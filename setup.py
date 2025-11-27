@@ -17,7 +17,10 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 # f5c C extension
 f5c_extension = Extension(
     'fin._f5c.f5c_python',
-    sources=['fin/_f5c/f5c_python.c'],
+    sources=[
+        'fin/_f5c/f5c_python.c',
+        'fin/_f5c/events.c',
+    ],
     include_dirs=[
         np.get_include(),
         'fin/_f5c',
@@ -41,6 +44,7 @@ if TORCH_AVAILABLE:
         'fin._opendba.opendba_cuda',
         sources=[
             'fin/_opendba/opendba_python.cpp',
+            'fin/_opendba/openDBA.cu',
         ],
         include_dirs=[
             np.get_include(),

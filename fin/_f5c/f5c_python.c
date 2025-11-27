@@ -1,6 +1,6 @@
 /*
  * Python bindings for f5c event alignment
- * Simplified version for integration with fin
+ * Implemented version using actual f5c core functions
  */
 
 #include <Python.h>
@@ -9,16 +9,15 @@
 #include <math.h>
 #include <string.h>
 
-// Forward declarations from f5c core
-// We'll include simplified versions here for demonstration
-// In production, include actual f5c headers
+// Include f5c core headers
+#include "f5c.h"
+#include "f5cmisc.h"
 
-typedef struct {
-    float mean;
-    float stdv;
-    int start;
-    int length;
-} event_t;
+// Forward declaration of event detection function from events.c
+event_table getevents(size_t nsample, float* rawptr, int8_t rna);
+
+// Function prototype for trimming and segmenting (from events.c)
+void trim_and_segment_raw(raw_table rt, int trim_start, int trim_end, int varseg_chunk, float varseg_thresh);
 
 // Simplified event alignment function
 typedef struct {
@@ -32,15 +31,12 @@ typedef struct {
     float alignment_score;
 } aligned_event_t;
 
-// Detect events from raw signal (simplified)
+// Detect events from raw signal using actual f5c algorithm
 static PyObject* detect_events_py(PyObject* self, PyObject* args) {
     PyArrayObject* signal_array;
-    float outlier_threshold = 3.0;
-    int min_event_length = 3;
-    int window_size = 5;
+    int is_rna = 0;  // Default to DNA for now
 
-    if (!PyArg_ParseTuple(args, "O!|fii", &PyArray_Type, &signal_array,
-                          &outlier_threshold, &min_event_length, &window_size)) {
+    if (!PyArg_ParseTuple(args, "O!|i", &PyArray_Type, &signal_array, &is_rna)) {
         return NULL;
     }
 
@@ -49,17 +45,37 @@ static PyObject* detect_events_py(PyObject* self, PyObject* args) {
         return NULL;
     }
 
+    if (PyArray_TYPE(signal_array) != NPY_FLOAT32) {
+        PyErr_SetString(PyExc_ValueError, "Signal array must be float32");
+        return NULL;
+    }
+
     // Get pointer to signal data
     float* signal = (float*)PyArray_DATA(signal_array);
     int n_samples = PyArray_DIM(signal_array, 0);
 
-    // Simple event detection - this is a placeholder
-    // In production, call actual f5c event detection
-    int n_events = n_samples / 100;  // Approximate
-    if (n_events == 0) n_events = 1;
+    // Call actual f5c event detection function from events.c
+    event_table et = getevents(n_samples, signal, is_rna);
+
+    if (et.n == 0) {
+        // No events detected
+        npy_intp dims[1] = {0};
+        PyObject* mean_array = PyArray_SimpleNew(1, dims, NPY_FLOAT32);
+        PyObject* stdv_array = PyArray_SimpleNew(1, dims, NPY_FLOAT32);
+        PyObject* start_array = PyArray_SimpleNew(1, dims, NPY_INT32);
+        PyObject* length_array = PyArray_SimpleNew(1, dims, NPY_INT32);
+
+        PyObject* result = PyTuple_Pack(4, mean_array, stdv_array, start_array, length_array);
+        Py_DECREF(mean_array);
+        Py_DECREF(stdv_array);
+        Py_DECREF(start_array);
+        Py_DECREF(length_array);
+
+        return result;
+    }
 
     // Create output arrays
-    npy_intp dims[1] = {n_events};
+    npy_intp dims[1] = {et.n};
     PyObject* mean_array = PyArray_SimpleNew(1, dims, NPY_FLOAT32);
     PyObject* stdv_array = PyArray_SimpleNew(1, dims, NPY_FLOAT32);
     PyObject* start_array = PyArray_SimpleNew(1, dims, NPY_INT32);
@@ -70,29 +86,16 @@ static PyObject* detect_events_py(PyObject* self, PyObject* args) {
     int* starts = (int*)PyArray_DATA((PyArrayObject*)start_array);
     int* lengths = (int*)PyArray_DATA((PyArrayObject*)length_array);
 
-    // Simplified event detection: split into equal segments
-    int event_length = n_samples / n_events;
-    for (int i = 0; i < n_events; i++) {
-        int start_idx = i * event_length;
-        int end_idx = (i == n_events - 1) ? n_samples : (start_idx + event_length);
-
-        // Calculate mean and stdv for this segment
-        float sum = 0.0;
-        for (int j = start_idx; j < end_idx; j++) {
-            sum += signal[j];
-        }
-        means[i] = sum / (end_idx - start_idx);
-
-        float sum_sq = 0.0;
-        for (int j = start_idx; j < end_idx; j++) {
-            float diff = signal[j] - means[i];
-            sum_sq += diff * diff;
-        }
-        stdvs[i] = sqrtf(sum_sq / (end_idx - start_idx));
-
-        starts[i] = start_idx;
-        lengths[i] = end_idx - start_idx;
+    // Copy event data from f5c event_table
+    for (size_t i = 0; i < et.n; i++) {
+        means[i] = et.event[i].mean;
+        stdvs[i] = et.event[i].stdv;
+        starts[i] = et.event[i].start;
+        lengths[i] = et.event[i].length;
     }
+
+    // Free the event table (important to prevent memory leak)
+    free(et.event);
 
     // Return a tuple of arrays
     PyObject* result = PyTuple_Pack(4, mean_array, stdv_array, start_array, length_array);
