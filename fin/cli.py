@@ -15,7 +15,7 @@ import numpy as np
 
 from fin.core.isoform_detector import IsoformDetector
 from fin.utils.config import PipelineConfig, ConfigManager
-from fin.io.output_writer import write_gtf, write_bed12, write_read_assignments_tsv
+from fin.io.output_writer import write_gtf, write_bed12, write_read_assignments_tsv, write_fusions_gtf
 from fin.core.isoform import ValidatedIsoform
 from fin.io.io_gtf import GtfParser
 
@@ -183,6 +183,11 @@ def parse_gene_region(gene: str, gtf_file: Optional[str] = None) -> Tuple[str, i
     is_flag=True,
     help='Enable verbose logging'
 )
+@click.option(
+    '--detect-fusions', '-f',
+    is_flag=True,
+    help='Enable gene fusion detection'
+)
 def main(
     config: Path,
     gene: str,
@@ -192,7 +197,8 @@ def main(
     signal_dir: Optional[Path],
     output_dir: Path,
     prefix: str,
-    verbose: bool
+    verbose: bool,
+    detect_fusions: bool
 ):
     """
     FIN: Isoform Detection Pipeline for Nanopore Direct RNA Sequencing
@@ -209,6 +215,7 @@ def main(
     Output:
     - GTF file with validated isoforms
     - BED12 file with read-to-isoform assignments
+    - GTF file with detected fusions (if --detect-fusions enabled)
 
     Examples:
 
@@ -232,6 +239,13 @@ def main(
         --gene chr17:7668420-7687960 \
         --bam alignments.bam \
         --reference reference.fasta
+
+    # Enable fusion detection:
+    fin --config config.yaml \
+        --gene chr17:7668420-7687960 \
+        --bam alignments.bam \
+        --reference reference.fasta \
+        --detect-fusions
     """
     # Configure logging
     if verbose:
@@ -295,7 +309,8 @@ def main(
             config=pipeline_config,
             reference_fasta=str(reference),
             signal_dir=str(signal_dir) if signal_dir else None,
-            use_cuda=pipeline_config.dtw.use_cuda
+            use_cuda=pipeline_config.dtw.use_cuda,
+            enable_fusion_detection=detect_fusions
         )
         logger.info("Detector initialized successfully")
     except Exception as e:

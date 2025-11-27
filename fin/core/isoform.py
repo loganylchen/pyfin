@@ -192,6 +192,21 @@ class ValidatedIsoform:
     supporting_reads: List[str] = field(default_factory=list)
     is_novel: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+    estimated_count: Optional[float] = None  # EM algorithm estimated read count
+    tpm: Optional[float] = None  # Transcripts Per Million (expression level)
+    fpkm: Optional[float] = None  # Fragments Per Kilobase Million (expression level)
+    isoform_fraction: Optional[float] = None  # Fraction of gene's expression
+
+    def __post_init__(self):
+        """Initialize optional quantification fields if not set."""
+        if self.estimated_count is None:
+            self.estimated_count = float(self.read_support)
+        if self.isoform_fraction is None and self.read_support > 0:
+            self.isoform_fraction = 1.0
+        if self.tpm is None:
+            self.tpm = 0.0
+        if self.fpkm is None:
+            self.fpkm = 0.0
 
     @property
     def length(self) -> int:

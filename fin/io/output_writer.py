@@ -94,11 +94,22 @@ def write_gtf(
                 trans_attrs += f"avg_completeness=\"{isoform.avg_completeness:.3f}\";"
                 trans_attrs += f"is_novel=\"{str(isoform.is_novel).lower()}\";"
 
+                # Add quantification metrics
+                if hasattr(isoform, 'estimated_count') and isoform.estimated_count is not None:
+                    trans_attrs += f"estimated_count=\"{isoform.estimated_count:.2f}\";"
+                if hasattr(isoform, 'tpm') and isoform.tpm is not None:
+                    trans_attrs += f"TPM=\"{isoform.tpm:.2f}\";"
+                if hasattr(isoform, 'fpkm') and isoform.fpkm is not None:
+                    trans_attrs += f"FPKM=\"{isoform.fpkm:.2f}\";"
+                if hasattr(isoform, 'isoform_fraction') and isoform.isoform_fraction is not None:
+                    trans_attrs += f"isoform_fraction=\"{isoform.isoform_fraction:.3f}\";"
+
                 # Add metadata fields
                 if isoform.metadata:
                     for key, value in isoform.metadata.items():
                         if key not in ['gene_id', 'transcript_id']:
                             trans_attrs += f"{key}=\"{value}\";"
+
 
                 trans_start = min(e[0] for e in isoform.exons)
                 trans_end = max(e[1] for e in isoform.exons)

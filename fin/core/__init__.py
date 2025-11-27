@@ -15,6 +15,7 @@ from . import integration_matrix
 from . import isoform
 from . import isoform_detector
 from . import dtw_gpu
+from . import fusion_detector
 
 __all__ = [
     "signal_processor",
@@ -27,4 +28,5 @@ __all__ = [
     "isoform",
     "isoform_detector",
     "dtw_gpu",
+    "fusion_detector",
 ]
