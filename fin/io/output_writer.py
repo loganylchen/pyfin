@@ -322,7 +322,7 @@ def write_metrics_summary(
         validated_isoforms: List of ValidatedIsoform objects
         completeness_matrix: N x M matrix of completeness scores
         output_path: Path to output summary file
-    ""'
+    """
     import json
 
     summary = {
@@ -369,3 +369,53 @@ def write_metrics_summary(
         json.dump(summary, f, indent=2)
 
     logger.info(f"Written metrics summary to {output_path}")
+
+
+def write_fusions_gtf(
+    fusions: List[Any],
+    output_path: str
+) -> None:
+    """
+    Write fusion junctions in GTF-like format.
+
+    This is a wrapper function that provides GTF output for fusion junctions.
+    For proper fusion detection, use fin.core.fusion_detector.FusionDetector
+    which handles read extraction, re-mapping, and validation.
+
+    Args:
+        fusions: List of fusion junction objects
+        output_path: Path to output GTF file
+    """
+    if not fusions:
+        logger.warning("No fusions to write")
+        return
+
+    with open(output_path, 'w') as f:
+        f.write("##gff-version 3\n")
+        f.write("##source: FIN Fusion Detection\n")
+        f.write("##feature_type: fusion\n\n")
+
+        for fusion in fusions:
+            # Basic GTF format for fusions
+            # Extract attributes with safe defaults
+            fusion_id = getattr(fusion, 'fusion_id', 'unknown')
+            gene_5p = getattr(fusion, 'gene_5p', 'unknown')
+            gene_3p = getattr(fusion, 'gene_3p', 'unknown')
+            read_support = getattr(fusion, 'read_support', 0)
+
+            attrs = f"fusion_id=\"{fusion_id}\";"
+            attrs += f"gene_5p=\"{gene_5p}\";"
+            attrs += f"gene_3p=\"{gene_3p}\";"
+            attrs += f"read_support=\"{read_support}\""
+
+            # Position information with safe defaults
+            chrom = getattr(fusion, 'chrom_5p', 'chr1')
+            start = getattr(fusion, 'pos_5p', 1)
+            end = getattr(fusion, 'pos_3p', 100)
+            score = getattr(fusion, 'confidence', 0.0)
+            strand = getattr(fusion, 'strand', '+')
+
+            # Format: chrom\tsource\tfeature\tstart\tend\tscore\tstrand\tframe\tattributes
+            f.write(f"{chrom}\tfin\tfusion\t{start}\t{end}\t{score:.2f}\t{strand}\t.\t{attrs}\n")
+
+    logger.info(f"Written {len(fusions)} fusions to {output_path}")

@@ -9,15 +9,24 @@
 #include <math.h>
 #include <string.h>
 
-// Include f5c core headers
-#include "f5c.h"
-#include "f5cmisc.h"
+// Forward declaration of simple event detection
+typedef struct {
+    float mean;
+    float stdv;
+    uint64_t start;
+    float length;
+} event_t;
 
-// Forward declaration of event detection function from events.c
-event_table getevents(size_t nsample, float* rawptr, int8_t rna);
+typedef struct {
+    size_t n;
+    size_t start;
+    size_t end;
+    event_t* event;
+} event_table;
 
-// Function prototype for trimming and segmenting (from events.c)
-void trim_and_segment_raw(raw_table rt, int trim_start, int trim_end, int varseg_chunk, float varseg_thresh);
+// Forward declaration of simple event detection function
+event_table getevents_simple(size_t nsample, float* rawptr, int is_rna);
+void free_event_table(event_table* et);
 
 // Simplified event alignment function
 typedef struct {
@@ -54,8 +63,8 @@ static PyObject* detect_events_py(PyObject* self, PyObject* args) {
     float* signal = (float*)PyArray_DATA(signal_array);
     int n_samples = PyArray_DIM(signal_array, 0);
 
-    // Call actual f5c event detection function from events.c
-    event_table et = getevents(n_samples, signal, is_rna);
+    // Call simple event detection (no htslib dependencies)
+    event_table et = getevents_simple(n_samples, signal, is_rna);
 
     if (et.n == 0) {
         // No events detected
@@ -95,7 +104,7 @@ static PyObject* detect_events_py(PyObject* self, PyObject* args) {
     }
 
     // Free the event table (important to prevent memory leak)
-    free(et.event);
+    free_event_table(&et);
 
     // Return a tuple of arrays
     PyObject* result = PyTuple_Pack(4, mean_array, stdv_array, start_array, length_array);
