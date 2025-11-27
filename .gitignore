@@ -1,0 +1,194 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+*.o
+*.obj
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Flask stuff
+instance/
+.webassets-cache
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# C preprocessor files
+*.i
+*.s
+
+# Compiled Object files
+*.slo
+*.lo
+*.ko
+*.elf
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+*.dll
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.bin
+
+# macOS
+.DS_Store
+
+# Linux
+*~
+
+# Data files
+*.csv
+*.tsv
+*.bed
+*.gtf
+*.gff
+*.gff3
+*.fasta
+*.fastq
+*.fq
+*.fa
+*.fna
+*.fast5
+*.pod5
+*.slow5
+*.blow5
+*.h5
+*.hdf5
+
+# Compressed files
+*.gz
+*.bz2
+*.zip
+*.tar
+*.tgz
+
+# Image files
+*.png
+*.jpg
+*.jpeg
+*.tiff
+*.tif
+*.svg
+*.pdf
+
+# Build artifacts (C/CUDA extensions)
+*.cubin
+*.fatbin
+*.ptx
+*.cu.o
+
+# openDBA build artifacts
+fin/_opendba/openDBA
+fin/_opendba/*.o
+tests/test_openDBA
+
+# f5c build artifacts
+fin/_f5c/*.o
+fin/_f5c/*.so
+
+# setuptools_scm version file
+fin/_version.py
+
+# pytest
+.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
+
+# Output directories
+outputs/
+results/
+data/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# Log files
+*.log
+logs/
+
+.claude

@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fin"
+description = "A Python tool for detecting RNA modifications using nanopore Direct RNA-seq data"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+   {name = "fin authors"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+requires-python = ">=3.7"
+dynamic = ["version"]
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "h5py",
+    "pysam",
+    "click",
+    "tqdm",
+    "matplotlib",
+    "seaborn",
+    "pyyaml",
+    "pyf5",
+    "ont-pyguppy-client-lib",
+    "pod5",
+    "slow5",
+]
+
+[project.scripts]
+Baleen.py = "fin.cli:main"
+
+[tool.setuptools_scm]
+write_to = "fin/_version.py"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fin*"]
+
+[project.urls]
+repository = "https://github.com/loganylchen/pyfin"
