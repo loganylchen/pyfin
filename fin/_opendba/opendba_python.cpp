@@ -171,6 +171,15 @@ static PyObject* py_dtw_pairwise_matrix(PyObject* self, PyObject* args, PyObject
     int use_open_start = 0;
     int use_open_end = 0;
     int use_cuda = 1;
+    size_t num_seqs;
+    npy_intp dims[2];
+    PyArrayObject* distance_matrix = NULL;
+    float* matrix_data = NULL;
+    bool cuda_success = false;
+
+    std::vector<float*> sequences;
+    std::vector<size_t> lengths;
+    std::vector<PyArrayObject*> arrays_to_clean;
 
     static const char* kwlist[] = {"sequences", "open_start", "open_end", "use_cuda", NULL};
 
@@ -183,21 +192,17 @@ static PyObject* py_dtw_pairwise_matrix(PyObject* self, PyObject* args, PyObject
     // Check if sequences_list is a list or tuple
     if (!PyList_Check(sequences_list) && !PyTuple_Check(sequences_list)) {
         PyErr_SetString(PyExc_TypeError, "sequences must be a list or tuple of arrays");
-        return NULL;
+        goto cleanup;
     }
 
-    size_t num_seqs = PySequence_Length(sequences_list);
+    num_seqs = PySequence_Length(sequences_list);
 
     if (num_seqs < 2) {
         PyErr_SetString(PyExc_ValueError, "Must provide at least 2 sequences");
-        return NULL;
+        goto cleanup;
     }
 
     // Extract all sequences
-    std::vector<float*> sequences;
-    std::vector<size_t> lengths;
-    std::vector<PyArrayObject*> arrays_to_clean;
-
     for (size_t i = 0; i < num_seqs; i++) {
         PyObject* item = PySequence_GetItem(sequences_list, i);
 
@@ -219,17 +224,17 @@ static PyObject* py_dtw_pairwise_matrix(PyObject* self, PyObject* args, PyObject
     }
 
     // Create distance matrix (2D array)
-    npy_intp dims[2] = {(npy_intp)num_seqs, (npy_intp)num_seqs};
-    PyArrayObject* distance_matrix = (PyArrayObject*)PyArray_SimpleNew(2, dims, NPY_FLOAT32);
+    dims[0] = (npy_intp)num_seqs;
+    dims[1] = (npy_intp)num_seqs;
+    distance_matrix = (PyArrayObject*)PyArray_SimpleNew(2, dims, NPY_FLOAT32);
 
     if (!distance_matrix) {
         goto cleanup;
     }
 
-    float* matrix_data = (float*)PyArray_DATA(distance_matrix);
+    matrix_data = (float*)PyArray_DATA(distance_matrix);
 
     // Compute pairwise distances
-    bool cuda_success = false;
     if (use_cuda) {
         // Placeholder for CUDA implementation
         cuda_success = false;

@@ -77,27 +77,8 @@ jobs:
       run: |
         black --check fin/
 
-  docker:
-    runs-on: ubuntu-latest
-    needs: [test, lint]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKER_HUB_USERNAME }}
-        password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-  docker-gpu:
+  build-and-push-gpu:
+    name: Build and Push GPU Docker Image
     runs-on: ubuntu-latest
     needs: [test, lint]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -121,7 +102,7 @@ jobs:
       id: meta_gpu
       uses: docker/metadata-action@v5
       with:
-        images: loganylchen/pyfin
+        images: btrspg/pyfin
         tags: |
           type=ref,event=branch
           type=ref,event=pr
@@ -132,15 +113,20 @@ jobs:
       uses: docker/build-push-action@v5
       with:
         context: .
+        file: Dockerfile.gpu
         platforms: linux/amd64
         push: true
         tags: ${{ steps.meta_gpu.outputs.tags }}
         labels: ${{ steps.meta_gpu.outputs.labels }}
-        target: runtime-gpu
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
-  docker-cpu:
+    - name: Test GPU image
+      run: |
+        docker run --rm btrspg/pyfin:latest-gpu python3 -c "from fin._opendba import opendba_cuda; print('CUDA extension loaded successfully')"
+
+  build-and-push-cpu:
+    name: Build and Push CPU Docker Image
     runs-on: ubuntu-latest
     needs: [test, lint]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -164,7 +150,7 @@ jobs:
       id: meta_cpu
       uses: docker/metadata-action@v5
       with:
-        images: loganylchen/pyfin
+        images: btrspg/pyfin
         tags: |
           type=ref,event=branch
           type=ref,event=pr
@@ -175,10 +161,15 @@ jobs:
       uses: docker/build-push-action@v5
       with:
         context: .
+        file: Dockerfile.cpu
         platforms: linux/amd64,linux/arm64
         push: true
         tags: ${{ steps.meta_cpu.outputs.tags }}
         labels: ${{ steps.meta_cpu.outputs.labels }}
-        target: runtime-cpu
         cache-from: type=gha
         cache-to: type=gha,mode=max
+
+    - name: Test CPU image
+      run: |
+        docker run --rm btrspg/pyfin:latest python3 -c "import fin; print('FIN CPU version ready')"
+        docker run --rm btrspg/pyfin:latest python3 -c "from fin.core.dtw_gpu import OPENDBA_AVAILABLE; print(f'CUDA available: {OPENDBA_AVAILABLE}')"

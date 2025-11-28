@@ -1,5 +1,5 @@
 from setuptools import setup, find_packages, Extension
-import numpy as np
+import sys
 
 # Try to import CUDA-enabled build tools
 try:
@@ -8,18 +8,43 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
+# Try to import numpy - may not be available during initial setup
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    np = None
+    NUMPY_AVAILABLE = False
+    # Only error if we're actually building extensions
+    if 'build_ext' in sys.argv or 'install' in sys.argv or 'bdist_wheel' in sys.argv:
+        print("ERROR: numpy is required to build extensions. Install it first with: pip install numpy")
+        sys.exit(1)
+
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 with open("requirements.txt", "r", encoding="utf-8") as fh:
     requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
 
-# f5c C extension
+# Delay numpy import for include directories
+def get_numpy_include():
+    global np
+    global NUMPY_AVAILABLE
+    if not NUMPY_AVAILABLE:
+        import numpy as _np
+        np = _np
+        NUMPY_AVAILABLE = True
+    return np.get_include()
+
+# f5c C extension - using simplified standalone event detection
 f5c_extension = Extension(
     'fin._f5c.f5c_python',
-    sources=['fin/_f5c/f5c_python.c'],
+    sources=[
+        'fin/_f5c/f5c_python.c',
+        'fin/_f5c/event_detection_simple.c',
+    ],
     include_dirs=[
-        np.get_include(),
+        get_numpy_include(),
         'fin/_f5c',
     ],
     libraries=['m'],
@@ -41,6 +66,7 @@ if TORCH_AVAILABLE:
         'fin._opendba.opendba_cuda',
         sources=[
             'fin/_opendba/opendba_python.cpp',
+            'fin/_opendba/openDBA.cu',
         ],
         include_dirs=[
             np.get_include(),

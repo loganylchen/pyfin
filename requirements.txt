@@ -20,7 +20,7 @@ pyyaml>=6.0
 
 # Signal file formats
 pod5>=0.1.0
-slow5>=0.7.0
+pyslow5
 
 # Development (optional)
 pytest>=6.0.0

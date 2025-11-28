@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "setuptools_scm"]
+requires = ["setuptools>=45", "wheel", "setuptools_scm", "numpy"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -36,13 +36,12 @@ dependencies = [
     "seaborn",
     "pyyaml",
     "pyf5",
-    "ont-pyguppy-client-lib",
     "pod5",
-    "slow5",
+    "pyslow5",
 ]
 
 [project.scripts]
-Baleen.py = "fin.cli:main"
+"FIN.py" = "fin.cli:main"
 
 [tool.setuptools_scm]
 write_to = "fin/_version.py"

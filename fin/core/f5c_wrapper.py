@@ -7,6 +7,7 @@ The actual implementation calls C functions from the f5c core library.
 
 import numpy as np
 from typing import List, Tuple, Optional
+from dataclasses import dataclass
 import warnings
 
 # Try to import the compiled f5c module
