@@ -35,7 +35,7 @@ class GenomicInterval:
     strand: Optional[str] = None  # '+' or '-', None for unstranded
     read_count: int = 0  # Number of reads mapped to this interval
     interval_id: Optional[str] = None
-    attrs: Optional[List[str]] = []
+    attrs: Optional[List] = []
 
     @property
     def interval_tuple(self) -> Tuple[str, int, int]:
