@@ -64,21 +64,44 @@ def check_dependencies():
     """Check if required system libraries are available"""
     missing = []
 
-    # Check for zlib
-    try:
-        import zlib
-    except ImportError:
-        missing.append("zlib")
+    # Check for zlib (system library, not Python package)
+    # Note: Python's zlib module doesn't guarantee the dev headers are installed
+    # We mainly need the zlib development headers for compilation
 
-    # Check for htslib (pysam provides this)
+    # Check for system zlib headers
+    import subprocess
     try:
-        import pysam
-    except ImportError:
-        missing.append("pysam (htslib)")
+        result = subprocess.run(['pkg-config', '--exists', 'zlib'], capture_output=True)
+        if result.returncode != 0:
+            missing.append("zlib development headers (install zlib1g-dev)")
+    except FileNotFoundError:
+        # pkg-config not available, just warn
+        pass
+
+    # Don't check for pysam here - it will be installed automatically by pip
+    # and checking now would give false warnings during installation
+    # The real pysam import check happens at runtime when someone tries to use the modules
+
+    # However, we can check if htslib headers are available for compilation
+    try:
+        result = subprocess.run(['pkg-config', '--exists', 'htslib'], capture_output=True)
+        if result.returncode != 0:
+            missing.append("htslib development headers (install libhts-dev or libhts-devel)")
+    except FileNotFoundError:
+        # pkg-config not available, assume headers are present (or will be handled by pysam)
+        pass
 
     if missing:
-        print(f"Warning: Some dependencies may be missing: {', '.join(missing)}")
-        print("Make sure you have: zlib1g-dev, libhts-dev (or install pysam via pip)")
+        print(f"Warning: Some build dependencies may be missing: {', '.join(missing)}")
+        print("These are only needed for compiling the f5c extension.")
+        print("If you're just installing the Python package, you can ignore this.")
+        print("\nTo install build dependencies on Ubuntu/Debian:")
+        print("  sudo apt-get install zlib1g-dev libhts-dev")
+        print("\nOn CentOS/RHEL:")
+        print("  sudo yum install zlib-devel htslib-devel")
+        print("\nThe following Python packages will be installed automatically:")
+        print("  - pysam (includes htslib Python bindings)")
+        print("  - numpy, scipy, pandas, etc.")
 
 
 class BuildF5CExt(build_ext):
