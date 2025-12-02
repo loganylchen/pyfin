@@ -162,13 +162,13 @@ def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None
     return read_alignments, fusion_read_ids
 
 
-def cluster_intervals(read_alignments: List[Dict], max_gap: int = 50) -> List[GenomicInterval]:
+def cluster_intervals(read_alignments: List[Dict], max_gap: int = 0) -> List[GenomicInterval]:
     """
     Cluster overlapping or nearby intervals by chromosome and strand
 
     Args:
         read_alignments: List of read alignment dictionaries
-        max_gap: Maximum gap between intervals to merge (default: 50bp)
+        max_gap: Maximum gap between intervals to merge (default: 0bp)
 
     Returns:
         List of clustered GenomicInterval objects (strand-separated)
@@ -352,7 +352,7 @@ def merge_gtf_and_read_intervals(gtf_intervals: List[GenomicInterval],
 
 def generate_isolated_intervals(bam_path: str,
                                 gtf_path: Optional[str] = None,
-                                max_gap: int = 50,
+                                max_gap: int =0,
                                 max_reads: Optional[int] = None) -> Dict[str, Any]:
     """
     Generate isolated, non-overlapping genomic intervals with strand separation
@@ -364,7 +364,7 @@ def generate_isolated_intervals(bam_path: str,
     Args:
         bam_path: Path to BAM file (required)
         gtf_path: Path to GTF file (optional, improves annotation)
-        max_gap: Maximum gap between intervals to merge (default: 50)
+        max_gap: Maximum gap between intervals to merge (default: 0)
         max_reads: Optional limit on number of reads to process
 
     Returns:
@@ -397,7 +397,7 @@ def generate_isolated_intervals(bam_path: str,
         read_intervals,
         max_gap=max_gap
     )
-    logger.debug(final_intervals)
+    # logger.debug(final_intervals)
     # Sort intervals by chromosome, strand, position
     strand_order = {'+': 0, '-': 1, None: 2}
     final_intervals.sort(key=lambda x: (x.chrom, strand_order.get(x.strand, 2), x.start))
