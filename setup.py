@@ -9,19 +9,10 @@ import sys
 from pathlib import Path
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
-import numpy as np
 
 # f5c source directory
 F5C_DIR = Path(__file__).parent / "third_party" / "f5c"
 SLOW5LIB_DIR = F5C_DIR / "slow5lib"
-
-# Required for numpy headers
-include_dirs = [
-    np.get_include(),
-    str(F5C_DIR / "include"),
-    str(F5C_DIR / "src"),
-    str(SLOW5LIB_DIR / "include"),
-]
 
 # Compiler arguments
 extra_compile_args = [
@@ -98,6 +89,19 @@ class BuildF5CExt(build_ext):
         self.build_slow5lib()
         super().run()
 
+    def build_extensions(self):
+        # Add numpy include dirs here (after numpy is installed)
+        try:
+            import numpy as np
+            numpy_include = np.get_include()
+            for ext in self.extensions:
+                ext.include_dirs.append(numpy_include)
+        except ImportError:
+            print("Warning: numpy not available, extension may not compile correctly")
+            print("Make sure numpy is installed before building")
+
+        super().build_extensions()
+
     def build_slow5lib(self):
         """Build slow5lib static library"""
         import subprocess
@@ -123,11 +127,18 @@ class BuildF5CExt(build_ext):
             raise
 
 
+# Initialize include_dirs base (numpy will be added during build)
+include_dirs_base = [
+    str(F5C_DIR / "include"),
+    str(F5C_DIR / "src"),
+    str(SLOW5LIB_DIR / "include"),
+]
+
 # f5c extension module
 f5c_module = Extension(
     "fin._f5c",
     sources=f5c_sources,
-    include_dirs=include_dirs + [
+    include_dirs=include_dirs_base + [
         str(F5C_DIR / "slow5lib" / "include"),
     ],
     libraries=["z", "pthread", "m"],
