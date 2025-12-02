@@ -1,11 +1,8 @@
-name: Python CI
+name: Docker image build
 
 on:
   push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
-
+    
 jobs:
   build-and-push-cpu:
     name: Build and Push CPU Docker Image
