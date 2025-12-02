@@ -104,7 +104,14 @@ def get_package_logger(name: str, **kwargs) -> logging.Logger:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         kwargs['log_file'] = str(log_dir / f'fin_{timestamp}.log')
 
-    return setup_logger(name, **kwargs)
+    logger = setup_logger(name, **kwargs)
+
+    # Disable propagation for non-root loggers to prevent duplicate logging
+    # This ensures messages aren't sent to parent loggers' handlers
+    if name != 'fin':  # Allow the package root logger to propagate
+        logger.propagate = False
+
+    return logger
 
 
 def list_log_files(log_dir: str = 'logs') -> List[str]:
