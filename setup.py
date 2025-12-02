@@ -106,17 +106,26 @@ class BuildF5CExt(build_ext):
     """Custom build extension for f5c"""
 
     def run(self):
+        # Check and build htslib if needed
+        if not self.check_and_build_htslib():
+            raise RuntimeError("htslib is required but could not be built. "
+                             "Please install libhts-dev or htslib-devel.")
+
         # Build slow5lib first
         self.build_slow5lib()
         super().run()
 
     def build_extensions(self):
-        # Add numpy include dirs here (after numpy is installed)
+        # Add numpy and htslib include dirs here (after dependencies are installed)
         try:
             import numpy as np
             numpy_include = np.get_include()
             for ext in self.extensions:
                 ext.include_dirs.append(numpy_include)
+                # Add htslib include path
+                ext.include_dirs.append("third_party/f5c/htslib")
+                # Add htslib library
+                ext.extra_link_args.append("third_party/f5c/htslib/libhts.a")
         except ImportError:
             print("Warning: numpy not available, extension may not compile correctly")
             print("Make sure numpy is installed before building")
@@ -146,6 +155,58 @@ class BuildF5CExt(build_ext):
         except subprocess.CalledProcessError as e:
             print(f"Failed to build slow5lib: {e}")
             raise
+
+    def check_and_build_htslib(self):
+        """Check if htslib is available, if not download and build it"""
+        import subprocess
+
+        htslib_dir = Path("third_party/f5c/htslib")
+
+        if not htslib_dir.exists():
+            print("htslib not found. Downloading...")
+
+            # Clone htslib
+            try:
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", "https://github.com/samtools/htslib.git", str(htslib_dir)],
+                    check=True
+                )
+            except subprocess.CalledProcessError as e:
+                print(f"Failed to clone htslib: {e}")
+                print("Please install htslib manually: sudo apt-get install libhts-dev")
+                return False
+
+            # Build htslib
+            try:
+                subprocess.run(
+                    ["autoheader"],
+                    cwd=htslib_dir,
+                    check=True
+                )
+                subprocess.run(
+                    ["autoconf"],
+                    cwd=htslib_dir,
+                    check=True
+                )
+                subprocess.run(
+                    ["./configure", "--disable-libcurl", "--disable-s3", "--disable-gcs", "--disable-plugins"],
+                    cwd=htslib_dir,
+                    check=True
+                )
+                subprocess.run(
+                    ["make", "-j4"],
+                    cwd=htslib_dir,
+                    check=True
+                )
+                print("htslib built successfully")
+                return True
+            except subprocess.CalledProcessError as e:
+                print(f"Failed to build htslib: {e}")
+                print("Please install htslib manually: sudo apt-get install libhts-dev")
+                return False
+        else:
+            print("htslib found")
+            return True
 
 
 # Initialize include_dirs base (numpy will be added during build)
