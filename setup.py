@@ -219,11 +219,11 @@ class BuildF5CExt(build_ext):
 
 # Initialize include_dirs base (numpy will be added during build)
 # Use relative paths for include directories
-include_dirs_base = [
-    "third_party/f5c/include",
-    "third_party/f5c/src",
-    "third_party/f5c/slow5lib/include",
-]
+# include_dirs_base = [
+#     "third_party/f5c/include",
+#     "third_party/f5c/src",
+#     "third_party/f5c/slow5lib/include",
+# ]
 
 # f5c extension module
 # f5c_module = Extension(
