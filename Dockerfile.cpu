@@ -54,7 +54,8 @@ RUN pip install -U pip && pip install --no-cache-dir -r requirements.txt && \
     cd htslib && \
     chmod +x ./configure && \
     ./configure --enable-bz2=no --enable-lzma=no --with-libdeflate=no --enable-libcurl=no  --enable-gcs=no --enable-s3=no && \
-    make -j8
+    make -j8 && \
+    cd /app
 
 # Install without CUDA (CPU-only)
 RUN pip install .
