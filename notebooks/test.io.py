@@ -21,7 +21,8 @@ fasta_path= os.path.join(TEST_DIR,'reference.fa')
 
 result = generate_isolated_intervals(
       bam_path,
-      gtf_path
+      gtf_path,
+      tmp_dir='tmp_dir'
   )
 intervals = result['intervals']
 fusion_ids = result['fusion_read_ids']
