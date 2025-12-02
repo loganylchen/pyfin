@@ -260,11 +260,11 @@ def cluster_intervals(read_alignments: List[Dict], max_gap: int = 0) -> List[Gen
             continue
 
         # Count reads per position for proper read counting
-        position_counts = defaultdict(set)  # position -> set of read_ids
-        for start, end, read_id in intervals:
-            # Mark all positions in the interval as covered by this read
-            for pos in range(start, end):
-                position_counts[pos].add(read_id)
+        # position_counts = defaultdict(set)  # position -> set of read_ids
+        # for start, end, read_id in intervals:
+        #     # Mark all positions in the interval as covered by this read
+        #     for pos in range(start, end):
+        #         position_counts[pos].add(read_id)
 
         # Sort intervals by start position
         intervals_sorted = sorted(intervals, key=lambda x: x[0])
