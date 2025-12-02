@@ -43,10 +43,10 @@ WORKDIR /app
 COPY --chown=finuser:finuser . .
 
 # Install Python dependencies
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip install -U pip && pip install --no-cache-dir -r requirements.txt
 
 # Install without CUDA (CPU-only)
-RUN pip3 install --no-cache-dir -e .
+RUN pip install .
 
 # Test CPU fallback
 RUN python3 -c "from fin.core.dtw_gpu import OPENDBA_AVAILABLE; print(f'CUDA available: {OPENDBA_AVAILABLE}')"
