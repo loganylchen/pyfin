@@ -17,7 +17,7 @@ from typing import Optional, List
 
 def setup_logger(
     name: str,
-    level: str = 'INFO',
+    level: str = 'DEBUG',
     log_file: Optional[str] = None,
     console: bool = True,
     file_mode: str = 'a',
