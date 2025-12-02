@@ -448,8 +448,9 @@ def generate_isolated_intervals(bam_path: str,
     read_intervals = cluster_intervals(read_alignments, max_gap)
     # logger.debug(read_intervals)
     if tmp_dir:
+        Path(tmp_dir).mkdir(exist_ok=True)
         tmp_read_intervals = Path(tmp_dir) / "read_intervals.bed"
-        tmp_read_intervals.mkdir(exist_ok=True)
+        # tmp_read_intervals.mkdir(exist_ok=True)
         intervals_to_bed(read_intervals,tmp_read_intervals)
     # Generate intervals from GTF if provided
     gtf_intervals = []
@@ -457,7 +458,7 @@ def generate_isolated_intervals(bam_path: str,
         gtf_intervals = generate_intervals_from_gtf(gtf_path)
     if tmp_dir:
         tmp_gtf_intervals = Path(tmp_dir) / "gtf_intervals.bed"
-        tmp_gtf_intervals.mkdir(exist_ok=True)
+        # tmp_gtf_intervals.mkdir(exist_ok=True)
         intervals_to_bed(gtf_intervals,tmp_gtf_intervals)
     # Merge intervals
     final_intervals = merge_gtf_and_read_intervals(
@@ -471,7 +472,7 @@ def generate_isolated_intervals(bam_path: str,
     final_intervals.sort(key=lambda x: (x.chrom, strand_order.get(x.strand, 2), x.start))
     if tmp_dir:
         tmp_final_intervals = Path(tmp_dir) / "final_intervals.bed"
-        tmp_final_intervals.mkdir(exist_ok=True)
+        # tmp_final_intervals.mkdir(exist_ok=True)
         intervals_to_bed(final_intervals,tmp_final_intervals)
     # Log summary
     logger.info("=" * 60)
