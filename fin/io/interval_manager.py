@@ -147,6 +147,8 @@ def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None
             if is_fusion_read(read_dict):
                 fusion_read_ids.add(read_dict['query_name'])
                 read_count += 1
+                if read_count % 10000 == 0:
+                    logger.info(f"Processed {read_count} reads...")
                 continue
 
             # Keep the read alignment info
@@ -160,13 +162,13 @@ def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None
     return read_alignments, fusion_read_ids
 
 
-def cluster_intervals(read_alignments: List[Dict], max_gap: int = 1000) -> List[GenomicInterval]:
+def cluster_intervals(read_alignments: List[Dict], max_gap: int = 50) -> List[GenomicInterval]:
     """
     Cluster overlapping or nearby intervals by chromosome and strand
 
     Args:
         read_alignments: List of read alignment dictionaries
-        max_gap: Maximum gap between intervals to merge (default: 1000bp)
+        max_gap: Maximum gap between intervals to merge (default: 50bp)
 
     Returns:
         List of clustered GenomicInterval objects (strand-separated)
@@ -284,7 +286,7 @@ def generate_intervals_from_gtf(gtf_path: str) -> List[GenomicInterval]:
 
 def merge_gtf_and_read_intervals(gtf_intervals: List[GenomicInterval],
                                 read_intervals: List[GenomicInterval],
-                                max_gap: int = 1000) -> List[GenomicInterval]:
+                                max_gap: int = 50) -> List[GenomicInterval]:
     """
     Merge GTF annotation intervals with read coverage intervals
 
@@ -350,7 +352,7 @@ def merge_gtf_and_read_intervals(gtf_intervals: List[GenomicInterval],
 
 def generate_isolated_intervals(bam_path: str,
                                 gtf_path: Optional[str] = None,
-                                max_gap: int = 1000,
+                                max_gap: int = 50,
                                 max_reads: Optional[int] = None) -> Dict[str, Any]:
     """
     Generate isolated, non-overlapping genomic intervals with strand separation
@@ -362,7 +364,7 @@ def generate_isolated_intervals(bam_path: str,
     Args:
         bam_path: Path to BAM file (required)
         gtf_path: Path to GTF file (optional, improves annotation)
-        max_gap: Maximum gap between intervals to merge (default: 1000)
+        max_gap: Maximum gap between intervals to merge (default: 50)
         max_reads: Optional limit on number of reads to process
 
     Returns:
