@@ -114,7 +114,7 @@ def extract_strand_from_read(read_dict: Dict) -> Optional[str]:
     """
     # Placeholder - can be extended based on specific BAM format
     # Some BAM files store strand in flags or tags
-    return read_dict.get('strand')
+    return '+' if read_dict.get('is_forward') else '-'
 
 
 def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None) -> Tuple[List[Dict], Set[str]]:

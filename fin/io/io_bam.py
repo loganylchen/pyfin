@@ -212,6 +212,7 @@ class BamReader:
             'next_reference_name': alignment.next_reference_name,
             'next_reference_start': alignment.next_reference_start,
             'tags': tags,
+            'is_forward', alignment.is_forward,
             'is_mapped': not alignment.is_unmapped,
             'query_length': alignment.query_length,
             'aligned_pairs': list(alignment.get_aligned_pairs()) if not alignment.is_unmapped else [],
