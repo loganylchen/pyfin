@@ -68,7 +68,7 @@ class GenomicInterval:
 
 def intervals_to_bed(
     intervals: List[GenomicInterval],
-    output_path: Union[str, Path, TextIO, None] = None) -> Optional[str]:
+    output_path: Union[str, Path, None] = None) -> Optional[str]:
     """
     Export GenomicInterval objects to BED format.
     
