@@ -10,9 +10,33 @@ from pathlib import Path
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 
-# f5c source directory
-F5C_DIR = Path(__file__).parent / "third_party" / "f5c"
-SLOW5LIB_DIR = F5C_DIR / "slow5lib"
+# f5c source directory (relative to setup.py)
+# Use relative paths for all sources to comply with setuptools requirements
+f5c_sources = [
+    # f5c source files
+    "third_party/f5c/src/f5c.c",
+    "third_party/f5c/src/events.c",
+    "third_party/f5c/src/nanopolish_read_db.c",
+    "third_party/f5c/src/index.c",
+    "third_party/f5c/src/nanopolish_fast5_io.c",
+    "third_party/f5c/src/model.c",
+    "third_party/f5c/src/methmodel.c",
+    "third_party/f5c/src/align.c",
+    "third_party/f5c/src/hmm.c",
+    "third_party/f5c/src/meth.c",
+    "third_party/f5c/src/freq.c",
+    "third_party/f5c/src/eventalign.c",
+    "third_party/f5c/src/freq_merge.c",
+    "third_party/f5c/src/resquiggle.c",
+    "third_party/f5c/src/profiles.c",
+    # slow5lib source files
+    "third_party/f5c/slow5lib/src/slow5.c",
+    "third_party/f5c/slow5lib/src/slow5_index.c",
+    "third_party/f5c/slow5lib/src/slow5_press.c",
+    "third_party/f5c/slow5lib/src/slow5_misc.c",
+    # Python wrapper
+    "fin/_f5c/f5c_python.c",
+]
 
 # Compiler arguments
 extra_compile_args = [
@@ -31,32 +55,6 @@ extra_link_args = [
     "-lz",
     "-lrt",
     "-ldl",
-]
-
-# f5c source files
-f5c_sources = [
-    str(F5C_DIR / "src" / "f5c.c"),
-    str(F5C_DIR / "src" / "events.c"),
-    str(F5C_DIR / "src" / "nanopolish_read_db.c"),
-    str(F5C_DIR / "src" / "index.c"),
-    str(F5C_DIR / "src" / "nanopolish_fast5_io.c"),
-    str(F5C_DIR / "src" / "model.c"),
-    str(F5C_DIR / "src" / "methmodel.c"),
-    str(F5C_DIR / "src" / "align.c"),
-    str(F5C_DIR / "src" / "hmm.c"),
-    str(F5C_DIR / "src" / "meth.c"),
-    str(F5C_DIR / "src" / "freq.c"),
-    str(F5C_DIR / "src" / "eventalign.c"),
-    str(F5C_DIR / "src" / "freq_merge.c"),
-    str(F5C_DIR / "src" / "resquiggle.c"),
-    str(F5C_DIR / "src" / "profiles.c"),
-    # Add slow5lib source files
-    str(SLOW5LIB_DIR / "src" / "slow5.c"),
-    str(SLOW5LIB_DIR / "src" / "slow5_index.c"),
-    str(SLOW5LIB_DIR / "src" / "slow5_press.c"),
-    str(SLOW5LIB_DIR / "src" / "slow5_misc.c"),
-    # Python wrapper
-    "fin/_f5c/f5c_python.c",
 ]
 
 # Check for required libraries
@@ -129,8 +127,8 @@ class BuildF5CExt(build_ext):
         """Build slow5lib static library"""
         import subprocess
 
-        slow5_build_dir = SLOW5LIB_DIR / "build"
-        slow5_build_dir.mkdir(exist_ok=True)
+        # Use relative path since we're running from the setup.py directory
+        slow5lib_dir_relative = "third_party/f5c/slow5lib"
 
         print("Building slow5lib...")
 
@@ -140,7 +138,7 @@ class BuildF5CExt(build_ext):
 
         try:
             subprocess.run(
-                ["make", "-C", str(SLOW5LIB_DIR), "lib"],
+                ["make", "-C", slow5lib_dir_relative, "lib"],
                 env=env,
                 check=True
             )
@@ -151,10 +149,11 @@ class BuildF5CExt(build_ext):
 
 
 # Initialize include_dirs base (numpy will be added during build)
+# Use relative paths for include directories
 include_dirs_base = [
-    str(F5C_DIR / "include"),
-    str(F5C_DIR / "src"),
-    str(SLOW5LIB_DIR / "include"),
+    "third_party/f5c/include",
+    "third_party/f5c/src",
+    "third_party/f5c/slow5lib/include",
 ]
 
 # f5c extension module
@@ -162,13 +161,13 @@ f5c_module = Extension(
     "fin._f5c",
     sources=f5c_sources,
     include_dirs=include_dirs_base + [
-        str(F5C_DIR / "slow5lib" / "include"),
+        "third_party/f5c/slow5lib/include",
     ],
     libraries=["z", "pthread", "m"],
     library_dirs=[],
     extra_compile_args=extra_compile_args,
     extra_link_args=extra_link_args + [
-        str(SLOW5LIB_DIR / "lib" / "libslow5.a")
+        "third_party/f5c/slow5lib/lib/libslow5.a"
     ],
     language="c++",
 )
