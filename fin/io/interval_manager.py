@@ -64,7 +64,7 @@ class GenomicInterval:
             start=min(self.start, other.start),
             end=max(self.end, other.end),
             strand=self.strand,
-            read_count=self.read_count + other.read_count
+            read_count=self.read_count + other.read_count,
             interval_id=self.interval_id if self.interval_id else other.interval_id,
             attrs=self.attrs + other.attrs
         )
