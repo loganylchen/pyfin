@@ -12,50 +12,50 @@ from setuptools.command.build_ext import build_ext
 
 # f5c source directory (relative to setup.py)
 # Use relative paths for all sources to comply with setuptools requirements
-f5c_sources = [
-    # f5c source files
-    "third_party/f5c/src/f5c.c",
-    "third_party/f5c/src/events.c",
-    "third_party/f5c/src/nanopolish_read_db.c",
-    "third_party/f5c/src/index.c",
-    "third_party/f5c/src/nanopolish_fast5_io.c",
-    "third_party/f5c/src/model.c",
-    "third_party/f5c/src/methmodel.c",
-    "third_party/f5c/src/align.c",
-    "third_party/f5c/src/hmm.c",
-    "third_party/f5c/src/meth.c",
-    "third_party/f5c/src/freq.c",
-    "third_party/f5c/src/eventalign.c",
-    "third_party/f5c/src/freq_merge.c",
-    "third_party/f5c/src/resquiggle.c",
-    "third_party/f5c/src/profiles.c",
-    # slow5lib source files
-    "third_party/f5c/slow5lib/src/slow5.c",
-    "third_party/f5c/slow5lib/src/slow5_index.c",
-    "third_party/f5c/slow5lib/src/slow5_press.c",
-    "third_party/f5c/slow5lib/src/slow5_misc.c",
-    # Python wrapper
-    "fin/_f5c/f5c_python.c",
-]
+# f5c_sources = [
+#     # f5c source files
+#     "third_party/f5c/src/f5c.c",
+#     "third_party/f5c/src/events.c",
+#     "third_party/f5c/src/nanopolish_read_db.c",
+#     "third_party/f5c/src/index.c",
+#     "third_party/f5c/src/nanopolish_fast5_io.c",
+#     "third_party/f5c/src/model.c",
+#     "third_party/f5c/src/methmodel.c",
+#     "third_party/f5c/src/align.c",
+#     "third_party/f5c/src/hmm.c",
+#     "third_party/f5c/src/meth.c",
+#     "third_party/f5c/src/freq.c",
+#     "third_party/f5c/src/eventalign.c",
+#     "third_party/f5c/src/freq_merge.c",
+#     "third_party/f5c/src/resquiggle.c",
+#     "third_party/f5c/src/profiles.c",
+#     # slow5lib source files
+#     "third_party/f5c/slow5lib/src/slow5.c",
+#     "third_party/f5c/slow5lib/src/slow5_index.c",
+#     "third_party/f5c/slow5lib/src/slow5_press.c",
+#     "third_party/f5c/slow5lib/src/slow5_misc.c",
+#     # Python wrapper
+#     "fin/_f5c/f5c_python.c",
+# ]
 
 # Compiler arguments
-extra_compile_args = [
-    "-std=c++11",
-    "-O3",
-    "-g",
-    "-Wall",
-    "-fPIC",
-    "-D HAVE_CUDA=0",  # Build without CUDA for now
-    "-D DISABLE_HDF5=1",  # Disable HDF5/FAST5 support, use slow5 instead
-]
+# extra_compile_args = [
+#     "-std=c++11",
+#     "-O3",
+#     "-g",
+#     "-Wall",
+#     "-fPIC",
+#     "-D HAVE_CUDA=0",  # Build without CUDA for now
+#     "-D DISABLE_HDF5=1",  # Disable HDF5/FAST5 support, use slow5 instead
+# ]
 
 # Linker arguments
-extra_link_args = [
-    "-lpthread",
-    "-lz",
-    "-lrt",
-    "-ldl",
-]
+# extra_link_args = [
+#     "-lpthread",
+#     "-lz",
+#     "-lrt",
+#     "-ldl",
+# ]
 
 # Check for required libraries
 def check_dependencies():
@@ -226,24 +226,24 @@ include_dirs_base = [
 ]
 
 # f5c extension module
-f5c_module = Extension(
-    "fin._f5c",
-    sources=f5c_sources,
-    include_dirs=include_dirs_base + [
-        "third_party/f5c/slow5lib/include",
-    ],
-    libraries=["z", "pthread", "m"],
-    library_dirs=[],
-    extra_compile_args=extra_compile_args,
-    extra_link_args=extra_link_args + [
-        "third_party/f5c/slow5lib/lib/libslow5.a"
-    ],
-    language="c++",
-)
+# f5c_module = Extension(
+#     "fin._f5c",
+#     sources=f5c_sources,
+#     include_dirs=include_dirs_base + [
+#         "third_party/f5c/slow5lib/include",
+#     ],
+#     libraries=["z", "pthread", "m"],
+#     library_dirs=[],
+#     extra_compile_args=extra_compile_args,
+#     extra_link_args=extra_link_args + [
+#         "third_party/f5c/slow5lib/lib/libslow5.a"
+#     ],
+#     language="c++",
+# )
 
 # Main setup configuration
 def main():
-    check_dependencies()
+    # check_dependencies()
 
     with open("README.md", "r", encoding="utf-8") as fh:
         long_description = fh.read()
@@ -267,8 +267,8 @@ def main():
         package_data={
             "fin": ["*.py", "*.c", "*.h", "*.yaml", "*.yml"],
         },
-        ext_modules=[f5c_module],
-        cmdclass={"build_ext": BuildF5CExt},
+        # ext_modules=[f5c_module],
+        # cmdclass={"build_ext": BuildF5CExt},
         python_requires=">=3.8",
         install_requires=[
             "numpy>=1.21.0",
