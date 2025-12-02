@@ -26,5 +26,5 @@ result = generate_isolated_intervals(
 intervals = result['intervals']
 fusion_ids = result['fusion_read_ids']
 
-print(intervals)
-print(fusion_ids)
+# print(intervals)
+# print(fusion_ids)

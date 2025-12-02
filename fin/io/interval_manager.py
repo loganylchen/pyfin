@@ -12,7 +12,7 @@ Key features:
 - Only essential info: chrom, start, end, strand, read_count
 """
 
-from typing import List, Dict, Tuple, Optional, Iterator, Set, Any
+from typing import List, Dict, Tuple, Optional, Iterator, Set, Any, Union
 from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass
