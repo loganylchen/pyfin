@@ -157,56 +157,64 @@ class BuildF5CExt(build_ext):
             raise
 
     def check_and_build_htslib(self):
-        """Check if htslib is available, if not download and build it"""
+        """Check if htslib is available, if not provide helpful error message"""
         import subprocess
 
+        # Check if htslib development headers are available
         htslib_dir = Path("third_party/f5c/htslib")
 
-        if not htslib_dir.exists():
-            print("htslib not found. Downloading...")
-
-            # Clone htslib
-            try:
-                subprocess.run(
-                    ["git", "clone", "--depth", "1", "https://github.com/samtools/htslib.git", str(htslib_dir)],
-                    check=True
-                )
-            except subprocess.CalledProcessError as e:
-                print(f"Failed to clone htslib: {e}")
-                print("Please install htslib manually: sudo apt-get install libhts-dev")
-                return False
-
-            # Build htslib
-            try:
-                subprocess.run(
-                    ["autoheader"],
-                    cwd=htslib_dir,
-                    check=True
-                )
-                subprocess.run(
-                    ["autoconf"],
-                    cwd=htslib_dir,
-                    check=True
-                )
-                subprocess.run(
-                    ["./configure", "--disable-libcurl", "--disable-s3", "--disable-gcs", "--disable-plugins"],
-                    cwd=htslib_dir,
-                    check=True
-                )
-                subprocess.run(
-                    ["make", "-j4"],
-                    cwd=htslib_dir,
-                    check=True
-                )
-                print("htslib built successfully")
+        # First try: check if system htslib is available
+        try:
+            result = subprocess.run(['pkg-config', '--exists', 'htslib'], capture_output=True)
+            if result.returncode == 0:
+                print("✓ System htslib found via pkg-config")
+                # Get the include path
+                result = subprocess.run(['pkg-config', '--cflags', 'htslib'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    include_path = result.stdout.strip().replace('-I', '')
+                    for ext in self.extensions:
+                        ext.include_dirs.append(include_path)
                 return True
-            except subprocess.CalledProcessError as e:
-                print(f"Failed to build htslib: {e}")
-                print("Please install htslib manually: sudo apt-get install libhts-dev")
-                return False
-        else:
-            print("htslib found")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+
+        # Second try: check for bundled or manually installed htslib
+        if htslib_dir.exists():
+            print("✓ Using bundled htslib")
+            for ext in self.extensions:
+                ext.include_dirs.append("third_party/f5c/htslib")
+                ext.extra_link_args.append("third_party/f5c/htslib/libhts.a")
             return True
+
+        # Final try: check common installation paths
+        common_paths = [
+            "/usr/include/htslib",
+            "/usr/local/include/htslib",
+            "/opt/homebrew/include/htslib",  # macOS Homebrew
+        ]
+
+        for path in common_paths:
+            if Path(path).exists():
+                print(f"✓ Found htslib headers at {path}")
+                parent_include = str(Path(path).parent)
+                for ext in self.extensions:
+                    ext.include_dirs.append(parent_include)
+                return True
+
+        # If we get here, htslib is not available
+        print("✗ htslib not found!")
+        print("\nPlease install htslib development headers:")
+        print("  Ubuntu/Debian: sudo apt-get install libhts-dev")
+        print("  CentOS/RHEL:   sudo yum install htslib-devel")
+        print("  Fedora:        sudo dnf install htslib-devel")
+        print("  macOS:         brew install htslib")
+        print("\nOr download and build manually:")
+        print("  cd third_party/f5c/")
+        print("  git clone https://github.com/samtools/htslib.git")
+        print("  cd htslib && ./configure --disable-libcurl && make -j4")
+        print("\nThen run pip install again.")
+
+        return False
 
 
 # Initialize include_dirs base (numpy will be added during build)
