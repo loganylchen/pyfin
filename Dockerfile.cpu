@@ -45,7 +45,8 @@ WORKDIR /app
 COPY --chown=finuser:finuser . .
 
 # Install Python dependencies
-RUN pip install -U pip && pip install --no-cache-dir -r requirements.txt
+RUN pip install -U pip && pip install --no-cache-dir -r requirements.txt && \
+    bash third_party/f5c/scripts/install-hts.sh
 
 # Install without CUDA (CPU-only)
 RUN pip install .
