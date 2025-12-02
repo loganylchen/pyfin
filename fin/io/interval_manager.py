@@ -35,6 +35,7 @@ class GenomicInterval:
     strand: Optional[str] = None  # '+' or '-', None for unstranded
     read_count: int = 0  # Number of reads mapped to this interval
     interval_id: Optional[str] = None
+    attrs: Optional[List[str]] = []
 
     @property
     def interval_tuple(self) -> Tuple[str, int, int]:
@@ -57,12 +58,15 @@ class GenomicInterval:
         if self.strand != other.strand:
             raise ValueError("Cannot merge intervals on different strands")
 
+        
         return GenomicInterval(
             chrom=self.chrom,
             start=min(self.start, other.start),
             end=max(self.end, other.end),
             strand=self.strand,
             read_count=self.read_count + other.read_count
+            interval_id=self.interval_id if self.interval_id else other.interval_id,
+            attrs=self.attrs + other.attrs
         )
 
 
@@ -306,7 +310,8 @@ def cluster_intervals(read_alignments: List[Dict], max_gap: int = 0) -> List[Gen
                 end=current_cluster[1],
                 strand=strand,
                 read_count=len(current_reads),
-                interval_id=f"interval_{interval_counter:06d}"
+                interval_id=f"interval_{interval_counter:06d}",
+                attrs = []
             ))
             interval_counter += 1
 
@@ -337,7 +342,8 @@ def generate_intervals_from_gtf(gtf_path: str) -> List[GenomicInterval]:
                 start=transcript.start,
                 end=transcript.end,
                 strand=transcript.strand,
-                interval_id=f"gtf_{transcript.transcript_id}"
+                interval_id=f"gtf_{transcript.transcript_id}",
+                attrs = [transcript.transcript_id]
             )
             intervals.append(interval)
 
