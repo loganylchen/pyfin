@@ -15,7 +15,7 @@ Key features:
 from typing import List, Dict, Tuple, Optional, Iterator, Set, Any, Union
 from pathlib import Path
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 
 import pysam
 
@@ -35,7 +35,7 @@ class GenomicInterval:
     strand: Optional[str] = None  # '+' or '-', None for unstranded
     read_count: int = 0  # Number of reads mapped to this interval
     interval_id: Optional[str] = None
-    attrs: Optional[List] = []
+    attrs: Optional[List] = field(default_factory=list)
 
     @property
     def interval_tuple(self) -> Tuple[str, int, int]:
