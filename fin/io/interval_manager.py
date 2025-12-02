@@ -66,6 +66,67 @@ class GenomicInterval:
         )
 
 
+def intervals_to_bed(
+    intervals: List[GenomicInterval],
+    output_path: Union[str, Path, TextIO, None] = None) -> Optional[str]:
+    """
+    Export GenomicInterval objects to BED format.
+    
+    Args:
+        intervals: List of GenomicInterval objects
+        output_path: Path to output file, file object, or None to return string
+    Returns:
+        BED formatted string if output_path is None, otherwise None
+    """
+    if not intervals:
+        if output_path is None:
+            return ""
+        return None
+    
+    # Sort intervals by chrom, then start position
+    bed_lines = []
+    
+    # Add UCSC BED header if requested
+    
+    for i, interval in enumerate(intervals):
+        # Required BED3 columns: chrom, start, end
+        chrom = interval.chrom
+        start = interval.start  # Already 0-based
+        end = interval.end      # Already exclusive
+        
+        # Optional columns
+        name = interval.interval_id if interval.interval_id else f"interval_{i}"
+        
+      
+        score = interval.read_count if interval.read_count else 0
+        
+        # Strand handling
+        strand = interval.strand if interval.strand else "."
+        
+        # Build BED fields
+        bed_fields = [chrom, str(start), str(end),name, str(score), strand]
+    
+        
+        # Join fields with tabs (BED format requirement)
+        bed_line = "\t".join(bed_fields)
+        bed_lines.append(bed_line)
+    
+    bed_content = "\n".join(bed_lines)
+    
+    # Output to file, file object, or return string
+    if output_path is None:
+        return bed_content
+    elif hasattr(output_path, 'write'):
+        # output_path is a file-like object
+        output_path.write(bed_content)
+        return None
+    else:
+        # output_path is a string/Path
+        with open(output_path, 'w') as f:
+            f.write(bed_content)
+        return None
+
+
 def is_fusion_read(read_dict: Dict) -> bool:
     """
     Check if a read is a fusion candidate based on soft-clip length
@@ -353,7 +414,7 @@ def merge_gtf_and_read_intervals(gtf_intervals: List[GenomicInterval],
 def generate_isolated_intervals(bam_path: str,
                                 gtf_path: Optional[str] = None,
                                 max_gap: int =0,
-                                max_reads: Optional[int] = None) -> Dict[str, Any]:
+                                max_reads: Optional[int] = None, tmp_dir: Optional[str] = None) -> Dict[str, Any]:
     """
     Generate isolated, non-overlapping genomic intervals with strand separation
 
@@ -385,12 +446,19 @@ def generate_isolated_intervals(bam_path: str,
 
     # Cluster read alignments
     read_intervals = cluster_intervals(read_alignments, max_gap)
-    logger.debug(read_intervals)
+    # logger.debug(read_intervals)
+    if tmp_dir:
+        tmp_read_intervals = Path(tmp_dir) / "read_intervals.bed"
+        tmp_read_intervals.mkdir(exist_ok=True)
+        intervals_to_bed(read_intervals,tmp_read_intervals)
     # Generate intervals from GTF if provided
     gtf_intervals = []
     if gtf_path:
         gtf_intervals = generate_intervals_from_gtf(gtf_path)
-    logger.debug(gtf_intervals)
+    if tmp_dir:
+        tmp_gtf_intervals = Path(tmp_dir) / "gtf_intervals.bed"
+        tmp_gtf_intervals.mkdir(exist_ok=True)
+        intervals_to_bed(gtf_intervals,tmp_gtf_intervals)
     # Merge intervals
     final_intervals = merge_gtf_and_read_intervals(
         gtf_intervals,
@@ -401,7 +469,10 @@ def generate_isolated_intervals(bam_path: str,
     # Sort intervals by chromosome, strand, position
     strand_order = {'+': 0, '-': 1, None: 2}
     final_intervals.sort(key=lambda x: (x.chrom, strand_order.get(x.strand, 2), x.start))
-
+    if tmp_dir:
+        tmp_final_intervals = Path(tmp_dir) / "final_intervals.bed"
+        tmp_final_intervals.mkdir(exist_ok=True)
+        intervals_to_bed(final_intervals,tmp_final_intervals)
     # Log summary
     logger.info("=" * 60)
     logger.info("Interval generation completed")
