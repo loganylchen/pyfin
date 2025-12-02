@@ -310,7 +310,12 @@ def merge_gtf_and_read_intervals(gtf_intervals: List[GenomicInterval],
     # Merge intervals on each chromosome and strand
     merged = []
 
-    for (chrom, strand), intervals in sorted(chrom_strand_intervals.items()):
+    # Sort with proper handling of None strand values
+    # Convert None to a sortable value (use 'z' so it sorts after '+' and '-')
+    for (chrom, strand), intervals in sorted(
+        chrom_strand_intervals.items(),
+        key=lambda x: (x[0][0], 'z' if x[0][1] is None else x[0][1])
+    ):
         if not intervals:
             continue
 
