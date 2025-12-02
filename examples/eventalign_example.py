@@ -8,6 +8,16 @@ events to reference k-mers.
 
 import sys
 from pathlib import Path
+import logging
+
+# Set debug level (choose one of these options):
+
+# Option 1: Set global debug level
+# logging.basicConfig(level=logging.DEBUG)
+
+# Option 2: Use the package logger with debug level
+from fin.utils.log_config import setup_logger
+logger = setup_logger(__name__, level='DEBUG', log_file='eventalign_debug.log')
 
 try:
     from fin._f5c import EventAligner, _F5C_AVAILABLE
