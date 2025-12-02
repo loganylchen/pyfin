@@ -1,8 +1,10 @@
 import os
 import fin
+import logging
 from fin.io.io_read_manager import create_subset_manager,ReadSubsetManager
 from fin.io import generate_isolated_intervals, extract_reads_for_interval
-
+logger = logging.getLogger(__name__)
+logger = logger.setLevel(logging.DEBUG)
 TEST_DIR='./testdata'
 bam_path=os.path.join(TEST_DIR,'test.bam')
 gtf_path=os.path.join(TEST_DIR,'reference.gtf')

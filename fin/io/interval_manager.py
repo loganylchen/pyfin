@@ -385,19 +385,19 @@ def generate_isolated_intervals(bam_path: str,
 
     # Cluster read alignments
     read_intervals = cluster_intervals(read_alignments, max_gap)
-
+    logger.debug(read_intervals)
     # Generate intervals from GTF if provided
     gtf_intervals = []
     if gtf_path:
         gtf_intervals = generate_intervals_from_gtf(gtf_path)
-
+    logger.debug(gtf_intervals)
     # Merge intervals
     final_intervals = merge_gtf_and_read_intervals(
         gtf_intervals,
         read_intervals,
         max_gap=max_gap
     )
-
+    logger.debug(final_intervals)
     # Sort intervals by chromosome, strand, position
     strand_order = {'+': 0, '-': 1, None: 2}
     final_intervals.sort(key=lambda x: (x.chrom, strand_order.get(x.strand, 2), x.start))
@@ -413,7 +413,9 @@ def generate_isolated_intervals(bam_path: str,
     for interval in final_intervals:
         strand_counts[interval.strand] += 1
 
+    
     logger.info("Intervals by strand:")
+    logger.debug(strand_counts.items())
     for strand, count in sorted(strand_counts.items()):
         logger.info(f"  {strand if strand else 'unstranded'}: {count}")
 
