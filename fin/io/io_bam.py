@@ -185,14 +185,7 @@ class BamReader:
         return {
             'query_name': alignment.query_name,
             'flag': alignment.flag,
-            'is_paired': alignment.is_paired,
-            'is_proper_pair': alignment.is_proper_pair,
-            'is_unmapped': alignment.is_unmapped,
-            'mate_is_unmapped': alignment.mate_is_unmapped,
             'is_reverse': alignment.is_reverse,
-            'mate_is_reverse': alignment.mate_is_reverse,
-            'is_read1': alignment.is_read1,
-            'is_read2': alignment.is_read2,
             'is_secondary': alignment.is_secondary,
             'is_duplicate': alignment.is_duplicate,
             'is_supplementary': alignment.is_supplementary,
@@ -203,19 +196,12 @@ class BamReader:
             'query_alignment_start': alignment.query_alignment_start,
             'query_alignment_end': alignment.query_alignment_end,
             'query_alignment_length': alignment.query_alignment_length,
-            'query_sequence': alignment.query_sequence,
-            'query_qualities': alignment.query_qualities,
-            'cigarstring': alignment.cigarstring,
-            'cigartuples': alignment.cigartuples,
             'mapping_quality': alignment.mapping_quality,
             'template_length': alignment.template_length,
-            'next_reference_name': alignment.next_reference_name,
-            'next_reference_start': alignment.next_reference_start,
-            'tags': tags,
+            'reference_sequence': alignment.get_reference_sequence()
             'is_forward': alignment.is_forward,
             'is_mapped': not alignment.is_unmapped,
             'query_length': alignment.query_length,
-            'aligned_pairs': list(alignment.get_aligned_pairs()) if not alignment.is_unmapped else [],
         }
 
     def get_reads_in_region(self, region: str, max_reads: Optional[int] = None) -> List[Dict[str, Any]]:

@@ -4,6 +4,7 @@ import fin
 from fin.io.io_read_manager import create_subset_manager,ReadSubsetManager
 from fin.io import generate_isolated_intervals, extract_reads_for_interval
 import logging
+from fin.analysis import ThreePrimePositionClustering
 
 # Set debug level (choose one of these options):
 
@@ -27,5 +28,8 @@ result = generate_isolated_intervals(
 intervals = result['intervals']
 fusion_ids = result['fusion_read_ids']
 
-print(intervals)
+# print(intervals)
 # print(fusion_ids)
+
+tppc = ThreePrimePositionClustering(bam_path,fasta_path)
+clustering_result =tppc.cluster_three_prime_positions(intervals[9].attrs,intervals[9].three_prime_pos)
