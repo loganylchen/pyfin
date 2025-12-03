@@ -36,7 +36,7 @@ class GenomicInterval:
     read_count: int = 0  # Number of reads mapped to this interval
     interval_id: Optional[str] = None
     attrs: Optional[List] = field(default_factory=list)
-    three_prime_pos[List] = field(default_factory=list)
+    three_prime_pos: Optional[List] = field(default_factory=list)
 
     @property
     def interval_tuple(self) -> Tuple[str, int, int]:
@@ -184,7 +184,7 @@ def extract_strand_from_read(read_dict: Dict) -> Optional[str]:
     return '+' if read_dict.get('is_forward') else '-'
 
 def extract_three_prime_pos(read_dict: Dict) -> Optional[int]:
-    return read_dict.get('reference_end') if read_dict.get('is_forward') else read_dict.get('reference_start')
+    return int(read_dict.get('reference_end')) if read_dict.get('is_forward') else int(read_dict.get('reference_start'))
 
 def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None) -> Tuple[List[Dict], Set[str]]:
     """
@@ -357,7 +357,7 @@ def generate_intervals_from_gtf(gtf_path: str) -> List[GenomicInterval]:
                 strand=transcript.strand,
                 interval_id=f"gtf_{transcript.transcript_id}",
                 attrs = [f"gtf_{transcript.transcript_id}"],
-                three_prime_pos=[transcript.end] if transcript.strand == '+' else [transcript.start]
+                three_prime_pos=[int(transcript.end)] if transcript.strand == '+' else [int(transcript.start)]
             )
             intervals.append(interval)
 
