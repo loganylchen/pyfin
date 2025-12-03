@@ -36,6 +36,7 @@ class GenomicInterval:
     read_count: int = 0  # Number of reads mapped to this interval
     interval_id: Optional[str] = None
     attrs: Optional[List] = field(default_factory=list)
+    three_prime_pos[List] = field(default_factory=list)
 
     @property
     def interval_tuple(self) -> Tuple[str, int, int]:
@@ -66,7 +67,8 @@ class GenomicInterval:
             strand=self.strand,
             read_count=self.read_count + other.read_count,
             interval_id=self.interval_id if self.interval_id else other.interval_id,
-            attrs=self.attrs + other.attrs
+            attrs=self.attrs + other.attrs,
+            three_prime_pos=self.three_prime_pos + other.three_prime_pos
         )
 
 
@@ -181,6 +183,8 @@ def extract_strand_from_read(read_dict: Dict) -> Optional[str]:
     # Some BAM files store strand in flags or tags
     return '+' if read_dict.get('is_forward') else '-'
 
+def extract_three_prime_pos(read_dict: Dict) -> Optional[int]:
+    return read_dict.get('reference_end') if read_dict.get('is_forward') else read_dict.get('reference_start')
 
 def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None) -> Tuple[List[Dict], Set[str]]:
     """
@@ -247,14 +251,15 @@ def cluster_intervals(read_alignments: List[Dict], max_gap: int = 0) -> List[Gen
     chrom_strand_intervals = defaultdict(list)
     for read_dict in read_alignments:
         chrom = read_dict.get('reference_name')
-        strand = extract_strand_from_read(read_dict) or None
+        strand = extract_strand_from_read(read_dict) 
         start = read_dict.get('reference_start')
         end = read_dict.get('reference_end')
         read_id = read_dict.get('query_name')
+        three_prime_pos = extract_three_prime_pos(read_dict)
 
         if chrom and start is not None and end is not None:
             key = (chrom, strand)  # Separate by strand
-            chrom_strand_intervals[key].append((start, end, read_id))
+            chrom_strand_intervals[key].append((start, end, read_id, three_prime_pos))
 
     clustered = []
     interval_counter = 0
@@ -274,20 +279,22 @@ def cluster_intervals(read_alignments: List[Dict], max_gap: int = 0) -> List[Gen
         intervals_sorted = sorted(intervals, key=lambda x: x[0])
 
         current_cluster = None
-        current_reads = set()
-
-        for start, end, read_id in intervals_sorted:
+        current_reads = list()
+        current_three_prime_pos = list()
+        for start, end, read_id, three_prime_pos in intervals_sorted:
             if current_cluster is None:
                 # Start new cluster
                 current_cluster = (start, end)
-                current_reads = {read_id}
+                current_reads = [read_id]
+                current_three_prime_pos = [three_prime_pos]
             elif start <= current_cluster[1] + max_gap:
                 # Merge with current cluster
                 current_cluster = (
                     current_cluster[0],
                     max(current_cluster[1], end)
                 )
-                current_reads.add(read_id)
+                current_reads.append(read_id)
+                current_three_prime_pos.append(three_prime_pos)
             else:
                 # Save current cluster and start new one
                 clustered.append(GenomicInterval(
@@ -296,11 +303,16 @@ def cluster_intervals(read_alignments: List[Dict], max_gap: int = 0) -> List[Gen
                     end=current_cluster[1],
                     strand=strand,
                     read_count=len(current_reads),
-                    interval_id=f"interval_{interval_counter:06d}"
+                    interval_id=f"interval_{interval_counter:06d}",
+                    attrs=current_reads,
+                    three_prime_pos=current_three_prime_pos
+                    
                 ))
                 interval_counter += 1
                 current_cluster = (start, end)
-                current_reads = {read_id}
+                current_reads = [read_id]
+                current_three_prime_pos = [three_prime_pos]
+                
 
         # Save the last cluster
         if current_cluster:
@@ -311,7 +323,8 @@ def cluster_intervals(read_alignments: List[Dict], max_gap: int = 0) -> List[Gen
                 strand=strand,
                 read_count=len(current_reads),
                 interval_id=f"interval_{interval_counter:06d}",
-                attrs = []
+                attrs=current_reads,
+                three_prime_pos=current_three_prime_pos
             ))
             interval_counter += 1
 
@@ -343,7 +356,8 @@ def generate_intervals_from_gtf(gtf_path: str) -> List[GenomicInterval]:
                 end=transcript.end,
                 strand=transcript.strand,
                 interval_id=f"gtf_{transcript.transcript_id}",
-                attrs = [transcript.transcript_id]
+                attrs = [f"gtf_{transcript.transcript_id}"],
+                three_prime_pos=[transcript.end] if transcript.strand == '+' else [transcript.start]
             )
             intervals.append(interval)
 
