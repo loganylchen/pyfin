@@ -248,7 +248,7 @@ class ThreePrimePositionClustering:
             curr_id = sorted_ids[i]
 
             # Check if within distance threshold
-            if curr_pos.position - prev_pos.position <= distance_threshold:
+            if curr_pos - prev_pos <= distance_threshold:
                 # Add to current cluster
                 current_cluster.append(curr_pos)
                 current_id.append(curr_id)
