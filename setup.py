@@ -6,6 +6,7 @@ This script builds the f5c eventalign module as a Python extension.
 
 import os
 import sys
+import numpy as np
 from pathlib import Path
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
