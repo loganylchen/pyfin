@@ -177,8 +177,10 @@ class BamReader:
             raise ValueError(f"Invalid DNA base: {e}")
 
     def reverse_complement(self,seq) -> str:
-        
-        return self.complement(seq)[::-1]
+        if seq:
+            return self.complement(seq)[::-1]
+        else:
+            return None
 
 
     def alignment_to_dict(self, alignment: pysam.AlignedSegment) -> Dict[str, Any]:
