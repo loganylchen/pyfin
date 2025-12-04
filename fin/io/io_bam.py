@@ -189,6 +189,7 @@ class BamReader:
             'is_secondary': alignment.is_secondary,
             'is_duplicate': alignment.is_duplicate,
             'is_supplementary': alignment.is_supplementary,
+            'cigartuples': alignment.cigartuples,
             'reference_name': alignment.reference_name,
             'reference_id': alignment.reference_id,
             'reference_start': alignment.reference_start,
