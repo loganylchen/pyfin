@@ -34,4 +34,4 @@ def detect_events(raw_signal: np.ndarray, is_rna: bool = True) -> list[dict]:
     return get_events(raw_signal, int(is_rna))
 
 # Export only the high-level function (hide low-level _f5c)
-__all__ = ["detect_events"]
+# __all__ = ["detect_events"]
