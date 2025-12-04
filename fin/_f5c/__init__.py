@@ -1,5 +1,5 @@
 import numpy as np
-from ._f5c import get_events  # Import the compiled C function
+from . import get_events  # Import the compiled C function
 
 def detect_events(raw_signal: np.ndarray, is_rna: bool = True) -> list[dict]:
     """
