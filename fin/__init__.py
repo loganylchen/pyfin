@@ -8,11 +8,11 @@ __author__ = "loganylchen"
 # Import submodules
 from . import io
 from .utils.log_config import setup_logger, get_package_logger
-
+from ._f5c import detect_events
 # Initialize package logger
 package_logger = get_package_logger(__name__, level='INFO')
 
 # Log package initialization
 package_logger.info(f"Package initialized - version {__version__}")
 
-__all__ = ["io", "setup_logger", "get_package_logger"]
+__all__ = ["io", "setup_logger", "get_package_logger",'detect_events']
