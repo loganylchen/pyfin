@@ -56,6 +56,7 @@ class ThreePrimePositionClustering:
         try:
             mode = 'rb' if self.bam_path.suffix.lower() == '.bam' else 'r'
             self._alignment_file = BamReader(self.bam_path)
+            self._alignment_file.open()
             self._is_open = True
             
             
