@@ -84,7 +84,7 @@ class ThreePrimePositionClustering:
     def iter_interval(self, intervals: List[GenomicInterval],
                          max_reads_per_interval: Optional[int] = None,
                          min_reads_per_interval: int = 10, 
-                         distance_threshold: int = 24) -> Generator[ClusteredData, None, None]:
+                         distance_threshold: int = 24) -> Generator[Tuple, None, None]:
         """
         Process all intervals: extract reads, cluster by 3' ends, prepare sequences
 

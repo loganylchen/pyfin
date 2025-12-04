@@ -19,6 +19,7 @@ TEST_DIR='./testdata'
 bam_path=os.path.join(TEST_DIR,'test.bam')
 gtf_path=os.path.join(TEST_DIR,'reference.gtf')
 fasta_path= os.path.join(TEST_DIR,'reference.fa')
+transcript_path=os.path.join(TEST_DIR,'transcript.fa')
 
 result = generate_isolated_intervals(
       bam_path,
@@ -31,5 +32,5 @@ fusion_ids = result['fusion_read_ids']
 # print(intervals)
 # print(fusion_ids)
 
-tppc = ThreePrimePositionClustering(bam_path,fasta_path)
+tppc = ThreePrimePositionClustering(bam_path,transcript_path)
 clustering_result =tppc.cluster_three_prime_positions(intervals[9].attrs,intervals[9].three_prime_pos)
