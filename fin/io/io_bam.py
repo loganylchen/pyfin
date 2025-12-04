@@ -182,7 +182,10 @@ class BamReader:
         else:
             return None
 
-
+    def get_reference_sequence(self, alignment:pysam.AlignedSegment) -> str:
+        forward_ref_seq = alignment.get_reference_sequence().upper() if not (alignment.is_supplementary|alignment.is_secondary) else None
+        return forward_ref_seq if not alignment.is_reverse else self.reverse_complement(forward_ref_seq)
+    
     def alignment_to_dict(self, alignment: pysam.AlignedSegment) -> Dict[str, Any]:
         """
         Convert AlignedSegment to dictionary
@@ -197,7 +200,7 @@ class BamReader:
             return {}
 
         tags = dict(alignment.tags) if alignment.tags else {}
-        forward_ref_seq = alignment.get_reference_sequence().upper() if not (alignment.is_supplementary|alignment.is_secondary) else None
+        
         
         
         return {
@@ -217,7 +220,7 @@ class BamReader:
             'query_alignment_length': alignment.query_alignment_length,
             'mapping_quality': alignment.mapping_quality,
             'template_length': alignment.template_length,
-            'reference_sequence': forward_ref_seq if not alignment.is_reverse else self.reverse_complement(forward_ref_seq),
+            'reference_sequence': self.get_reference_sequence(alignment),
             'is_forward': alignment.is_forward,
             'is_mapped': not alignment.is_unmapped,
             'query_length': alignment.query_length,

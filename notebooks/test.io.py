@@ -63,10 +63,18 @@ for read_i in read_seq_list:
             end_dif =  ref_3_end - read_3_end
         if end_dif >= 0:
             if read_seq[:-end_dif] in ref_seq:
+                print('----')
+                print(read_seq[:-end_dif])
+                print(ref_seq)
+                print(read_seq[:-end_dif] in ref_seq)
                 contained_read.add(read_id)
                 break
         else:
             if read_seq in ref_seq[:end_dif]:
+                print('----')
+                print(read_seq )
+                print(ref_seq[:end_dif])
+                print(read_seq[:-end_dif] in ref_seq)
                 contained_read.add(read_id)
                 break
             

@@ -55,9 +55,9 @@ class ThreePrimePositionClustering:
         """Open the alignment file"""
         try:
             mode = 'rb' if self.bam_path.suffix.lower() == '.bam' else 'r'
-            self._alignment_file = pysam.AlignmentFile(str(self.bam_path), mode)
+            self._alignment_file = BamReader(self.bam_path)
             self._is_open = True
-            logger.info(f"Opened alignment file: {self.bam_path}")
+            
             
             self._reference_file = pysam.FastaFile(str(self.fasta_path))
             logger.info(f"Opened reference file: {self.fasta_path}")
@@ -71,7 +71,6 @@ class ThreePrimePositionClustering:
         if self._alignment_file is not None:
             self._alignment_file.close()
             self._alignment_file = None
-            logger.info(f"Closed alignment file: {self.bam_path}")
         if self._reference_file is not None:
             self._reference_file.close()
             self._reference_file = None
@@ -149,7 +148,7 @@ class ThreePrimePositionClustering:
         if max_reads and len(reads) > max_reads:
             reads = reads[:max_reads]
             logger.info(f"Limited reads to {max_reads} out of {len(reads)} total")
-        read_sequences = {read.query_name:read.get_reference_sequence().upper() for read in self._alignment_file.fetch(region=interval.region_string) if read.query_name in reads}
+        read_sequences = {read.query_name:self._alignment_file.get_reference_sequence(read) for read in self._alignment_file.fetch(region=interval.region_string) if self._alignment_file.get_reference_sequence(read)}
         logger.info(f"Extracted {len(reads)} reads for interval {interval.region_string}")
         return read_sequences
 
