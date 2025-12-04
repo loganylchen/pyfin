@@ -23,8 +23,8 @@ if not os.path.exists(os.path.join(NUMPY_INCLUDE, "numpy", "arrayobject.h")):
 # --------------------------
 # Path Configuration
 # --------------------------
-PACKAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
-F5C_DIR = os.path.join(PACKAGE_ROOT, "fin", "_f5c")
+
+F5C_DIR = os.path.join("fin", "_f5c")
 
 
 f5c_extension = Extension(
