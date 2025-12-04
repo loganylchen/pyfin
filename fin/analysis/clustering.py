@@ -111,15 +111,15 @@ class ThreePrimePositionClustering:
             clusters = self.cluster_three_prime_positions(interval.attrs,interval.three_prime_pos)
             read_sequences = self.extract_read_sequence(interval,max_reads=max_reads_per_interval)
             reference_sequences = self.extract_ref_sequence(interval)
-            # yield (read_sequences,reference_sequences,clusters)
+            yield (read_sequences,reference_sequences,clusters)
             # Extract sequences for each cluster
-            for cluster_idx, cluster_dict in enumerate(clusters):
-                cluster_data = self.prepare_cluster_data(
-                    cluster_dict['ids'],
-                    cluster_dict['3_positions'],
-                    read_sequences,
-                    reference_sequences
-                )
+            # for cluster_idx, cluster_dict in enumerate(clusters):
+            #     cluster_data = self.prepare_cluster_data(
+            #         cluster_dict['ids'],
+            #         cluster_dict['3_positions'],
+            #         read_sequences,
+            #         reference_sequences
+            #     )
                 
 
         # logger.info(f"Generated {len(all_clusters)} total clusters from {len(intervals)} intervals")
