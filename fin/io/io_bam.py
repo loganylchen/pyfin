@@ -167,6 +167,20 @@ class BamReader:
             logger.error(f"Failed to get read {read_id}: {e}")
             return None
 
+    def complement(self,seq) -> str:
+        
+        complement_map = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C',
+                         'N': 'N', 'a': 't', 't': 'a', 'c': 'g', 'g': 'c', 'n': 'n'}
+        try:
+            return ''.join(complement_map[base] for base in seq)
+        except KeyError as e:
+            raise ValueError(f"Invalid DNA base: {e}")
+
+    def reverse_complement(self,seq) -> str:
+        
+        return self.complement(seq)[::-1]
+
+
     def alignment_to_dict(self, alignment: pysam.AlignedSegment) -> Dict[str, Any]:
         """
         Convert AlignedSegment to dictionary
@@ -181,7 +195,8 @@ class BamReader:
             return {}
 
         tags = dict(alignment.tags) if alignment.tags else {}
-
+        forward_ref_seq = alignment.get_reference_sequence().upper() if not (alignment.is_supplementary|alignment.is_secondary) else None
+        
         return {
             'query_name': alignment.query_name,
             'flag': alignment.flag,
@@ -199,7 +214,7 @@ class BamReader:
             'query_alignment_length': alignment.query_alignment_length,
             'mapping_quality': alignment.mapping_quality,
             'template_length': alignment.template_length,
-            'reference_sequence': alignment.get_reference_sequence() if not (alignment.is_supplementary|alignment.is_secondary) else None,
+            'reference_sequence': forward_ref_seq if not alignment.is_reverse else self.reverse_complement(forward_ref_seq),
             'is_forward': alignment.is_forward,
             'is_mapped': not alignment.is_unmapped,
             'query_length': alignment.query_length,

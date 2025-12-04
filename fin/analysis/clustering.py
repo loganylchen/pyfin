@@ -111,12 +111,15 @@ class ThreePrimePositionClustering:
             clusters = self.cluster_three_prime_positions(interval.attrs,interval.three_prime_pos)
             read_sequences = self.extract_read_sequence(interval,max_reads=max_reads_per_interval)
             reference_sequences = self.extract_ref_sequence(interval)
-            yield (read_sequences,reference_sequences,clusters)
+            # yield (read_sequences,reference_sequences,clusters)
             # Extract sequences for each cluster
-            # for cluster_idx, cluster_dict in enumerate(clusters):
-            #     cluster_data = self.prepare_cluster_data(
-            #         cluster_dict['ids'],cluster_dict['3_positions']
-            #     )
+            for cluster_idx, cluster_dict in enumerate(clusters):
+                cluster_data = self.prepare_cluster_data(
+                    cluster_dict['ids'],
+                    cluster_dict['3_positions'],
+                    read_sequences,
+                    reference_sequences
+                )
                 
 
         # logger.info(f"Generated {len(all_clusters)} total clusters from {len(intervals)} intervals")
@@ -229,25 +232,22 @@ class ThreePrimePositionClustering:
 
         return [{'ids':i,'3_positions':c} for i,c in zip(cluster_ids,clusters)]
 
-    # def prepare_cluster_data(self,
-    #                        cluster_positions: List[ThreePrimePosition],
-    #                        reads: List[Dict],
-    #                        transcripts: List,
-    #                        interval: GenomicInterval,
-    #                        cluster_id: str) -> ClusteredData:
-    #     """
-    #     Prepare all data for a single cluster
+    def prepare_cluster_data(self,
+                           ids: List[str],
+                           three_prime_positions: List[int],
+                           read_seqs: Dict[str,str],
+                           ref_seqs: Dict[str,str]) -> ClusteredData:
 
-    #     Args:
-    #         cluster_positions: List of ThreePrimePosition objects in this cluster
-    #         reads: List of all read dictionaries for the interval
-    #         transcripts: List of all GTFTranscript objects for the interval
-    #         interval: The interval this cluster belongs to
-    #         cluster_id: Unique ID for this cluster
-
-    #     Returns:
-    #         ClusteredData object
-    #     """
+        # Prepare the read seq set 
+        read_seq_list = [(j, read_seqs[j],three_prime_positions[i]) for i,j in enumerate(ids) if not j.startswith('gtf_')]
+        ref_seq_list = [(j.replace('gtf_',''),ref_seqs[j.replace('gtf_','')],three_prime_positions[i]) for i,j in enumerate(ids) if j.startswith('gtf_')]
+        
+        for read_i in read_seq_list:
+            read_id, read_seq, read_3_end = read_i
+            for ref_i in ref_seq_list:
+                ref_id, ref_seq, ref_3_end = ref_i
+                if read_
+    
     #     # Extract sequences for reads in this cluster
     #     read_sequences = {}
     #     read_qualities = {}
