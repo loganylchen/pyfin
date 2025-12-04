@@ -285,7 +285,7 @@ class ThreePrimePositionClustering:
                         break
         
         target_ref_seqs = {ref_id: ref_seqs[ref_id] for ref_id in target_ref_ids}
-        for read_id in [i for i in read_seq_list if i[0] not in contained_read]:
+        for read_id in [i[0] for i in read_seq_list if i[0] not in contained_read]:
             target_ref_seqs[read_id] = read_seqs[read_id]
             
         return  ClusteredData(
