@@ -6,19 +6,29 @@ This script builds the f5c eventalign module as a Python extension.
 
 import os
 import sys
-import numpy as np
+
 from pathlib import Path
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 
 # f5c source directory (relative to setup.py)
 # Use relative paths for all sources to comply with setuptools requirements
-NUMPY_INCLUDE = np.get_include()
-if not os.path.exists(os.path.join(NUMPY_INCLUDE, "numpy", "arrayobject.h")):
-    raise RuntimeError(
-        f"NumPy headers not found at {NUMPY_INCLUDE}! "
-        "Ensure numpy is installed in the current Python environment."
-    )
+
+# --------------------------
+# Custom Build Extension
+# --------------------------
+class BuildF5CExt(build_ext):
+    """Custom build_ext command to handle NumPy include paths."""
+
+    def build_extensions(self):
+        # Delay import of numpy until build_extensions phase
+        import numpy
+        # Add the numpy include directory to all extension include_dirs
+        for ext in self.extensions:
+            ext.include_dirs.append(numpy.get_include())
+        # Proceed with the standard build
+        super().build_extensions()
+
 
 # --------------------------
 # Path Configuration
@@ -72,7 +82,7 @@ def main():
             "fin": ["*.py", "*.c", "*.h", "*.yaml", "*.yml"],
         },
         ext_modules=[f5c_extension], 
-        # cmdclass={"build_ext": BuildF5CExt},
+        cmdclass={"build_ext": BuildF5CExt},
         python_requires=">=3.8",
         install_requires=[
             "numpy>=1.21.0",
