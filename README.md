@@ -1,72 +1,132 @@
-# FIN - RNA Isoform Detection
+# py-fin
 
-A Python tool for detecting RNA modifications using nanopore Direct RNA-seq data by comparing signal differences between native RNA and whole-transcriptomic in vitro transcribed products.
+A Python package for nanopore Direct RNA-seq data analysis and transcriptome assembly.
+
+## Overview
+
+`py-fin` is a bioinformatics tool designed for analyzing nanopore Direct RNA sequencing data. It provides efficient I/O handling for various genomic file formats and tools for organizing and processing RNA-seq reads.
 
 ## Installation
 
-### Development Installation
+### From Source (Development)
 
 ```bash
-# Clone the repository
 git clone https://github.com/loganylchen/pyfin.git
 cd pyfin
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Install in development mode
 pip install -e .
 ```
 
-### Docker Images
-
-FIN provides pre-built Docker images for easy deployment:
-
-**CPU-only version (recommended for most users):**
-```bash
-docker pull loganylchen/pyfin:latest
-docker run -it --rm -v $(pwd):/data loganylchen/pyfin:latest python3 -m fin.cli --help
-```
-
-**GPU-accelerated version (for high-performance computing):**
-```bash
-docker pull loganylchen/pyfin:latest-gpu
-docker run -it --rm --gpus all -v $(pwd):/data loganylchen/pyfin:latest-gpu python3 -m fin.cli --help
-```
-
-## Usage
+### Install with Optional Dependencies
 
 ```bash
-# Basic usage
-FIN.py --input <input.bam> --reference <reference.fa> --output <output_dir>
+# Install with GPU support
+pip install -e ".[gpu]"
 
-# See all options
-FIN.py --help
+# Install with development tools
+pip install -e ".[dev]"
+
+# Install everything
+pip install -e ".[all]"
 ```
 
 ## Features
 
-- **RNA modification detection** using nanopore Direct RNA-seq
-- **GPU-accelerated DTW** (Dynamic Time Warping) via OpenDBA
-- **Event alignment** using f5c for signal processing
-- **Multiple input formats**: FAST5, POD5, SLOW5
-- **Flexible deployment**: Native Python or Docker
+### File Format Readers
 
-## Architecture
+- **FASTA Reader** (`FASTAReader`, `FASTARecord`): Read and manipulate FASTA files
+- **BAM/SAM Reader** (`BamReader`): Read alignment files with pysam
+- **GTF/GFF Reader** (`GTFReader`): Parse genome annotations
+- **BED Reader** (`BEDReader`): Read genomic intervals
+- **Signal Files**: Support for nanopore signal formats:
+  - `Fast5Reader` (ONT FAST5)
+  - `Slow5Reader` (SLOW5/BLOW5)
+  - `Pod5Reader` (POD5)
 
-FIN is a hybrid Python-C/CUDA project:
+### Read Subset Manager
 
-- **Python layer**: High-level API and I/O handling (`fin/`)
-- **f5c C extension**: Event detection and alignment (`fin/_f5c/`)
-- **OpenDBA CUDA extension**: GPU-accelerated DTW (`fin/_opendba/`)
+The `ReadSubsetManager` organizes reads from BAM files into logical subsets based on GTF annotations:
+
+- Group reads by transcriptomic intervals
+- Identify fusion candidate reads (supplementary alignments, chimeric reads)
+- Separate unannotated reads
+- Lazy generation of subset BAM files
+- Generate data bundles for processing
+
+Example:
+```python
+from fin.io import create_subset_manager
+
+# Create manager and analyze reads
+manager = create_subset_manager(
+    bam_path='reads.bam',
+    gtf_path='annotation.gtf',
+    fasta_path='genome.fa'
+)
+
+# Iterate over subsets
+for subset in manager.iterate_subsets():
+    # Get data bundle with reads and sequences
+    bundle = manager.get_data_bundle(subset)
+
+    # Process reads
+    for read in bundle.reads:
+        print(read['query_name'])
+
+    # Optionally write subset to BAM
+    if subset.num_reads > 0:
+        manager.write_subset_bam(subset, f'{subset.subset_id}.bam')
+```
+
+## Quick Start
+
+### Reading FASTA Files
+
+```python
+from fin.io import FASTAReader
+
+with FASTAReader('genome.fa') as reader:
+    for record in reader.iterate_records():
+        print(f"{record.id}: {record.length} bp, {record.gc_content:.1f}% GC")
+```
+
+### Reading BAM Files
+
+```python
+from fin.io import BamReader
+
+with BamReader('alignments.bam') as reader:
+    # Get stats
+    stats = reader.get_file_stats()
+    print(f"Total reads: {stats['total_reads']}")
+    print(f"Mapped: {stats['mapped_pct']:.1f}%")
+
+    # Fetch reads in region
+    for read in reader.fetch(region='chr1:1000-2000'):
+        print(read['query_name'])
+```
+
+### Reading GTF Annotations
+
+```python
+from fin.io import GTFReader
+
+with GTFReader('annotation.gtf') as reader:
+    reader.parse()
+
+    # Get gene
+    gene = reader.get_gene('GENE001')
+    print(f"{gene.gene_id}: {gene.num_transcripts} transcripts")
+
+    # Get transcripts in region
+    transcripts = reader.get_transcripts_in_region('chr1', 1000, 5000)
+    for tx in transcripts:
+        print(f"{tx.transcript_id}: {tx.num_exons} exons")
+```
 
 ## Requirements
 
-- Python 3.7+
-- NumPy, Pandas, SciPy
-- Bioinformatics libraries: pysam, h5py
-- Nanopore signal libraries: pod5, slow5, pyf5
-- CUDA Toolkit (optional, for GPU acceleration)
+- Python >= 3.8
+- See `pyproject.toml` for dependencies
 
 ## License
 
@@ -74,4 +134,4 @@ MIT License
 
 ## Contributing
 
-Contributions are welcome! Please see the project repository for guidelines.
+Contributions are welcome! Please feel free to submit a Pull Request.

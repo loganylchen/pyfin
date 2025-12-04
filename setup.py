@@ -1,133 +1,323 @@
-from setuptools import setup, find_packages, Extension
+"""
+Setup script for py-fin package with f5c integration
+
+This script builds the f5c eventalign module as a Python extension.
+"""
+
+import os
 import sys
+from pathlib import Path
+from setuptools import setup, Extension
+from setuptools.command.build_ext import build_ext
 
-# Try to import CUDA-enabled build tools
-try:
-    from torch.utils.cpp_extension import BuildExtension, CUDAExtension
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
+# f5c source directory (relative to setup.py)
+# Use relative paths for all sources to comply with setuptools requirements
+# f5c_sources = [
+#     # f5c source files
+#     "third_party/f5c/src/f5c.c",
+#     "third_party/f5c/src/events.c",
+#     "third_party/f5c/src/nanopolish_read_db.c",
+#     "third_party/f5c/src/index.c",
+#     "third_party/f5c/src/nanopolish_fast5_io.c",
+#     "third_party/f5c/src/model.c",
+#     "third_party/f5c/src/methmodel.c",
+#     "third_party/f5c/src/align.c",
+#     "third_party/f5c/src/hmm.c",
+#     "third_party/f5c/src/meth.c",
+#     "third_party/f5c/src/freq.c",
+#     "third_party/f5c/src/eventalign.c",
+#     "third_party/f5c/src/freq_merge.c",
+#     "third_party/f5c/src/resquiggle.c",
+#     "third_party/f5c/src/profiles.c",
+#     # slow5lib source files
+#     "third_party/f5c/slow5lib/src/slow5.c",
+#     "third_party/f5c/slow5lib/src/slow5_index.c",
+#     "third_party/f5c/slow5lib/src/slow5_press.c",
+#     "third_party/f5c/slow5lib/src/slow5_misc.c",
+#     # Python wrapper
+#     "fin/_f5c/f5c_python.c",
+# ]
 
-# Try to import numpy - may not be available during initial setup
-try:
-    import numpy as np
-    NUMPY_AVAILABLE = True
-except ImportError:
-    np = None
-    NUMPY_AVAILABLE = False
-    # Only error if we're actually building extensions
-    if 'build_ext' in sys.argv or 'install' in sys.argv or 'bdist_wheel' in sys.argv:
-        print("ERROR: numpy is required to build extensions. Install it first with: pip install numpy")
-        sys.exit(1)
+# Compiler arguments
+# extra_compile_args = [
+#     "-std=c++11",
+#     "-O3",
+#     "-g",
+#     "-Wall",
+#     "-fPIC",
+#     "-D HAVE_CUDA=0",  # Build without CUDA for now
+#     "-D DISABLE_HDF5=1",  # Disable HDF5/FAST5 support, use slow5 instead
+# ]
 
-with open("README.md", "r", encoding="utf-8") as fh:
-    long_description = fh.read()
+# Linker arguments
+# extra_link_args = [
+#     "-lpthread",
+#     "-lz",
+#     "-lrt",
+#     "-ldl",
+# ]
 
-with open("requirements.txt", "r", encoding="utf-8") as fh:
-    requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
+# Check for required libraries
+def check_dependencies():
+    """Check if required system libraries are available"""
+    missing = []
 
-# Delay numpy import for include directories
-def get_numpy_include():
-    global np
-    global NUMPY_AVAILABLE
-    if not NUMPY_AVAILABLE:
-        import numpy as _np
-        np = _np
-        NUMPY_AVAILABLE = True
-    return np.get_include()
+    # Check for zlib (system library, not Python package)
+    # Note: Python's zlib module doesn't guarantee the dev headers are installed
+    # We mainly need the zlib development headers for compilation
 
-# f5c C extension - using simplified standalone event detection
-f5c_extension = Extension(
-    'fin._f5c.f5c_python',
-    sources=[
-        'fin/_f5c/f5c_python.c',
-        'fin/_f5c/event_detection_simple.c',
-    ],
-    include_dirs=[
-        get_numpy_include(),
-        'fin/_f5c',
-    ],
-    libraries=['m'],
-    extra_compile_args=[
-        '-O3',
-        '-std=c99',
-        '-Wall',
-        '-Wno-strict-prototypes',
-    ],
-    define_macros=[
-        ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION'),
-    ]
-)
+    # Check for system zlib headers
+    import subprocess
+    try:
+        result = subprocess.run(['pkg-config', '--exists', 'zlib'], capture_output=True)
+        if result.returncode != 0:
+            missing.append("zlib development headers (install zlib1g-dev)")
+    except FileNotFoundError:
+        # pkg-config not available, just warn
+        pass
 
-# OpenDBA CUDA extension
-if TORCH_AVAILABLE:
-    # Use PyTorch's CUDA build system if available
-    opendba_extension = CUDAExtension(
-        'fin._opendba.opendba_cuda',
-        sources=[
-            'fin/_opendba/opendba_python.cpp',
-            'fin/_opendba/openDBA.cu',
-        ],
-        include_dirs=[
-            np.get_include(),
-            'fin/_opendba',
-        ],
-        extra_compile_args={
-            'cxx': ['-O3'],
-            'nvcc': ['-O3'],
-        },
-        define_macros=[
-            ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION'),
+    # Don't check for pysam here - it will be installed automatically by pip
+    # and checking now would give false warnings during installation
+    # The real pysam import check happens at runtime when someone tries to use the modules
+
+    # However, we can check if htslib headers are available for compilation
+    try:
+        result = subprocess.run(['pkg-config', '--exists', 'htslib'], capture_output=True)
+        if result.returncode != 0:
+            missing.append("htslib development headers (install libhts-dev or libhts-devel)")
+    except FileNotFoundError:
+        # pkg-config not available, assume headers are present (or will be handled by pysam)
+        pass
+
+    if missing:
+        print(f"Warning: Some build dependencies may be missing: {', '.join(missing)}")
+        print("These are only needed for compiling the f5c extension.")
+        print("If you're just installing the Python package, you can ignore this.")
+        print("\nTo install build dependencies on Ubuntu/Debian:")
+        print("  sudo apt-get install zlib1g-dev libhts-dev")
+        print("\nOn CentOS/RHEL:")
+        print("  sudo yum install zlib-devel htslib-devel")
+        print("\nThe following Python packages will be installed automatically:")
+        print("  - pysam (includes htslib Python bindings)")
+        print("  - numpy, scipy, pandas, etc.")
+
+
+class BuildF5CExt(build_ext):
+    """Custom build extension for f5c"""
+
+    def run(self):
+        # Check and build htslib if needed
+        if not self.check_and_build_htslib():
+            raise RuntimeError("htslib is required but could not be built. "
+                             "Please install libhts-dev or htslib-devel.")
+
+        # Build slow5lib first
+        self.build_slow5lib()
+        super().run()
+
+    def build_extensions(self):
+        # Add numpy and htslib include dirs here (after dependencies are installed)
+        try:
+            import numpy as np
+            numpy_include = np.get_include()
+            for ext in self.extensions:
+                ext.include_dirs.append(numpy_include)
+                # Add htslib include path
+                ext.include_dirs.append("third_party/f5c/htslib")
+                # Add htslib library
+                ext.extra_link_args.append("third_party/f5c/htslib/libhts.a")
+        except ImportError:
+            print("Warning: numpy not available, extension may not compile correctly")
+            print("Make sure numpy is installed before building")
+
+        super().build_extensions()
+
+    def build_slow5lib(self):
+        """Build slow5lib static library"""
+        import subprocess
+
+        # Use relative path since we're running from the setup.py directory
+        slow5lib_dir_relative = "third_party/f5c/slow5lib"
+
+        print("Building slow5lib...")
+
+        # Configure and build slow5lib
+        env = os.environ.copy()
+        env["CFLAGS"] = "-fPIC -O3"
+
+        try:
+            subprocess.run(
+                ["make", "-C", slow5lib_dir_relative, "lib"],
+                env=env,
+                check=True
+            )
+            print("slow5lib built successfully")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to build slow5lib: {e}")
+            raise
+
+    def check_and_build_htslib(self):
+        """Check if htslib is available, if not provide helpful error message"""
+        import subprocess
+
+        # Check if htslib development headers are available
+        htslib_dir = Path("third_party/f5c/htslib")
+
+        # First try: check if system htslib is available
+        try:
+            result = subprocess.run(['pkg-config', '--exists', 'htslib'], capture_output=True)
+            if result.returncode == 0:
+                print("✓ System htslib found via pkg-config")
+                # Get the include path
+                result = subprocess.run(['pkg-config', '--cflags', 'htslib'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    include_path = result.stdout.strip().replace('-I', '')
+                    for ext in self.extensions:
+                        ext.include_dirs.append(include_path)
+                return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+
+        # Second try: check for bundled or manually installed htslib
+        if htslib_dir.exists():
+            print("✓ Using bundled htslib")
+            for ext in self.extensions:
+                ext.include_dirs.append("third_party/f5c/htslib")
+                ext.extra_link_args.append("third_party/f5c/htslib/libhts.a")
+            return True
+
+        # Final try: check common installation paths
+        common_paths = [
+            "/usr/include/htslib",
+            "/usr/local/include/htslib",
+            "/opt/homebrew/include/htslib",  # macOS Homebrew
         ]
-    )
-else:
-    # CPU-only version
-    opendba_extension = Extension(
-        'fin._opendba.opendba_cuda',
-        sources=['fin/_opendba/opendba_python.cpp'],
-        include_dirs=[
-            np.get_include(),
-            'fin/_opendba',
+
+        for path in common_paths:
+            if Path(path).exists():
+                print(f"✓ Found htslib headers at {path}")
+                parent_include = str(Path(path).parent)
+                for ext in self.extensions:
+                    ext.include_dirs.append(parent_include)
+                return True
+
+        # If we get here, htslib is not available
+        print("✗ htslib not found!")
+        print("\nPlease install htslib development headers:")
+        print("  Ubuntu/Debian: sudo apt-get install libhts-dev")
+        print("  CentOS/RHEL:   sudo yum install htslib-devel")
+        print("  Fedora:        sudo dnf install htslib-devel")
+        print("  macOS:         brew install htslib")
+        print("\nOr download and build manually:")
+        print("  cd third_party/f5c/")
+        print("  git clone https://github.com/samtools/htslib.git")
+        print("  cd htslib && ./configure --disable-libcurl && make -j4")
+        print("\nThen run pip install again.")
+
+        return False
+
+
+# Initialize include_dirs base (numpy will be added during build)
+# Use relative paths for include directories
+# include_dirs_base = [
+#     "third_party/f5c/include",
+#     "third_party/f5c/src",
+#     "third_party/f5c/slow5lib/include",
+# ]
+
+# f5c extension module
+# f5c_module = Extension(
+#     "fin._f5c",
+#     sources=f5c_sources,
+#     include_dirs=include_dirs_base + [
+#         "third_party/f5c/slow5lib/include",
+#     ],
+#     libraries=["z", "pthread", "m"],
+#     library_dirs=[],
+#     extra_compile_args=extra_compile_args,
+#     extra_link_args=extra_link_args + [
+#         "third_party/f5c/slow5lib/lib/libslow5.a"
+#     ],
+#     language="c++",
+# )
+
+# Main setup configuration
+def main():
+    # check_dependencies()
+
+    with open("README.md", "r", encoding="utf-8") as fh:
+        long_description = fh.read()
+
+    setup(
+        name="py-fin",
+        version="0.1.0",
+        author="loganylchen",
+        author_email="yuelong.chen.btr@gmail.com",
+        description="A Python package for nanopore Direct RNA-seq data analysis and transcriptome assembly",
+        long_description=long_description,
+        long_description_content_type="text/markdown",
+        url="https://github.com/loganylchen/pyfin",
+        packages=[
+            "fin",
+            "fin.io",
+            "fin.utils",
+            "fin.core",
         ],
-        extra_compile_args=['-O3', '-std=c++11'],
-        define_macros=[
-            ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION'),
+        package_dir={"fin": "fin"},
+        package_data={
+            "fin": ["*.py", "*.c", "*.h", "*.yaml", "*.yml"],
+        },
+        # ext_modules=[f5c_module],
+        # cmdclass={"build_ext": BuildF5CExt},
+        python_requires=">=3.8",
+        install_requires=[
+            "numpy>=1.21.0",
+            "pandas>=1.3.0",
+            "scipy>=1.7.0",
+            "pysam>=0.21.0",
+            "ont-fast5-api>=4.0.0",
+            "pyslow5>=0.3.0",
+            "pod5>=0.2.0",
+            "h5py>=3.0.0",
+            "click>=8.0.0",
+            "tqdm>=4.62.0",
+            "matplotlib>=3.4.0",
+            "seaborn>=0.11.0",
+            "pyyaml>=6.0",
         ],
-        language='c++'
+        extras_require={
+            "dev": [
+                "pytest>=6.0.0",
+                "pytest-cov",
+                "black",
+                "flake8",
+            ],
+            "gpu": [
+                "cupy>=12.0.0",
+                "numba>=0.56.0",
+            ],
+        },
+        classifiers=[
+            "Development Status :: 3 - Alpha",
+            "Intended Audience :: Science/Research",
+            "License :: OSI Approved :: MIT License",
+            "Operating System :: OS Independent",
+            "Programming Language :: Python :: 3",
+            "Programming Language :: Python :: 3.8",
+            "Programming Language :: Python :: 3.9",
+            "Programming Language :: Python :: 3.10",
+            "Programming Language :: Python :: 3.11",
+            "Programming Language :: Python :: 3.12",
+            "Topic :: Scientific/Engineering :: Bio-Informatics",
+        ],
+        entry_points={
+            "console_scripts": [
+                "fin=fin.cli:main",
+            ],
+        },
+        zip_safe=False,
     )
 
-setup(
-    name="fin",
-    version="0.1.0",
-    author="fin authors",
-    author_email="",
-    description="A Python tool for detecting RNA modifications using nanopore Direct RNA-seq data",
-    long_description=long_description,
-    long_description_content_type="text/markdown",
-    url="https://github.com/fin/fin",
-    packages=find_packages(),
-    classifiers=[
-        "Development Status :: 3 - Alpha",
-        "Intended Audience :: Science/Research",
-        "Topic :: Scientific/Engineering :: Bio-Informatics",
-        "License :: OSI Approved :: MIT License",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.7",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-    ],
-    python_requires=">=3.7",
-    install_requires=requirements,
-    setup_requires=['numpy'],
-    ext_modules=[f5c_extension, opendba_extension],
-    cmdclass={'build_ext': BuildExtension} if TORCH_AVAILABLE else {},
-    entry_points={
-        "console_scripts": [
-            "FIN.py=fin.cli:main",
-        ],
-    },
-    include_package_data=True,
-    zip_safe=False,
-)
+
+if __name__ == "__main__":
+    main()

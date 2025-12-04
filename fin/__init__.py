@@ -1,21 +1,18 @@
 """
-fin: A Python tool for detecting RNA modifications using nanopore Direct RNA-seq data.
-
-This package provides tools to compare signal differences between native RNA
-and whole-transcriptomic in vitro transcribed products to identify RNA modifications.
+fin - A Python package for nanopore Direct RNA-seq data analysis
 """
 
-try:
-    from ._version import version as __version__
-except ImportError:
-    __version__ = "unknown"
+__version__ = "0.1.0"
+__author__ = "loganylchen"
 
-__author__ = "fin authors"
-__email__ = ""
-__description__ = "A Python tool for detecting RNA modifications using nanopore Direct RNA-seq data"
+# Import submodules
+from . import io
+from .utils.log_config import setup_logger, get_package_logger
 
-__all__ = [
-    "core",
-    "io",
-    "utils",
-]
+# Initialize package logger
+package_logger = get_package_logger(__name__, level='INFO')
+
+# Log package initialization
+package_logger.info(f"Package initialized - version {__version__}")
+
+__all__ = ["io", "setup_logger", "get_package_logger"]
