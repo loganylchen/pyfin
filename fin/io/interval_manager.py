@@ -163,6 +163,8 @@ def is_fusion_read(read_dict: Dict) -> bool:
     if last_op == 4 and last_len >= SOFT_CLIP_THRESHOLD:
         return True
 
+
+    # OR I can just use read_dict.get('is_supplementary')
     return False
 
 
