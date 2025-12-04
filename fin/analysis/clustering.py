@@ -255,13 +255,14 @@ class ThreePrimePositionClustering:
                 else:
                     end_dif =  ref_3_end - read_3_end
                 if end_dif >= 0:
-                    if read_seq[:-end_idf] in ref_seq:
+                    if read_seq[:-end_dif] in ref_seq:
                         contained_read.add(read_id)
                         break
                 else:
                     if read_seq in ref_seq[:end_dif]:
                         contained_read.add(read_id)
                         break
+                
         
                         
                         
