@@ -33,7 +33,16 @@ fusion_ids = result['fusion_read_ids']
 # print(fusion_ids)
 
 tppc = ThreePrimePositionClustering(bam_path,transcript_path)
-clustering_result =tppc.cluster_three_prime_positions(intervals[9].attrs,intervals[9].three_prime_pos)
+# clustering_result =tppc.cluster_three_prime_positions(intervals[9].attrs,intervals[9].three_prime_pos)
 
-for i in tppc.iter_interval(intervals[9:11]):
-  print(i)
+for i in intervals:
+  if i.read_count > 20 and i.read_count < 40 and i.strand=='-':
+    break
+  
+for j in tppc.iter_interval([i]):
+  read_seqs = j[0]
+  ref_seqs = j[1]
+  for region in j[2]:
+    ids = region['ids']
+    three_prime_positions = region['3_positions']
+    

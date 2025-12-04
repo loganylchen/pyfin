@@ -118,7 +118,8 @@ class ThreePrimePositionClustering:
             #         cluster_dict['ids'],
             #         cluster_dict['3_positions'],
             #         read_sequences,
-            #         reference_sequences
+            #         reference_sequences,
+            #         interval.strand
             #     )
                 
 
@@ -236,17 +237,34 @@ class ThreePrimePositionClustering:
                            ids: List[str],
                            three_prime_positions: List[int],
                            read_seqs: Dict[str,str],
-                           ref_seqs: Dict[str,str]) -> ClusteredData:
+                           ref_seqs: Dict[str,str],
+                           strand: str) -> ClusteredData:
 
         # Prepare the read seq set 
         read_seq_list = [(j, read_seqs[j],three_prime_positions[i]) for i,j in enumerate(ids) if not j.startswith('gtf_')]
         ref_seq_list = [(j.replace('gtf_',''),ref_seqs[j.replace('gtf_','')],three_prime_positions[i]) for i,j in enumerate(ids) if j.startswith('gtf_')]
+        contained_read = {}
         
         for read_i in read_seq_list:
+            contained = False
             read_id, read_seq, read_3_end = read_i
             for ref_i in ref_seq_list:
                 ref_id, ref_seq, ref_3_end = ref_i
-                if read_
+                if strand == '+':
+                    end_dif = read_3_end- ref_3_end
+                else:
+                    end_dif =  ref_3_end - read_3_end
+                if end_dif >= 0:
+                    if read_seq[:-end_idf] in ref_seq:
+                        contained_read.add(read_id)
+                        break
+                else:
+                    if read_seq in ref_seq[:end_dif]:
+                        contained_read.add(read_id)
+                        break
+        
+                        
+                        
     
     #     # Extract sequences for reads in this cluster
     #     read_sequences = {}
