@@ -144,7 +144,7 @@ def is_fusion_read(read_dict: Dict) -> bool:
         True if read is a fusion candidate
     """
     SOFT_CLIP_THRESHOLD = 50
-    logger.debug(f'Checking Fusion reads')
+    logger.debug(f'Checking Fusion reads:{read_dict.get("cigartuples")}')
     if not read_dict.get('cigartuples'):
         return False
 
@@ -215,7 +215,7 @@ def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None
             read_dict = bam_reader.alignment_to_dict(alignment)
 
             # Check for fusion reads
-            logger.debug(f'Checking if {read_dict["query_name"]} is a fusion-read')
+            # logger.debug(f'Checking if {read_dict["query_name"]} is a fusion-read')
             if is_fusion_read(read_dict):
                 logger.debug(f'{read_dict["query_name"]} is a fusion-read, skipping')
                 fusion_read_ids.add(read_dict['query_name'])
