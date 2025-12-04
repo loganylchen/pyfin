@@ -38,7 +38,7 @@ typedef struct
 // Event detection function
 event_table detect_events_simple(raw_table const rt, int is_rna);
 
-void getevents_simple(int *n_events, float *event_means, float *event_stdvs, int *event_starts, int *event_lengths, const float *signal, int signal_length, float threshold);
+void getevents_simple(size_t nsample, float *rawptr, int is_rna);
 
 // Free event table
 void free_event_table(event_table *et);
