@@ -290,7 +290,7 @@ class ThreePrimePositionClustering:
             
         return  ClusteredData(
             strand=strand,
-            three_prime_positions=int(mean(three_prime_positions)),
+            three_prime_positions=three_prime_positions[int(len(three_prime_positions)/2)],
             ref_seqs= target_ref_seqs,
             read_ids=[i[0] for i in read_seq_list]
 
