@@ -183,7 +183,7 @@ class BamReader:
             return None
 
     def get_reference_sequence(self, alignment:pysam.AlignedSegment) -> str:
-        forward_ref_seq = alignment.get_reference_sequence().upper() if not (alignment.is_supplementary|alignment.is_secondary) else None
+        forward_ref_seq = alignment.get_reference_sequence().upper() if not (alignment.is_secondary) else None
         return forward_ref_seq if not alignment.is_reverse else self.reverse_complement(forward_ref_seq)
     
     def alignment_to_dict(self, alignment: pysam.AlignedSegment) -> Dict[str, Any]:
