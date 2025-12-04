@@ -13,7 +13,20 @@ from setuptools.command.build_ext import build_ext
 
 # f5c source directory (relative to setup.py)
 # Use relative paths for all sources to comply with setuptools requirements
-F5C_DIR = os.path.join('fin','_f5c')
+NUMPY_INCLUDE = np.get_include()
+if not os.path.exists(os.path.join(NUMPY_INCLUDE, "numpy", "arrayobject.h")):
+    raise RuntimeError(
+        f"NumPy headers not found at {NUMPY_INCLUDE}! "
+        "Ensure numpy is installed in the current Python environment."
+    )
+
+# --------------------------
+# Path Configuration
+# --------------------------
+PACKAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
+F5C_DIR = os.path.join(PACKAGE_ROOT, "fin", "_f5c")
+
+
 f5c_extension = Extension(
     name="fin._f5c",
     sources=[
