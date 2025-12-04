@@ -197,7 +197,8 @@ class BamReader:
             return {}
 
         tags = dict(alignment.tags) if alignment.tags else {}
-        forward_ref_seq = alignment.get_reference_sequence().upper() if not (alignment.is_supplementary|alignment.is_secondary) else None
+        forward_ref_seq = alignment.get_reference_sequence() if not (alignment.is_supplementary|alignment.is_secondary) else None
+        forward_ref_seq = forward_ref_seq.upper()
         
         return {
             'query_name': alignment.query_name,

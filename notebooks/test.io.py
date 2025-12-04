@@ -38,11 +38,12 @@ tppc = ThreePrimePositionClustering(bam_path,transcript_path)
 for i in intervals:
   if i.read_count > 20 and i.read_count < 40 and i.strand=='-':
     break
-  
+
+
 for j in tppc.iter_interval([i]):
   read_seqs = j[0]
   ref_seqs = j[1]
   for region in j[2]:
     ids = region['ids']
     three_prime_positions = region['3_positions']
-    
+    break
