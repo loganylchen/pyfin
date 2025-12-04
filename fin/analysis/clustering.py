@@ -20,12 +20,10 @@ logger = get_package_logger(__name__)
 @dataclass
 class ClusteredData:
     """Data container for a single cluster"""
-    cluster_id: str
-    chrom: str
     strand: str
-    three_prime_positions: List[int]
-    sequences: List[str]
-    ids: List[str]
+    three_prime_positions: int
+    ref_seqs: Dict[str,str]
+    read_ids: List[str]
 
 
 
@@ -113,14 +111,14 @@ class ThreePrimePositionClustering:
             reference_sequences = self.extract_ref_sequence(interval)
             yield (read_sequences,reference_sequences,clusters)
             # Extract sequences for each cluster
-            # for cluster_idx, cluster_dict in enumerate(clusters):
-            #     cluster_data = self.prepare_cluster_data(
-            #         cluster_dict['ids'],
-            #         cluster_dict['3_positions'],
-            #         read_sequences,
-            #         reference_sequences,
-            #         interval.strand
-            #     )
+            for cluster_idx, cluster_dict in enumerate(clusters):
+                cluster_data = self.prepare_cluster_data(
+                    cluster_dict['ids'],
+                    cluster_dict['3_positions'],
+                    read_sequences,
+                    reference_sequences,
+                    interval.strand
+                )
                 
 
         # logger.info(f"Generated {len(all_clusters)} total clusters from {len(intervals)} intervals")
@@ -244,7 +242,7 @@ class ThreePrimePositionClustering:
         read_seq_list = [(j, read_seqs[j],three_prime_positions[i]) for i,j in enumerate(ids) if not j.startswith('gtf_')]
         ref_seq_list = [(j.replace('gtf_',''),ref_seqs[j.replace('gtf_','')],three_prime_positions[i]) for i,j in enumerate(ids) if j.startswith('gtf_')]
         contained_read = set()
-        
+        target_ref_ids = set()
         for read_i in read_seq_list:
       
             read_id, read_seq, read_3_end = read_i
@@ -254,13 +252,15 @@ class ThreePrimePositionClustering:
                     end_dif = read_3_end- ref_3_end
                 else:
                     end_dif =  ref_3_end - read_3_end
-                if end_dif >= 0:
+                if end_dif > 0:
                     if read_seq[:-end_dif] in ref_seq:
                         contained_read.add(read_id)
+                        target_ref_ids.add(ref_id)
                         break
                 else:
                     if read_seq in ref_seq[:end_dif]:
                         contained_read.add(read_id)
+                        target_ref_ids.add(ref_id)
                         break
                     
         potential_novels = sorted([i for i in read_seq_list if i[0] not in contained_read],key=lambda x: len(x[1]))
@@ -274,7 +274,7 @@ class ThreePrimePositionClustering:
                     end_dif = read_3_end- ref_3_end
                 else:
                     end_dif =  ref_3_end - read_3_end
-                if end_dif >= 0:
+                if end_dif > 0:
                     if read_seq[:-end_dif] in ref_seq:
                         contained_read.add(read_id)
                         break
@@ -282,77 +282,18 @@ class ThreePrimePositionClustering:
                     if read_seq in ref_seq[:end_dif]:
                         contained_read.add(read_id)
                         break
-                        
-                        
-    
-    #     # Extract sequences for reads in this cluster
-    #     read_sequences = {}
-    #     read_qualities = {}
-    #     read_cigars = {}
-    #     transcript_sequences = {}
-    #     transcript_ids = []
+        
+        target_ref_seqs = {ref_id: ref_seqs[ref_id] for ref_id in target_ref_ids}
+        for read_id in [i for i in read_seq_list if i[0] not in contained_read]:
+            ref_seqs[read_id] = read_seqs[read_id]
+            
+        return  ClusteredData(
+            strand=strand,
+            three_prime_positions=int(mean(three_prime_positions)),
+            ref_seqs: ref_seqs
+            read_ids: [i[0] for i in read_seq_list]
 
-    #     chrom = interval.chrom
+        )
 
-    #     # Find reads in this cluster
-    #     cluster_read_ids = {pos.read_id for pos in cluster_positions if pos.is_read and pos.read_id}
-
-    #     logger.debug(f"Preparing data for cluster {cluster_id} with {len(cluster_read_ids)} reads")
-
-    #     # Extract read sequences
-    #     for read in reads:
-    #         read_id = read['query_name']
-    #         if read_id in cluster_read_ids:
-    #             # Get read sequence
-    #             seq = read.get('query_sequence')
-    #             if seq:
-    #                 read_sequences[read_id] = seq
-
-    #             # Get base qualities
-    #             qualities = read.get('query_qualities')
-    #             if qualities:
-    #                 read_qualities[read_id] = qualities
-
-    #             # Get CIGAR
-    #             cigar = read.get('cigartuples')
-    #             if cigar:
-    #                 read_cigars[read_id] = cigar
-
-    #     # Extract transcript sequences
-    #     cluster_transcript_ids = {pos.transcript_id for pos in cluster_positions
-    #                              if not pos.is_read and pos.transcript_id}
-
-    #     if self.gtf_path and cluster_transcript_ids and transcripts:
-    #         with FASTAReader(self.fasta_path) as fasta_reader:
-    #             for transcript in transcripts:
-    #                 if transcript.transcript_id in cluster_transcript_ids:
-    #                     transcript_ids.append(transcript.transcript_id)
-
-    #                     # Get spliced sequence
-    #                     chrom_seq = fasta_reader.get_sequence(chrom)
-    #                     if chrom_seq:
-    #                         transcript_seq = transcript.get_spliced_sequence(chrom_seq)
-    #                         transcript_sequences[transcript.transcript_id] = transcript_seq
-
-    #     # Collect all 3' end positions
-    #     three_prime_positions = [pos.position for pos in cluster_positions]
-
-    #     cluster_data = ClusteredData(
-    #         cluster_id=cluster_id,
-    #         chrom=chrom,
-    #         strand=interval.strand or '+',
-    #         three_prime_positions=three_prime_positions,
-    #         read_sequences=read_sequences,
-    #         read_qualities=read_qualities,
-    #         read_cigars=read_cigars,
-    #         transcript_sequences=transcript_sequences,
-    #         transcript_ids=transcript_ids,
-    #         interval=interval
-    #     )
-
-    #     logger.debug(f"Prepared cluster {cluster_id}: {len(read_sequences)} reads, "
-    #                 f"{len(transcript_sequences)} transcripts")
-
-    #     return cluster_data
 
 

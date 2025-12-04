@@ -61,18 +61,20 @@ for read_i in read_seq_list:
             end_dif = read_3_end- ref_3_end
         else:
             end_dif =  ref_3_end - read_3_end
-        if end_dif >= 0:
+        if end_dif > 0:
             if read_seq[:-end_dif] in ref_seq:
-                print('----')
+                print(f'----{read_id}:{end_dif}')
                 print(read_seq[:-end_dif])
+                print('===============')
                 print(ref_seq)
                 print(read_seq[:-end_dif] in ref_seq)
                 contained_read.add(read_id)
                 break
         else:
             if read_seq in ref_seq[:end_dif]:
-                print('----')
+                print(f'----{read_id}:{end_dif}')
                 print(read_seq )
+                print('===============')
                 print(ref_seq[:end_dif])
                 print(read_seq[:-end_dif] in ref_seq)
                 contained_read.add(read_id)
@@ -94,12 +96,22 @@ for i, read_i in enumerate(potential_novels):
             end_dif = read_3_end- ref_3_end
         else:
             end_dif =  ref_3_end - read_3_end
-        if end_dif >= 0:
+        if end_dif > 0:
             if read_seq[:-end_dif] in ref_seq:
+                print(f'----{read_id}:{end_dif}')
+                print(read_seq[:-end_dif])
+                print('===============')
+                print(ref_seq)
+                print(read_seq[:-end_dif] in ref_seq)
                 contained_read.add(read_id)
                 break
         else:
             if read_seq in ref_seq[:end_dif]:
+                print(f'----{read_id}:{end_dif}')
+                print(read_seq )
+                print('===============')
+                print(ref_seq[:end_dif])
+                print(read_seq[:-end_dif] in ref_seq)
                 contained_read.add(read_id)
                 break
 
