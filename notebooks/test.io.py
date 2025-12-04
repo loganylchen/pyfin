@@ -48,9 +48,9 @@ for j in tppc.iter_interval([i]):
     three_prime_positions = region['3_positions']
     break
 
-
-read_seq_list = [(j, read_seqs[j].upper(),three_prime_positions[i]) for i,j in enumerate(ids) if not j.startswith('gtf_')]
-ref_seq_list = [(j.replace('gtf_',''),ref_seqs[j.replace('gtf_','')].upper(),three_prime_positions[i]) for i,j in enumerate(ids) if j.startswith('gtf_')]
+strand='-'
+read_seq_list = [(j, read_seqs[j],three_prime_positions[i]) for i,j in enumerate(ids) if not j.startswith('gtf_')]
+ref_seq_list = [(j.replace('gtf_',''),ref_seqs[j.replace('gtf_','')],three_prime_positions[i]) for i,j in enumerate(ids) if j.startswith('gtf_')]
 contained_read = set()
 
 for read_i in read_seq_list:

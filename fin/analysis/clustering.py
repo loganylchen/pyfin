@@ -149,7 +149,7 @@ class ThreePrimePositionClustering:
         if max_reads and len(reads) > max_reads:
             reads = reads[:max_reads]
             logger.info(f"Limited reads to {max_reads} out of {len(reads)} total")
-        read_sequences = {read.query_name:read.get_reference_sequence() for read in self._alignment_file.fetch(region=interval.region_string) if read.query_name in reads}
+        read_sequences = {read.query_name:read.get_reference_sequence().upper() for read in self._alignment_file.fetch(region=interval.region_string) if read.query_name in reads}
         logger.info(f"Extracted {len(reads)} reads for interval {interval.region_string}")
         return read_sequences
 
