@@ -108,10 +108,10 @@ class ThreePrimePositionClustering:
                 logger.debug(f"Skipped interval {interval_idx + 1} due to low read count {interval.read_count}")
                 continue
             # Cluster by 3' end positions
-            clusters = self.cluster_three_prime_positions(interval.attrs,interval.three_prime_pos)
+            c = self.cluster_three_prime_positions(interval.attrs,interval.three_prime_pos)
             read_sequences = self.extract_read_sequence(interval,max_reads=max_reads_per_interval)
             reference_sequences = self.extract_ref_sequence(interval)
-            yield (read_sequences,reference_sequences,cluster_dict)
+            yield (read_sequences,reference_sequences,clusters)
             # Extract sequences for each cluster
             # for cluster_idx, cluster_dict in enumerate(clusters):
             #     cluster_data = self.prepare_cluster_data(

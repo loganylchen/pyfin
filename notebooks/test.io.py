@@ -34,3 +34,6 @@ fusion_ids = result['fusion_read_ids']
 
 tppc = ThreePrimePositionClustering(bam_path,transcript_path)
 clustering_result =tppc.cluster_three_prime_positions(intervals[9].attrs,intervals[9].three_prime_pos)
+
+for i in tppc.iter_interval(intervals[9:11]):
+  print(i)
