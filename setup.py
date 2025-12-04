@@ -38,7 +38,7 @@ F5C_DIR = os.path.join("fin", "_f5c")
 
 
 f5c_extension = Extension(
-    name="fin._f5c",
+    name="fin._f5c._event",
     sources=[
         os.path.join(F5C_DIR,'f5c_python.c'),
         os.path.join(F5C_DIR,'event_detection_simple.c')
