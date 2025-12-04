@@ -120,7 +120,7 @@ static struct PyModuleDef f5cmodule = {
 // --------------------------
 // Module initialization (required for numpy)
 // --------------------------
-PyMODINIT_FUNC PyInit__f5c(void)
+PyMODINIT_FUNC PyInit_f5c(void)
 {
     import_array(); // Initialize numpy C API
     return PyModule_Create(&f5cmodule);
