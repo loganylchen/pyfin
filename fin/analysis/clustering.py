@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 import pickle
-
+import pysam
 from ..io.io_bam import BamReader
 from ..io.io_fasta import FASTAReader
 from ..io.io_gtf import GTFReader
