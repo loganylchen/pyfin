@@ -43,7 +43,7 @@ f5c_extension = Extension(
         os.path.join(F5C_DIR,'f5c_python.c'),
         os.path.join(F5C_DIR,'event_detection_simple.c')
     ],
-    inlcude_dirs=[F5C_DIR,NUMPY_INCLUDE ],
+    inlcude_dirs=[F5C_DIR ],
     extra_compile_args=["-O3",          # Optimize compilation
         "-std=c99",     # C99 standard (matches your C code)
         "-Wall"         # Show warnings (debug)
