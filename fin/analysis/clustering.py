@@ -229,93 +229,93 @@ class ThreePrimePositionClustering:
 
         return [{'ids':i,'3_positions':c} for i,c in zip(cluster_ids,clusters)]
 
-    def prepare_cluster_data(self,
-                           cluster_positions: List[ThreePrimePosition],
-                           reads: List[Dict],
-                           transcripts: List,
-                           interval: GenomicInterval,
-                           cluster_id: str) -> ClusteredData:
-        """
-        Prepare all data for a single cluster
+    # def prepare_cluster_data(self,
+    #                        cluster_positions: List[ThreePrimePosition],
+    #                        reads: List[Dict],
+    #                        transcripts: List,
+    #                        interval: GenomicInterval,
+    #                        cluster_id: str) -> ClusteredData:
+    #     """
+    #     Prepare all data for a single cluster
 
-        Args:
-            cluster_positions: List of ThreePrimePosition objects in this cluster
-            reads: List of all read dictionaries for the interval
-            transcripts: List of all GTFTranscript objects for the interval
-            interval: The interval this cluster belongs to
-            cluster_id: Unique ID for this cluster
+    #     Args:
+    #         cluster_positions: List of ThreePrimePosition objects in this cluster
+    #         reads: List of all read dictionaries for the interval
+    #         transcripts: List of all GTFTranscript objects for the interval
+    #         interval: The interval this cluster belongs to
+    #         cluster_id: Unique ID for this cluster
 
-        Returns:
-            ClusteredData object
-        """
-        # Extract sequences for reads in this cluster
-        read_sequences = {}
-        read_qualities = {}
-        read_cigars = {}
-        transcript_sequences = {}
-        transcript_ids = []
+    #     Returns:
+    #         ClusteredData object
+    #     """
+    #     # Extract sequences for reads in this cluster
+    #     read_sequences = {}
+    #     read_qualities = {}
+    #     read_cigars = {}
+    #     transcript_sequences = {}
+    #     transcript_ids = []
 
-        chrom = interval.chrom
+    #     chrom = interval.chrom
 
-        # Find reads in this cluster
-        cluster_read_ids = {pos.read_id for pos in cluster_positions if pos.is_read and pos.read_id}
+    #     # Find reads in this cluster
+    #     cluster_read_ids = {pos.read_id for pos in cluster_positions if pos.is_read and pos.read_id}
 
-        logger.debug(f"Preparing data for cluster {cluster_id} with {len(cluster_read_ids)} reads")
+    #     logger.debug(f"Preparing data for cluster {cluster_id} with {len(cluster_read_ids)} reads")
 
-        # Extract read sequences
-        for read in reads:
-            read_id = read['query_name']
-            if read_id in cluster_read_ids:
-                # Get read sequence
-                seq = read.get('query_sequence')
-                if seq:
-                    read_sequences[read_id] = seq
+    #     # Extract read sequences
+    #     for read in reads:
+    #         read_id = read['query_name']
+    #         if read_id in cluster_read_ids:
+    #             # Get read sequence
+    #             seq = read.get('query_sequence')
+    #             if seq:
+    #                 read_sequences[read_id] = seq
 
-                # Get base qualities
-                qualities = read.get('query_qualities')
-                if qualities:
-                    read_qualities[read_id] = qualities
+    #             # Get base qualities
+    #             qualities = read.get('query_qualities')
+    #             if qualities:
+    #                 read_qualities[read_id] = qualities
 
-                # Get CIGAR
-                cigar = read.get('cigartuples')
-                if cigar:
-                    read_cigars[read_id] = cigar
+    #             # Get CIGAR
+    #             cigar = read.get('cigartuples')
+    #             if cigar:
+    #                 read_cigars[read_id] = cigar
 
-        # Extract transcript sequences
-        cluster_transcript_ids = {pos.transcript_id for pos in cluster_positions
-                                 if not pos.is_read and pos.transcript_id}
+    #     # Extract transcript sequences
+    #     cluster_transcript_ids = {pos.transcript_id for pos in cluster_positions
+    #                              if not pos.is_read and pos.transcript_id}
 
-        if self.gtf_path and cluster_transcript_ids and transcripts:
-            with FASTAReader(self.fasta_path) as fasta_reader:
-                for transcript in transcripts:
-                    if transcript.transcript_id in cluster_transcript_ids:
-                        transcript_ids.append(transcript.transcript_id)
+    #     if self.gtf_path and cluster_transcript_ids and transcripts:
+    #         with FASTAReader(self.fasta_path) as fasta_reader:
+    #             for transcript in transcripts:
+    #                 if transcript.transcript_id in cluster_transcript_ids:
+    #                     transcript_ids.append(transcript.transcript_id)
 
-                        # Get spliced sequence
-                        chrom_seq = fasta_reader.get_sequence(chrom)
-                        if chrom_seq:
-                            transcript_seq = transcript.get_spliced_sequence(chrom_seq)
-                            transcript_sequences[transcript.transcript_id] = transcript_seq
+    #                     # Get spliced sequence
+    #                     chrom_seq = fasta_reader.get_sequence(chrom)
+    #                     if chrom_seq:
+    #                         transcript_seq = transcript.get_spliced_sequence(chrom_seq)
+    #                         transcript_sequences[transcript.transcript_id] = transcript_seq
 
-        # Collect all 3' end positions
-        three_prime_positions = [pos.position for pos in cluster_positions]
+    #     # Collect all 3' end positions
+    #     three_prime_positions = [pos.position for pos in cluster_positions]
 
-        cluster_data = ClusteredData(
-            cluster_id=cluster_id,
-            chrom=chrom,
-            strand=interval.strand or '+',
-            three_prime_positions=three_prime_positions,
-            read_sequences=read_sequences,
-            read_qualities=read_qualities,
-            read_cigars=read_cigars,
-            transcript_sequences=transcript_sequences,
-            transcript_ids=transcript_ids,
-            interval=interval
-        )
+    #     cluster_data = ClusteredData(
+    #         cluster_id=cluster_id,
+    #         chrom=chrom,
+    #         strand=interval.strand or '+',
+    #         three_prime_positions=three_prime_positions,
+    #         read_sequences=read_sequences,
+    #         read_qualities=read_qualities,
+    #         read_cigars=read_cigars,
+    #         transcript_sequences=transcript_sequences,
+    #         transcript_ids=transcript_ids,
+    #         interval=interval
+    #     )
 
-        logger.debug(f"Prepared cluster {cluster_id}: {len(read_sequences)} reads, "
-                    f"{len(transcript_sequences)} transcripts")
+    #     logger.debug(f"Prepared cluster {cluster_id}: {len(read_sequences)} reads, "
+    #                 f"{len(transcript_sequences)} transcripts")
 
-        return cluster_data
+    #     return cluster_data
 
 
