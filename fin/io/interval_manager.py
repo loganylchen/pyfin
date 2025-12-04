@@ -215,6 +215,7 @@ def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None
             read_dict = bam_reader.alignment_to_dict(alignment)
 
             # Check for fusion reads
+            logger.debug(f'Checking if {read_dict["query_name"]} is a fusion-read')
             if is_fusion_read(read_dict):
                 logger.debug(f'{read_dict["query_name"]} is a fusion-read, skipping')
                 fusion_read_ids.add(read_dict['query_name'])
