@@ -111,14 +111,15 @@ class ThreePrimePositionClustering:
             clusters = self.cluster_three_prime_positions(interval.attrs,interval.three_prime_pos)
             read_sequences = self.extract_read_sequence(interval,max_reads=max_reads_per_interval)
             reference_sequences = self.extract_ref_sequence(interval)
+            yield (read_sequences,reference_sequences,cluster_dict)
             # Extract sequences for each cluster
-            for cluster_idx, cluster_dict in enumerate(clusters):
-                cluster_data = self.prepare_cluster_data(
-                    cluster_dict['ids']
-                )
+            # for cluster_idx, cluster_dict in enumerate(clusters):
+            #     cluster_data = self.prepare_cluster_data(
+            #         cluster_dict['ids'],cluster_dict['3_positions']
+            #     )
                 
 
-        logger.info(f"Generated {len(all_clusters)} total clusters from {len(intervals)} intervals")
+        # logger.info(f"Generated {len(all_clusters)} total clusters from {len(intervals)} intervals")
 
   
 
@@ -163,67 +164,6 @@ class ThreePrimePositionClustering:
         logger.info(f"Extracted {len(transcripts)} transcripts for interval {interval.region_string}")
         return transcripts_sequence
 
-    # def get_three_prime_positions(self, reads: List[Dict], transcripts: List,
-    #                             interval: GenomicInterval) -> List[ThreePrimePosition]:
-    #     """
-    #     Get 3' end positions for all reads and transcripts
-
-    #     Args:
-    #         reads: List of read dictionaries
-    #         transcripts: List of GTFTranscript objects
-    #         interval: Interval we're working on
-
-    #     Returns:
-    #         List of ThreePrimePosition objects
-    #     """
-    #     three_prime_positions = []
-
-    #     # Process reads
-    #     for read in reads:
-    #         strand = read.get('is_forward', True)
-    #         strand_char = '+' if strand else '-'
-
-    #         # Get read sequence
-    #         read_seq = read.get('query_sequence', '')
-    #         if not read_seq:
-    #             logger.debug(f"No sequence for read {read['query_name']}, skipping")
-    #             continue
-
-    #         # Calculate 3' end position based on strand
-    #         # For forward (+) reads: 3' end is reference_end
-    #         # For reverse (-) reads: 3' end is reference_start
-    #         if strand:  # Forward strand
-    #             three_prime_pos = read.get('reference_end', 0)
-    #         else:  # Reverse strand
-    #             three_prime_pos = read.get('reference_start', 0)
-
-    #         three_prime_positions.append(ThreePrimePosition(
-    #             position=three_prime_pos,
-    #             is_read=True,
-    #             read_id=read['query_name'],
-    #             strand=strand_char,
-    #             cigar=read.get('cigartuples')
-    #         ))
-
-    #     # Process transcripts
-    #     for transcript in transcripts:
-    #         # Calculate 3' end position based on strand
-    #         # For + strand: 3' end is transcript end
-    #         # For - strand: 3' end is transcript start
-    #         if transcript.strand == '+':
-    #             three_prime_pos = transcript.end
-    #         else:
-    #             three_prime_pos = transcript.start
-
-    #         three_prime_positions.append(ThreePrimePosition(
-    #             position=three_prime_pos,
-    #             is_read=False,
-    #             transcript_id=transcript.transcript_id,
-    #             strand=transcript.strand
-    #         ))
-
-    #     logger.info(f"Collected {len(three_prime_positions)} 3' end positions (reads + transcripts)")
-    #     return three_prime_positions
 
     def cluster_three_prime_positions(self,
                                     ids: List[str],
