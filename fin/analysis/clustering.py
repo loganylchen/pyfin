@@ -286,12 +286,12 @@ class ThreePrimePositionClustering:
         
         target_ref_seqs = {ref_id: ref_seqs[ref_id] for ref_id in target_ref_ids}
         for read_id in [i for i in read_seq_list if i[0] not in contained_read]:
-            ref_seqs[read_id] = read_seqs[read_id]
+            target_ref_seqs[read_id] = read_seqs[read_id]
             
         return  ClusteredData(
             strand=strand,
             three_prime_positions=int(mean(three_prime_positions)),
-            ref_seqs= ref_seqs
+            ref_seqs= target_ref_seqs,
             read_ids=[i[0] for i in read_seq_list]
 
         )
