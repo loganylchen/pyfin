@@ -198,7 +198,7 @@ class BamReader:
             'query_alignment_length': alignment.query_alignment_length,
             'mapping_quality': alignment.mapping_quality,
             'template_length': alignment.template_length,
-            'reference_sequence': alignment.get_reference_sequence()
+            'reference_sequence': alignment.get_reference_sequence(),
             'is_forward': alignment.is_forward,
             'is_mapped': not alignment.is_unmapped,
             'query_length': alignment.query_length,
