@@ -143,27 +143,28 @@ def is_fusion_read(read_dict: Dict) -> bool:
     Returns:
         True if read is a fusion candidate
     """
-    SOFT_CLIP_THRESHOLD = 50
-    logger.debug(f'Checking Fusion reads:{read_dict.get("cigartuples")}')
-    if not read_dict.get('cigartuples'):
-        return False
+    # SOFT_CLIP_THRESHOLD = 50
+    # logger.debug(f'Checking Fusion reads:{read_dict.get("cigartuples")}')
+    # if not read_dict.get('cigartuples'):
+        # return False
 
     # Check for long soft-clips at read ends
-    cigartuples = read_dict['cigartuples']
-    if not cigartuples:
-        return False
+    # cigartuples = read_dict['cigartuples']
+    # if not cigartuples:
+        # return False
 
     # Check first and last CIGAR operations for soft-clips
-    first_op, first_len = cigartuples[0]
-    last_op, last_len = cigartuples[-1]
+    # first_op, first_len = cigartuples[0]
+    # last_op, last_len = cigartuples[-1]
 
     # Check if soft-clips exceed threshold at either end
-    if first_op == 4 and first_len >= SOFT_CLIP_THRESHOLD:
+    # if first_op == 4 and first_len >= SOFT_CLIP_THRESHOLD:
+        # return True
+    # if last_op == 4 and last_len >= SOFT_CLIP_THRESHOLD:
+        # return True
+    if read_dict.get('is_supplementary'):
         return True
-    if last_op == 4 and last_len >= SOFT_CLIP_THRESHOLD:
-        return True
-
-
+    
     # OR I can just use read_dict.get('is_supplementary')
     return False
 
