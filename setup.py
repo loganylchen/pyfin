@@ -60,14 +60,13 @@ class MultiExt(build_ext):
         # Apply type-specific logic to each extension
         for ext in self.extensions:
             if not hasattr(ext, "ext_type"):
-                raise ValueError(f"Extension {ext.name} must have 'ext_type' (c/cpp/cuda)!")
-            
+                raise ValueError(f"Extension {ext.name} must have 'ext_type' (f5c/dtw)!")
             if ext.ext_type == "f5c":
-                apply_f5c_compile
+                apply_f5c_compile(ext)
             elif ext.ext_type == "dtw":
                 apply_dtw_compile(ext)
             else:
-                raise ValueError(f"Unknown ext_type: {ext.ext_type} (must be c/cpp/cuda)")
+                raise ValueError(f"Unknown ext_type: {ext.ext_type} (must be f5c/dtw)")
         super().build_extensions()
     
 
