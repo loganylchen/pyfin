@@ -46,6 +46,7 @@ def apply_dtw_compile(ext):
     ]
     ext.include_dirs.append(include_path)
     ext.language='c++'
+    ext.compiler='nvcc'
 
 # --------------------------
 # Custom Build Extension
