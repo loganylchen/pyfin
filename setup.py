@@ -28,7 +28,7 @@ def apply_f5c_compile(ext):
 
 def apply_dtw_compile(ext):
     nvcc_path = shutil.which('nvcc')
-    if not nvcc:
+    if not nvcc_path:
         raise RuntimeError("nvcc not found! Please set CUDA_PATH or install CUDA Toolkit.")
     
     cuda_path = os.path.dirname(os.path.dirname(nvcc_path))
