@@ -6,7 +6,7 @@ This script builds the f5c eventalign module as a Python extension.
 
 import os
 import sys
-
+import shutil
 from pathlib import Path
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
@@ -14,20 +14,62 @@ from setuptools.command.build_ext import build_ext
 # f5c source directory (relative to setup.py)
 # Use relative paths for all sources to comply with setuptools requirements
 
+
+def apply_f5c_compile(ext):
+    import numpy
+    ext.extra_compile_args+=["-O3",          # Optimize compilation
+        "-std=c99",     # C99 standard (matches your C code)
+        "-Wall"         # Show warnings (debug)
+        ]
+    ext.extra_link_args += ["-lm"]  # Example link flag for Type1
+    ext.include_dirs += [numpy.get_include()]
+    ext.language = 'c'
+
+
+def apply_dtw_compile(ext):
+    nvcc_path = shutil.which('nvcc')
+    if not nvcc:
+        raise RuntimeError("nvcc not found! Please set CUDA_PATH or install CUDA Toolkit.")
+    
+    cuda_path = os.path.dirname(os.path.dirname(nvcc_path))
+    include_path = os.path.join(cuda_path,'include')
+    
+    ext.extra_compile_args += [
+        "-std=c++11",
+        "-O3",
+        "-Xcompiler", "-fPIC",
+        "-Xcuda", "-gencode=arch=compute_80,code=sm_80",  #  80 = Ampere
+    ]
+    ext.extra_link_args += [
+        "-lcudart",
+        f"-L{cuda_path}/lib64",  # Linux/macOS
+    ]
+    ext.include_dirs.append(include_path)
+    ext.language='c++'
+
 # --------------------------
 # Custom Build Extension
 # --------------------------
-class BuildF5CExt(build_ext):
-    """Custom build_ext command to handle NumPy include paths."""
+
+
+class MultiExt(build_ext):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
     def build_extensions(self):
-        # Delay import of numpy until build_extensions phase
-        import numpy
-        # Add the numpy include directory to all extension include_dirs
+        # Apply type-specific logic to each extension
         for ext in self.extensions:
-            ext.include_dirs.append(numpy.get_include())
-        # Proceed with the standard build
+            if not hasattr(ext, "ext_type"):
+                raise ValueError(f"Extension {ext.name} must have 'ext_type' (c/cpp/cuda)!")
+            
+            if ext.ext_type == "f5c":
+                apply_f5c_compile
+            elif ext.ext_type == "dtw":
+                apply_dtw_compile(ext)
+            else:
+                raise ValueError(f"Unknown ext_type: {ext.ext_type} (must be c/cpp/cuda)")
         super().build_extensions()
+    
 
 
 # --------------------------
@@ -46,15 +88,25 @@ f5c_extension = Extension(
     depends = [
       os.path.join(F5C_DIR,'event_detection_simple.h')  
     ],
-    inlcude_dirs=[F5C_DIR ],
-    extra_compile_args=["-O3",          # Optimize compilation
-        "-std=c99",     # C99 standard (matches your C code)
-        "-Wall"         # Show warnings (debug)
-        ],
-    extra_link_args=["-lm"],
-    language="c"
+    include_dirs=[F5C_DIR ],
+    ext_type='f5c'
 )
    
+OPENDBA_DIR = os.path.join("fin",'_dtw')
+cuda_dtw_extension = Extension(
+        name="fin._dtw._cuda_dtw",  #
+        sources=[
+            os.path.join(OPENDBA_DIR,"dtw_api.cpp"),  
+            
+        ],
+        depends = [
+            os.path.join(OPENDBA_DIR,'cuda_utils.hpp'),
+            os.path.join(OPENDBA_DIR,'dtw_api.h'),
+            os.path.join(OPENDBA_DIR,'dtw.hpp'),
+            os.path.join(OPENDBA_DIR,'limits.hpp'),
+        ],
+        ext_type='dtw'
+)
 
 
 # Main setup configuration
@@ -79,13 +131,15 @@ def main():
             "fin.utils",
             "fin.core",
             "fin._f5c",
+            'fin._dtw'
         ],
         package_dir={"fin": "fin"},
         package_data={
             "fin": ["*.py", "*.c", "*.h", "*.yaml", "*.yml"],
         },
-        ext_modules=[f5c_extension], 
-        cmdclass={"build_ext": BuildF5CExt},
+        include_package_data=True,
+        ext_modules=[f5c_extension,cuda_dtw_extension], 
+        cmdclass={"build_ext": MultiExt},
         python_requires=">=3.8",
         install_requires=[
             "numpy>=1.21.0",
