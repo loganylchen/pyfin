@@ -89,8 +89,9 @@ f5c_extension = Extension(
       os.path.join(F5C_DIR,'event_detection_simple.h')  
     ],
     include_dirs=[F5C_DIR ],
-    ext_type='f5c'
+    
 )
+f5c_extension.ext_type='f5c'
    
 OPENDBA_DIR = os.path.join("fin",'_dtw')
 cuda_dtw_extension = Extension(
@@ -105,9 +106,9 @@ cuda_dtw_extension = Extension(
             os.path.join(OPENDBA_DIR,'dtw.hpp'),
             os.path.join(OPENDBA_DIR,'limits.hpp'),
         ],
-        ext_type='dtw'
+        
 )
-
+cuda_dtw_extension.ext_type='dtw'
 
 # Main setup configuration
 def main():
