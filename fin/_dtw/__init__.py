@@ -10,6 +10,7 @@ from typing import Union, Optional
 # Try to import the CUDA extension
 try:
     from ._cuda_dtw import dtw_distance as _dtw_distance_cuda
+    from ._cuda_dtw import dtw_pairwise as _dtw_pairwise_cuda
     from ._cuda_dtw import cleanup as _cuda_cleanup
     CUDA_AVAILABLE = True
 except ImportError as e:
@@ -107,6 +108,85 @@ def dtw_distance(
     )
 
 
+def dtw_pairwise(
+    sequences: Union[np.ndarray, list],
+    use_open_start: bool = False,
+    use_open_end: bool = False
+) -> np.ndarray:
+    """
+    Compute pairwise DTW distances for a batch of sequences using CUDA.
+    
+    This is significantly more efficient than calling dtw_distance() in a loop,
+    as it:
+    - Transfers all sequences to GPU in one batch
+    - Computes multiple DTW pairs in parallel
+    - Amortizes memory allocation/deallocation overhead
+    
+    Parameters
+    ----------
+    sequences : array-like
+        2D array of sequences with shape (num_sequences, seq_length)
+        All sequences must have the same length
+        Will be converted to float32 if needed
+    use_open_start : bool, optional
+        Enable open start boundary condition (default: False)
+    use_open_end : bool, optional
+        Enable open end boundary condition (default: False)
+    
+    Returns
+    -------
+    np.ndarray
+        Distance matrix of shape (num_sequences, num_sequences)
+        Matrix is symmetric with zeros on the diagonal
+    
+    Raises
+    ------
+    RuntimeError
+        If CUDA extension is not available
+    ValueError
+        If input sequences are invalid
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from fin._dtw import dtw_pairwise
+    >>> # Generate 10 sequences of length 100
+    >>> sequences = np.random.randn(10, 100).astype(np.float32)
+    >>> distance_matrix = dtw_pairwise(sequences)
+    >>> print(f"Distance matrix shape: {distance_matrix.shape}")
+    >>> # distance_matrix[i, j] is the DTW distance between sequences[i] and sequences[j]
+    """
+    if not CUDA_AVAILABLE:
+        raise RuntimeError(
+            f"CUDA DTW extension is not available.\n"
+            f"Import error: {_import_error}\n\n"
+            f"Check availability with: fin._dtw.is_available()"
+        )
+    
+    # Convert to numpy array if needed
+    if not isinstance(sequences, np.ndarray):
+        sequences = np.array(sequences, dtype=np.float32)
+    else:
+        sequences = np.asarray(sequences, dtype=np.float32)
+    
+    # Validate input
+    if sequences.ndim != 2:
+        raise ValueError(f"sequences must be 2D array, got shape {sequences.shape}")
+    
+    if sequences.shape[0] < 2:
+        raise ValueError(f"Need at least 2 sequences, got {sequences.shape[0]}")
+    
+    if sequences.shape[1] == 0:
+        raise ValueError("Sequence length cannot be 0")
+    
+    # Call the CUDA function
+    return _dtw_pairwise_cuda(
+        sequences,
+        use_open_start=int(use_open_start),
+        use_open_end=int(use_open_end)
+    )
+
+
 def cleanup():
     """
     Reset CUDA device and free all GPU resources.
@@ -138,4 +218,4 @@ def is_available() -> bool:
     return CUDA_AVAILABLE
 
 
-__all__ = ['dtw_distance', 'cleanup', 'is_available', 'CUDA_AVAILABLE']
+__all__ = ['dtw_distance', 'dtw_pairwise', 'cleanup', 'is_available', 'CUDA_AVAILABLE']

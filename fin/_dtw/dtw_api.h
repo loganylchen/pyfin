@@ -25,7 +25,25 @@ extern "C"
         float *out_distance);
 
     /**
-     * @brief 释放 CUDA 资源
+     * @brief Compute pairwise DTW distances for a batch of sequences (all same length)
+     * @param sequences Flattened array of sequences (num_sequences * seq_length floats)
+     * @param num_sequences Number of sequences
+     * @param seq_length Length of each sequence (all must be same length)
+     * @param use_open_start Whether to use open start boundary
+     * @param use_open_end Whether to use open end boundary
+     * @param out_distances Output pairwise distance matrix (num_sequences * num_sequences floats)
+     * @return 0=success, non-zero=error
+     */
+    int opendba_dtw_pairwise_batch(
+        const float *sequences,
+        size_t num_sequences,
+        size_t seq_length,
+        int use_open_start,
+        int use_open_end,
+        float *out_distances);
+
+    /**
+     * @brief 清理 CUDA 资源
      */
     void opendba_dtw_cleanup();
 
