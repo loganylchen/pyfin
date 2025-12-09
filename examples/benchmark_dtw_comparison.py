@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""
+Benchmark comparison: CUDA DTW vs dtaidistance vs fastdtw
+
+This script compares the performance and accuracy of three DTW implementations:
+1. fin._dtw (CUDA GPU-accelerated)
+2. dtaidistance (optimized CPU with C extensions)
+3. fastdtw (approximate DTW algorithm)
+
+Requirements:
+    pip install dtaidistance fastdtw
+"""
+
+import numpy as np
+import time
+from typing import Dict, List, Tuple
+import sys
+
+# Try to import all DTW implementations
+implementations = {}
+
+# 1. CUDA DTW (our implementation)
+try:
+    from fin._dtw import dtw_distance as cuda_dtw, is_available as cuda_available, cleanup
+    if cuda_available():
+        implementations['CUDA (GPU)'] = cuda_dtw
+        print("✓ CUDA DTW available")
+    else:
+        print("✗ CUDA DTW not available")
+except ImportError as e:
+    print(f"✗ CUDA DTW import failed: {e}")
+
+# 2. dtaidistance
+try:
+    from dtaidistance import dtw as dtaidistance_dtw
+    implementations['dtaidistance (CPU)'] = lambda x, y, **kwargs: dtaidistance_dtw.distance(x, y)
+    print("✓ dtaidistance available")
+except ImportError:
+    print("✗ dtaidistance not available (install: pip install dtaidistance)")
+
+# 3. fastdtw
+try:
+    from fastdtw import fastdtw
+    from scipy.spatial.distance import euclidean
+    implementations['fastdtw (approx)'] = lambda x, y, **kwargs: fastdtw(x, y, dist=euclidean)[0]
+    print("✓ fastdtw available")
+except ImportError:
+    print("✗ fastdtw not available (install: pip install fastdtw)")
+
+print()
+
+
+def benchmark_dtw(
+    impl_name: str,
+    dtw_func,
+    seq1: np.ndarray,
+    seq2: np.ndarray,
+    n_runs: int = 10,
+    warmup: int = 2
+) -> Tuple[float, float]:
+    """
+    Benchmark a DTW implementation.
+    
+    Returns:
+        Tuple of (distance, avg_time_ms)
+    """
+    # Warm-up runs
+    for _ in range(warmup):
+        try:
+            _ = dtw_func(seq1, seq2)
+        except:
+            pass
+    
+    # Actual benchmark
+    times = []
+    distance = None
+    
+    for _ in range(n_runs):
+        start = time.perf_counter()
+        try:
+            distance = dtw_func(seq1, seq2)
+        except Exception as e:
+            print(f"  Error in {impl_name}: {e}")
+            return None, None
+        end = time.perf_counter()
+        times.append((end - start) * 1000)  # Convert to ms
+    
+    avg_time = np.mean(times)
+    std_time = np.std(times)
+    
+    return distance, avg_time, std_time
+
+
+def run_benchmark_suite(sequence_lengths: List[int], n_runs: int = 10):
+    """
+    Run benchmarks for different sequence lengths.
+    """
+    print("="*80)
+    print("DTW Implementation Benchmark Suite")
+    print("="*80)
+    print(f"Number of runs per test: {n_runs}")
+    print(f"Implementations available: {len(implementations)}")
+    print()
+    
+    if len(implementations) == 0:
+        print("ERROR: No DTW implementations available!")
+        print("Please install at least one: pip install dtaidistance fastdtw")
+        return
+    
+    results = {name: [] for name in implementations.keys()}
+    
+    for length in sequence_lengths:
+        print(f"\n{'='*80}")
+        print(f"Sequence Length: {length}")
+        print(f"{'='*80}")
+        
+        # Generate random sequences
+        np.random.seed(42)  # For reproducibility
+        seq1 = np.random.randn(length).astype(np.float32)
+        seq2 = np.random.randn(length).astype(np.float32)
+        
+        length_results = {}
+        
+        for impl_name, dtw_func in implementations.items():
+            print(f"\nTesting {impl_name}...")
+            distance, avg_time, std_time = benchmark_dtw(
+                impl_name, dtw_func, seq1, seq2, n_runs=n_runs
+            )
+            
+            if distance is not None:
+                print(f"  Distance: {distance:.4f}")
+                print(f"  Avg time: {avg_time:.2f} ± {std_time:.2f} ms")
+                length_results[impl_name] = {
+                    'distance': distance,
+                    'time': avg_time,
+                    'std': std_time
+                }
+                results[impl_name].append((length, avg_time, distance))
+            else:
+                print(f"  Benchmark failed")
+                results[impl_name].append((length, None, None))
+        
+        # Print comparison
+        if len(length_results) > 1:
+            print(f"\n{'-'*80}")
+            print("Comparison:")
+            
+            # Find fastest
+            fastest = min(length_results.items(), key=lambda x: x[1]['time'])
+            print(f"  Fastest: {fastest[0]} ({fastest[1]['time']:.2f} ms)")
+            
+            # Compare distances
+            distances = [r['distance'] for r in length_results.values()]
+            if len(set([f"{d:.4f}" for d in distances])) == 1:
+                print(f"  Distance agreement: ✓ All implementations agree")
+            else:
+                print(f"  Distance agreement: ✗ Implementations differ")
+                for name, res in length_results.items():
+                    print(f"    {name}: {res['distance']:.4f}")
+            
+            # Speedup comparison
+            if 'CUDA (GPU)' in length_results and len(length_results) > 1:
+                cuda_time = length_results['CUDA (GPU)']['time']
+                print(f"\n  Speedup vs CUDA:")
+                for name, res in length_results.items():
+                    if name != 'CUDA (GPU)':
+                        speedup = res['time'] / cuda_time
+                        print(f"    {name}: {speedup:.2f}x slower")
+    
+    # Summary
+    print(f"\n\n{'='*80}")
+    print("BENCHMARK SUMMARY")
+    print(f"{'='*80}\n")
+    
+    for impl_name in implementations.keys():
+        print(f"{impl_name}:")
+        impl_results = results[impl_name]
+        
+        if all(r[1] is not None for r in impl_results):
+            print(f"  {'Length':<10} {'Time (ms)':<15} {'Distance':<15}")
+            print(f"  {'-'*40}")
+            for length, time_ms, distance in impl_results:
+                print(f"  {length:<10} {time_ms:<15.2f} {distance:<15.4f}")
+        else:
+            print("  Some benchmarks failed")
+        print()
+    
+    # Overall winner
+    print(f"{'='*80}")
+    print("OVERALL PERFORMANCE")
+    print(f"{'='*80}")
+    
+    avg_times = {}
+    for impl_name, impl_results in results.items():
+        valid_times = [t for _, t, _ in impl_results if t is not None]
+        if valid_times:
+            avg_times[impl_name] = np.mean(valid_times)
+    
+    if avg_times:
+        sorted_impls = sorted(avg_times.items(), key=lambda x: x[1])
+        print("\nRanking (by average time across all sequence lengths):")
+        for i, (name, avg_time) in enumerate(sorted_impls, 1):
+            print(f"  {i}. {name:<25} {avg_time:>10.2f} ms")
+        
+        if len(sorted_impls) > 1:
+            fastest_time = sorted_impls[0][1]
+            print(f"\nSpeedup factors (relative to {sorted_impls[0][0]}):")
+            for name, avg_time in sorted_impls[1:]:
+                speedup = avg_time / fastest_time
+                print(f"  {name:<25} {speedup:>10.2f}x slower")
+
+
+def test_accuracy():
+    """
+    Test accuracy: Compare results on identical sequences and simple cases.
+    """
+    print(f"\n{'='*80}")
+    print("ACCURACY TEST")
+    print(f"{'='*80}\n")
+    
+    if len(implementations) < 2:
+        print("Need at least 2 implementations to compare accuracy")
+        return
+    
+    # Test 1: Identical sequences (should give distance ~0)
+    print("Test 1: Identical sequences")
+    seq = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+    print(f"  Sequence: {seq}")
+    
+    for name, func in implementations.items():
+        try:
+            dist = func(seq, seq)
+            print(f"  {name:<25} distance: {dist:.6f}")
+        except Exception as e:
+            print(f"  {name:<25} error: {e}")
+    
+    # Test 2: Simple different sequences
+    print("\nTest 2: Different sequences")
+    seq1 = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+    seq2 = np.array([1.5, 2.5, 3.5, 4.5, 5.5], dtype=np.float32)
+    print(f"  Seq1: {seq1}")
+    print(f"  Seq2: {seq2}")
+    
+    distances = {}
+    for name, func in implementations.items():
+        try:
+            dist = func(seq1, seq2)
+            distances[name] = dist
+            print(f"  {name:<25} distance: {dist:.6f}")
+        except Exception as e:
+            print(f"  {name:<25} error: {e}")
+    
+    # Check agreement
+    if len(distances) > 1:
+        dist_values = list(distances.values())
+        max_diff = max(dist_values) - min(dist_values)
+        print(f"\n  Maximum difference: {max_diff:.6f}")
+        if max_diff < 0.01:
+            print("  ✓ All implementations agree (within 0.01)")
+        else:
+            print("  ⚠ Implementations show some variation")
+
+
+def main():
+    """
+    Main benchmark script.
+    """
+    if len(implementations) == 0:
+        print("\nERROR: No DTW implementations available!")
+        print("\nTo install missing implementations:")
+        print("  pip install dtaidistance  # Optimized CPU DTW")
+        print("  pip install fastdtw       # Approximate DTW")
+        print("\nFor CUDA DTW, rebuild the package:")
+        print("  cd /path/to/pyfin && pip install -e .")
+        sys.exit(1)
+    
+    print(f"Found {len(implementations)} DTW implementation(s)\n")
+    
+    # Run accuracy tests first
+    test_accuracy()
+    
+    # Run performance benchmarks
+    sequence_lengths = [50, 100, 200, 500, 1000]
+    n_runs = 10
+    
+    print(f"\n{'='*80}")
+    print("Starting performance benchmarks...")
+    print(f"Sequence lengths: {sequence_lengths}")
+    print(f"Runs per length: {n_runs}")
+    print(f"{'='*80}\n")
+    
+    run_benchmark_suite(sequence_lengths, n_runs=n_runs)
+    
+    # Cleanup CUDA if used
+    if 'CUDA (GPU)' in implementations:
+        try:
+            cleanup()
+            print("\n✓ CUDA resources cleaned up")
+        except:
+            pass
+    
+    print("\nBenchmark complete!")
+
+
+if __name__ == "__main__":
+    main()
