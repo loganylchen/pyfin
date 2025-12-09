@@ -129,7 +129,17 @@ except ImportError:
 try:
     from fastdtw import fastdtw
     from scipy.spatial.distance import euclidean
-    implementations['fastdtw (approx)'] = lambda x, y, **kwargs: fastdtw(x, y, dist=euclidean)[0]
+    
+    def fastdtw_wrapper(x, y, **kwargs):
+        # Ensure arrays are 1D and reshape if needed
+        x_1d = np.asarray(x).ravel()
+        y_1d = np.asarray(y).ravel()
+        # fastdtw expects each element to be a sequence, so reshape to (n, 1)
+        x_2d = x_1d.reshape(-1, 1)
+        y_2d = y_1d.reshape(-1, 1)
+        return fastdtw(x_2d, y_2d, dist=euclidean)[0]
+    
+    implementations['fastdtw (approx)'] = fastdtw_wrapper
     print("✓ fastdtw available")
 except ImportError:
     print("✗ fastdtw not available (install: pip install fastdtw)")
