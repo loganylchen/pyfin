@@ -17,11 +17,13 @@ except ImportError:
     _F5C_AVAILABLE = False
     detect_events = None
 
+
 # Initialize package logger
 package_logger = get_package_logger(__name__, level='INFO')
 
 # Log package initialization
 package_logger.info(f"Package initialized - version {__version__}")
+
 if not _F5C_AVAILABLE:
     package_logger.warning("f5c extension not available - event detection disabled")
 
