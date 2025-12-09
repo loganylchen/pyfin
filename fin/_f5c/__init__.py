@@ -1,3 +1,4 @@
+
 import numpy as np
 
 # Try to import the compiled C extension
@@ -60,3 +61,4 @@ def is_available() -> bool:
 
 # Export public functions
 __all__ = ["detect_events", "is_available"]
+
