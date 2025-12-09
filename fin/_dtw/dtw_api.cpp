@@ -177,25 +177,25 @@ int opendba_dtw_pairwise_batch(
     cudaDeviceProp deviceProp;
     CUDA_CHECK(cudaGetDeviceProperties(&deviceProp, 0));
     int max_threads = deviceProp.maxThreadsPerBlock;
-    
+
     // Query available GPU memory
     size_t free_memory, total_memory;
     CUDA_CHECK(cudaMemGetInfo(&free_memory, &total_memory));
-    
+
     // Maximum pairs we'll compute in parallel (when processing first sequence)
     size_t max_pairs_parallel = num_sequences - 1;
 
     // Memory required for cost buffers: seq_length * max_pairs_parallel * 2 * sizeof(float)
     // Example: 1000 len × 100 pairs × 8 bytes = 800 KB (reasonable)
     // With 20GB GPU, you could do: 10000 len × 1000 pairs × 8 bytes = 80 MB (still tiny!)
-    
+
     size_t cost_buffer_size = seq_length * max_pairs_parallel * sizeof(float);
-    size_t total_temp_memory = cost_buffer_size * 2;  // Two buffers
-    
+    size_t total_temp_memory = cost_buffer_size * 2; // Two buffers
+
     if (getenv("DTW_DEBUG"))
     {
         fprintf(stderr, "=== DTW Batch Pairwise Memory Usage ===\n");
-        fprintf(stderr, "GPU: %.2f GB total, %.2f GB free\n", 
+        fprintf(stderr, "GPU: %.2f GB total, %.2f GB free\n",
                 total_memory / 1024.0 / 1024.0 / 1024.0,
                 free_memory / 1024.0 / 1024.0 / 1024.0);
         fprintf(stderr, "Input sequences: %.2f MB (%zu × %zu)\n",
