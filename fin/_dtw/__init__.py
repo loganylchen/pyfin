@@ -60,9 +60,17 @@ def dtw_distance(
     """
     if not CUDA_AVAILABLE:
         raise RuntimeError(
-            f"CUDA DTW extension is not available. "
-            f"Import error: {_import_error}\n"
-            f"Please ensure CUDA toolkit is installed and the extension was built correctly."
+            f"CUDA DTW extension is not available.\n"
+            f"Import error: {_import_error}\n\n"
+            f"The extension was not built during installation. This can happen if:\n"
+            f"  1. CUDA Toolkit is not installed (check with: nvcc --version)\n"
+            f"  2. The build process skipped the CUDA extension\n"
+            f"  3. The package was installed in a different environment\n\n"
+            f"To build with CUDA support:\n"
+            f"  1. Install CUDA Toolkit from NVIDIA\n"
+            f"  2. Ensure nvcc is in PATH\n"
+            f"  3. Reinstall: pip uninstall py-fin && pip install -e .\n\n"
+            f"Check availability with: fin._dtw.is_available()"
         )
     
     # Convert inputs to numpy arrays if needed
