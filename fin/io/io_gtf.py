@@ -1,419 +1,550 @@
 """
-GTF/GFF annotation file parser.
-
-Provides functionality to parse GTF/GFF files and extract transcript
-structures (isoforms) for use in isoform detection pipeline.
-
-Handles:
-- GTF format (http://mblab.wustl.edu/GTF2.html)
-- GFF3 format
-- Exon grouping by transcript_id or Parent attributes
-- Transcript coordinate extraction
-- Strand-aware coordinate handling
-- Gzipped (.gz) file support
+GTF/GFF file format parser
 """
 
-from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Iterator, Optional, Set
-import re
+from typing import List, Dict, Optional, Iterator, Tuple, Any, Generator
+from pathlib import Path
 import logging
 import gzip
 
-try:
-    import pysam
-    PYSAM_AVAILABLE = True
-except ImportError:
-    PYSAM_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class TranscriptFeature:
-    """
-    Represents a transcript feature parsed from GTF/GFF.
+class GTFTranscript:
+    """Represents a transcript with exons and optional CDS features"""
 
-    Attributes:
-        transcript_id: Unique transcript identifier (e.g., ENST00000000001)
-        gene_id: Gene identifier (e.g., ENSG00000000001)
-        chrom: Chromosome name
-        strand: Strand (+, -, or .)
-        exons: List of exon (start, end) coordinates in genomic space
-        attrs: Dictionary of all attributes from the GTF
-        start: Minimum start coordinate (transcript start)
-        end: Maximum end coordinate (transcript end)
-    """
-    transcript_id: str
-    gene_id: str
-    chrom: str
-    strand: str
-    exons: List[Tuple[int, int]] = field(default_factory=list)
-    attrs: Dict[str, str] = field(default_factory=dict)
-    start: Optional[int] = None
-    end: Optional[int] = None
+    def __init__(self, transcript_id: str, gene_id: str, chrom: str,
+                 strand: str, source: str = 'unknown', score: Optional[float] = None,
+                 frame: Optional[int] = None, attributes: Optional[Dict[str, str]] = None):
+        """
+        Initialize transcript
 
-    def __post_init__(self):
-        """Calculate transcript bounds after initialization."""
+        Args:
+            transcript_id: Transcript ID
+            gene_id: Gene ID
+            chrom: Chromosome name
+            strand: Strand (+ or -)
+            source: Source/annotation origin
+            score: Score value
+            frame: Frame information (0, 1, 2, or .)
+            attributes: Additional attributes
+        """
+        self.transcript_id = transcript_id
+        self.gene_id = gene_id
+        self.chrom = chrom
+        self.strand = strand
+        self.source = source
+        self.score = score
+        self.frame = frame
+        self.attributes = attributes or {}
+
+        self.exons = []  # List of (start, end) tuples
+        self.cds = []    # List of (start, end) tuples
+        self.start_codon = None
+        self.stop_codon = None
+        self.utr5 = []   # 5' UTR regions
+        self.utr3 = []   # 3' UTR regions
+
+    @property
+    def start(self) -> int:
+        """Get transcript start (minimum position of all features)"""
+        all_starts = []
         if self.exons:
-            self.start = min(e[0] for e in self.exons)
-            self.end = max(e[1] for e in self.exons)
+            all_starts.extend([exon[0] for exon in self.exons])
+        if self.cds:
+            all_starts.extend([cds[0] for cds in self.cds])
+        return min(all_starts) if all_starts else 0
+
+    @property
+    def end(self) -> int:
+        """Get transcript end (maximum position of all features)"""
+        all_ends = []
+        if self.exons:
+            all_ends.extend([exon[1] for exon in self.exons])
+        if self.cds:
+            all_ends.extend([cds[1] for cds in self.cds])
+        return max(all_ends) if all_ends else 0
 
     @property
     def length(self) -> int:
-        """Return total length of transcript (sum of exon lengths)."""
+        """Get total transcript length including introns"""
+        return self.end - self.start
+
+    @property
+    def cds_length(self) -> int:
+        """Get total CDS length"""
+        return sum(end - start for start, end in self.cds)
+
+    @property
+    def exon_length(self) -> int:
+        """Get total exon length"""
         return sum(end - start for start, end in self.exons)
 
     @property
-    def introns(self) -> List[Tuple[int, int]]:
-        """Return list of intron coordinates."""
-        if len(self.exons) < 2:
-            return []
+    def num_exons(self) -> int:
+        """Get number of exons"""
+        return len(self.exons)
 
-        introns = []
-        for i in range(len(self.exons) - 1):
-            _, prev_end = self.exons[i]
-            next_start, _ = self.exons[i + 1]
-            introns.append((prev_end, next_start))
-        return introns
+    def sort_features(self):
+        """Sort exons and CDS by position"""
+        self.exons.sort()
+        self.cds.sort()
 
-    def get_exon_number(self, genomic_pos: int) -> Optional[int]:
+    def add_exon(self, start: int, end: int):
+        """Add an exon"""
+        self.exons.append((start, end))
+
+    def add_cds(self, start: int, end: int):
+        """Add a CDS region"""
+        self.cds.append((start, end))
+
+    def get_spliced_sequence(self, fasta_seq: str) -> str:
         """
-        Get exon number (1-indexed) containing the genomic position.
+        Get spliced sequence for this transcript
 
         Args:
-            genomic_pos: Genomic position (0-based)
+            fasta_seq: Full chromosome sequence as string
 
         Returns:
-            Exon number if position is within a transcr exon, None otherwise
+            Spliced transcript sequence
         """
-        for i, (start, end) in enumerate(self.exons, 1):
-            if start <= genomic_pos < end:
-                return i
+        if not self.exons:
+            return ""
+
+        sequence = ""
+        for start, end in self.exons:
+            sequence += fasta_seq[start:end]
+
+        # Reverse complement for negative strand
+        if self.strand == '-':
+            sequence = self._reverse_complement(sequence)
+
+        return sequence
+
+    @staticmethod
+    def _reverse_complement(seq: str) -> str:
+        """Get reverse complement of a sequence"""
+        complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C', 'N': 'N',
+                     'a': 't', 't': 'a', 'c': 'g', 'g': 'c', 'n': 'n'}
+        return "".join(complement.get(base, 'N') for base in reversed(seq))
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return {
+            'transcript_id': self.transcript_id,
+            'gene_id': self.gene_id,
+            'chrom': self.chrom,
+            'strand': self.strand,
+            'start': self.start,
+            'end': self.end,
+            'length': self.length,
+            'source': self.source,
+            'score': self.score,
+            'frame': self.frame,
+            'attributes': self.attributes,
+            'exons': self.exons,
+            'num_exons': self.num_exons,
+            'exon_length': self.exon_length,
+            'cds': self.cds,
+            'cds_length': self.cds_length,
+        }
+
+
+class GTFGene:
+    """Represents a gene with multiple transcripts"""
+
+    def __init__(self, gene_id: str, chrom: str, strand: str, source: str = 'unknown',
+                 score: Optional[float] = None, attributes: Optional[Dict[str, str]] = None):
+        """
+        Initialize gene
+
+        Args:
+            gene_id: Gene ID
+            chrom: Chromosome name
+            strand: Strand (+ or -)
+            source: Source/annotation origin
+            score: Score value
+            attributes: Additional attributes
+        """
+        self.gene_id = gene_id
+        self.chrom = chrom
+        self.strand = strand
+        self.source = source
+        self.score = score
+        self.attributes = attributes or {}
+        self.transcripts = {}  # transcript_id -> GTFTranscript
+
+    @property
+    def start(self) -> int:
+        """Get gene start (minimum position of all transcripts)"""
+        if not self.transcripts:
+            return 0
+        return min(tx.start for tx in self.transcripts.values())
+
+    @property
+    def end(self) -> int:
+        """Get gene end (maximum position of all transcripts)"""
+        if not self.transcripts:
+            return 0
+        return max(tx.end for tx in self.transcripts.values())
+
+    @property
+    def length(self) -> int:
+        """Get gene length"""
+        return self.end - self.start
+
+    @property
+    def num_transcripts(self) -> int:
+        """Get number of transcripts"""
+        return len(self.transcripts)
+
+    def add_transcript(self, transcript: GTFTranscript):
+        """Add a transcript to the gene"""
+        self.transcripts[transcript.transcript_id] = transcript
+
+    def get_cds_length(self) -> int:
+        """Get max CDS length among all transcripts"""
+        if not self.transcripts:
+            return 0
+        return max(tx.cds_length for tx in self.transcripts.values())
+
+    def get_exon_numbers(self) -> List[int]:
+        """Get list of exon numbers for all transcripts"""
+        return [tx.num_exons for tx in self.transcripts.values()]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return {
+            'gene_id': self.gene_id,
+            'chrom': self.chrom,
+            'strand': self.strand,
+            'start': self.start,
+            'end': self.end,
+            'length': self.length,
+            'source': self.source,
+            'score': self.score,
+            'attributes': self.attributes,
+            'num_transcripts': self.num_transcripts,
+            'transcript_ids': list(self.transcripts.keys()),
+        }
+
+
+class GTFReader:
+    """Reader for GTF/GFF files"""
+
+    def __init__(self, file_path: str):
+        """
+        Initialize GTF/GFF reader
+
+        Args:
+            file_path: Path to GTF/GFF file
+        """
+        self.file_path = Path(file_path)
+        if not self.file_path.exists():
+            raise FileNotFoundError(f"GTF/GFF file not found: {file_path}")
+
+        self._file = None
+        self.genes = {}  # gene_id -> GTFGene
+        self.transcripts = {}  # transcript_id -> GTFTranscript
+        self._parsed = False
+
+    def __enter__(self):
+        """Context manager entry"""
+        self.open()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit"""
+        self.close()
+
+    def open(self):
+        """Open GTF/GFF file"""
+        try:
+            self._file = open(self.file_path, 'r')
+            logger.info(f"Opened GTF/GFF file: {self.file_path}")
+        except Exception as e:
+            logger.error(f"Failed to open GTF/GFF file {self.file_path}: {e}")
+            raise
+
+    def close(self):
+        """Close file"""
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+            logger.info(f"Closed GTF/GFF file: {self.file_path}")
+
+    def _parse_attributes(self, attr_str: str) -> Dict[str, str]:
+        """
+        Parse GTF/GFF attribute field
+
+        Args:
+            attr_str: Attribute string (key "value"; key2 "value2"; ...)
+
+        Returns:
+            Dictionary of attributes
+        """
+        if not attr_str or attr_str == '.':
+            return {}
+
+        attrs = {}
+
+        # Handle different formats (GTF with space separation, GFF with =)
+        if '; ' in attr_str or (attr_str.count(';') > 1 and '"' in attr_str):
+            # GTF format: key "value"; key2 "value2";
+            for attr in attr_str.rstrip(';').split('; '):
+                if not attr.strip():
+                    continue
+                parts = attr.strip().split(' ', 1)
+                if len(parts) == 2:
+                    key = parts[0].strip()
+                    value = parts[1].strip().strip('"')
+                    attrs[key] = value
+        else:
+            # GFF3 format: key=value; key2=value2
+            for attr in attr_str.rstrip(';').split(';'):
+                if not attr.strip():
+                    continue
+                if '=' in attr:
+                    key, value = attr.strip().split('=', 1)
+                    attrs[key.strip()] = value.strip().strip('"')
+                elif ' ' in attr:
+                    # Fallback to space-separated
+                    parts = attr.strip().split(' ', 1)
+                    if len(parts) == 2:
+                        key = parts[0].strip()
+                        value = parts[1].strip().strip('"')
+                        attrs[key] = value
+
+        return attrs
+
+    def _extract_id(self, attributes: Dict[str, str], id_keys: List[str]) -> Optional[str]:
+        """
+        Extract ID from attributes using multiple possible keys
+
+        Args:
+            attributes: Attribute dictionary
+            id_keys: List of possible ID keys to try
+
+        Returns:
+            ID string or None if not found
+        """
+        for key in id_keys:
+            if key in attributes:
+                return attributes[key]
         return None
 
-
-def parse_gtf_attributes(attribute_string: str) -> Dict[str, str]:
-    """
-    Parse GTF/GFF attribute string.
-
-    GTF format: "key1 \"value1\"; key2 \"value2\";"
-    GFF3 format: "key1=value1;key2=value2"
-
-    Args:
-        attribute_string: Attribute field from GTF/GFF
-
-    Returns:
-        Dictionary mapping keys to values
-    """
-    if not attribute_string or attribute_string == '.':
-        return {}
-
-    attrs = {}
-
-    # Try GFF3 format first (key=value)
-    if '=' in attribute_string or ';' in attribute_string:
-        for field in attribute_string.rstrip(';').split(';'):
-            field = field.strip()
-            if '=' in field:
-                key, value = field.split('=', 1)
-                attrs[key] = value
-            elif ' ' in field:
-                # GTF format
-                parts = field.split(' ', 1)
-                if len(parts) == 2:
-                    key = parts[0]
-                    value = parts[1].strip('"')
-                    attrs[key] = value
-
-    if not attrs:
-        # Legacy GTF parsing with regex
-        gtf_pattern = r'(\w+)\s+"([^"]+)"'
-        matches = re.finditer(gtf_pattern, attribute_string)
-        for match in matches:
-            key, value = match.groups()
-            attrs[key] = value
-
-    return attrs
-
-
-class GtfParser:
-    """
-    Parser for GTF/GFF annotation files.
-
-    Supports both tabix-indexed and non-indexed GTF files.
-    """
-
-    def __init__(self, filename: str):
+    def parse(self):
         """
-        Initialize GTF parser.
-
-        Args:
-            filename: Path to GTF or GFF file
+        Parse entire GTF/GFF file and build gene/transcript structure
         """
-        self.filename = filename
-        self.transcripts: Dict[str, TranscriptFeature] = {}
+        if self._file is None:
+            raise RuntimeError("GTF/GFF file not opened. Call open() first.")
 
-        # Try to open as tabix indexed
-        self.use_tabix = False
-        if PYSAM_AVAILABLE:
-            try:
-                self.tabix_file = pysam.TabixFile(filename)
-                self.use_tabix = True
-            except Exception as e:
-                logger.info(f"Could not open {filename} as tabix: {e}. Using sequential access.")
-                self.use_tabix = False
+        self._file.seek(0)
 
-    def parse(self) -> Iterator[TranscriptFeature]:
-        """
-        Parse entire GTF file and yield transcript features.
+        # Temporary storage for transcript components
+        transcript_parts = {}  # transcript_id -> {'exons': [], 'cds': [], ...}
 
-        This method builds transcript models by aggregating exons.
+        # Common attribute keys to look for
+        gene_id_keys = ['gene_id', 'geneid', 'geneID', 'ID']
+        transcript_id_keys = ['transcript_id', 'transcriptid', 'transcriptID', 'Parent']
 
-        Yields:
-            TranscriptFeature objects with exons grouped
-        """
-        temp_transcripts: Dict[str, TranscriptFeature] = {}
+        # Keep track of current gene/transcript
+        current_gene_id = None
+        current_transcript_id = None
 
-        with _open_gtf_file(self.filename) as f:
-            for line_num, line in enumerate(f, 1):
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-
-                try:
-                    fields = line.split('\t')
-                    if len(fields) < 9:
-                        logger.warning(f"Skipping malformed line {line_num}: {line[:50]}")
-                        continue
-
-                    chrom, source, feature, start, end, score, strand, frame, attrs_str = fields[:9]
-
-                    # Skip if not an exon
-                    if feature != 'exon':
-                        continue
-
-                    start, end = int(start), int(end)
-
-                    # Parse attributes
-                    attrs = parse_gtf_attributes(attrs_str)
-
-                    # Get required IDs
-                    transcript_id = attrs.get('transcript_id', '')
-                    if not transcript_id:
-                        continue  # Skip transcripts without ID
-
-                    gene_id = attrs.get('gene_id', transcript_id)
-
-                    # Initialize transcript if needed
-                    if transcript_id not in temp_transcripts:
-                        temp_transcripts[transcript_id] = TranscriptFeature(
-                            transcript_id=transcript_id,
-                            gene_id=gene_id,
-                            chrom=chrom,
-                            strand=strand,
-                            attrs=attrs
-                        )
-
-                    # Add exon
-                    temp_transcripts[transcript_id].exons.append((start, end))
-
-                except Exception as e:
-                    logger.warning(f"Error parsing line {line_num}: {e}")
-                    continue
-
-        # Sort exons by coordinate and yield transcripts
-        for transcript in temp_transcripts.values():
-            # Sort exons based on strand
-            if transcript.strand == '-':
-                transcript.exons.sort(reverse=True)
-            else:
-                transcript.exons.sort()
-
-            # Check for overlapping or malformed exons
-            clean_exons = self._validate_exons(transcript.exons)
-            if clean_exons:
-                transcript.exons = clean_exons
-                yield transcript
-
-    def _validate_exons(self, exons: List[Tuple[int, int]]) -> Optional[List[Tuple[int, int]]]:
-        """
-        Validate and clean exon list.
-
-        Args:
-            exons: List of (start, end) exon coordinates
-
-        Returns:
-            Cleaned exon list, or None if invalid
-        """
-        if not exons:
-            return None
-
-        clean_exons = []
-        for i, (start, end) in enumerate(exons):
-            if start >= end:
-                logger.warning(f"Invalid exon {i}: start={start} >= end={end}")
+        for line_num, line in enumerate(self._file, 1):
+            line = line.strip()
+            if not line or line.startswith('#'):
                 continue
-            clean_exons.append((start, end))
 
-        # Check for overlapping exons
-        if len(clean_exons) > 1:
-            for i in range(len(clean_exons) - 1):
-                _, prev_end = clean_exons[i]
-                next_start, _ = clean_exons[i + 1]
-                if prev_end > next_start:
-                    logger.warning(f"Overlapping exons detected: {clean_exons}")
-                    return None
+            try:
+                if line.startswith('#'):
+                    logger.warning('Comment line, skipped!')
+                # Parse GTF/GFF line
+                fields = line.split('\t')
+                if len(fields) < 9:
+                    logger.warning(f"Invalid GTF/GFF line at {line_num}: not enough fields")
+                    continue
 
-        return clean_exons if clean_exons else None
+                chrom, source, feature_type, start_str, end_str, score_str, strand, frame_str, attr_str = fields[:9]
 
-    def get_transcripts_in_region(self, chrom: str, start: int, end: int) -> List[TranscriptFeature]:
+                # Convert positions (GTF is 1-based, convert to 0-based)
+                start = int(start_str) - 1
+                end = int(end_str)
+                score = float(score_str) if score_str != '.' else None
+                frame = int(frame_str) if frame_str.isdigit() else None
+
+                # Parse attributes
+                attributes = self._parse_attributes(attr_str)
+
+                # Extract IDs
+                gene_id = self._extract_id(attributes, gene_id_keys)
+                transcript_id = self._extract_id(attributes, transcript_id_keys)
+
+                if not gene_id and not transcript_id:
+                    logger.warning(f"No gene or transcript ID found at line {line_num}")
+                    continue
+
+                # Use gene_id as transcript_id if only gene_id exists (simpler annotation)
+                if gene_id and not transcript_id:
+                    transcript_id = gene_id
+                elif transcript_id and not gene_id:
+                    # Try to find gene_id in attributes or use transcript_id as gene_id
+                    for key in ['gene_id', 'geneid', 'geneID', 'gene', 'ID']:
+                        gene_id = attributes.get(key, transcript_id)
+                        if gene_id:
+                            break
+
+                # Create/update gene
+                if gene_id not in self.genes:
+                    self.genes[gene_id] = GTFGene(
+                        gene_id=gene_id, chrom=chrom, strand=strand,
+                        source=source, score=score, attributes=attributes
+                    )
+
+                # Create/update transcript
+                if transcript_id not in self.transcripts:
+                    self.transcripts[transcript_id] = GTFTranscript(
+                        transcript_id=transcript_id, gene_id=gene_id, chrom=chrom,
+                        strand=strand, source=source, score=score, frame=frame,
+                        attributes=attributes
+                    )
+                    self.genes[gene_id].add_transcript(self.transcripts[transcript_id])
+
+                transcript_obj = self.transcripts[transcript_id]
+
+                # Add features based on feature_type
+                feature_type_lower = feature_type.lower()
+
+                if 'exon' in feature_type_lower:
+                    transcript_obj.add_exon(start, end)
+                elif 'cds' in feature_type_lower:
+                    transcript_obj.add_cds(start, end)
+                elif 'utr' in feature_type_lower:
+                    if '5' in feature_type_lower or 'five' in feature_type_lower:
+                        transcript_obj.utr5.append((start, end))
+                    elif '3' in feature_type_lower or 'three' in feature_type_lower:
+                        transcript_obj.utr3.append((start, end))
+                elif 'start_codon' in feature_type_lower:
+                    transcript_obj.start_codon = (start, end)
+                elif 'stop_codon' in feature_type_lower:
+                    transcript_obj.stop_codon = (start, end)
+
+            except Exception as e:
+                logger.warning(f"Error parsing line {line_num}: {e}: {fields[:9]}")
+                continue
+
+        # Sort features for all transcripts
+        for transcript in self.transcripts.values():
+            transcript.sort_features()
+
+        self._parsed = True
+        logger.info(f"Parsed {len(self.genes)} genes and {len(self.transcripts)} transcripts")
+
+    def get_gene(self, gene_id: str) -> Optional[GTFGene]:
+        """Get gene by ID"""
+        return self.genes.get(gene_id)
+
+    def get_transcript(self, transcript_id: str) -> Optional[GTFTranscript]:
+        """Get transcript by ID"""
+        return self.transcripts.get(transcript_id)
+
+    def get_genes_on_chromosome(self, chrom: str) -> List[GTFGene]:
         """
-        Get all transcripts overlapping a genomic region.
+        Get all genes on a specific chromosome
 
         Args:
             chrom: Chromosome name
-            start: Start coordinate (0-based)
-            end: End coordinate
 
         Returns:
-            List of TranscriptFeature objects overlapping the region
+            List of GTFGene objects
         """
-        transcripts = []
+        return [gene for gene in self.genes.values() if gene.chrom == chrom]
 
-        if self.use_tabix and PYSAM_AVAILABLE:
-            # Use tabix for fast region queries
-            try:
-                # Tabix is 0-based, inclusive-start, exclusive-end
-                for line in self.tabix_file.fetch(chrom, start, end):
-                    fields = line.split('\t')
-                    if len(fields) < 9:
-                        continue
-
-                    if fields[2] != 'exon':
-                        continue
-
-                    transcript_start, transcript_end = int(fields[3]), int(fields[4])
-
-                    # Check overlap
-                    if (transcript_start <= end and transcript_end >= start):
-                        # Parse this transcript
-                        attrs = parse_gtf_attributes(fields[8])
-                        transcript_id = attrs.get('transcript_id', '')
-                        gene_id = attrs.get('gene_id', transcript_id)
-
-                        if not transcript_id:
-                            continue
-
-                        # Build transcript object
-                        transcript = TranscriptFeature(
-                            transcript_id=transcript_id,
-                            gene_id=gene_id,
-                            chrom=chrom,
-                            strand=fields[6],
-                            attrs=attrs
-                        )
-                        transcript.exons.append((transcript_start, transcript_end))
-
-                        transcripts.append(transcript)
-
-                return transcripts
-
-            except Exception as e:
-                logger.warning(f"Tabix fetch failed: {e}")
-
-        # Fallback: sequential parsing
-        for transcript in self.parse():
-            if transcript.chrom != chrom:
-                continue
-
-            transcript_start = min(e[0] for e in transcript.exons)
-            transcript_end = max(e[1] for e in transcript.exons)
-
-            if transcript_start <= end and transcript_end >= start:
-                transcripts.append(transcript)
-
-        return transcripts
-
-    def get_all_genes(self) -> Dict[str, List[TranscriptFeature]]:
+    def get_transcripts_on_chromosome(self, chrom: str) -> List[GTFTranscript]:
         """
-        Get all genes and their transcripts from the GTF file.
-
-        Returns:
-            Dictionary mapping gene_id to list of TranscriptFeature objects
-        """
-        genes: Dict[str, List[TranscriptFeature]] = {}
-
-        for transcript in self.parse():
-            if transcript.gene_id not in genes:
-                genes[transcript.gene_id] = []
-            genes[transcript.gene_id].append(transcript)
-
-        return genes
-
-    def get_transcript_by_id(self, transcript_id: str) -> Optional[TranscriptFeature]:
-        """
-        Get a specific transcript by ID.
+        Get all transcripts on a specific chromosome
 
         Args:
-            transcript_id: Transcript identifier
+            chrom: Chromosome name
 
         Returns:
-            TranscriptFeature object or None if not found
+            List of GTFTranscript objects
         """
-        for transcript in self.parse():
-            if transcript.transcript_id == transcript_id:
-                return transcript
-        return None
+        return [tx for tx in self.transcripts.values() if tx.chrom == chrom]
 
+    def get_genes_in_region(self, chrom: str, start: int, end: int) -> List[GTFGene]:
+        """
+        Get genes overlapping a region
 
-def create_gtf_index(gtf_file: str) -> Optional[str]:
-    """
-    Create tabix index for GTF file if it doesn't exist.
+        Args:
+            chrom: Chromosome name
+            start: Start position (0-based)
+            end: End position
 
-    Args:
-        gtf_file: Path to GTF file
+        Returns:
+            List of GTFGene objects
+        """
+        genes_in_region = []
+        for gene in self.genes.values():
+            if gene.chrom == chrom and gene.start < end and gene.end > start:
+                genes_in_region.append(gene)
+        return genes_in_region
 
-    Returns:
-        Path to index file if successful, None otherwise
-    """
-    if not PYSAM_AVAILABLE:
-        logger.warning("pysam not available for GTF indexing")
-        return None
+    def get_transcripts_in_region(self, chrom: str, start: int, end: int) -> List[GTFTranscript]:
+        """
+        Get transcripts overlapping a region
 
-    try:
-        # Sort GTF if needed
-        import subprocess
-        sorted_gtf = gtf_file.replace('.gtf', '.sorted.gtf')
+        Args:
+            chrom: Chromosome name
+            start: Start position (0-based)
+            end: End position
 
-        if not Path(sorted_gtf).exists():
-            logger.info(f"Sorting GTF file: {gtf_file}")
-            subprocess.run([
-                'sort', '-k1,1', '-k4,4n', gtf_file
-            ], stdout=open(sorted_gtf, 'w'), check=True)
+        Returns:
+            List of GTFTranscript objects
+        """
+        txs_in_region = []
+        for tx in self.transcripts.values():
+            if tx.chrom == chrom and tx.start < end and tx.end > start:
+                txs_in_region.append(tx)
+        return txs_in_region
 
-        # Index with tabix
-        index_file = sorted_gtf + '.tbi'
-        pysam.tabix_index(sorted_gtf, preset='gff')
-        logger.info(f"Created GTF index: {index_file}")
+    def iterate_genes(self) -> Generator[GTFGene, None, None]:
+        """Iterate over all genes"""
+        for gene in self.genes.values():
+            yield gene
 
-        return index_file
+    def iterate_transcripts(self) -> Generator[GTFTranscript, None, None]:
+        """Iterate over all transcripts"""
+        for transcript in self.transcripts.values():
+            yield transcript
 
-    except Exception as e:
-        logger.error(f"Failed to create GTF index: {e}")
-        return None
+    def get_gene_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about genes in the file
 
+        Returns:
+            Dictionary with statistics
+        """
+        if not self.genes:
+            return {}
 
-def _open_gtf_file(filename: str):
-    """Open GTF file, supporting both plain text and gzipped files."""
-    if filename.endswith('.gz'):
-        return gzip.open(filename, 'rt')
-    else:
-        return open(filename, 'r')
+        gene_lengths = [gene.length for gene in self.genes.values()]
+        transcript_counts = [gene.num_transcripts for gene in self.genes.values()]
 
+        chromosomes = set(gene.chrom for gene in self.genes.values())
+        strands = set(gene.strand for gene in self.genes.values())
 
-# Example usage and test
-if __name__ == "__main__":
-    # Simple test
-    test_attrs = 'gene_id "ENSG00000141510"; transcript_id "ENST00000269305";'
-    parsed = parse_gtf_attributes(test_attrs)
-    print("Test attribute parsing:", parsed)
+        return {
+            'num_genes': len(self.genes),
+            'num_transcripts': len(self.transcripts),
+            'num_chromosomes': len(chromosomes),
+            'strands': list(strands),
+            'avg_gene_length': sum(gene_lengths) / len(gene_lengths),
+            'median_gene_length': sorted(gene_lengths)[len(gene_lengths) // 2],
+            'avg_transcripts_per_gene': sum(transcript_counts) / len(transcript_counts),
+            'genes_per_chromosome': {chrom: sum(1 for g in self.genes.values() if g.chrom == chrom)
+                                    for chrom in chromosomes},
+        }
