@@ -28,6 +28,7 @@ def dtw_python(seq1: np.ndarray, seq2: np.ndarray) -> float:
     Pure Python DTW implementation (naive, unoptimized).
     
     This is the reference implementation - slow but easy to understand.
+    Uses squared Euclidean distance to match CUDA implementation.
     """
     n, m = len(seq1), len(seq2)
     
@@ -38,7 +39,9 @@ def dtw_python(seq1: np.ndarray, seq2: np.ndarray) -> float:
     # Fill the cost matrix
     for i in range(1, n + 1):
         for j in range(1, m + 1):
-            cost = abs(seq1[i-1] - seq2[j-1])
+            # Use squared difference to match CUDA implementation
+            diff = seq1[i-1] - seq2[j-1]
+            cost = diff * diff
             dtw_matrix[i, j] = cost + min(
                 dtw_matrix[i-1, j],      # insertion
                 dtw_matrix[i, j-1],      # deletion
@@ -61,6 +64,7 @@ try:
         Numba JIT-compiled DTW implementation.
         
         Uses @jit decorator to compile to machine code at runtime.
+        Uses squared Euclidean distance to match CUDA implementation.
         """
         n, m = len(seq1), len(seq2)
         
@@ -71,7 +75,9 @@ try:
         # Fill the cost matrix
         for i in range(1, n + 1):
             for j in range(1, m + 1):
-                cost = abs(seq1[i-1] - seq2[j-1])
+                # Use squared difference to match CUDA implementation
+                diff = seq1[i-1] - seq2[j-1]
+                cost = diff * diff
                 
                 # Find minimum of three predecessors
                 min_prev = dtw_matrix[i-1, j-1]
@@ -443,15 +449,16 @@ def main():
     
     # Run performance benchmarks
     # Note: Pure Python is very slow, so we limit max length
-    if 'Pure Python' in implementations and 'CUDA (GPU)' in implementations:
-        # Full range to show GPU advantage
-        sequence_lengths = [50, 100, 200, 500, 1000, 2000]
-    elif 'Pure Python' in implementations:
-        # Shorter sequences for Pure Python only
-        sequence_lengths = [50, 100, 200, 500]
-    else:
-        # Longer sequences when Pure Python is not included
-        sequence_lengths = [100, 500, 1000, 2000, 5000]
+    sequence_lengths = [100, 500, 1000, 2000, 5000]
+    # if 'Pure Python' in implementations and 'CUDA (GPU)' in implementations:
+    #     # Full range to show GPU advantage
+    #     sequence_lengths = [50, 100, 200, 500, 1000, 2000]
+    # elif 'Pure Python' in implementations:
+    #     # Shorter sequences for Pure Python only
+    #     sequence_lengths = [50, 100, 200, 500]
+    # else:
+    #     # Longer sequences when Pure Python is not included
+    #     sequence_lengths = [100, 500, 1000, 2000, 5000]
     
     n_runs = 10
     
