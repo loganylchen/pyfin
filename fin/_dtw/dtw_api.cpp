@@ -68,24 +68,52 @@ int opendba_dtw_cuda(
     dim3 thread_block(max_threads, 1, 1);
     size_t shared_mem = thread_block.x * 3 * sizeof(float); // 复用 OpenDBA 的共享内存计算
 
-    DTWDistance<float><<<1, thread_block, shared_mem>>>(
-        d_seq1, len1,
-        d_seq2, len2,
-        0, 0,                         // 单序列对，index/offset 设为 0
-        (const float *)nullptr, 0, 0, // 多序列相关参数置空/0
-        (const size_t *)nullptr,
-        d_dtw_cost,
-        d_new_dtw_cost,
-        d_path_matrix,
-        path_mem_pitch,
-        d_pairwise_dist,
-        use_open_start,
-        use_open_end);
-    CUDA_CHECK(cudaGetLastError());      // 检查核函数启动错误
-    CUDA_CHECK(cudaDeviceSynchronize()); // 等待核函数执行完成
+    // CRITICAL: The wavefront algorithm processes the second sequence in chunks of blockDim.x
+    // We must call the kernel multiple times, advancing offset_within_second_seq each time
+    float *d_current_cost = d_dtw_cost;
+    float *d_next_cost = d_new_dtw_cost;
+
+    for (size_t offset = 0; offset < len2; offset += max_threads)
+    {
+        DTWDistance<float><<<1, thread_block, shared_mem>>>(
+            d_seq1, len1,
+            d_seq2, len2,
+            0, offset,                    // Advance offset through second sequence
+            (const float *)nullptr, 0, 0, // 多序列相关参数置空/0
+            (const size_t *)nullptr,
+            d_current_cost,
+            d_next_cost,
+            d_path_matrix,
+            path_mem_pitch,
+            d_pairwise_dist,
+            use_open_start,
+            use_open_end);
+        CUDA_CHECK(cudaGetLastError()); // 检查核函数启动错误
+
+        // Swap buffers for next iteration
+        float *temp = d_current_cost;
+        d_current_cost = d_next_cost;
+        d_next_cost = temp;
+    }
+
+    CUDA_CHECK(cudaDeviceSynchronize()); // 等待所有核函数执行完成
 
     // 5. 设备→主机拷贝结果
-    CUDA_CHECK(cudaMemcpy(out_distance, d_pairwise_dist, sizeof(float), cudaMemcpyDeviceToHost));
+    // After the loop, d_current_cost contains the final result
+    // (kernel writes to d_next_cost, then we swap, so result is in d_current_cost after swap)
+    float final_cost;
+    CUDA_CHECK(cudaMemcpy(&final_cost, &d_current_cost[len1 - 1], sizeof(float), cudaMemcpyDeviceToHost));
+
+    // Apply same normalization/distance calculation as the kernel would
+    // Note: The kernel computes squared differences, so we take sqrt here
+    if ((use_open_end && !use_open_start) || (!use_open_end && use_open_start))
+    {
+        *out_distance = sqrtf(final_cost) / len1; // Normalized by sequence length
+    }
+    else
+    {
+        *out_distance = sqrtf(final_cost); // Raw distance
+    }
 
     // 6. 释放设备内存
     CUDA_CHECK(cudaFree(d_seq1));
