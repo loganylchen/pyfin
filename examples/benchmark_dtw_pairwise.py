@@ -106,7 +106,7 @@ def python_naive_pairwise(sequences):
                     dtw_matrix[i-1, j-1]
                 )
         
-        return dtw_matrix[n, m]
+        return np.sqrt(dtw_matrix[n, m])
     
     n = len(sequences)
     dist_matrix = np.zeros((n, n), dtype=np.float32)
@@ -143,7 +143,7 @@ def numba_pairwise(sequences):
                 
                 dtw_matrix[i, j] = cost + min_prev
         
-        return dtw_matrix[n, m]
+        return np.sqrt(dtw_matrix[n, m])
     
     n = len(sequences)
     dist_matrix = np.zeros((n, n), dtype=np.float32)
