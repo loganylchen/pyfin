@@ -66,12 +66,12 @@ int opendba_dtw_cuda(
     dim3 thread_block(max_threads, 1, 1);
     size_t shared_mem = thread_block.x * 3 * sizeof(float); // 复用 OpenDBA 的共享内存计算
 
-    DTWDistance<<<1, thread_block, shared_mem>>>(
+    DTWDistance<float><<<1, thread_block, shared_mem>>>(
         d_seq1, len1,
         d_seq2, len2,
-        0, 0,          // 单序列对，index/offset 设为 0
-        nullptr, 0, 0, // 多序列相关参数置空/0
-        nullptr,
+        0, 0,                         // 单序列对，index/offset 设为 0
+        (const float *)nullptr, 0, 0, // 多序列相关参数置空/0
+        (const size_t *)nullptr,
         d_dtw_cost,
         d_new_dtw_cost,
         d_path_matrix,

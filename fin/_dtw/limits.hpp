@@ -7,6 +7,7 @@ typedef unsigned int uint;
 #endif
 
 #include <limits.h>
+#include <cfloat>
 
 namespace cudahack
 {

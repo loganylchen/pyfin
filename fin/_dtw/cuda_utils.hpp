@@ -1,6 +1,7 @@
 #ifndef __dba_cuda_utils_included
 #define __dba_cuda_utils_included
 
+#include <iostream>
 #include "multithreading.h"
 
 #define CUDA_THREADBLOCK_MAX_L1CACHE 48000
