@@ -7,249 +7,121 @@
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <numpy/arrayobject.h>
+#include "event_detection_simple.h"
 
-// f5c headers
-extern "C"
+// --------------------------
+// Helper: Convert event_table to Python list of dicts
+// --------------------------
+static PyObject *event_table_to_py(event_table et)
 {
-#include "f5c.h"
-#include "f5cmisc.h"
-#include "slow5/slow5.h"
-}
-
-// Event alignment result structure
-typedef struct
-{
-    int64_t event_idx;
-    int64_t kmer_idx;
-    char kmer[20];
-    double event_mean;
-    double event_stdv;
-    double model_mean;
-    double model_stdv;
-    double posterior_probability;
-} event_alignment_result_t;
-
-// Core data structure for event alignment
-typedef struct
-{
-    core_t *core;
-    db_t *db;
-    char *bam_path;
-    char *fasta_path;
-    char *slow5_path;
-} f5c_eventalign_context_t;
-
-static PyObject *py_init_eventalign(PyObject *self, PyObject *args)
-{
-    const char *bam_path;
-    const char *fasta_path;
-    const char *slow5_path = NULL;
-
-    if (!PyArg_ParseTuple(args, "ss|s", &bam_path, &fasta_path, &slow5_path))
-    {
-        PyErr_SetString(PyExc_TypeError, "Invalid arguments. Expected: bam_path, fasta_path, [slow5_path]");
+    // Create a Python list to hold events
+    PyObject *event_list = PyList_New(et.n);
+    if (!event_list)
         return NULL;
-    }
 
-    // Initialize options
-    opt_t opt;
-    memset(&opt, 0, sizeof(opt_t));
-
-    // Set default options for eventalign
-    opt.batch_size = 512;
-    opt.num_thread = 1;
-    opt.mini_batch_size = 512;
-    opt.rna = 0;
-    opt.prealloc = 0;
-    opt.verboselog = 0;
-    opt.mode = 1; // Eventalign mode
-
-    opt.model_file = NULL;
-    opt.custom_model_file = NULL;
-    opt.bwa_mem_burst_name = NULL;
-    opt.region_str = NULL;
-    opt.scaling_events_per_kmer = 200;
-    opt.scaling_kmer_threshold = 0.5;
-    opt.meth_out_version = 1;
-    opt.sam_out_version = 1;
-    opt.min_num_events_to_rescale = 200;
-
-    // Flags - enable RNA mode eventalign
-    opt.flag |= F5C_COLLAPSE_EVENTS; // Collapse events for RNA
-
-    // Initialize core
-    double realtime0 = realtime();
-    core_t *core = init_core(bam_path, fasta_path, NULL, NULL, opt, realtime0, 1, NULL, slow5_path);
-
-    if (!core)
+    // Populate each event as a Python dict
+    for (size_t i = 0; i < et.n; i++)
     {
-        PyErr_SetString(PyExc_RuntimeError, "Failed to initialize f5c core");
-        return NULL;
-    }
-
-    // Initialize database
-    db_t *db = init_db(core);
-    if (!db)
-    {
-        PyErr_SetString(PyExc_RuntimeError, "Failed to initialize f5c database");
-        free(core);
-        return NULL;
-    }
-
-    // Create context
-    f5c_eventalign_context_t *ctx = (f5c_eventalign_context_t *)malloc(sizeof(f5c_eventalign_context_t));
-    ctx->core = core;
-    ctx->db = db;
-    ctx->bam_path = strdup(bam_path);
-    ctx->fasta_path = strdup(fasta_path);
-    ctx->slow5_path = slow5_path ? strdup(slow5_path) : NULL;
-
-    return PyCapsule_New(ctx, "f5c_eventalign_context", NULL);
-}
-
-static PyObject *py_eventalign_read(PyObject *self, PyObject *args)
-{
-    PyObject *capsule;
-    const char *read_id;
-
-    if (!PyArg_ParseTuple(args, "Os", &capsule, &read_id))
-    {
-        PyErr_SetString(PyExc_TypeError, "Invalid arguments. Expected: context, read_id");
-        return NULL;
-    }
-
-    f5c_eventalign_context_t *ctx = (f5c_eventalign_context_t *)PyCapsule_GetPointer(capsule, "f5c_eventalign_context");
-    if (!ctx)
-    {
-        PyErr_SetString(PyExc_RuntimeError, "Invalid context");
-        return NULL;
-    }
-
-    // Load and process a single read batch
-    ret_status_t status = load_db(ctx->core, ctx->db);
-
-    if (status == 0)
-    {
-        // No more reads
-        return PyList_New(0);
-    }
-
-    // Process the batch
-    process_db(ctx->core, ctx->db);
-
-    // Extract event alignments
-    PyObject *result_list = PyList_New(0);
-
-    // Check if we have event alignment results
-    if (ctx->db->event_alignment_result && ctx->db->event_alignment_result[0])
-    {
-        std::vector<event_alignment_t> *alignments = ctx->db->event_alignment_result[0];
-
-        for (size_t i = 0; i < alignments->size(); i++)
+        event_t *evt = &et.event[i];
+        PyObject *event_dict = PyDict_New();
+        if (!event_dict)
         {
-            event_alignment_t *ea = &(*alignments)[i];
-
-            PyObject *alignment_dict = PyDict_New();
-
-            PyDict_SetItemString(alignment_dict, "event_idx", PyLong_FromLong(ea->event_idx));
-            PyDict_SetItemString(alignment_dict, "kmer_idx", PyLong_FromLong(ea->kmer_idx));
-            PyDict_SetItemString(alignment_dict, "kmer", PyUnicode_FromString(ea->kmer));
-            PyDict_SetItemString(alignment_dict, "event_mean", PyFloat_FromDouble(ea->event_mean));
-            PyDict_SetItemString(alignment_dict, "event_stdv", PyFloat_FromDouble(ea->event_stdv));
-            PyDict_SetItemString(alignment_dict, "model_mean", PyFloat_FromDouble(ea->model_mean));
-            PyDict_SetItemString(alignment_dict, "model_stdv", PyFloat_FromDouble(ea->model_stdv));
-            PyDict_SetItemString(alignment_dict, "posterior_probability", PyFloat_FromDouble(ea->posterior_probability));
-            PyDict_SetItemString(alignment_dict, "start_idx", PyLong_FromLong(ea->start_idx));
-            PyDict_SetItemString(alignment_dict, "end_idx", PyLong_FromLong(ea->end_idx));
-
-            PyList_Append(result_list, alignment_dict);
-            Py_DECREF(alignment_dict);
+            Py_DECREF(event_list);
+            return NULL;
         }
+
+        // Add event fields to dict
+        PyDict_SetItemString(event_dict, "mean", PyFloat_FromDouble(evt->mean));
+        PyDict_SetItemString(event_dict, "stdv", PyFloat_FromDouble(evt->stdv));
+        PyDict_SetItemString(event_dict, "start", PyLong_FromUnsignedLongLong(evt->start));
+        PyDict_SetItemString(event_dict, "length", PyFloat_FromDouble(evt->length));
+
+        // Add dict to list
+        PyList_SetItem(event_list, i, event_dict);
     }
 
-    return result_list;
+    return event_list;
 }
 
-static PyObject *py_free_eventalign(PyObject *self, PyObject *args)
+// --------------------------
+// Wrapper for getevents_simple (takes Numpy array)
+// --------------------------
+static PyObject *py_getevents_simple(PyObject *self, PyObject *args)
 {
-    PyObject *capsule;
+    PyArrayObject *raw_arr;
+    int is_rna;
 
-    if (!PyArg_ParseTuple(args, "O", &capsule))
+    // Parse arguments: (numpy_array, is_rna)
+    if (!PyArg_ParseTuple(args, "Oi", &raw_arr, &is_rna))
     {
-        PyErr_SetString(PyExc_TypeError, "Invalid arguments. Expected: context");
         return NULL;
     }
 
-    f5c_eventalign_context_t *ctx = (f5c_eventalign_context_t *)PyCapsule_GetPointer(capsule, "f5c_eventalign_context");
-    if (!ctx)
+    // Validate Numpy array (float32, 1D, contiguous)
+    if (PyArray_TYPE(raw_arr) != NPY_FLOAT32 || PyArray_NDIM(raw_arr) != 1)
     {
-        PyErr_SetString(PyExc_RuntimeError, "Invalid context");
+        PyErr_SetString(PyExc_TypeError, "Raw signal must be a 1D numpy float32 array");
+        return NULL;
+    }
+    if (!PyArray_IS_C_CONTIGUOUS(raw_arr))
+    {
+        PyErr_SetString(PyExc_ValueError, "Raw signal array must be contiguous");
         return NULL;
     }
 
-    // Free resources
-    if (ctx->core)
-    {
-        // Note: core_free function should be called if available
-        free(ctx->core);
-    }
-    if (ctx->db)
-    {
-        // Note: db_free function should be called if available
-        free(ctx->db);
-    }
-    if (ctx->bam_path)
-        free(ctx->bam_path);
-    if (ctx->fasta_path)
-        free(ctx->fasta_path);
-    if (ctx->slow5_path)
-        free(ctx->slow5_path);
+    // Get array metadata (size + pointer to raw data)
+    size_t nsample = (size_t)PyArray_SIZE(raw_arr);
+    float *rawptr = (float *)PyArray_DATA(raw_arr);
 
-    free(ctx);
+    // Call C function
+    event_table et = getevents_simple(nsample, rawptr, is_rna);
+    if (et.n == 0 || !et.event)
+    {
+        PyErr_SetString(PyExc_RuntimeError, "Event detection failed (no events found)");
+        return NULL;
+    }
 
-    Py_RETURN_NONE;
+    // Convert event_table to Python object
+    PyObject *py_events = event_table_to_py(et);
+
+    // Free C memory (critical to avoid leaks)
+    free_event_table(&et);
+
+    return py_events;
 }
 
-// Method definitions
-static PyMethodDef f5c_methods[] = {
-    {"init_eventalign", py_init_eventalign, METH_VARARGS,
-     "Initialize f5c eventalign context\n\n"
+// --------------------------
+// Module method definitions
+// --------------------------
+static PyMethodDef F5cMethods[] = {
+    {"get_events",        // Python function name
+     py_getevents_simple, // C wrapper function
+     METH_VARARGS,        // Argument type (positional args)
+     "Detect events from raw nanopore signal (1D float32 numpy array).\n"
      "Args:\n"
-     "    bam_path: Path to BAM file\n"
-     "    fasta_path: Path to FASTA reference\n"
-     "    slow5_path: Optional path to SLOW5 signal file\n\n"
+     "  raw_signal: 1D numpy float32 array of raw signal values\n"
+     "  is_rna: int (1 for RNA, 0 for DNA)\n"
      "Returns:\n"
-     "    Context object for eventalign"},
-
-    {"eventalign_read", py_eventalign_read, METH_VARARGS,
-     "Align events to kmers for reads in the current batch\n\n"
-     "Args:\n"
-     "    context: f5c eventalign context\n"
-     "    read_id: Read identifier\n\n"
-     "Returns:\n"
-     "    List of alignment dictionaries"},
-
-    {"free_eventalign", py_free_eventalign, METH_VARARGS,
-     "Free f5c eventalign context and resources"},
-
-    {NULL, NULL, 0, NULL} // Sentinel
+     "  List of dicts with event fields: mean, stdv, start, length"},
+    {NULL, NULL, 0, NULL} // Sentinel (end of method list)
 };
 
+// --------------------------
 // Module definition
-static struct PyModuleDef f5c_module = {
+// --------------------------
+static struct PyModuleDef f5cmodule = {
     PyModuleDef_HEAD_INIT,
-    "fin._f5c", // Module name
-    "Python wrapper for f5c eventalign functionality\n\n"
-    "This module provides direct access to f5c's eventalign function,\n"
-    "which aligns nanopore signal events to reference k-mers.",
-    -1,
-    f5c_methods};
+    "_f5c",                                          // Module name (import as fin._f5c)
+    "C-backed event detection for nanopore signals", // Docstring
+    -1,                                              // Size of per-interpreter state (global)
+    F5cMethods};
 
-// Module initialization
-PyMODINIT_FUNC PyInit__f5c(void)
+// --------------------------
+// Module initialization (required for numpy)
+// --------------------------
+PyMODINIT_FUNC PyInit__event(void)
 {
-    return PyModule_Create(&f5c_module);
+    import_array(); // Initialize numpy C API
+    return PyModule_Create(&f5cmodule);
 }

@@ -2,248 +2,253 @@
 Setup script for py-fin package with f5c integration
 
 This script builds the f5c eventalign module as a Python extension.
+CUDA extension (_dtw) is optional and requires nvcc.
 """
 
 import os
 import sys
+import shutil
+import subprocess
 from pathlib import Path
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 
 # f5c source directory (relative to setup.py)
 # Use relative paths for all sources to comply with setuptools requirements
-# f5c_sources = [
-#     # f5c source files
-#     "third_party/f5c/src/f5c.c",
-#     "third_party/f5c/src/events.c",
-#     "third_party/f5c/src/nanopolish_read_db.c",
-#     "third_party/f5c/src/index.c",
-#     "third_party/f5c/src/nanopolish_fast5_io.c",
-#     "third_party/f5c/src/model.c",
-#     "third_party/f5c/src/methmodel.c",
-#     "third_party/f5c/src/align.c",
-#     "third_party/f5c/src/hmm.c",
-#     "third_party/f5c/src/meth.c",
-#     "third_party/f5c/src/freq.c",
-#     "third_party/f5c/src/eventalign.c",
-#     "third_party/f5c/src/freq_merge.c",
-#     "third_party/f5c/src/resquiggle.c",
-#     "third_party/f5c/src/profiles.c",
-#     # slow5lib source files
-#     "third_party/f5c/slow5lib/src/slow5.c",
-#     "third_party/f5c/slow5lib/src/slow5_index.c",
-#     "third_party/f5c/slow5lib/src/slow5_press.c",
-#     "third_party/f5c/slow5lib/src/slow5_misc.c",
-#     # Python wrapper
-#     "fin/_f5c/f5c_python.c",
-# ]
-
-# Compiler arguments
-# extra_compile_args = [
-#     "-std=c++11",
-#     "-O3",
-#     "-g",
-#     "-Wall",
-#     "-fPIC",
-#     "-D HAVE_CUDA=0",  # Build without CUDA for now
-#     "-D DISABLE_HDF5=1",  # Disable HDF5/FAST5 support, use slow5 instead
-# ]
-
-# Linker arguments
-# extra_link_args = [
-#     "-lpthread",
-#     "-lz",
-#     "-lrt",
-#     "-ldl",
-# ]
-
-# Check for required libraries
-def check_dependencies():
-    """Check if required system libraries are available"""
-    missing = []
-
-    # Check for zlib (system library, not Python package)
-    # Note: Python's zlib module doesn't guarantee the dev headers are installed
-    # We mainly need the zlib development headers for compilation
-
-    # Check for system zlib headers
-    import subprocess
-    try:
-        result = subprocess.run(['pkg-config', '--exists', 'zlib'], capture_output=True)
-        if result.returncode != 0:
-            missing.append("zlib development headers (install zlib1g-dev)")
-    except FileNotFoundError:
-        # pkg-config not available, just warn
-        pass
-
-    # Don't check for pysam here - it will be installed automatically by pip
-    # and checking now would give false warnings during installation
-    # The real pysam import check happens at runtime when someone tries to use the modules
-
-    # However, we can check if htslib headers are available for compilation
-    try:
-        result = subprocess.run(['pkg-config', '--exists', 'htslib'], capture_output=True)
-        if result.returncode != 0:
-            missing.append("htslib development headers (install libhts-dev or libhts-devel)")
-    except FileNotFoundError:
-        # pkg-config not available, assume headers are present (or will be handled by pysam)
-        pass
-
-    if missing:
-        print(f"Warning: Some build dependencies may be missing: {', '.join(missing)}")
-        print("These are only needed for compiling the f5c extension.")
-        print("If you're just installing the Python package, you can ignore this.")
-        print("\nTo install build dependencies on Ubuntu/Debian:")
-        print("  sudo apt-get install zlib1g-dev libhts-dev")
-        print("\nOn CentOS/RHEL:")
-        print("  sudo yum install zlib-devel htslib-devel")
-        print("\nThe following Python packages will be installed automatically:")
-        print("  - pysam (includes htslib Python bindings)")
-        print("  - numpy, scipy, pandas, etc.")
 
 
-class BuildF5CExt(build_ext):
-    """Custom build extension for f5c"""
+def apply_f5c_compile(ext):
+    import numpy
+    ext.extra_compile_args+=["-O3",          # Optimize compilation
+        "-std=c99",     # C99 standard (matches your C code)
+        "-Wall"         # Show warnings (debug)
+        ]
+    ext.extra_link_args += ["-lm"]  # Example link flag for Type1
+    ext.include_dirs += [numpy.get_include()]
+    ext.language = 'c'
 
-    def run(self):
-        # Check and build htslib if needed
-        if not self.check_and_build_htslib():
-            raise RuntimeError("htslib is required but could not be built. "
-                             "Please install libhts-dev or htslib-devel.")
 
-        # Build slow5lib first
-        self.build_slow5lib()
-        super().run()
+def find_cuda_home():
+    """Find CUDA installation directory"""
+    # Check environment variable first
+    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+    if cuda_home and os.path.exists(cuda_home):
+        return cuda_home
+    
+    # Try to find nvcc
+    nvcc_path = shutil.which('nvcc')
+    if nvcc_path:
+        # nvcc is typically in $CUDA_HOME/bin/nvcc
+        return os.path.dirname(os.path.dirname(os.path.realpath(nvcc_path)))
+    
+    # Common installation paths
+    for path in ['/usr/local/cuda', '/usr/cuda', '/opt/cuda']:
+        if os.path.exists(path):
+            return path
+    
+    return None
+
+# --------------------------
+# Custom Build Extension
+# --------------------------
+
+
+class CUDAExtension(Extension):
+    """Custom Extension class that uses nvcc to compile CUDA code"""
+    pass
+
+
+class MultiExt(build_ext):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
     def build_extensions(self):
-        # Add numpy and htslib include dirs here (after dependencies are installed)
-        try:
-            import numpy as np
-            numpy_include = np.get_include()
-            for ext in self.extensions:
-                ext.include_dirs.append(numpy_include)
-                # Add htslib include path
-                ext.include_dirs.append("third_party/f5c/htslib")
-                # Add htslib library
-                ext.extra_link_args.append("third_party/f5c/htslib/libhts.a")
-        except ImportError:
-            print("Warning: numpy not available, extension may not compile correctly")
-            print("Make sure numpy is installed before building")
-
+        # Filter out CUDA extensions if CUDA is not available
+        cuda_available = find_cuda_home() is not None and shutil.which('nvcc') is not None
+        
+        extensions_to_build = []
+        for ext in self.extensions:
+            if not hasattr(ext, "ext_type"):
+                raise ValueError(f"Extension {ext.name} must have 'ext_type' (f5c/dtw)!")
+            
+            if ext.ext_type == "dtw":
+                if not cuda_available:
+                    print(f"WARNING: Skipping CUDA extension {ext.name} - nvcc not found")
+                    print("Install CUDA Toolkit to enable GPU acceleration features")
+                    continue
+                self._configure_cuda_extension(ext)
+            elif ext.ext_type == "f5c":
+                apply_f5c_compile(ext)
+            else:
+                raise ValueError(f"Unknown ext_type: {ext.ext_type} (must be f5c/dtw)")
+            
+            extensions_to_build.append(ext)
+        
+        self.extensions = extensions_to_build
         super().build_extensions()
-
-    def build_slow5lib(self):
-        """Build slow5lib static library"""
-        import subprocess
-
-        # Use relative path since we're running from the setup.py directory
-        slow5lib_dir_relative = "third_party/f5c/slow5lib"
-
-        print("Building slow5lib...")
-
-        # Configure and build slow5lib
-        env = os.environ.copy()
-        env["CFLAGS"] = "-fPIC -O3"
-
-        try:
-            subprocess.run(
-                ["make", "-C", slow5lib_dir_relative, "lib"],
-                env=env,
-                check=True
-            )
-            print("slow5lib built successfully")
-        except subprocess.CalledProcessError as e:
-            print(f"Failed to build slow5lib: {e}")
-            raise
-
-    def check_and_build_htslib(self):
-        """Check if htslib is available, if not provide helpful error message"""
-        import subprocess
-
-        # Check if htslib development headers are available
-        htslib_dir = Path("third_party/f5c/htslib")
-
-        # First try: check if system htslib is available
-        try:
-            result = subprocess.run(['pkg-config', '--exists', 'htslib'], capture_output=True)
-            if result.returncode == 0:
-                print("✓ System htslib found via pkg-config")
-                # Get the include path
-                result = subprocess.run(['pkg-config', '--cflags', 'htslib'], capture_output=True, text=True)
-                if result.returncode == 0:
-                    include_path = result.stdout.strip().replace('-I', '')
-                    for ext in self.extensions:
-                        ext.include_dirs.append(include_path)
-                return True
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
-
-        # Second try: check for bundled or manually installed htslib
-        if htslib_dir.exists():
-            print("✓ Using bundled htslib")
-            for ext in self.extensions:
-                ext.include_dirs.append("third_party/f5c/htslib")
-                ext.extra_link_args.append("third_party/f5c/htslib/libhts.a")
-            return True
-
-        # Final try: check common installation paths
-        common_paths = [
-            "/usr/include/htslib",
-            "/usr/local/include/htslib",
-            "/opt/homebrew/include/htslib",  # macOS Homebrew
+    
+    def _configure_cuda_extension(self, ext):
+        """Configure CUDA extension compilation"""
+        cuda_home = find_cuda_home()
+        if not cuda_home:
+            raise RuntimeError("CUDA_HOME not found")
+        
+        # Get Python and NumPy include directories
+        import sysconfig
+        import numpy
+        python_include = sysconfig.get_path('include')
+        numpy_include = numpy.get_include()
+        
+        # Add CUDA, Python, and NumPy include paths
+        ext.include_dirs.append(os.path.join(cuda_home, 'include'))
+        ext.include_dirs.append(python_include)
+        ext.include_dirs.append(numpy_include)
+        ext.include_dirs.append('fin/_dtw')  # Add local include directory
+        
+        ext.library_dirs = [os.path.join(cuda_home, 'lib64')]
+        ext.libraries = ['cudart']
+        
+        # Set compiler flags for nvcc
+        ext.extra_compile_args = [
+            '-x', 'cu',  # Treat input as CUDA
+            '--compiler-options', '-fPIC',
+            '-std=c++11',
+            '-O3',
+            '--generate-code=arch=compute_80,code=sm_80',  # Ampere architecture
         ]
+        
+        ext.extra_link_args = [
+            f'-L{os.path.join(cuda_home, "lib64")}',
+            '-lcudart',
+        ]
+    
+    def build_extension(self, ext):
+        # Use nvcc for CUDA extensions
+        if hasattr(ext, "ext_type") and ext.ext_type == "dtw":
+            self._compile_cuda_extension(ext)
+        else:
+            # Build non-CUDA extensions normally
+            super().build_extension(ext)
+    
+    def _compile_cuda_extension(self, ext):
+        """Compile CUDA extension using nvcc directly"""
+        nvcc_path = shutil.which('nvcc')
+        if not nvcc_path:
+            raise RuntimeError("nvcc not found!")
+        
+        # Get output paths
+        build_temp = Path(self.build_temp)
+        build_lib = Path(self.build_lib)
+        
+        # Create directories
+        build_temp.mkdir(parents=True, exist_ok=True)
+        ext_path = build_lib / self.get_ext_filename(ext.name)
+        ext_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Compile each source file to object file
+        objects = []
+        for source in ext.sources:
+            source_path = Path(source)
+            obj_name = source_path.stem + '.o'
+            obj_path = build_temp / obj_name
+            
+            # Build nvcc command
+            nvcc_cmd = [
+                nvcc_path,
+                '-c',
+                str(source_path),
+                '-o', str(obj_path),
+            ]
+            
+            # Add include directories
+            for inc_dir in ext.include_dirs:
+                nvcc_cmd.extend(['-I', inc_dir])
+            
+            # Add compile flags
+            nvcc_cmd.extend(ext.extra_compile_args)
+            
+            print(f"Compiling {source} with nvcc...")
+            print(' '.join(nvcc_cmd))
+            result = subprocess.run(nvcc_cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print(result.stdout)
+                print(result.stderr)
+                raise RuntimeError(f"nvcc compilation failed for {source}")
+            
+            objects.append(str(obj_path))
+        
+        # Link objects into shared library
+        link_cmd = [
+            nvcc_path,
+            '-shared',
+            '-o', str(ext_path),
+        ] + objects
+        
+        # Add library directories and libraries
+        if hasattr(ext, 'library_dirs'):
+            for lib_dir in ext.library_dirs:
+                link_cmd.extend(['-L', lib_dir])
+        
+        if hasattr(ext, 'libraries'):
+            for lib in ext.libraries:
+                link_cmd.append(f'-l{lib}')
+        
+        # Add link flags
+        link_cmd.extend(ext.extra_link_args)
+        
+        print(f"Linking {ext.name}...")
+        print(' '.join(link_cmd))
+        result = subprocess.run(link_cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            print(result.stdout)
+            print(result.stderr)
+            raise RuntimeError(f"nvcc linking failed for {ext.name}")
+    
 
-        for path in common_paths:
-            if Path(path).exists():
-                print(f"✓ Found htslib headers at {path}")
-                parent_include = str(Path(path).parent)
-                for ext in self.extensions:
-                    ext.include_dirs.append(parent_include)
-                return True
 
-        # If we get here, htslib is not available
-        print("✗ htslib not found!")
-        print("\nPlease install htslib development headers:")
-        print("  Ubuntu/Debian: sudo apt-get install libhts-dev")
-        print("  CentOS/RHEL:   sudo yum install htslib-devel")
-        print("  Fedora:        sudo dnf install htslib-devel")
-        print("  macOS:         brew install htslib")
-        print("\nOr download and build manually:")
-        print("  cd third_party/f5c/")
-        print("  git clone https://github.com/samtools/htslib.git")
-        print("  cd htslib && ./configure --disable-libcurl && make -j4")
-        print("\nThen run pip install again.")
+# --------------------------
+# Path Configuration
+# --------------------------
 
-        return False
+F5C_DIR = os.path.join("fin", "_f5c")
 
 
-# Initialize include_dirs base (numpy will be added during build)
-# Use relative paths for include directories
-# include_dirs_base = [
-#     "third_party/f5c/include",
-#     "third_party/f5c/src",
-#     "third_party/f5c/slow5lib/include",
-# ]
-
-# f5c extension module
-# f5c_module = Extension(
-#     "fin._f5c",
-#     sources=f5c_sources,
-#     include_dirs=include_dirs_base + [
-#         "third_party/f5c/slow5lib/include",
-#     ],
-#     libraries=["z", "pthread", "m"],
-#     library_dirs=[],
-#     extra_compile_args=extra_compile_args,
-#     extra_link_args=extra_link_args + [
-#         "third_party/f5c/slow5lib/lib/libslow5.a"
-#     ],
-#     language="c++",
-# )
+f5c_extension = Extension(
+    name="fin._f5c._event",
+    sources=[
+        os.path.join(F5C_DIR,'f5c_python.c'),
+        os.path.join(F5C_DIR,'event_detection_simple.c')
+    ],
+    depends = [
+      os.path.join(F5C_DIR,'event_detection_simple.h')  
+    ],
+    include_dirs=[F5C_DIR ],
+    
+)
+f5c_extension.ext_type='f5c'
+   
+# DTW/CUDA extension with Python bindings
+OPENDBA_DIR = os.path.join("fin",'_dtw')
+cuda_dtw_extension = Extension(
+        name="fin._dtw._cuda_dtw",
+        sources=[
+            os.path.join(OPENDBA_DIR,"dtw_api.cpp"),
+            os.path.join(OPENDBA_DIR,"multithreading.cpp"),
+        ],
+        depends = [
+            os.path.join(OPENDBA_DIR,'cuda_utils.hpp'),
+            os.path.join(OPENDBA_DIR,'dtw_api.h'),
+            os.path.join(OPENDBA_DIR,'dtw.hpp'),
+            os.path.join(OPENDBA_DIR,'limits.hpp'),
+        ],
+)
+cuda_dtw_extension.ext_type='dtw'
 
 # Main setup configuration
 def main():
-    # check_dependencies()
+
 
     with open("README.md", "r", encoding="utf-8") as fh:
         long_description = fh.read()
@@ -262,13 +267,16 @@ def main():
             "fin.io",
             "fin.utils",
             "fin.core",
+            "fin._f5c",
+            'fin._dtw'
         ],
         package_dir={"fin": "fin"},
         package_data={
             "fin": ["*.py", "*.c", "*.h", "*.yaml", "*.yml"],
         },
-        # ext_modules=[f5c_module],
-        # cmdclass={"build_ext": BuildF5CExt},
+        include_package_data=True,
+        ext_modules=[f5c_extension, cuda_dtw_extension],
+        cmdclass={"build_ext": MultiExt},
         python_requires=">=3.8",
         install_requires=[
             "numpy>=1.21.0",
