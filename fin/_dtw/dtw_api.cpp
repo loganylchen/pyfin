@@ -42,18 +42,20 @@ int opendba_dtw_cuda(
     // 分配序列内存
     CUDA_CHECK(cudaMalloc(&d_seq1, len1 * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_seq2, len2 * sizeof(float)));
-    // 分配 DTW 计算所需临时内存（参考 OpenDBA 原版逻辑）
-    CUDA_CHECK(cudaMalloc(&d_dtw_cost, len2 * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_new_dtw_cost, len2 * sizeof(float)));
+    // 分配 DTW 计算所需临时内存
+    // CRITICAL: d_dtw_cost and d_new_dtw_cost must be sized by len1 (first_seq_length)
+    // because the kernel indexes them up to first_seq_length-1
+    CUDA_CHECK(cudaMalloc(&d_dtw_cost, len1 * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_new_dtw_cost, len1 * sizeof(float)));
     CUDA_CHECK(cudaMallocPitch(&d_path_matrix, &path_mem_pitch, len2 * sizeof(unsigned char), len1));
     CUDA_CHECK(cudaMalloc(&d_pairwise_dist, sizeof(float)));
 
     // 3. 主机→设备数据拷贝
     CUDA_CHECK(cudaMemcpy(d_seq1, seq1, len1 * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_seq2, seq2, len2 * sizeof(float), cudaMemcpyHostToDevice));
-    // 初始化临时内存
-    CUDA_CHECK(cudaMemset(d_dtw_cost, 0, len2 * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_new_dtw_cost, 0, len2 * sizeof(float)));
+    // 初始化临时内存（must match allocation sizes above)
+    CUDA_CHECK(cudaMemset(d_dtw_cost, 0, len1 * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_new_dtw_cost, 0, len1 * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_path_matrix, 0, path_mem_pitch * len1));
     CUDA_CHECK(cudaMemset(d_pairwise_dist, 0, sizeof(float)));
 

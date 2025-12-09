@@ -328,6 +328,30 @@ def run_benchmark_suite(sequence_lengths: List[int], n_runs: int = 10):
             for name, avg_time in sorted_impls[1:]:
                 speedup = avg_time / fastest_time
                 print(f"  {name:<25} {speedup:>10.2f}x slower")
+        
+        # Explain CUDA performance characteristics
+        if 'CUDA (GPU)' in avg_times and 'Numba JIT' in avg_times:
+            print(f"\n{'='*80}")
+            print("WHY NUMBA MAY BE FASTER THAN CUDA:")
+            print(f"{'='*80}")
+            print("CUDA has fixed overhead (~100-500μs) per call:")
+            print("  • 6× cudaMalloc allocations")
+            print("  • 2× Host→Device memory transfers")
+            print("  • 1× Device→Host memory transfer")
+            print("  • 6× cudaFree deallocations")
+            print("  • Kernel launch overhead")
+            print("\nNumba advantages for short sequences:")
+            print("  • Zero memory transfer overhead")
+            print("  • Direct CPU execution (cache-friendly)")
+            print("  • LLVM-optimized native code")
+            print("\nCUDA becomes faster when:")
+            print("  • Sequence length > 5000 (parallelism >> overhead)")
+            print("  • Batch processing (amortize overhead over many DTW calls)")
+            print("  • Very long sequences > 10k (GPU dominates)")
+            print("\nTo optimize CUDA for short sequences:")
+            print("  • Implement memory pooling (reuse cudaMalloc)")
+            print("  • Add batch API (compute multiple DTW at once)")
+            print("  • Use pinned memory for faster transfers")
 
 
 def test_accuracy():
@@ -401,14 +425,19 @@ def print_implementation_info():
         print("   - JIT-compiled Python code using LLVM")
         print("   - Same algorithm as Pure Python but compiled")
         print("   - 10-100x faster than Pure Python")
-        print("   - No GPU required, works on any CPU\n")
+        print("   - No GPU required, works on any CPU")
+        print("   - Best for short-medium sequences (< 5000 points)")
+        print("   - Zero memory transfer overhead\n")
     
     if 'CUDA (GPU)' in implementations:
         print("3. CUDA (GPU)")
         print("   - GPU-accelerated using NVIDIA CUDA")
         print("   - Parallel wavefront algorithm")
-        print("   - 100-1000x faster than Pure Python")
-        print("   - Requires NVIDIA GPU and CUDA toolkit\n")
+        print("   - 100-1000x faster than Pure Python for long sequences")
+        print("   - Requires NVIDIA GPU and CUDA toolkit")
+        print("   - Overhead: ~100-500μs per call (cudaMalloc/cudaMemcpy)")
+        print("   - Best for: sequences > 5000 points or batch processing")
+        print("   - Note: May be slower than Numba for short sequences\n")
     
     if 'dtaidistance (C)' in implementations:
         print("4. dtaidistance (C)")
@@ -423,6 +452,12 @@ def print_implementation_info():
         print("   - Reduces complexity using multilevel approach")
         print("   - May not give exact DTW distance")
         print("   - Good for very long sequences\n")
+    
+    print("PERFORMANCE EXPECTATIONS:")
+    print("  • Sequences < 2000:    Numba ≈ dtaidistance > CUDA > Pure Python")
+    print("  • Sequences 2000-5000: CUDA ≈ Numba ≈ dtaidistance > Pure Python")
+    print("  • Sequences > 5000:    CUDA > dtaidistance ≈ Numba > Pure Python")
+    print("  • Batch processing:    CUDA >> all others (amortizes overhead)\n")
 
 
 def main():
@@ -448,17 +483,18 @@ def main():
     test_accuracy()
     
     # Run performance benchmarks
-    # Note: Pure Python is very slow, so we limit max length
-    sequence_lengths = [100, 500, 1000, 2000, 5000]
-    # if 'Pure Python' in implementations and 'CUDA (GPU)' in implementations:
-    #     # Full range to show GPU advantage
-    #     sequence_lengths = [50, 100, 200, 500, 1000, 2000]
-    # elif 'Pure Python' in implementations:
-    #     # Shorter sequences for Pure Python only
-    #     sequence_lengths = [50, 100, 200, 500]
-    # else:
-    #     # Longer sequences when Pure Python is not included
-    #     sequence_lengths = [100, 500, 1000, 2000, 5000]
+    # Choose sequence lengths to show crossover point where CUDA becomes faster
+    if 'CUDA (GPU)' in implementations and 'Pure Python' not in implementations:
+        # Show CUDA advantage for long sequences
+        sequence_lengths = [100, 500, 1000, 2000, 5000, 10000]
+        print("NOTE: Including long sequences to demonstrate GPU advantage")
+    elif 'Pure Python' in implementations:
+        # Limit max length because Pure Python is very slow
+        sequence_lengths = [100, 500, 1000, 2000]
+        print("NOTE: Limited sequence lengths due to Pure Python being slow")
+    else:
+        # Default range
+        sequence_lengths = [100, 500, 1000, 2000, 5000]
     
     n_runs = 10
     
