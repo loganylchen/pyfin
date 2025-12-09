@@ -2,11 +2,13 @@
 Setup script for py-fin package with f5c integration
 
 This script builds the f5c eventalign module as a Python extension.
+CUDA extension (_dtw) is optional and requires nvcc.
 """
 
 import os
 import sys
 import shutil
+import subprocess
 from pathlib import Path
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
@@ -26,30 +28,34 @@ def apply_f5c_compile(ext):
     ext.language = 'c'
 
 
-def apply_dtw_compile(ext):
+def find_cuda_home():
+    """Find CUDA installation directory"""
+    # Check environment variable first
+    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+    if cuda_home and os.path.exists(cuda_home):
+        return cuda_home
+    
+    # Try to find nvcc
     nvcc_path = shutil.which('nvcc')
-    if not nvcc_path:
-        raise RuntimeError("nvcc not found! Please set CUDA_PATH or install CUDA Toolkit.")
+    if nvcc_path:
+        # nvcc is typically in $CUDA_HOME/bin/nvcc
+        return os.path.dirname(os.path.dirname(os.path.realpath(nvcc_path)))
     
-    cuda_path = os.path.dirname(os.path.dirname(nvcc_path))
-    include_path = os.path.join(cuda_path,'include')
+    # Common installation paths
+    for path in ['/usr/local/cuda', '/usr/cuda', '/opt/cuda']:
+        if os.path.exists(path):
+            return path
     
-    ext.extra_compile_args += [
-        "-std=c++11",
-        "-O3",
-        "-Xcompiler", "-fPIC",
-        "-gencode=arch=compute_80,code=sm_80",  #  80 = Ampere
-    ]
-    ext.extra_link_args += [
-        "-lcudart",
-        f"-L{cuda_path}/lib64",  # Linux/macOS
-    ]
-    ext.include_dirs.append(include_path)
-    ext.language='c++'
+    return None
 
 # --------------------------
 # Custom Build Extension
 # --------------------------
+
+
+class CUDAExtension(Extension):
+    """Custom Extension class that uses nvcc to compile CUDA code"""
+    pass
 
 
 class MultiExt(build_ext):
@@ -57,45 +63,148 @@ class MultiExt(build_ext):
         super().__init__(*args, **kwargs)
 
     def build_extensions(self):
-        # Apply type-specific logic to each extension
+        # Filter out CUDA extensions if CUDA is not available
+        cuda_available = find_cuda_home() is not None and shutil.which('nvcc') is not None
+        
+        extensions_to_build = []
         for ext in self.extensions:
             if not hasattr(ext, "ext_type"):
                 raise ValueError(f"Extension {ext.name} must have 'ext_type' (f5c/dtw)!")
-            if ext.ext_type == "f5c":
+            
+            if ext.ext_type == "dtw":
+                if not cuda_available:
+                    print(f"WARNING: Skipping CUDA extension {ext.name} - nvcc not found")
+                    print("Install CUDA Toolkit to enable GPU acceleration features")
+                    continue
+                self._configure_cuda_extension(ext)
+            elif ext.ext_type == "f5c":
                 apply_f5c_compile(ext)
-            elif ext.ext_type == "dtw":
-                apply_dtw_compile(ext)
             else:
                 raise ValueError(f"Unknown ext_type: {ext.ext_type} (must be f5c/dtw)")
+            
+            extensions_to_build.append(ext)
+        
+        self.extensions = extensions_to_build
         super().build_extensions()
     
+    def _configure_cuda_extension(self, ext):
+        """Configure CUDA extension compilation"""
+        cuda_home = find_cuda_home()
+        if not cuda_home:
+            raise RuntimeError("CUDA_HOME not found")
+        
+        # Get Python and NumPy include directories
+        import sysconfig
+        import numpy
+        python_include = sysconfig.get_path('include')
+        numpy_include = numpy.get_include()
+        
+        # Add CUDA, Python, and NumPy include paths
+        ext.include_dirs.append(os.path.join(cuda_home, 'include'))
+        ext.include_dirs.append(python_include)
+        ext.include_dirs.append(numpy_include)
+        ext.include_dirs.append('fin/_dtw')  # Add local include directory
+        
+        ext.library_dirs = [os.path.join(cuda_home, 'lib64')]
+        ext.libraries = ['cudart']
+        
+        # Set compiler flags for nvcc
+        ext.extra_compile_args = [
+            '-x', 'cu',  # Treat input as CUDA
+            '--compiler-options', '-fPIC',
+            '-std=c++11',
+            '-O3',
+            '--generate-code=arch=compute_80,code=sm_80',  # Ampere architecture
+        ]
+        
+        ext.extra_link_args = [
+            f'-L{os.path.join(cuda_home, "lib64")}',
+            '-lcudart',
+        ]
+    
     def build_extension(self, ext):
-        # Override compiler for CUDA extensions
+        # Use nvcc for CUDA extensions
         if hasattr(ext, "ext_type") and ext.ext_type == "dtw":
-            nvcc_path = shutil.which('nvcc')
-            if not nvcc_path:
-                raise RuntimeError("nvcc not found for building CUDA extension!")
-            
-            # Replace the entire compiler command lists with nvcc
-            original_compiler = self.compiler.compiler_so
-            original_compiler_cxx = self.compiler.compiler_cxx
-            original_linker = self.compiler.linker_so
-            
-            # Set nvcc as compiler
-            self.compiler.set_executable('compiler_so', nvcc_path)
-            self.compiler.set_executable('compiler_cxx', nvcc_path)
-            self.compiler.set_executable('linker_so', nvcc_path)
-            
-            try:
-                super().build_extension(ext)
-            finally:
-                # Restore original compiler for other extensions
-                self.compiler.compiler_so = original_compiler
-                self.compiler.compiler_cxx = original_compiler_cxx
-                self.compiler.linker_so = original_linker
+            self._compile_cuda_extension(ext)
         else:
             # Build non-CUDA extensions normally
             super().build_extension(ext)
+    
+    def _compile_cuda_extension(self, ext):
+        """Compile CUDA extension using nvcc directly"""
+        nvcc_path = shutil.which('nvcc')
+        if not nvcc_path:
+            raise RuntimeError("nvcc not found!")
+        
+        # Get output paths
+        build_temp = Path(self.build_temp)
+        build_lib = Path(self.build_lib)
+        
+        # Create directories
+        build_temp.mkdir(parents=True, exist_ok=True)
+        ext_path = build_lib / self.get_ext_filename(ext.name)
+        ext_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Compile each source file to object file
+        objects = []
+        for source in ext.sources:
+            source_path = Path(source)
+            obj_name = source_path.stem + '.o'
+            obj_path = build_temp / obj_name
+            
+            # Build nvcc command
+            nvcc_cmd = [
+                nvcc_path,
+                '-c',
+                str(source_path),
+                '-o', str(obj_path),
+            ]
+            
+            # Add include directories
+            for inc_dir in ext.include_dirs:
+                nvcc_cmd.extend(['-I', inc_dir])
+            
+            # Add compile flags
+            nvcc_cmd.extend(ext.extra_compile_args)
+            
+            print(f"Compiling {source} with nvcc...")
+            print(' '.join(nvcc_cmd))
+            result = subprocess.run(nvcc_cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print(result.stdout)
+                print(result.stderr)
+                raise RuntimeError(f"nvcc compilation failed for {source}")
+            
+            objects.append(str(obj_path))
+        
+        # Link objects into shared library
+        link_cmd = [
+            nvcc_path,
+            '-shared',
+            '-o', str(ext_path),
+        ] + objects
+        
+        # Add library directories and libraries
+        if hasattr(ext, 'library_dirs'):
+            for lib_dir in ext.library_dirs:
+                link_cmd.extend(['-L', lib_dir])
+        
+        if hasattr(ext, 'libraries'):
+            for lib in ext.libraries:
+                link_cmd.append(f'-l{lib}')
+        
+        # Add link flags
+        link_cmd.extend(ext.extra_link_args)
+        
+        print(f"Linking {ext.name}...")
+        print(' '.join(link_cmd))
+        result = subprocess.run(link_cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            print(result.stdout)
+            print(result.stderr)
+            raise RuntimeError(f"nvcc linking failed for {ext.name}")
     
 
 
@@ -120,12 +229,12 @@ f5c_extension = Extension(
 )
 f5c_extension.ext_type='f5c'
    
+# DTW/CUDA extension with Python bindings
 OPENDBA_DIR = os.path.join("fin",'_dtw')
 cuda_dtw_extension = Extension(
-        name="fin._dtw._cuda_dtw",  #
+        name="fin._dtw._cuda_dtw",
         sources=[
-            os.path.join(OPENDBA_DIR,"dtw_api.cpp"),  
-            
+            os.path.join(OPENDBA_DIR,"dtw_api.cpp"),
         ],
         depends = [
             os.path.join(OPENDBA_DIR,'cuda_utils.hpp'),
@@ -133,7 +242,6 @@ cuda_dtw_extension = Extension(
             os.path.join(OPENDBA_DIR,'dtw.hpp'),
             os.path.join(OPENDBA_DIR,'limits.hpp'),
         ],
-        
 )
 cuda_dtw_extension.ext_type='dtw'
 
@@ -166,7 +274,7 @@ def main():
             "fin": ["*.py", "*.c", "*.h", "*.yaml", "*.yml"],
         },
         include_package_data=True,
-        ext_modules=[f5c_extension,cuda_dtw_extension], 
+        ext_modules=[f5c_extension, cuda_dtw_extension],
         cmdclass={"build_ext": MultiExt},
         python_requires=">=3.8",
         install_requires=[
