@@ -2,7 +2,7 @@
 Sequence extraction utilities for reference genomes and BAM files.
 
 Provides functions to extract DNA/RNA sequences from:
-- Reference FASTA files using BED coordinates
+- Reference FASTA files using BED coordinates (supports .gz)
 - BAM alignment files
 - Reference genomes with coordinate transformations
 """
@@ -10,6 +10,10 @@ Provides functions to extract DNA/RNA sequences from:
 import pysam
 from typing import List, Dict, Optional, Iterator, Tuple, Union
 import logging
+import gzip
+import tempfile
+import os
+from pathlib import Path
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -38,6 +42,7 @@ class ReferenceExtractor:
     Extract sequences from reference FASTA/FASTQ files.
 
     Handles coordinate transformations and strand-specific extraction.
+    Supports both plain text and gzipped (.gz) FASTA files.
     """
 
     def __init__(self, reference_file: str):
@@ -45,14 +50,26 @@ class ReferenceExtractor:
         Initialize reference extractor.
 
         Args:
-            reference_file: Path to reference FASTA file
+            reference_file: Path to reference FASTA file (plain or .gz)
         """
         self.reference_file = reference_file
         self.fasta = None
+        self._temp_file = None
+        self._temp_index = None
+
+        # Handle gzipped files
+        actual_file = reference_file
+        if reference_file.endswith('.gz'):
+            logger.warning(
+                f"Detected gzipped FASTA file: {reference_file}. "
+                "Note: Using gzipped FASTA may require re-indexing on each use. "
+                f"Consider using bgzip (pysam-compatible) for better performance."
+            )
+            actual_file = self._extract_gzip(reference_file)
 
         # Open reference file
         try:
-            self.fasta = pysam.FastaFile(reference_file)
+            self.fasta = pysam.FastaFile(actual_file)
             logger.info(f"Opened reference file: {reference_file}")
             logger.info(f"Contigs: {list(self.fasta.references)}")
         except Exception as e:
@@ -67,12 +84,51 @@ class ReferenceExtractor:
         """Context manager exit."""
         self.close()
 
+    def _extract_gzip(self, gz_file: str) -> str:
+        """
+        Extract gzipped FASTA to a temporary file.
+
+        Args:
+            gz_file: Path to gzipped FASTA file
+
+        Returns:
+            Path to temporary extracted file
+        """
+        # Create temporary directory and file
+        temp_dir = tempfile.mkdtemp()
+        self._temp_file = os.path.join(temp_dir, Path(gz_file).stem)
+
+        # Extract gzipped content
+        with gzip.open(gz_file, 'rt') as f_in:
+            with open(self._temp_file, 'w') as f_out:
+                chunk_size = 8192
+                while True:
+                    chunk = f_in.read(chunk_size)
+                    if not chunk:
+                        break
+                    f_out.write(chunk)
+
+        logger.info(f"Extracted gzipped FASTA to temporary file: {self._temp_file}")
+        return self._temp_file
+
     def close(self):
-        """Close the reference file."""
+        """Close the reference file and cleanup temporary files."""
         if self.fasta is not None:
             self.fasta.close()
             self.fasta = None
             logger.debug(f"Closed reference file: {self.reference_file}")
+
+        # Cleanup temporary extracted file if needed
+        if self._temp_file and os.path.exists(self._temp_file):
+            try:
+                # Remove both the file and the temp directory
+                temp_dir = os.path.dirname(self._temp_file)
+                os.unlink(self._temp_file)
+                os.rmdir(temp_dir)
+                logger.debug(f"Removed temporary directory: {temp_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to remove temporary file: {e}")
+            self._temp_file = None
 
     def get_contigs(self) -> List[str]:
         """Get list of contig names."""

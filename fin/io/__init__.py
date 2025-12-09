@@ -19,6 +19,9 @@ from .io_gtf import GtfParser, TranscriptFeature, parse_gtf_attributes
 from .output_writer import (
     write_gtf, write_bed12, write_read_assignments_tsv, write_metrics_summary
 )
+from .region_separator import (
+    RegionSeparator, GeneRegion, FusionReadDetector, separate_regions
+)
 
 __all__ = [
     "io_bam",
@@ -36,4 +39,11 @@ __all__ = [
     "reverse_complement",
     "extract_sequence_from_bed_and_fasta",
     "get_sequence_at_position",
+    "GtfParser",
+    "TranscriptFeature",
+    "parse_gtf_attributes",
+    "RegionSeparator",
+    "GeneRegion",
+    "FusionReadDetector",
+    "separate_regions",
 ]

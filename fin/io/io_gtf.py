@@ -10,12 +10,14 @@ Handles:
 - Exon grouping by transcript_id or Parent attributes
 - Transcript coordinate extraction
 - Strand-aware coordinate handling
+- Gzipped (.gz) file support
 """
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Iterator, Optional, Set
 import re
 import logging
+import gzip
 
 try:
     import pysam
@@ -172,7 +174,7 @@ class GtfParser:
         """
         temp_transcripts: Dict[str, TranscriptFeature] = {}
 
-        with open(self.filename, 'r') as f:
+        with _open_gtf_file(self.filename) as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line or line.startswith('#'):
@@ -399,6 +401,14 @@ def create_gtf_index(gtf_file: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"Failed to create GTF index: {e}")
         return None
+
+
+def _open_gtf_file(filename: str):
+    """Open GTF file, supporting both plain text and gzipped files."""
+    if filename.endswith('.gz'):
+        return gzip.open(filename, 'rt')
+    else:
+        return open(filename, 'r')
 
 
 # Example usage and test
