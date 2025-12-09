@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Benchmark comparison: CUDA DTW vs dtaidistance vs fastdtw
+Benchmark comparison: CUDA DTW vs dtaidistance vs fastdtw vs pure Python vs Numba
 
-This script compares the performance and accuracy of three DTW implementations:
+This script compares the performance and accuracy of multiple DTW implementations:
 1. fin._dtw (CUDA GPU-accelerated)
 2. dtaidistance (optimized CPU with C extensions)
 3. fastdtw (approximate DTW algorithm)
+4. Pure Python (naive implementation)
+5. Numba JIT (JIT-compiled Python)
 
 Requirements:
-    pip install dtaidistance fastdtw
+    pip install dtaidistance fastdtw numba
 """
 
 import numpy as np
@@ -16,10 +18,95 @@ import time
 from typing import Dict, List, Tuple
 import sys
 
+
+# =============================================================================
+# Pure Python Implementation
+# =============================================================================
+
+def dtw_python(seq1: np.ndarray, seq2: np.ndarray) -> float:
+    """
+    Pure Python DTW implementation (naive, unoptimized).
+    
+    This is the reference implementation - slow but easy to understand.
+    """
+    n, m = len(seq1), len(seq2)
+    
+    # Initialize cost matrix with infinity
+    dtw_matrix = np.full((n + 1, m + 1), np.inf)
+    dtw_matrix[0, 0] = 0.0
+    
+    # Fill the cost matrix
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = abs(seq1[i-1] - seq2[j-1])
+            dtw_matrix[i, j] = cost + min(
+                dtw_matrix[i-1, j],      # insertion
+                dtw_matrix[i, j-1],      # deletion
+                dtw_matrix[i-1, j-1]     # match
+            )
+    
+    return dtw_matrix[n, m]
+
+
+# =============================================================================
+# Numba-accelerated Implementation
+# =============================================================================
+
+try:
+    from numba import jit
+    
+    @jit(nopython=True)
+    def dtw_numba(seq1: np.ndarray, seq2: np.ndarray) -> float:
+        """
+        Numba JIT-compiled DTW implementation.
+        
+        Uses @jit decorator to compile to machine code at runtime.
+        """
+        n, m = len(seq1), len(seq2)
+        
+        # Initialize cost matrix
+        dtw_matrix = np.full((n + 1, m + 1), np.inf)
+        dtw_matrix[0, 0] = 0.0
+        
+        # Fill the cost matrix
+        for i in range(1, n + 1):
+            for j in range(1, m + 1):
+                cost = abs(seq1[i-1] - seq2[j-1])
+                
+                # Find minimum of three predecessors
+                min_prev = dtw_matrix[i-1, j-1]
+                if dtw_matrix[i-1, j] < min_prev:
+                    min_prev = dtw_matrix[i-1, j]
+                if dtw_matrix[i, j-1] < min_prev:
+                    min_prev = dtw_matrix[i, j-1]
+                
+                dtw_matrix[i, j] = cost + min_prev
+        
+        return dtw_matrix[n, m]
+    
+    NUMBA_AVAILABLE = True
+    print("✓ Numba available")
+except ImportError:
+    NUMBA_AVAILABLE = False
+    print("✗ Numba not available (install: pip install numba)")
+
+
+# =============================================================================
+# External Library Implementations
+# =============================================================================
+
 # Try to import all DTW implementations
 implementations = {}
 
-# 1. CUDA DTW (our implementation)
+# 1. Pure Python (always available)
+implementations['Pure Python'] = dtw_python
+print("✓ Pure Python DTW available")
+
+# 2. Numba JIT
+if NUMBA_AVAILABLE:
+    implementations['Numba JIT'] = dtw_numba
+
+# 3. CUDA DTW (our implementation)
 try:
     from fin._dtw import dtw_distance as cuda_dtw, is_available as cuda_available, cleanup
     if cuda_available():
@@ -30,15 +117,15 @@ try:
 except ImportError as e:
     print(f"✗ CUDA DTW import failed: {e}")
 
-# 2. dtaidistance
+# 4. dtaidistance
 try:
     from dtaidistance import dtw as dtaidistance_dtw
-    implementations['dtaidistance (CPU)'] = lambda x, y, **kwargs: dtaidistance_dtw.distance(x, y)
+    implementations['dtaidistance (C)'] = lambda x, y, **kwargs: dtaidistance_dtw.distance(x, y)
     print("✓ dtaidistance available")
 except ImportError:
     print("✗ dtaidistance not available (install: pip install dtaidistance)")
 
-# 3. fastdtw
+# 5. fastdtw
 try:
     from fastdtw import fastdtw
     from scipy.spatial.distance import euclidean
@@ -94,6 +181,9 @@ def benchmark_dtw(
 def run_benchmark_suite(sequence_lengths: List[int], n_runs: int = 10):
     """
     Run benchmarks for different sequence lengths.
+    
+    For very slow implementations (Pure Python), reduce number of runs
+    and skip very long sequences.
     """
     print("="*80)
     print("DTW Implementation Benchmark Suite")
@@ -101,6 +191,11 @@ def run_benchmark_suite(sequence_lengths: List[int], n_runs: int = 10):
     print(f"Number of runs per test: {n_runs}")
     print(f"Implementations available: {len(implementations)}")
     print()
+    
+    # Warn about Pure Python performance
+    if 'Pure Python' in implementations and max(sequence_lengths) > 500:
+        print("⚠ WARNING: Pure Python implementation is very slow for long sequences")
+        print("  Consider reducing sequence lengths or skipping Pure Python for large tests\n")
     
     if len(implementations) == 0:
         print("ERROR: No DTW implementations available!")
@@ -122,9 +217,18 @@ def run_benchmark_suite(sequence_lengths: List[int], n_runs: int = 10):
         length_results = {}
         
         for impl_name, dtw_func in implementations.items():
+            # Skip Pure Python for very long sequences (too slow)
+            if impl_name == 'Pure Python' and length > 500:
+                print(f"\nSkipping {impl_name} (too slow for length {length})...")
+                results[impl_name].append((length, None, None))
+                continue
+            
+            # Reduce runs for Pure Python to save time
+            test_runs = max(3, n_runs // 3) if impl_name == 'Pure Python' and length > 200 else n_runs
+            
             print(f"\nTesting {impl_name}...")
             distance, avg_time, std_time = benchmark_dtw(
-                impl_name, dtw_func, seq1, seq2, n_runs=n_runs
+                impl_name, dtw_func, seq1, seq2, n_runs=test_runs
             )
             
             if distance is not None:
@@ -261,6 +365,50 @@ def test_accuracy():
             print("  ⚠ Implementations show some variation")
 
 
+def print_implementation_info():
+    """
+    Print information about each DTW implementation.
+    """
+    print(f"\n{'='*80}")
+    print("IMPLEMENTATION DETAILS")
+    print(f"{'='*80}\n")
+    
+    if 'Pure Python' in implementations:
+        print("1. Pure Python")
+        print("   - Naive implementation using nested loops")
+        print("   - O(n*m) time complexity, O(n*m) space complexity")
+        print("   - Slowest but easiest to understand")
+        print("   - Reference implementation for correctness\n")
+    
+    if 'Numba JIT' in implementations:
+        print("2. Numba JIT")
+        print("   - JIT-compiled Python code using LLVM")
+        print("   - Same algorithm as Pure Python but compiled")
+        print("   - 10-100x faster than Pure Python")
+        print("   - No GPU required, works on any CPU\n")
+    
+    if 'CUDA (GPU)' in implementations:
+        print("3. CUDA (GPU)")
+        print("   - GPU-accelerated using NVIDIA CUDA")
+        print("   - Parallel wavefront algorithm")
+        print("   - 100-1000x faster than Pure Python")
+        print("   - Requires NVIDIA GPU and CUDA toolkit\n")
+    
+    if 'dtaidistance (C)' in implementations:
+        print("4. dtaidistance (C)")
+        print("   - Optimized C implementation with Python bindings")
+        print("   - Highly optimized CPU code")
+        print("   - 50-200x faster than Pure Python")
+        print("   - No GPU required\n")
+    
+    if 'fastdtw (approx)' in implementations:
+        print("5. fastdtw (approx)")
+        print("   - Approximate DTW using FastDTW algorithm")
+        print("   - Reduces complexity using multilevel approach")
+        print("   - May not give exact DTW distance")
+        print("   - Good for very long sequences\n")
+
+
 def main():
     """
     Main benchmark script.
@@ -268,6 +416,7 @@ def main():
     if len(implementations) == 0:
         print("\nERROR: No DTW implementations available!")
         print("\nTo install missing implementations:")
+        print("  pip install numba         # JIT-compiled Python")
         print("  pip install dtaidistance  # Optimized CPU DTW")
         print("  pip install fastdtw       # Approximate DTW")
         print("\nFor CUDA DTW, rebuild the package:")
@@ -276,11 +425,24 @@ def main():
     
     print(f"Found {len(implementations)} DTW implementation(s)\n")
     
+    # Print implementation details
+    print_implementation_info()
+    
     # Run accuracy tests first
     test_accuracy()
     
     # Run performance benchmarks
-    sequence_lengths = [50, 100, 200, 500, 1000]
+    # Note: Pure Python is very slow, so we limit max length
+    if 'Pure Python' in implementations and 'CUDA (GPU)' in implementations:
+        # Full range to show GPU advantage
+        sequence_lengths = [50, 100, 200, 500, 1000, 2000]
+    elif 'Pure Python' in implementations:
+        # Shorter sequences for Pure Python only
+        sequence_lengths = [50, 100, 200, 500]
+    else:
+        # Longer sequences when Pure Python is not included
+        sequence_lengths = [100, 500, 1000, 2000, 5000]
+    
     n_runs = 10
     
     print(f"\n{'='*80}")
