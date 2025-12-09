@@ -38,7 +38,7 @@ def apply_dtw_compile(ext):
         "-std=c++11",
         "-O3",
         "-Xcompiler", "-fPIC",
-        "-Xcuda", "-gencode=arch=compute_80,code=sm_80",  #  80 = Ampere
+        "-gencode=arch=compute_80,code=sm_80",  #  80 = Ampere
     ]
     ext.extra_link_args += [
         "-lcudart",
@@ -46,7 +46,6 @@ def apply_dtw_compile(ext):
     ]
     ext.include_dirs.append(include_path)
     ext.language='c++'
-    ext.compiler='nvcc'
 
 # --------------------------
 # Custom Build Extension
@@ -69,6 +68,22 @@ class MultiExt(build_ext):
             else:
                 raise ValueError(f"Unknown ext_type: {ext.ext_type} (must be f5c/dtw)")
         super().build_extensions()
+    
+    def build_extension(self, ext):
+        # Override compiler for CUDA extensions
+        if hasattr(ext, "ext_type") and ext.ext_type == "dtw":
+            # Save original compiler
+            original_compiler = self.compiler.compiler_so[0]
+            
+            # Replace compiler with nvcc for CUDA extensions
+            nvcc_path = shutil.which('nvcc')
+            if nvcc_path:
+                self.compiler.compiler_so[0] = nvcc_path
+                self.compiler.compiler_cxx = [nvcc_path]
+                self.compiler.linker_so[0] = nvcc_path
+        
+        # Build the extension
+        super().build_extension(ext)
     
 
 
