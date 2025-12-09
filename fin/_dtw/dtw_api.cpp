@@ -245,23 +245,6 @@ int opendba_dtw_pairwise_batch(
     {
         size_t num_comparisons = num_sequences - i - 1;
 
-        // Progress logging
-        if (getenv("DTW_DEBUG") || (i % 10 == 0 && i > 0))
-        {
-            auto now = std::chrono::high_resolution_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
-            float progress = 100.0 * total_pairs_completed / num_pairs;
-            float pairs_per_sec = total_pairs_completed / (elapsed / 1000.0);
-            size_t remaining_pairs = num_pairs - total_pairs_completed;
-            float eta_sec = remaining_pairs / pairs_per_sec;
-
-            fprintf(stderr, "[Progress] Ref seq %3zu/%zu | Completed: %6zu/%zu pairs (%.1f%%) | "
-                            "Speed: %.1f pairs/sec | ETA: %.1f sec\n",
-                    i, num_sequences - 1, total_pairs_completed, num_pairs, progress,
-                    pairs_per_sec, eta_sec);
-            fflush(stderr);
-        }
-
         // Initialize buffers for all comparisons with this reference sequence
         CUDA_CHECK(cudaMemset(d_dtw_cost, 0, seq_length * num_comparisons * sizeof(float)));
         CUDA_CHECK(cudaMemset(d_new_dtw_cost, 0, seq_length * num_comparisons * sizeof(float)));
@@ -305,6 +288,29 @@ int opendba_dtw_pairwise_batch(
 
         // Update completed pairs count
         total_pairs_completed += num_comparisons;
+
+        // Synchronize and report progress AFTER GPU work is done
+        if (i % 10 == 0 || getenv("DTW_DEBUG"))
+        {
+            CUDA_CHECK(cudaDeviceSynchronize()); // Wait for GPU to finish
+
+            auto now = std::chrono::high_resolution_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
+
+            if (elapsed > 0) // Avoid division by zero
+            {
+                float progress = 100.0 * total_pairs_completed / num_pairs;
+                float pairs_per_sec = total_pairs_completed / (elapsed / 1000.0);
+                size_t remaining_pairs = num_pairs - total_pairs_completed;
+                float eta_sec = remaining_pairs / pairs_per_sec;
+
+                fprintf(stderr, "[Progress] Ref seq %3zu/%zu | Completed: %6zu/%zu pairs (%.1f%%) | "
+                                "Speed: %.1f pairs/sec | ETA: %.1f sec\n",
+                        i + 1, num_sequences - 1, total_pairs_completed, num_pairs, progress,
+                        pairs_per_sec, eta_sec);
+                fflush(stderr);
+            }
+        }
     }
 
     CUDA_CHECK(cudaDeviceSynchronize());
