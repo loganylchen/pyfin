@@ -1,5 +1,12 @@
 import numpy as np
-from ._event import get_events  # Import the compiled C function
+
+# Try to import the compiled C extension
+try:
+    from ._event import get_events
+    _EVENT_AVAILABLE = True
+except ImportError as e:
+    _EVENT_AVAILABLE = False
+    _import_error = str(e)
 
 def detect_events(raw_signal: np.ndarray, is_rna: bool = True) -> list[dict]:
     """
@@ -18,8 +25,15 @@ def detect_events(raw_signal: np.ndarray, is_rna: bool = True) -> list[dict]:
     
     Raises:
         TypeError: If raw_signal is not a 1D float32 numpy array.
-        RuntimeError: If event detection fails (no events found).
+        RuntimeError: If event detection fails (no events found) or extension not available.
     """
+    if not _EVENT_AVAILABLE:
+        raise RuntimeError(
+            f"f5c event detection extension is not available. "
+            f"Import error: {_import_error}\n"
+            f"Please ensure the package was built correctly with: pip install -e ."
+        )
+    
     # Validate input (add user-friendly checks)
     if not isinstance(raw_signal, np.ndarray):
         raise TypeError(f"raw_signal must be a numpy array (got {type(raw_signal)})")
@@ -33,5 +47,16 @@ def detect_events(raw_signal: np.ndarray, is_rna: bool = True) -> list[dict]:
     # Call C function (convert is_rna to int: 1/0)
     return get_events(raw_signal, int(is_rna))
 
-# Export only the high-level function (hide low-level _f5c)
-__all__ = ["detect_events"]
+
+def is_available() -> bool:
+    """
+    Check if the f5c event detection extension is available.
+    
+    Returns:
+        bool: True if extension is available, False otherwise
+    """
+    return _EVENT_AVAILABLE
+
+
+# Export public functions
+__all__ = ["detect_events", "is_available"]

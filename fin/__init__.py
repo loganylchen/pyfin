@@ -8,11 +8,23 @@ __author__ = "loganylchen"
 # Import submodules
 from . import io
 from .utils.log_config import setup_logger, get_package_logger
-from ._f5c import detect_events
+
+# Try to import optional extensions
+try:
+    from ._f5c import detect_events
+    _F5C_AVAILABLE = True
+except ImportError:
+    _F5C_AVAILABLE = False
+    detect_events = None
+
 # Initialize package logger
 package_logger = get_package_logger(__name__, level='INFO')
 
 # Log package initialization
 package_logger.info(f"Package initialized - version {__version__}")
+if not _F5C_AVAILABLE:
+    package_logger.warning("f5c extension not available - event detection disabled")
 
-__all__ = ["io", "setup_logger", "get_package_logger",'detect_events']
+__all__ = ["io", "setup_logger", "get_package_logger"]
+if _F5C_AVAILABLE:
+    __all__.append('detect_events')
