@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <iostream>
+#include <chrono>
 
 // Define CUDA_CHECK macro for error checking
 #define CUDA_CHECK(call)                                                          \
@@ -228,10 +229,38 @@ int opendba_dtw_pairwise_batch(
     dim3 thread_block(max_threads, 1, 1);
     size_t shared_mem = thread_block.x * 3 * sizeof(float);
 
+    if (getenv("DTW_DEBUG"))
+    {
+        fprintf(stderr, "\n=== Starting DTW Pairwise Computation ===\n");
+        fprintf(stderr, "Total pairs to compute: %zu\n", num_pairs);
+        fprintf(stderr, "Wavefront chunks per sequence: %zu\n", (seq_length + max_threads - 1) / max_threads);
+        fprintf(stderr, "=========================================\n\n");
+    }
+
+    size_t total_pairs_completed = 0;
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     // Process each reference sequence
     for (size_t i = 0; i < num_sequences - 1; i++)
     {
         size_t num_comparisons = num_sequences - i - 1;
+
+        // Progress logging
+        if (getenv("DTW_DEBUG") || (i % 10 == 0 && i > 0))
+        {
+            auto now = std::chrono::high_resolution_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
+            float progress = 100.0 * total_pairs_completed / num_pairs;
+            float pairs_per_sec = total_pairs_completed / (elapsed / 1000.0);
+            size_t remaining_pairs = num_pairs - total_pairs_completed;
+            float eta_sec = remaining_pairs / pairs_per_sec;
+
+            fprintf(stderr, "[Progress] Ref seq %3zu/%zu | Completed: %6zu/%zu pairs (%.1f%%) | "
+                            "Speed: %.1f pairs/sec | ETA: %.1f sec\n",
+                    i, num_sequences - 1, total_pairs_completed, num_pairs, progress,
+                    pairs_per_sec, eta_sec);
+            fflush(stderr);
+        }
 
         // Initialize buffers for all comparisons with this reference sequence
         CUDA_CHECK(cudaMemset(d_dtw_cost, 0, seq_length * num_comparisons * sizeof(float)));
@@ -241,8 +270,17 @@ int opendba_dtw_pairwise_batch(
         float *d_next_cost = d_new_dtw_cost;
 
         // Process sequence in wavefront chunks
-        for (size_t offset = 0; offset < seq_length; offset += max_threads)
+        size_t num_chunks = (seq_length + max_threads - 1) / max_threads;
+        for (size_t chunk_idx = 0, offset = 0; offset < seq_length; chunk_idx++, offset += max_threads)
         {
+            // Detailed progress for very long sequences
+            if (getenv("DTW_DEBUG") && seq_length > 10000 && chunk_idx % 100 == 0)
+            {
+                fprintf(stderr, "  [Seq %zu] Chunk %zu/%zu (offset %zu/%zu)\n",
+                        i, chunk_idx, num_chunks, offset, seq_length);
+                fflush(stderr);
+            }
+
             // Launch kernel with num_comparisons blocks to compute all pairs with sequence i
             DTWDistance<float><<<num_comparisons, thread_block, shared_mem>>>(
                 nullptr, seq_length, // Don't pass individual seqs, use batch arrays
@@ -264,9 +302,22 @@ int opendba_dtw_pairwise_batch(
             d_current_cost = d_next_cost;
             d_next_cost = temp;
         }
+
+        // Update completed pairs count
+        total_pairs_completed += num_comparisons;
     }
 
     CUDA_CHECK(cudaDeviceSynchronize());
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto total_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+
+    if (getenv("DTW_DEBUG") || true) // Always show completion
+    {
+        fprintf(stderr, "\n[Complete] Computed %zu pairs in %.2f seconds (%.1f pairs/sec)\n",
+                num_pairs, total_elapsed / 1000.0, num_pairs / (total_elapsed / 1000.0));
+        fflush(stderr);
+    }
 
     // Copy results back (upper triangle format)
     float *h_upper_triangle = new float[num_pairs];
