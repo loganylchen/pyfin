@@ -247,7 +247,7 @@ def run_benchmark_suite():
         
         # Generate random sequences
         np.random.seed(42)
-        sequences = np.random.randn(num_seq, seq_len).astype(np.float32)
+        sequences = np.random.randn(num_seq, seq_len).astype(np.float32) * 100
         
         config_results = {}
         reference_matrix = None
