@@ -28,15 +28,204 @@ static detector_param_t RNA_DEFAULTS = {
     .threshold2 = 9.0f,
     .peak_height = 1.0f};
 
+static detector_param_t DNA_DEFAULTS = {
+    .window_length1 = 3,
+    .window_length2 = 6,
+    .threshold1 = 1.4f,
+    .threshold2 = 9.0f,
+    .peak_height = 0.2f};
+
+// Helper function for sorting floats
+static int compare_float(const void *a, const void *b)
+{
+    float fa = *(const float *)a;
+    float fb = *(const float *)b;
+    return (fa > fb) - (fa < fb);
+}
+
+// Calculate median of float array
+static float medianf(float *x, size_t n)
+{
+    if (n == 0)
+        return 0.0f;
+
+    float *tmp = (float *)malloc(n * sizeof(float));
+    if (!tmp)
+        return 0.0f;
+
+    memcpy(tmp, x, n * sizeof(float));
+    qsort(tmp, n, sizeof(float), compare_float);
+
+    float result;
+    if (n % 2 == 0)
+        result = (tmp[n / 2 - 1] + tmp[n / 2]) / 2.0f;
+    else
+        result = tmp[n / 2];
+
+    free(tmp);
+    return result;
+}
+
+// Calculate quantile of float array
+static void quantilef(float *x, size_t n, const float *p, size_t np)
+{
+    if (n == 0 || np == 0)
+        return;
+
+    float *tmp = (float *)malloc(n * sizeof(float));
+    if (!tmp)
+        return;
+
+    memcpy(tmp, x, n * sizeof(float));
+    qsort(tmp, n, sizeof(float), compare_float);
+
+    for (size_t i = 0; i < np; i++)
+    {
+        if (p[i] < 0.0f || p[i] > 1.0f)
+            continue;
+
+        float pos = p[i] * (n - 1);
+        size_t idx = (size_t)pos;
+
+        if (idx >= n - 1)
+        {
+            x[i] = tmp[n - 1];
+        }
+        else
+        {
+            float frac = pos - idx;
+            x[i] = tmp[idx] * (1.0f - frac) + tmp[idx + 1] * frac;
+        }
+    }
+
+    free(tmp);
+}
+
+// Calculate Median Absolute Deviation (MAD)
+static float madf(float const *x, size_t n, float const *med)
+{
+    if (n == 0)
+        return 0.0f;
+
+    // MAD scaling factor for normal distribution
+    const float mad_scaling_factor = 1.4826f;
+
+    float _med = (med == NULL) ? medianf((float *)x, n) : *med;
+
+    float *absdiff = (float *)malloc(n * sizeof(float));
+    if (!absdiff)
+        return 0.0f;
+
+    for (size_t i = 0; i < n; i++)
+    {
+        absdiff[i] = fabsf(x[i] - _med);
+    }
+
+    float mad = medianf(absdiff, n);
+    free(absdiff);
+
+    return mad * mad_scaling_factor;
+}
+
+// Trim raw signal by MAD-based segmentation
+// This removes adapter regions with low signal variation
+static raw_table trim_raw_by_mad(raw_table rt, int chunk_size, float perc)
+{
+    assert(chunk_size > 1);
+    assert(perc >= 0.0f && perc <= 1.0f);
+
+    const size_t nsample = rt.end - rt.start;
+    const size_t nchunk = nsample / chunk_size;
+
+    // Truncate end to be consistent with f5c/scrappie
+    rt.end = rt.start + nchunk * chunk_size;
+
+    if (nchunk == 0)
+        return rt;
+
+    float *madarr = (float *)malloc(nchunk * sizeof(float));
+    if (!madarr)
+        return rt;
+
+    // Calculate MAD for each chunk
+    for (size_t i = 0; i < nchunk; i++)
+    {
+        madarr[i] = madf(rt.raw + rt.start + i * chunk_size, chunk_size, NULL);
+    }
+
+    // Calculate threshold as percentile of MADs
+    quantilef(madarr, nchunk, &perc, 1);
+    const float thresh = perc;
+
+    // Trim from start: remove chunks with MAD <= threshold
+    for (size_t i = 0; i < nchunk; i++)
+    {
+        if (madarr[i] > thresh)
+            break;
+        rt.start += chunk_size;
+    }
+
+    // Trim from end: remove chunks with MAD <= threshold
+    for (size_t i = nchunk; i > 0; i--)
+    {
+        if (madarr[i - 1] > thresh)
+            break;
+        rt.end -= chunk_size;
+    }
+
+    free(madarr);
+
+    // Ensure we still have valid data
+    if (rt.start >= rt.end)
+    {
+        rt.start = 0;
+        rt.end = 0;
+    }
+
+    return rt;
+}
+
+// Trim and segment raw signal to remove adapters and open pore regions
+static raw_table trim_and_segment_raw(raw_table rt, int trim_start, int trim_end,
+                                      int varseg_chunk, float varseg_thresh)
+{
+    if (!rt.raw)
+        return rt;
+
+    // First, apply MAD-based segmentation to remove adapter regions
+    rt = trim_raw_by_mad(rt, varseg_chunk, varseg_thresh);
+    if (!rt.raw)
+        return rt;
+
+    // Then apply additional fixed trimming
+    rt.start += trim_start;
+    rt.end -= trim_end;
+
+    // Ensure we have valid range
+    if (rt.start >= rt.end)
+    {
+        rt.start = 0;
+        rt.end = 0;
+        rt.n = 0;
+    }
+    else
+    {
+        rt.n = rt.end - rt.start;
+    }
+
+    return rt;
+}
+
 // Compute sum and sum of squares for the raw signal
-static void compute_sum_sumsq(float const *raw, double *sums, double *sumsqs, size_t n)
+static void compute_sum_sumsq(float const *raw, size_t start, double *sums, double *sumsqs, size_t n)
 {
     sums[0] = 0.0;
     sumsqs[0] = 0.0;
     for (size_t i = 0; i < n; i++)
     {
-        sums[i + 1] = sums[i] + raw[i];
-        sumsqs[i + 1] = sumsqs[i] + raw[i] * raw[i];
+        float val = raw[start + i];
+        sums[i + 1] = sums[i] + val;
+        sumsqs[i + 1] = sumsqs[i] + val * val;
     }
 }
 
@@ -226,9 +415,19 @@ event_table detect_events_simple(raw_table const rt, int is_rna)
         return et;
     }
 
+    // Calculate the working range
+    size_t work_start = rt.start;
+    size_t work_end = rt.end;
+    size_t work_n = work_end - work_start;
+
+    if (work_n == 0)
+    {
+        return et;
+    }
+
     // Allocate memory for sums and sum squares
-    double *sums = (double *)calloc(rt.n + 1, sizeof(double));
-    double *sumsqs = (double *)calloc(rt.n + 1, sizeof(double));
+    double *sums = (double *)calloc(work_n + 1, sizeof(double));
+    double *sumsqs = (double *)calloc(work_n + 1, sizeof(double));
 
     if (!sums || !sumsqs)
     {
@@ -237,15 +436,15 @@ event_table detect_events_simple(raw_table const rt, int is_rna)
         return et;
     }
 
-    // Compute sums
-    compute_sum_sumsq(rt.raw, sums, sumsqs, rt.n);
+    // Compute sums from the working range
+    compute_sum_sumsq(rt.raw, work_start, sums, sumsqs, work_n);
 
     // Get detector parameters
-    detector_param_t *params = &RNA_DEFAULTS;
+    detector_param_t *params = is_rna ? &RNA_DEFAULTS : &DNA_DEFAULTS;
 
     // Compute t-statistics for both window sizes
-    float *tstat1 = compute_tstat(sums, sumsqs, rt.n, params->window_length1);
-    float *tstat2 = compute_tstat(sums, sumsqs, rt.n, params->window_length2);
+    float *tstat1 = compute_tstat(sums, sumsqs, work_n, params->window_length1);
+    float *tstat2 = compute_tstat(sums, sumsqs, work_n, params->window_length2);
 
     if (!tstat1 || !tstat2)
     {
@@ -258,7 +457,7 @@ event_table detect_events_simple(raw_table const rt, int is_rna)
 
     // Detect peaks
     size_t n_peaks;
-    size_t *peaks = detect_peaks(tstat1, tstat2, rt.n, params->peak_height,
+    size_t *peaks = detect_peaks(tstat1, tstat2, work_n, params->peak_height,
                                  params->window_length1, params->window_length2,
                                  &n_peaks);
 
@@ -298,11 +497,17 @@ event_table detect_events_simple(raw_table const rt, int is_rna)
     }
 
     // Last event (last peak to end)
-    et.event[event_idx++] = create_event(peaks[n_peaks - 1], rt.n, sums, sumsqs);
+    et.event[event_idx++] = create_event(peaks[n_peaks - 1], work_n, sums, sumsqs);
 
     et.n = event_idx;
     et.start = 0;
     et.end = et.n;
+
+    // Adjust event start positions to account for trimming
+    for (size_t i = 0; i < et.n; i++)
+    {
+        et.event[i].start += work_start;
+    }
 
     // Cleanup
     free(peaks);
@@ -314,10 +519,22 @@ event_table detect_events_simple(raw_table const rt, int is_rna)
     return et;
 }
 
-// Wrapper function for numpy array
+// Wrapper function for numpy array with adapter trimming
 event_table getevents_simple(size_t nsample, float *rawptr, int is_rna)
 {
+    // Parameters from f5c/scrappie defaults
+    int trim_start = 200;      // Trim 200 samples from start
+    int trim_end = 10;         // Trim 10 samples from end
+    int varseg_chunk = 100;    // Chunk size for MAD calculation
+    float varseg_thresh = 0.0; // Percentile threshold (0.0 = median)
+
+    // Create raw table
     raw_table rt = {nsample, 0, nsample, rawptr};
+
+    // Trim adapters and segment the signal
+    rt = trim_and_segment_raw(rt, trim_start, trim_end, varseg_chunk, varseg_thresh);
+
+    // Detect events on the trimmed signal
     return detect_events_simple(rt, is_rna);
 }
 
