@@ -178,17 +178,23 @@ int opendba_dtw_pairwise_batch(
     CUDA_CHECK(cudaGetDeviceProperties(&deviceProp, 0));
     int max_threads = deviceProp.maxThreadsPerBlock;
 
-    // We need buffers for each pair being computed in parallel
-    size_t max_pairs_parallel = num_sequences - 1; // Maximum number of pairs in one batch
-    float *d_dtw_cost, *d_new_dtw_cost;
-    unsigned char *d_path_matrix;
-    size_t path_mem_pitch;
+    // Maximum pairs we'll compute in parallel (when processing first sequence)
+    size_t max_pairs_parallel = num_sequences - 1;
 
+    // Memory required for cost buffers: seq_length * max_pairs_parallel * 2 * sizeof(float)
+    // Example: 1000 len × 100 pairs × 8 bytes = 800 KB (reasonable)
+    // The path matrix would be seq_length² × max_pairs, which is HUGE, so we skip it
+
+    float *d_dtw_cost, *d_new_dtw_cost;
+
+    // Allocate cost buffers: seq_length per parallel pair
     CUDA_CHECK(cudaMalloc(&d_dtw_cost, seq_length * max_pairs_parallel * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_new_dtw_cost, seq_length * max_pairs_parallel * sizeof(float)));
-    CUDA_CHECK(cudaMallocPitch(&d_path_matrix, &path_mem_pitch,
-                               seq_length * sizeof(unsigned char),
-                               seq_length * max_pairs_parallel));
+
+    // Don't allocate path matrix for pairwise - we only need distances, not alignments
+    // This saves HUGE amounts of memory (would be seq_length² per pair!)
+    unsigned char *d_path_matrix = nullptr;
+    size_t path_mem_pitch = 0;
 
     // Compute pairwise distances
     dim3 thread_block(max_threads, 1, 1);
@@ -199,7 +205,7 @@ int opendba_dtw_pairwise_batch(
     {
         size_t num_comparisons = num_sequences - i - 1;
 
-        // Initialize buffers
+        // Initialize buffers for all comparisons with this reference sequence
         CUDA_CHECK(cudaMemset(d_dtw_cost, 0, seq_length * num_comparisons * sizeof(float)));
         CUDA_CHECK(cudaMemset(d_new_dtw_cost, 0, seq_length * num_comparisons * sizeof(float)));
 
@@ -209,7 +215,7 @@ int opendba_dtw_pairwise_batch(
         // Process sequence in wavefront chunks
         for (size_t offset = 0; offset < seq_length; offset += max_threads)
         {
-            // Launch kernel with multiple block to compute all pairs with sequence i
+            // Launch kernel with num_comparisons blocks to compute all pairs with sequence i
             DTWDistance<float><<<num_comparisons, thread_block, shared_mem>>>(
                 nullptr, seq_length, // Don't pass individual seqs, use batch arrays
                 nullptr, seq_length,
@@ -258,7 +264,7 @@ int opendba_dtw_pairwise_batch(
     CUDA_CHECK(cudaFree(d_distances));
     CUDA_CHECK(cudaFree(d_dtw_cost));
     CUDA_CHECK(cudaFree(d_new_dtw_cost));
-    CUDA_CHECK(cudaFree(d_path_matrix));
+    // d_path_matrix is nullptr, don't free it
 
     return 0;
 }
