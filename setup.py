@@ -72,18 +72,30 @@ class MultiExt(build_ext):
     def build_extension(self, ext):
         # Override compiler for CUDA extensions
         if hasattr(ext, "ext_type") and ext.ext_type == "dtw":
-            # Save original compiler
-            original_compiler = self.compiler.compiler_so[0]
-            
-            # Replace compiler with nvcc for CUDA extensions
             nvcc_path = shutil.which('nvcc')
-            if nvcc_path:
-                self.compiler.compiler_so[0] = nvcc_path
-                self.compiler.compiler_cxx = [nvcc_path]
-                self.compiler.linker_so[0] = nvcc_path
-        
-        # Build the extension
-        super().build_extension(ext)
+            if not nvcc_path:
+                raise RuntimeError("nvcc not found for building CUDA extension!")
+            
+            # Replace the entire compiler command lists with nvcc
+            original_compiler = self.compiler.compiler_so
+            original_compiler_cxx = self.compiler.compiler_cxx
+            original_linker = self.compiler.linker_so
+            
+            # Set nvcc as compiler
+            self.compiler.set_executable('compiler_so', nvcc_path)
+            self.compiler.set_executable('compiler_cxx', nvcc_path)
+            self.compiler.set_executable('linker_so', nvcc_path)
+            
+            try:
+                super().build_extension(ext)
+            finally:
+                # Restore original compiler for other extensions
+                self.compiler.compiler_so = original_compiler
+                self.compiler.compiler_cxx = original_compiler_cxx
+                self.compiler.linker_so = original_linker
+        else:
+            # Build non-CUDA extensions normally
+            super().build_extension(ext)
     
 
 
