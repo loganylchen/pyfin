@@ -235,6 +235,7 @@ cuda_dtw_extension = Extension(
         name="fin._dtw._cuda_dtw",
         sources=[
             os.path.join(OPENDBA_DIR,"dtw_api.cpp"),
+            os.path.join(OPENDBA_DIR,"multithreading.cpp"),
         ],
         depends = [
             os.path.join(OPENDBA_DIR,'cuda_utils.hpp'),
