@@ -225,8 +225,8 @@ def run_benchmark_suite():
         (5, 100),    # Small: quick test
         (10, 200),   # Small-medium
         (20, 300),   # Medium
-        (50, 500),   # Large
-        (100, 2000),
+        (20, 500),   # Large
+        (20, 2000),
         (100, 100000)
     ]
     
