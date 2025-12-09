@@ -84,7 +84,7 @@ def dtaidistance_pairwise(sequences):
     """dtaidistance CPU batch - optimized C implementation"""
     from dtaidistance import dtw
     # dtaidistance expects list of arrays
-    seq_list = [seq for seq in sequences]
+    seq_list = np.array([seq for seq in sequences])
     dist_matrix = dtw.distance_matrix_fast(seq_list)
     return np.array(dist_matrix)
 
