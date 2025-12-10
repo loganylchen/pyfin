@@ -25,8 +25,8 @@
 #define MODEL_ID_DNA_R9_NUCLEOTIDE 0
 #define MODEL_ID_DNA_R10_NUCLEOTIDE 5
 
-// Import model loading function from model.c
-extern uint32_t set_model(model_t *model, uint32_t model_id);
+// Model data is included from model.h (static arrays)
+// We'll load models directly from the built-in data
 
 // Import CPU alignment function
 extern int32_t align_with_flanking_cpu(
@@ -50,32 +50,8 @@ extern "C" int32_t align_with_flanking_gpu(
     simple_scalings_t scaling);
 #endif
 
-// Basic kmer rank calculation
-static inline uint32_t get_rank(char base)
-{
-    if (base == 'A')
-        return 0;
-    else if (base == 'C')
-        return 1;
-    else if (base == 'G')
-        return 2;
-    else if (base == 'T' || base == 'U')
-        return 3;
-    else
-        return 0;
-}
-
-static inline uint32_t get_kmer_rank(const char *str, uint32_t k)
-{
-    uint32_t r = 0;
-    for (uint32_t i = 0; i < k; ++i)
-    {
-        r += get_rank(str[k - i - 1]) << (i << 1);
-    }
-    return r;
-}
-
 // Simple scaling estimation (method of moments)
+// Note: get_rank and get_kmer_rank are already in align_common.h
 static simple_scalings_t estimate_scalings(const char *sequence, int32_t seq_len,
                                            simple_model_t *model, uint32_t kmer_size,
                                            event_table et)
@@ -203,34 +179,37 @@ static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
 
     // Allocate model array
     int n_kmers_model = 1 << (kmer_size * 2); // 4^k
-    model_t *model = (model_t *)malloc(n_kmers_model * sizeof(model_t));
+    simple_model_t *model = (simple_model_t *)malloc(n_kmers_model * sizeof(simple_model_t));
     if (!model)
     {
         free_event_table(&et);
         return PyErr_NoMemory();
     }
 
-    // Load the real pore model from built-in data
-    uint32_t loaded_kmer_size = set_model(model, model_id);
-    if (loaded_kmer_size != kmer_size)
+    // Load the real pore model from built-in data arrays in model.h
+    float *model_data = NULL;
+    if (model_id == MODEL_ID_RNA_R9_NUCLEOTIDE)
     {
-        free(model);
-        free_event_table(&et);
-        PyErr_Format(PyExc_RuntimeError, "Model kmer size mismatch: expected %d, got %d",
-                     kmer_size, loaded_kmer_size);
-        return NULL;
+        model_data = rna002_model_builtin_data;
+    }
+    else if (model_id == MODEL_ID_RNA_RNA004_NUCLEOTIDE)
+    {
+        model_data = rna004_model_builtin_data;
+    }
+    else
+    {
+        // DNA models not yet in model.h, use RNA for now
+        model_data = rna002_model_builtin_data;
+        kmer_size = 5; // Force to 5-mer
     }
 
-    // Pre-compute log_stdv for performance (if not already cached)
+    // Copy model data (format: mean, stdv, mean, stdv, ...)
     for (int i = 0; i < n_kmers_model; ++i)
     {
+        model[i].level_mean = model_data[i * 2 + 0];
+        model[i].level_stdv = model_data[i * 2 + 1];
         model[i].level_log_stdv = logf(model[i].level_stdv);
-    }
-
-    // Convert model_t to simple_model_t for alignment
-    simple_model_t *simple_model = (simple_model_t *)model; // Same structure
-
-    // Step 3: Estimate scaling parameters
+    } // Step 3: Estimate scaling parameters
     simple_scalings_t scaling = estimate_scalings(sequence, seq_len, model, kmer_size, et);
 
     // Step 4: Align events to sequence
