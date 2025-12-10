@@ -433,8 +433,8 @@ event_table detect_events_simple(raw_table const rt, int is_rna)
     compute_sum_sumsq(rt.raw, work_start, sums, sumsqs, work_n);
 
     // Get detector parameters
-    detector_param_t *params = is_rna ? &RNA_DEFAULTS : &DNA_DEFAULTS;
-
+    // detector_param_t *params = is_rna ? &RNA_DEFAULTS : &DNA_DEFAULTS;
+    detector_param_t *params = &RNA_DEFAULTS;
     // Compute t-statistics for both window sizes
     float *tstat1 = compute_tstat(sums, sumsqs, work_n, params->window_length1);
     float *tstat2 = compute_tstat(sums, sumsqs, work_n, params->window_length2);
