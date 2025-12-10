@@ -12,16 +12,7 @@
 #include <stdbool.h>
 #include "event_detection_simple.h"
 
-// Detector parameters
-typedef struct
-{
-    size_t window_length1;
-    size_t window_length2;
-    float threshold1;
-    float threshold2;
-    float peak_height;
-} detector_param_t;
-
+// RNA detector parameters (from f5c)
 static detector_param_t RNA_DEFAULTS = {
     .window_length1 = 7,
     .window_length2 = 14,
