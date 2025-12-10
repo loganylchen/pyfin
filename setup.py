@@ -234,10 +234,14 @@ eventalign_extension = Extension(
     name="fin._f5c._eventalign",
     sources=[
         os.path.join(F5C_DIR, 'eventalign.c'),
-        os.path.join(F5C_DIR, 'event_detection_simple.c')
+        os.path.join(F5C_DIR, 'event_detection_simple.c'),
+        os.path.join(F5C_DIR, 'model.c'),
+        os.path.join(F5C_DIR, 'align.c')  # Add align.c for CPU alignment
     ],
     depends=[
-        os.path.join(F5C_DIR, 'event_detection_simple.h')
+        os.path.join(F5C_DIR, 'event_detection_simple.h'),
+        os.path.join(F5C_DIR, 'align_common.h'),
+        os.path.join(F5C_DIR, 'model.h')
     ],
     include_dirs=[F5C_DIR],
 )
