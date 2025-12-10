@@ -60,7 +60,11 @@ static float medianf(float *x, size_t n)
 }
 
 // Calculate quantile of float array
-static void quantilef(float *x, size_t n, const float *p, size_t np)
+// x: input array to calculate quantiles from
+// n: length of x
+// p: array of percentiles (e.g., 0.0, 0.5, 1.0), modified in place with results
+// np: number of percentiles to calculate
+static void quantilef(const float *x, size_t n, float *p, size_t np)
 {
     if (n == 0 || np == 0)
         return;
@@ -82,12 +86,12 @@ static void quantilef(float *x, size_t n, const float *p, size_t np)
 
         if (idx >= n - 1)
         {
-            x[i] = tmp[n - 1];
+            p[i] = tmp[n - 1]; // Write result to p[i], not x[i]
         }
         else
         {
             float frac = pos - idx;
-            x[i] = tmp[idx] * (1.0f - frac) + tmp[idx + 1] * frac;
+            p[i] = tmp[idx] * (1.0f - frac) + tmp[idx + 1] * frac; // Write result to p[i]
         }
     }
 
