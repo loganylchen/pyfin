@@ -12,7 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from fin import detect_events, eventalign
-
+import pickle
 
 def generate_signal_from_sequence(sequence, samples_per_base=50, noise_level=2.5, seed=42):
     """
@@ -220,13 +220,15 @@ def main():
     
     # 1. Define a reference sequence
     print("\n[1] Setting up reference sequence...")
-    sequence = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"  # 40 bases
+    sequence = "AAACTGCAAATAAAATAATAAAAAGGAAAGGAAACTTTGAACCTTATGTACATGAAATAATGCAGGTCTAGCTAAACATAATGCTAGTCCTAGATTACTTATTGATTTAAAAACAAAAAACAAAAAATAGTAAAATAAAACAATTAATGTTTTCATAGACCTAAGGAAAAAGAATTTCTTGACAAGTACAAAAAAAAATTTAAAGCATTCCTTTTTAATTTGTAATTTTTTTTACTGTGGAATAAATTTGCAGAATGTCAGTTTTGTTTAGTAACAGAATTTGATATATTGAGCAGGAAACGCAATATTTGGATTATAAAATTCTTGCTTTAATAAAAATTCCTTAAACAGTGAAAAAAAT"  # 40 bases
     print(f"    Sequence: {sequence}")
     print(f"    Length: {len(sequence)} bases")
     
     # 2. Generate synthetic signal from sequence
     print("\n[2] Generating synthetic nanopore signal from sequence...")
-    raw_signal = generate_signal_from_sequence(sequence, samples_per_base=50, noise_level=2.5)
+    # raw_signal = generate_signal_from_sequence(sequence, samples_per_base=50, noise_level=2.5)
+    with open('examples/signal.pkl', 'rb') as f:
+        raw_signal = pickle.load(f)
     print(f"    ✓ Generated {len(raw_signal)} samples")
     print(f"    ✓ Signal range: {raw_signal.min():.2f} - {raw_signal.max():.2f} pA")
     print(f"    ✓ Average samples per base: ~50")
