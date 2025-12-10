@@ -235,8 +235,8 @@ eventalign_extension = Extension(
     sources=[
         os.path.join(F5C_DIR, 'eventalign.c'),
         os.path.join(F5C_DIR, 'event_detection_simple.c'),
-        os.path.join(F5C_DIR, 'model.c'),
-        os.path.join(F5C_DIR, 'align.c')  # Add align.c for CPU alignment
+        os.path.join(F5C_DIR, 'align.c')  # CPU alignment with 3-state HMM
+        # Note: model.c not needed - we load models directly from model.h arrays
     ],
     depends=[
         os.path.join(F5C_DIR, 'event_detection_simple.h'),
