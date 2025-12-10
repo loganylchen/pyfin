@@ -228,6 +228,20 @@ f5c_extension = Extension(
     
 )
 f5c_extension.ext_type='f5c'
+
+# Eventalign extension
+eventalign_extension = Extension(
+    name="fin._f5c._eventalign",
+    sources=[
+        os.path.join(F5C_DIR, 'eventalign.c'),
+        os.path.join(F5C_DIR, 'event_detection_simple.c')
+    ],
+    depends=[
+        os.path.join(F5C_DIR, 'event_detection_simple.h')
+    ],
+    include_dirs=[F5C_DIR],
+)
+eventalign_extension.ext_type = 'f5c'
    
 # DTW/CUDA extension with Python bindings
 OPENDBA_DIR = os.path.join("fin",'_dtw')
@@ -275,7 +289,7 @@ def main():
             "fin": ["*.py", "*.c", "*.h", "*.yaml", "*.yml"],
         },
         include_package_data=True,
-        ext_modules=[f5c_extension, cuda_dtw_extension],
+        ext_modules=[f5c_extension, eventalign_extension, cuda_dtw_extension],
         cmdclass={"build_ext": MultiExt},
         python_requires=">=3.8",
         install_requires=[
