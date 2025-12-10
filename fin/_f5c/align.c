@@ -230,7 +230,7 @@ static inline float update_cell(float *cell, HMMUpdateScores *scores, float emis
 
 // CPU implementation: Full f5c HMM with 3 states
 int32_t align_with_flanking_cpu(
-    simple_aligned_pair_t *out,
+    simple_aligned_pair_t **out_alignment,
     const char *sequence,
     int32_t seq_len,
     event_table events,
@@ -359,7 +359,7 @@ int32_t align_with_flanking_cpu(
             float lp_emission_b = BAD_EVENT_PENALTY;
 
             HMMUpdateScores scores;
-            int prev_state, prev_block;
+            int prev_state_trace, prev_block_trace;
 
             // STATE_MATCH: Event matches this kmer
             scores.x[HMT_FROM_SAME_M] = bt->lp_mm_self + dp[row - 1][curr_offset + STATE_MATCH];
@@ -370,9 +370,9 @@ int32_t align_with_flanking_cpu(
             scores.x[HMT_FROM_SOFT] = (kmer_idx == 0) ? lp_sm + pre_flank[row - 1] : -INFINITY;
 
             update_cell(&dp[row][curr_offset + STATE_MATCH], &scores, lp_emission_m,
-                        &prev_state, &prev_block, block, STATE_MATCH);
-            traceback_state[row][curr_offset + STATE_MATCH] = prev_state;
-            traceback_kmer[row][curr_offset + STATE_MATCH] = prev_block;
+                        &prev_state_trace, &prev_block_trace, block, STATE_MATCH);
+            traceback_state[row][curr_offset + STATE_MATCH] = prev_state_trace;
+            traceback_kmer[row][curr_offset + STATE_MATCH] = prev_block_trace;
 
             // STATE_BAD_EVENT: This event should be ignored
             scores.x[HMT_FROM_SAME_M] = bt->lp_mb + dp[row - 1][curr_offset + STATE_MATCH];
@@ -383,9 +383,9 @@ int32_t align_with_flanking_cpu(
             scores.x[HMT_FROM_SOFT] = -INFINITY;
 
             update_cell(&dp[row][curr_offset + STATE_BAD_EVENT], &scores, lp_emission_b,
-                        &prev_state, &prev_block, block, STATE_BAD_EVENT);
-            traceback_state[row][curr_offset + STATE_BAD_EVENT] = prev_state;
-            traceback_kmer[row][curr_offset + STATE_BAD_EVENT] = prev_block;
+                        &prev_state_trace, &prev_block_trace, block, STATE_BAD_EVENT);
+            traceback_state[row][curr_offset + STATE_BAD_EVENT] = prev_state_trace;
+            traceback_kmer[row][curr_offset + STATE_BAD_EVENT] = prev_block_trace;
 
             // STATE_KMER_SKIP: No event for this kmer
             scores.x[HMT_FROM_SAME_M] = -INFINITY;
@@ -396,9 +396,9 @@ int32_t align_with_flanking_cpu(
             scores.x[HMT_FROM_SOFT] = -INFINITY;
 
             update_cell(&dp[row][curr_offset + STATE_KMER_SKIP], &scores, 0.0f,
-                        &prev_state, &prev_block, block, STATE_KMER_SKIP);
-            traceback_state[row][curr_offset + STATE_KMER_SKIP] = prev_state;
-            traceback_kmer[row][curr_offset + STATE_KMER_SKIP] = prev_block;
+                        &prev_state_trace, &prev_block_trace, block, STATE_KMER_SKIP);
+            traceback_state[row][curr_offset + STATE_KMER_SKIP] = prev_state_trace;
+            traceback_kmer[row][curr_offset + STATE_KMER_SKIP] = prev_block_trace;
         }
     }
 
