@@ -10,7 +10,7 @@ This example demonstrates:
 import numpy as np
 import matplotlib.pyplot as plt
 from fin import detect_events
-
+import pickle
 
 def generate_synthetic_signal(n_samples=2000, seed=42):
     """
@@ -168,7 +168,10 @@ def main():
     
     # 1. Generate synthetic signal
     print("\n[1] Generating synthetic nanopore signal...")
-    raw_signal, adapter_length = generate_synthetic_signal(n_samples=2000, seed=42)
+    # raw_signal, adapter_length = generate_synthetic_signal(n_samples=2000, seed=42)
+    with open('signal.pkl','rb') as f:
+        raw_signal= pickle.load(f)
+    adapter_length=200
     print(f"    ✓ Generated {len(raw_signal)} samples")
     print(f"    ✓ Adapter region: 0-{adapter_length} samples")
     print(f"    ✓ Signal range: {raw_signal.min():.2f} - {raw_signal.max():.2f} pA")
