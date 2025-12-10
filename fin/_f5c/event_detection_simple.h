@@ -1,6 +1,6 @@
 /*
  * Simple event detection header
- * Standalone implementation without external dependencies
+ * Standalone implementation adapted from f5c/scrappie
  */
 
 #ifndef EVENT_DETECTION_SIMPLE_H
@@ -10,7 +10,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// Forward declare the event structure
+// Event structure
 typedef struct
 {
     float mean;
@@ -19,6 +19,7 @@ typedef struct
     float length;
 } event_t;
 
+// Event table structure
 typedef struct
 {
     size_t n;
@@ -27,6 +28,7 @@ typedef struct
     event_t *event;
 } event_table;
 
+// Raw signal table structure
 typedef struct
 {
     size_t n;
@@ -35,12 +37,25 @@ typedef struct
     float *raw;
 } raw_table;
 
-// Event detection function
-event_table detect_events_simple(raw_table const rt, int is_rna);
+// Detector parameters structure
+typedef struct
+{
+    size_t window_length1;
+    size_t window_length2;
+    float threshold1;
+    float threshold2;
+    float peak_height;
+} detector_param_t;
 
+// Main event detection function using f5c algorithm
+// Takes raw signal table and detector parameters
+event_table detect_events_simple(raw_table const rt, detector_param_t const edparam);
+
+// High-level wrapper function for numpy arrays with adapter trimming
+// Uses RNA defaults for event detection
 event_table getevents_simple(size_t nsample, float *rawptr, int is_rna);
 
-// Free event table
+// Free event table memory
 void free_event_table(event_table *et);
 
 #endif // EVENT_DETECTION_SIMPLE_H
