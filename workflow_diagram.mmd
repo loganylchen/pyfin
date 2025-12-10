@@ -1,0 +1,140 @@
+---
+title: RNA Modification Detection Workflow (FIN)
+---
+
+```mermaid
+graph TD
+    subgraph "Input Data"
+        A1[BAM File: Aligned Reads]
+        A2[FAST5/POD5/SLOW5: Raw Signals]
+        A3[Reference FASTA: Genome Sequence]
+        A4[GTF File: Annotations]
+        A5[Config YAML: Parameters]
+    end
+
+    subgraph "Stage 1: Region Extraction"
+        B1[Parse Target Region<br/>chr:start-end or Gene Name]
+        B2[Extract Reads from BAM]
+        B3[Load Raw Signals]
+        B4[Parse GTF Annotations]
+    end
+
+    subgraph "Stage 2: Isoform Prior Generation"
+        C1[Extract Reference Isoforms<br/>from GTF]
+        C2[Extract Read-Derived Isoforms<br/>from BAM]
+        C3[Get Transcript Sequences<br/>from Reference FASTA]
+        C4[Create IsoformSequence Objects]
+    end
+
+    subgraph "Stage 3: Event Detection & Alignment (Eventalign)"
+        D1[Raw Signal<br/>&#8594; Statistical Events]
+        D2[Adaptive Banded<br/>Event Alignment]
+        D3[Calculate<br/>Alignment Completeness]
+        D4[Build Completeness Matrix<br/>(Reads × Isoforms)]
+    end
+
+    subgraph "Stage 4: DTW Signal Clustering"
+        E1[Extract Signal Events<br/>for Each Read]
+        E2[Compute Pairwise<br/>DTW Distances]
+        E3[Build Distance Matrix<br/>(Reads × Reads)]
+        E4[Graph-Based<br/>Signal Clustering]
+    end
+
+    subgraph "Stage 5: Integration & Validation"
+        F1[Combine Completeness<br/>& Cluster Data]
+        F2[Validate Isoforms:<br/>- Min Read Support<br/>- Min Completeness<br/>- Cluster Consistency]
+        F3[Classify Isoforms:<br/>Annotated vs Novel]
+        F4[Calculate<br/>Confidence Scores]
+    end
+
+    subgraph "Stage 6: Read Assignment & Output"
+        G1[Assign Reads to<br/>Validated Isoforms]
+        G2[Generate GTF Output<br/>(Isoform Annotations)]
+        G3[Generate BED12 Output<br/>(Read Assignments)]
+        G4[Generate TSV Output<br/>(Detailed Scores)]
+    end
+
+    subgraph "Optional: Gene Fusion Detection"
+        H1[Detect Chimeric Reads<br/>from Clipped Alignments]
+        H2[Validate with<br/>Eventalign Completeness]
+        H3[Output Fusion<br/>Junctions]
+    end
+
+    %% Input to Stage 1
+    A1 --> B2
+    A2 --> B3
+    A3 --> B4
+    A4 --> B4
+    A5 --> B1
+
+    %% Stage 1 to Stage 2
+    B2 --> C2
+    B3 --> D1
+    B4 --> C1
+
+    %% Stage 2 to Stage 3
+    C1 --> D2
+    C2 --> D2
+    C4 --> D2
+
+    %% Stage 3 outputs
+    D4 --> F1
+    D3 --> F2
+
+    %% Stage 4 outputs
+    E3 --> E4
+    E4 --> F1
+    E2 --> F2
+
+    %% Parallel processing
+    D1 --> E1
+    D1 -.-> E2
+    D2 -.-> E3
+
+    %% Stage 5 outputs
+    F2 --> G1
+    F3 --> G2
+    F4 --> G2
+
+    %% Stage 6 outputs
+    G1 --> G3
+    G1 --> G4
+    G2 --> Output1[GTF File]
+    G3 --> Output2[BED12 File]
+    G4 --> Output3[TSV File]
+
+    %% Optional fusion detection
+    B2 -.-> H1
+    H1 --> H2
+    H2 --> H3
+    H3 --> Output4[Fusion Junctions]
+
+    %% Data structures
+    D4 --> D4_matrix["Completeness Matrix<br/><i>N reads × M isoforms</i>"]
+    E3 --> E3_matrix["Distance Matrix<br/><i>N reads × N reads</i>"]
+    F1 --> F1_integrated["Integrated Scores<br/>Validation Metrics"]
+
+    %% Styling
+    classDef inputNode fill:#e1f5ff,stroke:#4a90e2,stroke-width:2px,color:#333
+    classDef stageNode fill:#fff2cc,stroke:#d4a574,stroke-width:2px,color:#333
+    classDef outputNode fill:#e8f5e9,stroke:#66bb6a,stroke-width:2px,color:#333
+    classDef matrixNode fill:#fce4ec,stroke:#ec407a,stroke-width:2px,color:#333
+
+    class A1,A2,A3,A4,A5 inputNode
+    class B1,B2,B3,B4,C1,C2,C3,C4,D1,D2,D3,E1,E2,E3,E4,F1,F2,F3,F4,G1,G2,G3,G4,H1,H2,H3 stageNode
+    class Output1,Output2,Output3,Output4 outputNode
+    class D4_matrix,E3_matrix,F1_integrated matrixNode
+
+    %% Annotations
+    A0["FIN<br/>RNA Modification Detection"]:::titleNode
+
+    subgraph keys["Legend"]
+        direction LR
+        K1["Input Data"]:::inputNode
+        K2["Processing Stage"]:::stageNode
+        K3["Output Data"]:::outputNode
+        K4["Data Structure/Matrix"]:::matrixNode
+    end
+
+    style A0 fill:#333,stroke:#000,stroke-width:3px,color:#fff
+```

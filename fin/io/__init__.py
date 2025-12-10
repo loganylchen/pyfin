@@ -17,6 +17,9 @@ from .interval_manager import (
     extract_annotation_for_interval,
     is_fusion_read
 )
+from .region_separator import (
+    RegionSeparator, GeneRegion, FusionReadDetector, separate_regions
+)
 
 # Import optional readers with lazy loading
 class _LazyImporter:
