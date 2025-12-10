@@ -28,13 +28,6 @@ static detector_param_t RNA_DEFAULTS = {
     .threshold2 = 9.0f,
     .peak_height = 1.0f};
 
-static detector_param_t DNA_DEFAULTS = {
-    .window_length1 = 3,
-    .window_length2 = 6,
-    .threshold1 = 1.4f,
-    .threshold2 = 9.0f,
-    .peak_height = 0.2f};
-
 // Helper function for sorting floats
 static int compare_float(const void *a, const void *b)
 {
