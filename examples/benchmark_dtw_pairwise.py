@@ -13,7 +13,10 @@ import numpy as np
 import time
 from typing import Dict, List, Tuple
 import sys
-
+"""Numba JIT-compiled pairwise"""
+from numba import jit
+    
+    
 
 def benchmark_pairwise(
     sequences: np.ndarray,
@@ -119,12 +122,9 @@ def python_naive_pairwise(sequences):
     
     return dist_matrix
 
-
+@jit(nopython=True)
 def numba_pairwise(sequences):
-    """Numba JIT-compiled pairwise"""
-    from numba import jit
     
-    @jit(nopython=True)
     def dtw_numba(seq1, seq2):
         n, m = len(seq1), len(seq2)
         dtw_matrix = np.full((n + 1, m + 1), np.inf)
