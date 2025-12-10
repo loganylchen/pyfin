@@ -169,7 +169,7 @@ def main():
     # 1. Generate synthetic signal
     print("\n[1] Generating synthetic nanopore signal...")
     # raw_signal, adapter_length = generate_synthetic_signal(n_samples=2000, seed=42)
-    with open('signal.pkl','rb') as f:
+    with open('examples/signal.pkl','rb') as f:
         raw_signal= pickle.load(f)
     adapter_length=200
     print(f"    ✓ Generated {len(raw_signal)} samples")
