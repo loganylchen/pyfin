@@ -22,7 +22,7 @@ def generate_synthetic_signal(n_samples=2000, seed=42):
     np.random.seed(seed)
     
     # Adapter region (200-300 samples): high unstable current
-    adapter_length = 250
+    adapter_length = 750
     adapter = np.random.normal(loc=150.0, scale=20.0, size=adapter_length)
     # Add some drift to adapter
     adapter += np.linspace(0, -30, adapter_length)
