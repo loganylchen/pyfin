@@ -5,6 +5,7 @@ GTF/GFF file format parser
 from typing import List, Dict, Optional, Iterator, Tuple, Any, Generator
 from pathlib import Path
 import logging
+import gzip
 
 
 logger = logging.getLogger(__name__)
