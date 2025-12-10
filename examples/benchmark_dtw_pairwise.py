@@ -227,7 +227,7 @@ def run_benchmark_suite():
         (20, 300),   # Medium
         (20, 500),   # Large
         (20, 2000),
-        (100, 100000)
+        (20, 10000)
     ]
     
     # Skip expensive tests for slow implementations
