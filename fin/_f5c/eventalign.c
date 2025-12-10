@@ -1,8 +1,13 @@
 /*
- * Python wrapper for f5c eventalign - event to sequence alignment
+ * Python wrapper for f5c eventalign - event to sequence alignment with soft-clipping
  *
- * This module provides a simplified Python interface to align detected events
- * to a reference sequence (k-mer model).
+ * This module provides a Python interface to align detected events
+ * to a reference sequence (k-mer model) using HMM with soft-clipping states
+ * to handle untrimmed adapters and low-quality regions.
+ *
+ * The actual alignment algorithms are in:
+ * - align.c: CPU implementation
+ * - align.cu: GPU implementation (CUDA)
  */
 
 #define PY_SSIZE_T_CLEAN
@@ -10,34 +15,40 @@
 #include <numpy/arrayobject.h>
 #include <stdlib.h>
 #include <string.h>
-#include "event_detection_simple.h"
+#include <math.h>
+#include "align_common.h"
+#include "model.h"
 
-// Import f5c alignment functions (we'll need to link against f5c)
-// These are declared in f5c headers but we need basic versions here
+// Model IDs from f5c
+#define MODEL_ID_RNA_R9_NUCLEOTIDE 3
+#define MODEL_ID_RNA_RNA004_NUCLEOTIDE 6
+#define MODEL_ID_DNA_R9_NUCLEOTIDE 0
+#define MODEL_ID_DNA_R10_NUCLEOTIDE 5
 
-// Simplified model structure for Python wrapper
-typedef struct
-{
-    float level_mean;
-    float level_stdv;
-    float level_log_stdv;
-} simple_model_t;
+// Import model loading function from model.c
+extern uint32_t set_model(model_t *model, uint32_t model_id);
 
-// Simplified scaling structure
-typedef struct
-{
-    float scale;
-    float shift;
-    float var;
-    float log_var;
-} simple_scalings_t;
+// Import CPU alignment function
+extern int32_t align_with_flanking_cpu(
+    simple_aligned_pair_t **out_alignment,
+    const char *sequence,
+    int32_t seq_len,
+    event_table events,
+    simple_model_t *model,
+    uint32_t kmer_size,
+    simple_scalings_t scaling);
 
-// Simplified aligned pair structure
-typedef struct
-{
-    int ref_pos;  // kmer index in sequence
-    int read_pos; // event index
-} simple_aligned_pair_t;
+// Import GPU alignment function (if CUDA is available)
+#ifdef CUDA_ENABLED
+extern "C" int32_t align_with_flanking_gpu(
+    simple_aligned_pair_t *out,
+    const char *sequence,
+    int32_t seq_len,
+    event_table events,
+    simple_model_t *model,
+    uint32_t kmer_size,
+    simple_scalings_t scaling);
+#endif
 
 // Basic kmer rank calculation
 static inline uint32_t get_rank(char base)
@@ -110,42 +121,6 @@ static simple_scalings_t estimate_scalings(const char *sequence, int32_t seq_len
     return out;
 }
 
-// Simplified alignment function (basic dynamic programming)
-// This creates a base-to-event mapping
-static int32_t simple_align(simple_aligned_pair_t *out, const char *sequence, int32_t seq_len,
-                            event_table events, simple_model_t *model, uint32_t kmer_size,
-                            simple_scalings_t scaling)
-{
-    int32_t n_kmers = seq_len - kmer_size + 1;
-    int32_t n_events = events.n;
-
-    // Simple heuristic alignment: distribute events uniformly across kmers
-    float events_per_kmer = (float)n_events / (float)n_kmers;
-
-    int out_idx = 0;
-    float event_idx_float = 0.0f;
-
-    for (int32_t ki = 0; ki < n_kmers; ++ki)
-    {
-        int start_event = (int)event_idx_float;
-        event_idx_float += events_per_kmer;
-        int end_event = (int)event_idx_float;
-
-        if (end_event > n_events)
-            end_event = n_events;
-
-        // Map this kmer to its events
-        for (int ei = start_event; ei < end_event && ei < n_events; ++ei)
-        {
-            out[out_idx].ref_pos = ki;
-            out[out_idx].read_pos = ei;
-            out_idx++;
-        }
-    }
-
-    return out_idx;
-}
-
 // Python wrapper for eventalign
 static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
 {
@@ -195,37 +170,88 @@ static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    // Step 2: Load or create simple model (5-mer DNA model by default)
+    // Step 2: Load real pore model based on chemistry and kmer size
+    uint32_t model_id;
+    uint32_t model_kmer_size;
+
+    // Determine which model to use
+    if (is_rna)
+    {
+        if (kmer_size == 9)
+        {
+            model_id = MODEL_ID_RNA_RNA004_NUCLEOTIDE; // RNA004 9-mer
+            model_kmer_size = 9;
+        }
+        else
+        {
+            model_id = MODEL_ID_RNA_R9_NUCLEOTIDE; // RNA R9.4 5-mer (default)
+            model_kmer_size = 5;
+        }
+    }
+    else
+    {
+        // DNA models - for now use R9.4 (we can add R10 support later)
+        model_id = MODEL_ID_DNA_R9_NUCLEOTIDE;
+        model_kmer_size = 5;
+    }
+
+    // Override kmer_size if not specified or doesn't match model
+    if (kmer_size != model_kmer_size)
+    {
+        kmer_size = model_kmer_size;
+    }
+
+    // Allocate model array
     int n_kmers_model = 1 << (kmer_size * 2); // 4^k
-    simple_model_t *model = (simple_model_t *)malloc(n_kmers_model * sizeof(simple_model_t));
+    model_t *model = (model_t *)malloc(n_kmers_model * sizeof(model_t));
     if (!model)
     {
         free_event_table(&et);
         return PyErr_NoMemory();
     }
 
-    // Use default model values (these would normally come from a model file)
+    // Load the real pore model from built-in data
+    uint32_t loaded_kmer_size = set_model(model, model_id);
+    if (loaded_kmer_size != kmer_size)
+    {
+        free(model);
+        free_event_table(&et);
+        PyErr_Format(PyExc_RuntimeError, "Model kmer size mismatch: expected %d, got %d",
+                     kmer_size, loaded_kmer_size);
+        return NULL;
+    }
+
+    // Pre-compute log_stdv for performance (if not already cached)
     for (int i = 0; i < n_kmers_model; ++i)
     {
-        model[i].level_mean = 100.0f + (i % 20) - 10.0f; // Simplified
-        model[i].level_stdv = 2.5f;
-        model[i].level_log_stdv = 0.916f; // log(2.5)
+        model[i].level_log_stdv = logf(model[i].level_stdv);
     }
+
+    // Convert model_t to simple_model_t for alignment
+    simple_model_t *simple_model = (simple_model_t *)model; // Same structure
 
     // Step 3: Estimate scaling parameters
     simple_scalings_t scaling = estimate_scalings(sequence, seq_len, model, kmer_size, et);
 
     // Step 4: Align events to sequence
-    int max_pairs = et.n + seq_len;
-    simple_aligned_pair_t *aligned_pairs = (simple_aligned_pair_t *)malloc(max_pairs * sizeof(simple_aligned_pair_t));
-    if (!aligned_pairs)
+    // alignment function will allocate memory dynamically
+    simple_aligned_pair_t *aligned_pairs = NULL;
+
+    // Use enhanced alignment with soft-clipping support
+    // By default, use CPU implementation (GPU can be enabled at compile time)
+#ifdef CUDA_ENABLED
+    int n_pairs = align_with_flanking_gpu(&aligned_pairs, sequence, seq_len, et, model, kmer_size, scaling);
+#else
+    int n_pairs = align_with_flanking_cpu(&aligned_pairs, sequence, seq_len, et, model, kmer_size, scaling);
+#endif
+
+    if (n_pairs <= 0 || !aligned_pairs)
     {
         free(model);
         free_event_table(&et);
-        return PyErr_NoMemory();
+        PyErr_SetString(PyExc_RuntimeError, "Alignment failed");
+        return NULL;
     }
-
-    int n_pairs = simple_align(aligned_pairs, sequence, seq_len, et, model, kmer_size, scaling);
 
     // Step 5: Create base_to_event_map
     int n_kmers_seq = seq_len - kmer_size + 1;
@@ -287,26 +313,50 @@ static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
 // Method definitions
 static PyMethodDef EventalignMethods[] = {
     {"eventalign", (PyCFunction)py_eventalign, METH_VARARGS | METH_KEYWORDS,
-     "Align nanopore events to a reference sequence.\n\n"
+     "Align nanopore events to a reference sequence with soft-clipping.\n\n"
+     "This function uses HMM-based alignment with soft-clipping states to handle\n"
+     "untrimmed adapters and low-quality regions at the start/end of reads.\n"
+     "Events in adapter regions are automatically skipped during alignment.\n\n"
      "Args:\n"
      "    raw_signal: 1D numpy float32 array of raw signal\n"
      "    sequence: Reference DNA/RNA sequence string\n"
-     "    model: Optional k-mer model dict (default: built-in)\n"
+     "    model: Optional k-mer model dict (default: built-in pore models)\n"
      "    is_rna: int (1 for RNA, 0 for DNA, default: 0)\n"
-     "    kmer_size: k-mer size (default: 5)\n\n"
+     "    kmer_size: k-mer size (5 or 9, default: auto-selected based on model)\n\n"
      "Returns:\n"
      "    dict with keys:\n"
      "        - base_to_event_map: list of dicts mapping kmers to events\n"
      "        - scaling: dict with 'scale' and 'shift' parameters\n"
      "        - n_events: number of detected events\n"
-     "        - n_aligned_pairs: number of aligned pairs\n"},
+     "        - n_aligned_pairs: number of aligned pairs (excludes soft-clipped)\n\n"
+     "Models:\n"
+     "    RNA:\n"
+     "        - kmer_size=5: RNA R9.4 5-mer model (default)\n"
+     "        - kmer_size=9: RNA004 9-mer model\n"
+     "    DNA:\n"
+     "        - kmer_size=5: DNA R9.4 5-mer model (default)\n\n"
+     "Alignment:\n"
+     "    Uses f5c's full 3-state HMM with:\n"
+     "    - MATCH state: Event matches kmer\n"
+     "    - BAD_EVENT state: Noisy event to skip\n"
+     "    - KMER_SKIP state: Kmer with no event\n"
+     "    - Soft-clipping: TRANS_START_TO_CLIP=0.5, TRANS_CLIP_SELF=0.9\n"
+     "    - Dynamic transitions based on events_per_base ratio\n"},
     {NULL, NULL, 0, NULL}};
 
 // Module definition
 static struct PyModuleDef eventalign_module = {
     PyModuleDef_HEAD_INIT,
     "_eventalign",
-    "Event-to-sequence alignment for nanopore signals",
+    "Raw signal to sequence alignment for nanopore data.\n\n"
+    "Pipeline: Raw signal → Event detection → 3-state HMM alignment\n"
+    "Features:\n"
+    "  - Real pore models (RNA R9.4, RNA004, DNA R9.4)\n"
+    "  - f5c's full 3-state HMM (MATCH, BAD_EVENT, KMER_SKIP)\n"
+    "  - Soft-clipping for untrimmed adapters\n"
+    "  - Dynamic transition probabilities\n"
+    "  - MAD-based adapter trimming\n"
+    "Based on f5c/nanopolish eventalign algorithm.",
     -1,
     EventalignMethods};
 
