@@ -40,6 +40,24 @@ import json
 
 import numpy as np
 
+# Optional visualization imports
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+
+# Optional clustering imports
+try:
+    from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
+    from scipy.spatial.distance import squareform
+
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+
 # Add parent directory to path for development
 parent_dir = Path(__file__).parent.parent
 if str(parent_dir) not in sys.path:
@@ -342,6 +360,181 @@ class RegionTranscriptAnalyzer:
             logger.warning(f"DTW computation failed: {e}")
             return None
 
+    def cluster_reads_by_dtw(
+        self,
+        distance_matrix: np.ndarray,
+        read_ids: List[str],
+        method: str = "ward",
+        n_clusters: Optional[int] = None,
+        distance_threshold: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Perform hierarchical clustering on reads based on DTW distance matrix.
+
+        Args:
+            distance_matrix: Pairwise DTW distance matrix (n x n)
+            read_ids: List of read IDs corresponding to matrix rows/columns
+            method: Linkage method ('ward', 'complete', 'average', 'single')
+            n_clusters: Number of clusters to form (optional)
+            distance_threshold: Distance threshold for forming clusters (optional)
+
+        Returns:
+            Dictionary with clustering results
+        """
+        if not SCIPY_AVAILABLE:
+            logger.warning("scipy not available for clustering")
+            return {"error": "scipy not installed"}
+
+        if len(read_ids) < 2:
+            return {"error": "Need at least 2 reads for clustering"}
+
+        try:
+            # Convert distance matrix to condensed form for scipy
+            # Ensure matrix is symmetric and has zero diagonal
+            dist_matrix = np.array(distance_matrix)
+            np.fill_diagonal(dist_matrix, 0)
+            dist_matrix = (dist_matrix + dist_matrix.T) / 2  # Ensure symmetry
+
+            condensed_dist = squareform(dist_matrix)
+
+            # Perform hierarchical clustering
+            linkage_matrix = linkage(condensed_dist, method=method)
+
+            # Determine cluster assignments
+            if n_clusters is not None:
+                cluster_labels = fcluster(linkage_matrix, n_clusters, criterion="maxclust")
+            elif distance_threshold is not None:
+                cluster_labels = fcluster(linkage_matrix, distance_threshold, criterion="distance")
+            else:
+                # Default: use 2 clusters
+                cluster_labels = fcluster(linkage_matrix, 2, criterion="maxclust")
+
+            # Build cluster membership
+            clusters = defaultdict(list)
+            for read_id, label in zip(read_ids, cluster_labels):
+                clusters[int(label)].append(read_id)
+
+            return {
+                "method": method,
+                "n_clusters": len(clusters),
+                "cluster_labels": cluster_labels.tolist(),
+                "clusters": dict(clusters),
+                "linkage_matrix": linkage_matrix.tolist(),
+                "read_ids": read_ids,
+            }
+
+        except Exception as e:
+            logger.error(f"Clustering failed: {e}")
+            return {"error": str(e)}
+
+    def plot_dtw_heatmap(
+        self,
+        distance_matrix: np.ndarray,
+        read_ids: List[str],
+        output_path: Path,
+        title: str = "DTW Distance Matrix",
+        cluster_result: Optional[Dict] = None,
+        figsize: Tuple[int, int] = (12, 10),
+    ) -> Optional[Path]:
+        """
+        Generate a heatmap visualization of the DTW distance matrix.
+
+        Args:
+            distance_matrix: Pairwise DTW distance matrix
+            read_ids: List of read IDs
+            output_path: Path to save the heatmap image
+            title: Plot title
+            cluster_result: Optional clustering result for dendrogram
+            figsize: Figure size
+
+        Returns:
+            Path to saved image, or None if visualization failed
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            logger.warning("matplotlib not available for visualization")
+            return None
+
+        try:
+            dist_matrix = np.array(distance_matrix)
+            n_reads = len(read_ids)
+
+            # Create figure with optional dendrogram
+            if cluster_result and SCIPY_AVAILABLE and "linkage_matrix" in cluster_result:
+                fig = plt.figure(figsize=(figsize[0] + 2, figsize[1]))
+
+                # Create grid for dendrogram + heatmap
+                gs = fig.add_gridspec(1, 2, width_ratios=[1, 4], wspace=0.02)
+
+                # Dendrogram on the left
+                ax_dendro = fig.add_subplot(gs[0])
+                linkage_matrix = np.array(cluster_result["linkage_matrix"])
+                dendro = dendrogram(
+                    linkage_matrix,
+                    orientation="left",
+                    labels=read_ids,
+                    ax=ax_dendro,
+                    leaf_font_size=8,
+                )
+                ax_dendro.set_xlabel("Distance")
+                ax_dendro.set_title("Clustering")
+
+                # Reorder matrix according to dendrogram
+                order = dendro["leaves"]
+                ordered_matrix = dist_matrix[order][:, order]
+                ordered_ids = [read_ids[i] for i in order]
+
+                # Heatmap on the right
+                ax_heat = fig.add_subplot(gs[1])
+                im = ax_heat.imshow(ordered_matrix, cmap="viridis", aspect="auto")
+
+                # Add colorbar
+                cbar = plt.colorbar(im, ax=ax_heat, shrink=0.8)
+                cbar.set_label("DTW Distance")
+
+                # Labels
+                if n_reads <= 30:
+                    ax_heat.set_xticks(range(n_reads))
+                    ax_heat.set_xticklabels(ordered_ids, rotation=90, fontsize=8)
+                    ax_heat.set_yticks(range(n_reads))
+                    ax_heat.set_yticklabels(ordered_ids, fontsize=8)
+                else:
+                    ax_heat.set_xlabel(f"Reads (n={n_reads})")
+                    ax_heat.set_ylabel(f"Reads (n={n_reads})")
+
+                ax_heat.set_title(title)
+
+            else:
+                # Simple heatmap without dendrogram
+                fig, ax = plt.subplots(figsize=figsize)
+                im = ax.imshow(dist_matrix, cmap="viridis", aspect="auto")
+
+                # Add colorbar
+                cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+                cbar.set_label("DTW Distance")
+
+                # Labels
+                if n_reads <= 30:
+                    ax.set_xticks(range(n_reads))
+                    ax.set_xticklabels(read_ids, rotation=90, fontsize=8)
+                    ax.set_yticks(range(n_reads))
+                    ax.set_yticklabels(read_ids, fontsize=8)
+                else:
+                    ax.set_xlabel(f"Reads (n={n_reads})")
+                    ax.set_ylabel(f"Reads (n={n_reads})")
+
+                ax.set_title(title)
+
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+            logger.info(f"  Saved DTW heatmap to: {output_path}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"Failed to generate heatmap: {e}")
+            return None
+
     def analyze_region(
         self, region, pod5_reader: Pod5Reader, max_reads: int = 100, max_transcripts: int = 50
     ) -> Dict[str, Any]:
@@ -463,14 +656,47 @@ class RegionTranscriptAnalyzer:
         if len(read_signals) >= 2:
             logger.info(f"  Computing DTW distances for {len(read_signals)} reads...")
             signals_only = [sig for _, sig in read_signals]
+            read_ids_list = [rid for rid, _ in read_signals]
             distance_matrix = self.compute_dtw_distances(signals_only)
 
             if distance_matrix is not None:
                 result["dtw_distances"] = {
-                    "read_ids": [rid for rid, _ in read_signals],
+                    "read_ids": read_ids_list,
                     "matrix": distance_matrix.tolist(),
                 }
                 logger.info(f"  DTW distance matrix computed: {distance_matrix.shape}")
+
+                # Step 5: Perform hierarchical clustering
+                logger.info(f"  Performing hierarchical clustering...")
+                cluster_result = self.cluster_reads_by_dtw(
+                    distance_matrix, read_ids_list, method="average"
+                )
+
+                if "error" not in cluster_result:
+                    result["clustering"] = cluster_result
+                    logger.info(f"  Identified {cluster_result['n_clusters']} clusters")
+
+                    # Log cluster membership
+                    for cluster_id, members in cluster_result["clusters"].items():
+                        logger.info(f"    Cluster {cluster_id}: {len(members)} reads")
+                else:
+                    logger.warning(f"  Clustering failed: {cluster_result['error']}")
+                    result["clustering"] = None
+
+                # Step 6: Generate heatmap visualization
+                region_safe_id = region_id.replace(":", "_").replace("-", "_")
+                heatmap_path = self.output_dir / f"dtw_heatmap_{region_safe_id}.png"
+
+                heatmap_file = self.plot_dtw_heatmap(
+                    distance_matrix,
+                    read_ids_list,
+                    heatmap_path,
+                    title=f"DTW Distance Matrix - {region_id}",
+                    cluster_result=result.get("clustering"),
+                )
+
+                if heatmap_file:
+                    result["heatmap_path"] = str(heatmap_file)
 
         # Summary statistics
         result["summary"] = {
@@ -482,6 +708,10 @@ class RegionTranscriptAnalyzer:
                 / max(len(result["read_alignments"]), 1)
             ),
             "dtw_computed": result["dtw_distances"] is not None,
+            "clustering_computed": result.get("clustering") is not None,
+            "n_clusters": (
+                result.get("clustering", {}).get("n_clusters", 0) if result.get("clustering") else 0
+            ),
         }
 
         return result
@@ -560,6 +790,14 @@ class RegionTranscriptAnalyzer:
                 ),
                 "regions_with_dtw": sum(
                     1 for r in self.region_results.values() if r["summary"]["dtw_computed"]
+                ),
+                "regions_with_clustering": sum(
+                    1
+                    for r in self.region_results.values()
+                    if r["summary"].get("clustering_computed", False)
+                ),
+                "total_clusters": sum(
+                    r["summary"].get("n_clusters", 0) for r in self.region_results.values()
                 ),
             },
             "regions": self.region_results,
@@ -731,7 +969,10 @@ def main():
     print(f"Total transcripts: {results['summary']['total_transcripts']}")
     print(f"Total reads processed: {results['summary']['total_reads_processed']}")
     print(f"Regions with DTW: {results['summary']['regions_with_dtw']}")
+    print(f"Regions with clustering: {results['summary']['regions_with_clustering']}")
+    print(f"Total clusters identified: {results['summary']['total_clusters']}")
     print(f"\nResults saved to: {args.output}/analysis_results.json")
+    print(f"Heatmaps saved to: {args.output}/dtw_heatmap_*.png")
 
 
 if __name__ == "__main__":
