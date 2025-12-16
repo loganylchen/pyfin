@@ -115,11 +115,13 @@ class RegionTranscriptAnalyzer:
         gtf_path: str,
         pod5_path: str,
         output_dir: str,
-        is_rna: bool = True,
         kmer_size: int = 5,
     ):
         """
         Initialize the analyzer.
+
+        RNA-only: For Direct RNA Sequencing (DRS), sequences are automatically
+        reversed to match the 3'→5' pore transit direction.
 
         Args:
             bam_path: Path to BAM file (reads mapped to genome)
@@ -128,7 +130,6 @@ class RegionTranscriptAnalyzer:
             gtf_path: Path to GTF annotation file
             pod5_path: Path to POD5 signal file
             output_dir: Directory for output files
-            is_rna: Whether this is RNA data (default: True)
             kmer_size: K-mer size for eventalign (5 or 9, default: 5)
         """
         self.bam_path = Path(bam_path)
@@ -137,7 +138,6 @@ class RegionTranscriptAnalyzer:
         self.gtf_path = Path(gtf_path)
         self.pod5_path = Path(pod5_path)
         self.output_dir = Path(output_dir)
-        self.is_rna = is_rna
         self.kmer_size = kmer_size
 
         # Create output directory
@@ -283,9 +283,13 @@ class RegionTranscriptAnalyzer:
         """
         Perform eventalign of a read's signal to a transcript sequence.
 
+        For Direct RNA Sequencing (DRS), the RNA strand passes through the pore
+        in the 3'→5' direction, so we need to reverse the transcript sequence
+        (which is stored 5'→3') before alignment.
+
         Args:
             signal: Calibrated nanopore signal
-            transcript_seq: Transcript sequence (DNA/RNA)
+            transcript_seq: Transcript sequence (DNA/RNA, stored 5'→3')
             use_profile_hmm: Use Profile HMM (True) or simple ABEA (False)
 
         Returns:
@@ -296,20 +300,28 @@ class RegionTranscriptAnalyzer:
             return None
 
         try:
+            # For DRS (RNA), reverse the sequence since RNA passes 3'→5' through pore
+            # RNA-only mode: always reverse the sequence
+            align_seq = transcript_seq[::-1]  # Reverse the sequence
+
             if use_profile_hmm:
                 result = profile_hmm_eventalign(
                     raw_signal=signal,
-                    sequence=transcript_seq,
-                    is_rna=self.is_rna,
+                    sequence=align_seq,
                     kmer_size=self.kmer_size,
                 )
             else:
                 result = eventalign(
                     raw_signal=signal,
-                    sequence=transcript_seq,
-                    is_rna=self.is_rna,
+                    sequence=align_seq,
                     kmer_size=self.kmer_size,
                 )
+
+            # Store original and aligned sequence info for reference
+            result["original_sequence"] = transcript_seq
+            result["aligned_sequence"] = align_seq
+            result["sequence_reversed"] = True  # RNA-only mode
+
             return result
         except Exception as e:
             logger.warning(f"Eventalign failed: {e}")
@@ -586,6 +598,246 @@ class RegionTranscriptAnalyzer:
             traceback.print_exc()
             return None
 
+    def plot_eventalign_signal(
+        self,
+        signal: np.ndarray,
+        eventalign_result: Dict[str, Any],
+        output_path: Path,
+        read_id: str = "",
+        transcript_id: str = "",
+        max_events: int = 100,
+        figsize: Tuple[int, int] = (16, 10),
+    ) -> Optional[Path]:
+        """
+        Visualize the eventalign result for a single read.
+
+        Creates a multi-panel figure showing:
+        1. Raw signal with event boundaries and k-mer annotations
+        2. Event means vs model expected means
+        3. HMM state distribution
+
+        Args:
+            signal: Raw nanopore signal
+            eventalign_result: Result from profile_hmm_eventalign()
+            output_path: Path to save the figure
+            read_id: Read ID for title
+            transcript_id: Transcript ID for title
+            max_events: Maximum number of events to display (for readability)
+            figsize: Figure size
+
+        Returns:
+            Path to saved image, or None if visualization failed
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            logger.warning("matplotlib not available for visualization")
+            return None
+
+        try:
+            alignment = eventalign_result.get("alignment", [])
+            scaling = eventalign_result.get("scaling", {})
+            n_events = eventalign_result.get("n_events", 0)
+            n_aligned = eventalign_result.get("n_aligned", 0)
+
+            if not alignment:
+                logger.warning("No alignment data to visualize")
+                return None
+
+            # Limit events for visualization
+            if len(alignment) > max_events:
+                alignment = alignment[:max_events]
+
+            # Create figure with subplots
+            fig = plt.figure(figsize=figsize)
+            gs = fig.add_gridspec(3, 1, height_ratios=[3, 1.5, 1], hspace=0.3)
+
+            # === Panel 1: Raw signal with event boundaries ===
+            ax_signal = fig.add_subplot(gs[0])
+
+            # Plot raw signal
+            ax_signal.plot(signal, color="steelblue", alpha=0.7, linewidth=0.5, label="Raw signal")
+
+            # Collect event info for annotation
+            event_starts = []
+            event_ends = []
+            event_means = []
+            event_kmers = []
+            event_states = []
+            model_means = []
+
+            for aln in alignment:
+                event_idx = aln.get("event_idx", -1)
+                if event_idx < 0:
+                    continue
+
+                # Get event boundaries from the original events (approximate from event_idx)
+                # We'll use the event_mean as a horizontal line
+                event_mean = aln.get("event_mean", 0)
+                kmer = aln.get("ref_kmer", "")
+                state = aln.get("hmm_state", "")
+                scaled_model_mean = aln.get("scaled_model_mean", aln.get("model_mean", 0))
+
+                event_means.append(event_mean)
+                event_kmers.append(kmer)
+                event_states.append(state)
+                model_means.append(scaled_model_mean)
+
+            # Create synthetic event boundaries based on event indices
+            # (actual boundaries would require original event table)
+            n_display = len(event_means)
+            if n_display > 0:
+                samples_per_event = len(signal) // max(n_events, 1)
+
+                for i, (mean, kmer, state, model_mean) in enumerate(
+                    zip(event_means, event_kmers, event_states, model_means)
+                ):
+                    start_sample = i * samples_per_event
+                    end_sample = min((i + 1) * samples_per_event, len(signal))
+
+                    if start_sample >= len(signal):
+                        break
+
+                    # Draw event boundary
+                    ax_signal.axvline(start_sample, color="gray", alpha=0.3, linewidth=0.5)
+
+                    # Draw event mean level
+                    ax_signal.hlines(
+                        mean,
+                        start_sample,
+                        end_sample,
+                        colors="red",
+                        linewidth=2,
+                        alpha=0.8,
+                    )
+
+                    # Draw model expected level
+                    if model_mean > 0:
+                        ax_signal.hlines(
+                            model_mean,
+                            start_sample,
+                            end_sample,
+                            colors="green",
+                            linewidth=1.5,
+                            linestyle="--",
+                            alpha=0.6,
+                        )
+
+                    # Annotate with k-mer (only every few events to avoid clutter)
+                    if i % max(1, n_display // 20) == 0 and kmer:
+                        # Color by HMM state
+                        state_colors = {"M": "black", "K": "orange", "B": "red"}
+                        color = state_colors.get(state, "gray")
+                        ax_signal.text(
+                            (start_sample + end_sample) / 2,
+                            mean + 5,
+                            f"{kmer}\n({state})",
+                            fontsize=7,
+                            ha="center",
+                            va="bottom",
+                            color=color,
+                            rotation=45,
+                        )
+
+            ax_signal.set_xlabel("Sample index")
+            ax_signal.set_ylabel("Signal level (pA)")
+            ax_signal.set_title(
+                f"Eventalign: Read {read_id[:20]}... → {transcript_id}\n"
+                f"Events: {n_events}, Aligned: {n_aligned}, "
+                f"Scale: {scaling.get('scale', 0):.3f}, Shift: {scaling.get('shift', 0):.1f}"
+            )
+
+            # Add legend
+            from matplotlib.lines import Line2D
+
+            legend_elements = [
+                Line2D([0], [0], color="steelblue", alpha=0.7, label="Raw signal"),
+                Line2D([0], [0], color="red", linewidth=2, label="Event mean"),
+                Line2D(
+                    [0], [0], color="green", linewidth=1.5, linestyle="--", label="Model expected"
+                ),
+            ]
+            ax_signal.legend(handles=legend_elements, loc="upper right", fontsize=8)
+
+            # === Panel 2: Event means vs Model means ===
+            ax_compare = fig.add_subplot(gs[1])
+
+            if event_means and model_means:
+                x_pos = np.arange(len(event_means))
+                width = 0.35
+
+                ax_compare.bar(
+                    x_pos - width / 2,
+                    event_means,
+                    width,
+                    label="Event mean",
+                    color="red",
+                    alpha=0.7,
+                )
+                ax_compare.bar(
+                    x_pos + width / 2,
+                    model_means,
+                    width,
+                    label="Model mean (scaled)",
+                    color="green",
+                    alpha=0.7,
+                )
+
+                # Only show labels for some events
+                label_step = max(1, len(event_kmers) // 15)
+                ax_compare.set_xticks(x_pos[::label_step])
+                ax_compare.set_xticklabels(
+                    event_kmers[::label_step], rotation=45, ha="right", fontsize=7
+                )
+
+                ax_compare.set_xlabel("K-mer")
+                ax_compare.set_ylabel("Signal level (pA)")
+                ax_compare.set_title("Event Mean vs Model Expected")
+                ax_compare.legend(loc="upper right", fontsize=8)
+
+            # === Panel 3: HMM state distribution ===
+            ax_states = fig.add_subplot(gs[2])
+
+            if event_states:
+                state_counts = {}
+                for s in event_states:
+                    state_counts[s] = state_counts.get(s, 0) + 1
+
+                state_names = {
+                    "M": "Match",
+                    "K": "K-mer Skip",
+                    "B": "Bad Event",
+                }
+                state_colors_map = {
+                    "M": "forestgreen",
+                    "K": "orange",
+                    "B": "red",
+                }
+
+                labels = [state_names.get(s, s) for s in state_counts.keys()]
+                sizes = list(state_counts.values())
+                colors = [state_colors_map.get(s, "gray") for s in state_counts.keys()]
+
+                ax_states.barh(labels, sizes, color=colors, alpha=0.8)
+                ax_states.set_xlabel("Count")
+                ax_states.set_title("HMM State Distribution")
+
+                # Add count labels
+                for i, (label, size) in enumerate(zip(labels, sizes)):
+                    ax_states.text(size + 0.5, i, str(size), va="center", fontsize=9)
+
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+            logger.info(f"  Saved eventalign visualization to: {output_path}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"Failed to generate eventalign visualization: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return None
+
     def analyze_region(
         self, region, pod5_reader: Pod5Reader, max_reads: int = 100, max_transcripts: int = 50
     ) -> Dict[str, Any]:
@@ -648,6 +900,9 @@ class RegionTranscriptAnalyzer:
         # Step 3: For each read, get signal and align to all transcripts
         read_signals = []
 
+        # Track first read for visualization
+        first_read_info = None
+
         for read in reads:
             read_id = read.query_name
 
@@ -669,6 +924,15 @@ class RegionTranscriptAnalyzer:
                 alignment = self.eventalign_read_to_transcript(signal, tx_seq)
 
                 if alignment:
+                    # Save first read's first alignment for visualization
+                    if first_read_info is None:
+                        first_read_info = {
+                            "read_id": read_id,
+                            "signal": signal,
+                            "transcript_id": tx_id,
+                            "alignment": alignment,
+                        }
+
                     # Include full alignment details, not just summary
                     alignment_record = {
                         "transcript_id": tx_id,
@@ -703,7 +967,26 @@ class RegionTranscriptAnalyzer:
 
         logger.info(f"  Aligned {len(result['read_alignments'])} reads to transcripts")
 
-        # Step 4: Compute DTW distances among read signals
+        # Step 4: Visualize the first read's eventalign result
+        if first_read_info is not None:
+            logger.info(
+                f"  Visualizing eventalign for first read: {first_read_info['read_id'][:20]}..."
+            )
+            region_safe_id = region_id.replace(":", "_").replace("-", "_")
+            eventalign_plot_path = self.output_dir / f"eventalign_{region_safe_id}_first_read.png"
+
+            eventalign_plot = self.plot_eventalign_signal(
+                signal=first_read_info["signal"],
+                eventalign_result=first_read_info["alignment"],
+                output_path=eventalign_plot_path,
+                read_id=first_read_info["read_id"],
+                transcript_id=first_read_info["transcript_id"],
+            )
+
+            if eventalign_plot:
+                result["first_read_eventalign_plot"] = str(eventalign_plot)
+
+        # Step 5: Compute DTW distances among read signals
         if len(read_signals) >= 2:
             logger.info(f"  Computing DTW distances for {len(read_signals)} reads...")
             signals_only = [sig for _, sig in read_signals]
@@ -717,7 +1000,7 @@ class RegionTranscriptAnalyzer:
                 }
                 logger.info(f"  DTW distance matrix computed: {distance_matrix.shape}")
 
-                # Step 5: Perform hierarchical clustering
+                # Step 6: Perform hierarchical clustering
                 logger.info(f"  Performing hierarchical clustering...")
                 cluster_result = self.cluster_reads_by_dtw(
                     distance_matrix, read_ids_list, method="average"
@@ -734,7 +1017,7 @@ class RegionTranscriptAnalyzer:
                     logger.warning(f"  Clustering failed: {cluster_result['error']}")
                     result["clustering"] = None
 
-                # Step 6: Generate heatmap visualization
+                # Step 7: Generate heatmap visualization
                 region_safe_id = region_id.replace(":", "_").replace("-", "_")
                 heatmap_path = self.output_dir / f"dtw_heatmap_{region_safe_id}.png"
 
@@ -828,7 +1111,7 @@ class RegionTranscriptAnalyzer:
                 "transcriptome": str(self.transcriptome_path),
                 "gtf": str(self.gtf_path),
                 "pod5": str(self.pod5_path),
-                "is_rna": self.is_rna,
+                "mode": "RNA-only",
                 "kmer_size": self.kmer_size,
             },
             "summary": {
@@ -893,9 +1176,14 @@ def run_demo():
         signal = np.random.randn(1000).astype(np.float32) * 10 + 120
         sequence = "ACGUACGUACGUACGUACGUACGUACGU"
 
-        result = profile_hmm_eventalign(
-            raw_signal=signal, sequence=sequence, is_rna=True, kmer_size=5
-        )
+        # For DRS, the RNA passes through the pore 3'→5', so we align to reversed sequence
+        # This mimics what happens with real DRS data
+        reversed_seq = sequence[::-1]
+        print(f"Original sequence (5'→3'):  {sequence}")
+        print(f"Reversed sequence (3'→5'):  {reversed_seq}")
+        print()
+
+        result = profile_hmm_eventalign(raw_signal=signal, sequence=reversed_seq, kmer_size=5)
 
         print(f"Signal length: {len(signal)} samples")
         print(f"Sequence length: {len(sequence)} bases")
@@ -906,7 +1194,7 @@ def run_demo():
             f"shift={result['scaling']['shift']:.1f}"
         )
         print()
-        print("First 5 alignment records:")
+        print("First 5 alignment records (aligned to reversed/3'→5' sequence):")
         for aln in result["alignment"][:5]:
             print(
                 f"  Position {aln['ref_position']}: {aln['ref_kmer']} "
@@ -967,9 +1255,7 @@ def main():
         choices=[5, 9],
         help="K-mer size for eventalign (default: 5)",
     )
-    parser.add_argument(
-        "--dna", action="store_true", help="Use DNA mode instead of RNA (default: RNA)"
-    )
+    # RNA-only mode: no --dna option needed
     parser.add_argument("--demo", action="store_true", help="Run demonstration with synthetic data")
 
     args = parser.parse_args()
@@ -1003,7 +1289,6 @@ def main():
         gtf_path=args.gtf,
         pod5_path=args.pod5,
         output_dir=args.output,
-        is_rna=not args.dna,
         kmer_size=args.kmer_size,
     )
 
@@ -1023,7 +1308,8 @@ def main():
     print(f"Regions with clustering: {results['summary']['regions_with_clustering']}")
     print(f"Total clusters identified: {results['summary']['total_clusters']}")
     print(f"\nResults saved to: {args.output}/analysis_results.json")
-    print(f"Heatmaps saved to: {args.output}/dtw_heatmap_*.png")
+    print(f"Eventalign plots: {args.output}/eventalign_*_first_read.png")
+    print(f"DTW heatmaps: {args.output}/dtw_heatmap_*.png")
 
 
 if __name__ == "__main__":

@@ -203,30 +203,77 @@ class MultiExt(build_ext):
             obj_name = source_path.stem + ".o"
             obj_path = build_temp / obj_name
 
-            # Build nvcc command
-            nvcc_cmd = [
-                nvcc_path,
-                "-c",
-                str(source_path),
-                "-o",
-                str(obj_path),
-            ]
+            # Determine file type and use appropriate compiler
+            suffix = source_path.suffix.lower()
 
-            # Add include directories
-            for inc_dir in ext.include_dirs:
-                nvcc_cmd.extend(["-I", inc_dir])
+            if suffix == ".cu":
+                # CUDA source file - compile with nvcc
+                nvcc_cmd = [
+                    nvcc_path,
+                    "-c",
+                    str(source_path),
+                    "-o",
+                    str(obj_path),
+                ]
+                # Add include directories
+                for inc_dir in ext.include_dirs:
+                    nvcc_cmd.extend(["-I", inc_dir])
+                # Add compile flags
+                nvcc_cmd.extend(ext.extra_compile_args)
 
-            # Add compile flags
-            nvcc_cmd.extend(ext.extra_compile_args)
+                print(f"Compiling {source} with nvcc...")
+                print(" ".join(nvcc_cmd))
+                result = subprocess.run(nvcc_cmd, capture_output=True, text=True)
 
-            print(f"Compiling {source} with nvcc...")
-            print(" ".join(nvcc_cmd))
-            result = subprocess.run(nvcc_cmd, capture_output=True, text=True)
+            elif suffix == ".c":
+                # C source file - compile with gcc, add CUDA_ENABLED define
+                import sysconfig
+
+                cc = os.environ.get("CC", "gcc")
+
+                c_cmd = [
+                    cc,
+                    "-c",
+                    "-fPIC",
+                    "-O3",
+                    "-DCUDA_ENABLED",  # Enable CUDA code paths
+                    str(source_path),
+                    "-o",
+                    str(obj_path),
+                ]
+                # Add include directories
+                for inc_dir in ext.include_dirs:
+                    c_cmd.extend(["-I", inc_dir])
+
+                print(f"Compiling {source} with {cc}...")
+                print(" ".join(c_cmd))
+                result = subprocess.run(c_cmd, capture_output=True, text=True)
+
+            else:
+                # C++ source file - compile with nvcc treating as CUDA
+                nvcc_cmd = [
+                    nvcc_path,
+                    "-x",
+                    "cu",  # Treat as CUDA
+                    "-c",
+                    str(source_path),
+                    "-o",
+                    str(obj_path),
+                ]
+                # Add include directories
+                for inc_dir in ext.include_dirs:
+                    nvcc_cmd.extend(["-I", inc_dir])
+                # Add compile flags
+                nvcc_cmd.extend(ext.extra_compile_args)
+
+                print(f"Compiling {source} with nvcc...")
+                print(" ".join(nvcc_cmd))
+                result = subprocess.run(nvcc_cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
                 print(result.stdout)
                 print(result.stderr)
-                raise RuntimeError(f"nvcc compilation failed for {source}")
+                raise RuntimeError(f"Compilation failed for {source}")
 
             objects.append(str(obj_path))
 

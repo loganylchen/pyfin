@@ -46,14 +46,14 @@ static PyObject *event_table_to_py(event_table et)
 
 // --------------------------
 // Wrapper for getevents_simple (takes Numpy array)
+// RNA-only: events are automatically reversed to match 3'->5' pore direction
 // --------------------------
 static PyObject *py_getevents_simple(PyObject *self, PyObject *args)
 {
     PyArrayObject *raw_arr;
-    int is_rna;
 
-    // Parse arguments: (numpy_array, is_rna)
-    if (!PyArg_ParseTuple(args, "Oi", &raw_arr, &is_rna))
+    // Parse arguments: (numpy_array,)
+    if (!PyArg_ParseTuple(args, "O", &raw_arr))
     {
         return NULL;
     }
@@ -74,8 +74,8 @@ static PyObject *py_getevents_simple(PyObject *self, PyObject *args)
     size_t nsample = (size_t)PyArray_SIZE(raw_arr);
     float *rawptr = (float *)PyArray_DATA(raw_arr);
 
-    // Call C function
-    event_table et = getevents_simple(nsample, rawptr, is_rna);
+    // Call C function (RNA mode with reversed events)
+    event_table et = getevents_simple(nsample, rawptr);
     if (et.n == 0 || !et.event)
     {
         PyErr_SetString(PyExc_RuntimeError, "Event detection failed (no events found)");

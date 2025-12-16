@@ -53,7 +53,8 @@ event_table detect_events_simple(raw_table const rt, detector_param_t const edpa
 
 // High-level wrapper function for numpy arrays with adapter trimming
 // Uses RNA defaults for event detection
-event_table getevents_simple(size_t nsample, float *rawptr, int is_rna);
+// Events are returned in 3'->5' order (reversed) to match RNA pore transit direction
+event_table getevents_simple(size_t nsample, float *rawptr);
 
 // Free event table memory
 void free_event_table(event_table *et);

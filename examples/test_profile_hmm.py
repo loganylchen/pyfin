@@ -49,7 +49,7 @@ def test_profile_hmm():
     print("Test 1: Simple ABEA Alignment")
     print("-" * 70)
     try:
-        result_abea = eventalign(raw_signal=signal, sequence=sequence, is_rna=True, kmer_size=5)
+        result_abea = eventalign(raw_signal=signal, sequence=sequence, kmer_size=5)
         print(f"✓ ABEA alignment successful")
         print(f"  Events detected: {result_abea['n_events']}")
         print(f"  Aligned pairs: {result_abea['n_aligned_pairs']}")
@@ -74,7 +74,7 @@ def test_profile_hmm():
     print("-" * 70)
     try:
         result_hmm = profile_hmm_eventalign(
-            raw_signal=signal, sequence=sequence, is_rna=True, kmer_size=5, events_per_base=3.0
+            raw_signal=signal, sequence=sequence, kmer_size=5, events_per_base=3.0
         )
         print(f"✓ Profile HMM alignment successful")
         print(f"  Events detected: {result_hmm['n_events']}")

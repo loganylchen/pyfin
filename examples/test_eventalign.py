@@ -221,7 +221,7 @@ def main():
     # 3. Detect events
     print("\n[3] Detecting events from raw signal...")
     try:
-        events = detect_events(raw_signal, is_rna=False)
+        events = detect_events(raw_signal)  # RNA-only mode
         print(f"    ✓ Detected {len(events)} events")
         event_means = [e["mean"] for e in events]
         print(
@@ -235,7 +235,7 @@ def main():
     print("\n[4] Aligning events to reference sequence...")
     kmer_size = 5
     try:
-        result = eventalign(raw_signal, sequence[::-1], is_rna=True, kmer_size=kmer_size)
+        result = eventalign(raw_signal, sequence[::-1], kmer_size=kmer_size)  # RNA-only
         print(f"    ✓ Alignment complete!")
         print(f"    ✓ K-mer size: {kmer_size}")
         print(f"    ✓ Number of k-mers: {len(result['base_to_event_map'])}")

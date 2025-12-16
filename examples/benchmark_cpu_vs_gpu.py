@@ -88,9 +88,9 @@ def print_table(headers, rows, title=None):
             print(" | ".join(f"{str(v):<{col_widths[i]}}" for i, v in enumerate(row)))
 
 
-def generate_random_sequence(length: int, is_rna: bool = False) -> str:
-    """Generate a random DNA/RNA sequence."""
-    bases = "ACGU" if is_rna else "ACGT"
+def generate_random_sequence(length: int) -> str:
+    """Generate a random RNA sequence."""
+    bases = "ACGU"  # RNA-only mode
     return "".join(np.random.choice(list(bases), size=length))
 
 
@@ -154,7 +154,7 @@ def benchmark_eventalign_cpu(signal_sizes: list, iterations: int = 3) -> list:
         for i in range(iterations):
             start = time.perf_counter()
             result = profile_hmm_eventalign(
-                raw_signal=signal, sequence=sequence, is_rna=False, kmer_size=5, events_per_base=3.0
+                raw_signal=signal, sequence=sequence, kmer_size=5, events_per_base=3.0
             )
             elapsed = time.perf_counter() - start
             times.append(elapsed)
@@ -197,7 +197,7 @@ def benchmark_eventalign_cuda(signal_sizes: list, iterations: int = 3) -> list:
         for i in range(iterations):
             start = time.perf_counter()
             result = profile_hmm_eventalign_cuda(
-                raw_signal=signal, sequence=sequence, is_rna=False, kmer_size=5, events_per_base=3.0
+                raw_signal=signal, sequence=sequence, kmer_size=5, events_per_base=3.0
             )
             elapsed = time.perf_counter() - start
             times.append(elapsed)

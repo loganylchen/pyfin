@@ -204,10 +204,10 @@ def main():
     # 2. Detect events
     print("\n[2] Detecting events using f5c algorithm...")
     print("    ✓ Trimming: start=200, end=10 (f5c defaults)")
-    print("    ✓ Using RNA detection parameters")
+    print("    ✓ Using RNA detection parameters (RNA-only mode)")
 
     try:
-        events = detect_events(raw_signal, is_rna=True)
+        events = detect_events(raw_signal)  # RNA-only mode
         print(f"    ✓ Detected {len(events)} events")
     except Exception as e:
         print(f"    ✗ Error: {e}")

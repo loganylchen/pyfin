@@ -62,15 +62,15 @@ def generate_test_signal(sequence, events_per_base=10):
     return np.array(signal, dtype=np.float32)
 
 
-def analyze_pyfin_alignment(raw_signal, sequence, kmer_size=5, is_rna=False):
-    """Run PyFin eventalign and analyze results"""
+def analyze_pyfin_alignment(raw_signal, sequence, kmer_size=5):
+    """Run PyFin eventalign and analyze results (RNA-only mode)"""
     print("\n" + "=" * 80)
-    print("PYFIN ALIGNMENT ANALYSIS")
+    print("PYFIN ALIGNMENT ANALYSIS (RNA-only mode)")
     print("=" * 80)
 
     # Detect events first to see what we're working with
     print("\n[1] Event Detection:")
-    events = detect_events(raw_signal, is_rna=is_rna)
+    events = detect_events(raw_signal)  # RNA-only mode
     print(f"    Total events detected: {len(events)}")
     print(f"    Signal length: {len(raw_signal)} samples")
     print(f"    Events per sample: {len(events) / len(raw_signal):.4f}")
@@ -89,7 +89,7 @@ def analyze_pyfin_alignment(raw_signal, sequence, kmer_size=5, is_rna=False):
     print(f"    K-mer size: {kmer_size}")
     print(f"    Expected k-mers: {len(sequence) - kmer_size + 1}")
 
-    result = eventalign(raw_signal, sequence, is_rna=is_rna, kmer_size=kmer_size)
+    result = eventalign(raw_signal, sequence, kmer_size=kmer_size)  # RNA-only
 
     print(f"\n    Results:")
     print(f"      Total events: {result['n_events']}")
@@ -302,12 +302,12 @@ def test_synthetic_alignment():
     raw_signal = generate_test_signal(sequence, events_per_base=10)
     print(f"Signal: {len(raw_signal)} samples")
 
-    # Test with DNA
-    print(f"\n--- Testing DNA alignment ---")
-    result_dna = analyze_pyfin_alignment(raw_signal, sequence, kmer_size=5, is_rna=False)
+    # Test with RNA-only mode
+    print(f"\n--- Testing RNA alignment ---")
+    result = analyze_pyfin_alignment(raw_signal, sequence, kmer_size=5)
 
     # Detailed comparison
-    compare_alignments_detailed(result_dna, sequence, kmer_size=5)
+    compare_alignments_detailed(result, sequence, kmer_size=5)
 
 
 def main():

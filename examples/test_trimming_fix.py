@@ -66,7 +66,7 @@ def test_adapter_trimming():
 
         # Detect events
         try:
-            events = detect_events(full_signal, is_rna=False)
+            events = detect_events(full_signal)  # RNA-only mode
 
             if len(events) > 0:
                 first_event_start = events[0]["start"]

@@ -50,14 +50,17 @@ extern int32_t profile_hmm_align(
 
 // Import GPU alignment function (if CUDA is available)
 #ifdef CUDA_ENABLED
-extern "C" int32_t align_with_flanking_gpu(
-    simple_aligned_pair_t *out,
-    const char *sequence,
-    int32_t seq_len,
-    event_table events,
-    simple_model_t *model,
-    uint32_t kmer_size,
-    simple_scalings_t scaling);
+#ifdef __cplusplus
+extern "C"
+#endif
+    int32_t align_with_flanking_gpu(
+        simple_aligned_pair_t *out,
+        const char *sequence,
+        int32_t seq_len,
+        event_table events,
+        simple_model_t *model,
+        uint32_t kmer_size,
+        simple_scalings_t scaling);
 #endif
 
 // Simple scaling estimation (method of moments)
@@ -108,18 +111,18 @@ static simple_scalings_t estimate_scalings(const char *sequence, int32_t seq_len
 }
 
 // Python wrapper for eventalign
+// RNA-only: events are automatically reversed to match 3'->5' pore direction
 static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     PyArrayObject *raw_arr;
     const char *sequence;
     PyObject *model_dict = NULL;
-    int is_rna = 0;
     int kmer_size = 5;
 
-    static char *kwlist[] = {"raw_signal", "sequence", "model", "is_rna", "kmer_size", NULL};
+    static char *kwlist[] = {"raw_signal", "sequence", "model", "kmer_size", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|Oii", kwlist,
-                                     &raw_arr, &sequence, &model_dict, &is_rna, &kmer_size))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|Oi", kwlist,
+                                     &raw_arr, &sequence, &model_dict, &kmer_size))
     {
         return NULL;
     }
@@ -148,36 +151,27 @@ static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
     size_t nsample = (size_t)PyArray_SIZE(raw_arr);
     float *rawptr = (float *)PyArray_DATA(raw_arr);
 
-    // Step 1: Detect events
-    event_table et = getevents_simple(nsample, rawptr, is_rna);
+    // Step 1: Detect events (RNA-only: events are automatically reversed)
+    event_table et = getevents_simple(nsample, rawptr);
     if (et.n == 0 || !et.event)
     {
         PyErr_SetString(PyExc_RuntimeError, "Event detection failed");
         return NULL;
     }
 
-    // Step 2: Load real pore model based on chemistry and kmer size
+    // Step 2: Load RNA pore model based on kmer size
     uint32_t model_id;
     uint32_t model_kmer_size;
 
-    // Determine which model to use
-    if (is_rna)
+    // RNA-only: select model based on kmer_size
+    if (kmer_size == 9)
     {
-        if (kmer_size == 9)
-        {
-            model_id = MODEL_ID_RNA_RNA004_NUCLEOTIDE; // RNA004 9-mer
-            model_kmer_size = 9;
-        }
-        else
-        {
-            model_id = MODEL_ID_RNA_R9_NUCLEOTIDE; // RNA R9.4 5-mer (default)
-            model_kmer_size = 5;
-        }
+        model_id = MODEL_ID_RNA_RNA004_NUCLEOTIDE; // RNA004 9-mer
+        model_kmer_size = 9;
     }
     else
     {
-        // DNA models - for now use R9.4 (we can add R10 support later)
-        model_id = MODEL_ID_DNA_R9_NUCLEOTIDE;
+        model_id = MODEL_ID_RNA_R9_NUCLEOTIDE; // RNA R9.4 5-mer (default)
         model_kmer_size = 5;
     }
 
@@ -196,21 +190,15 @@ static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
         return PyErr_NoMemory();
     }
 
-    // Load the real pore model from built-in data arrays in model.h
+    // Load the RNA pore model from built-in data arrays in model.h
     float *model_data = NULL;
-    if (model_id == MODEL_ID_RNA_R9_NUCLEOTIDE)
-    {
-        model_data = rna002_model_builtin_data;
-    }
-    else if (model_id == MODEL_ID_RNA_RNA004_NUCLEOTIDE)
+    if (model_id == MODEL_ID_RNA_RNA004_NUCLEOTIDE)
     {
         model_data = rna004_model_builtin_data;
     }
     else
     {
-        // DNA models not yet in model.h, use RNA for now
         model_data = rna002_model_builtin_data;
-        kmer_size = 5; // Force to 5-mer
     }
 
     // Copy model data (format: mean, stdv, mean, stdv, ...)
@@ -300,19 +288,19 @@ static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
 }
 
 // Python wrapper for profile HMM eventalign (f5c version with detailed output)
+// RNA-only: events are automatically reversed to match 3'->5' pore direction
 static PyObject *py_profile_hmm_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     PyArrayObject *raw_arr;
     const char *sequence;
     PyObject *model_dict = NULL;
-    int is_rna = 0;
     int kmer_size = 5;
     float events_per_base = 3.0f; // Default from f5c
 
-    static char *kwlist[] = {"raw_signal", "sequence", "model", "is_rna", "kmer_size", "events_per_base", NULL};
+    static char *kwlist[] = {"raw_signal", "sequence", "model", "kmer_size", "events_per_base", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|Oiif", kwlist,
-                                     &raw_arr, &sequence, &model_dict, &is_rna, &kmer_size, &events_per_base))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|Oif", kwlist,
+                                     &raw_arr, &sequence, &model_dict, &kmer_size, &events_per_base))
     {
         return NULL;
     }
@@ -341,8 +329,8 @@ static PyObject *py_profile_hmm_eventalign(PyObject *self, PyObject *args, PyObj
     size_t nsample = (size_t)PyArray_SIZE(raw_arr);
     float *rawptr = (float *)PyArray_DATA(raw_arr);
 
-    // Step 1: Detect events
-    event_table et = getevents_simple(nsample, rawptr, is_rna);
+    // Step 1: Detect events (RNA-only: events are automatically reversed)
+    event_table et = getevents_simple(nsample, rawptr);
     if (et.n == 0 || !et.event)
     {
         PyErr_SetString(PyExc_RuntimeError, "Event detection failed");
@@ -355,26 +343,19 @@ static PyObject *py_profile_hmm_eventalign(PyObject *self, PyObject *args, PyObj
         events_per_base = (float)et.n / (float)(seq_len - kmer_size + 1);
     }
 
-    // Step 2: Load real pore model
+    // Step 2: Load RNA pore model
     uint32_t model_id;
     uint32_t model_kmer_size;
 
-    if (is_rna)
+    // RNA-only: select model based on kmer_size
+    if (kmer_size == 9)
     {
-        if (kmer_size == 9)
-        {
-            model_id = MODEL_ID_RNA_RNA004_NUCLEOTIDE;
-            model_kmer_size = 9;
-        }
-        else
-        {
-            model_id = MODEL_ID_RNA_R9_NUCLEOTIDE;
-            model_kmer_size = 5;
-        }
+        model_id = MODEL_ID_RNA_RNA004_NUCLEOTIDE;
+        model_kmer_size = 9;
     }
     else
     {
-        model_id = MODEL_ID_DNA_R9_NUCLEOTIDE;
+        model_id = MODEL_ID_RNA_R9_NUCLEOTIDE;
         model_kmer_size = 5;
     }
 
@@ -391,20 +372,15 @@ static PyObject *py_profile_hmm_eventalign(PyObject *self, PyObject *args, PyObj
         return PyErr_NoMemory();
     }
 
-    // Load model data
+    // Load RNA model data
     float *model_data = NULL;
-    if (model_id == MODEL_ID_RNA_R9_NUCLEOTIDE)
-    {
-        model_data = rna002_model_builtin_data;
-    }
-    else if (model_id == MODEL_ID_RNA_RNA004_NUCLEOTIDE)
+    if (model_id == MODEL_ID_RNA_RNA004_NUCLEOTIDE)
     {
         model_data = rna004_model_builtin_data;
     }
     else
     {
         model_data = rna002_model_builtin_data;
-        kmer_size = 5;
     }
 
     for (int i = 0; i < n_kmers_model; ++i)
@@ -482,16 +458,15 @@ static PyObject *py_profile_hmm_eventalign(PyObject *self, PyObject *args, PyObj
 // Method definitions
 static PyMethodDef EventalignMethods[] = {
     {"eventalign", (PyCFunction)py_eventalign, METH_VARARGS | METH_KEYWORDS,
-     "Align nanopore events to a reference sequence with soft-clipping.\n\n"
+     "Align nanopore RNA events to a reference sequence with soft-clipping.\n\n"
+     "RNA-only: Events are automatically reversed to match 3'->5' pore direction.\n\n"
      "This function uses HMM-based alignment with soft-clipping states to handle\n"
-     "untrimmed adapters and low-quality regions at the start/end of reads.\n"
-     "Events in adapter regions are automatically skipped during alignment.\n\n"
+     "untrimmed adapters and low-quality regions at the start/end of reads.\n\n"
      "Args:\n"
      "    raw_signal: 1D numpy float32 array of raw signal\n"
-     "    sequence: Reference DNA/RNA sequence string\n"
-     "    model: Optional k-mer model dict (default: built-in pore models)\n"
-     "    is_rna: int (1 for RNA, 0 for DNA, default: 0)\n"
-     "    kmer_size: k-mer size (5 or 9, default: auto-selected based on model)\n\n"
+     "    sequence: Reference RNA sequence string (will be aligned 3'->5')\n"
+     "    model: Optional k-mer model dict (default: built-in RNA pore models)\n"
+     "    kmer_size: k-mer size (5 or 9, default: 5)\n\n"
      "Returns:\n"
      "    dict with keys:\n"
      "        - base_to_event_map: list of dicts mapping kmers to events\n"
@@ -499,28 +474,24 @@ static PyMethodDef EventalignMethods[] = {
      "        - n_events: number of detected events\n"
      "        - n_aligned_pairs: number of aligned pairs (excludes soft-clipped)\n\n"
      "Models:\n"
-     "    RNA:\n"
-     "        - kmer_size=5: RNA R9.4 5-mer model (default)\n"
-     "        - kmer_size=9: RNA004 9-mer model\n"
-     "    DNA:\n"
-     "        - kmer_size=5: DNA R9.4 5-mer model (default)\n\n"
+     "    - kmer_size=5: RNA R9.4 5-mer model (default)\n"
+     "    - kmer_size=9: RNA004 9-mer model\n\n"
      "Alignment:\n"
      "    Uses f5c's full 3-state HMM with:\n"
      "    - MATCH state: Event matches kmer\n"
      "    - BAD_EVENT state: Noisy event to skip\n"
      "    - KMER_SKIP state: Kmer with no event\n"
-     "    - Soft-clipping: TRANS_START_TO_CLIP=0.5, TRANS_CLIP_SELF=0.9\n"
-     "    - Dynamic transitions based on events_per_base ratio\n"},
+     "    - Soft-clipping for untrimmed adapters\n"},
     {"profile_hmm_eventalign", (PyCFunction)py_profile_hmm_eventalign, METH_VARARGS | METH_KEYWORDS,
      "Full f5c Profile HMM eventalign with detailed alignment output.\n\n"
+     "RNA-only: Events are automatically reversed to match 3'->5' pore direction.\n\n"
      "This is the true f5c eventalign implementation using Viterbi HMM.\n"
      "Returns detailed event_alignment_t structures with HMM states.\n\n"
      "Args:\n"
      "    raw_signal: 1D numpy float32 array of raw signal\n"
-     "    sequence: Reference DNA/RNA sequence string\n"
-     "    model: Optional k-mer model dict (default: built-in pore models)\n"
-     "    is_rna: int (1 for RNA, 0 for DNA, default: 0)\n"
-     "    kmer_size: k-mer size (5 or 9, default: auto-selected)\n"
+     "    sequence: Reference RNA sequence string (will be aligned 3'->5')\n"
+     "    model: Optional k-mer model dict (default: built-in RNA pore models)\n"
+     "    kmer_size: k-mer size (5 or 9, default: 5)\n"
      "    events_per_base: Expected events per base (default: 3.0)\n\n"
      "Returns:\n"
      "    dict with keys:\n"

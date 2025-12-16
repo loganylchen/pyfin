@@ -536,8 +536,29 @@ event_table detect_events_simple(raw_table const rt, detector_param_t const edpa
     return et;
 }
 
+// Reverse event table in place (for RNA which transits pore 3'->5')
+static void reverse_event_table(event_table *et)
+{
+    if (!et || !et->event || et->n < 2)
+        return;
+
+    size_t i = 0;
+    size_t j = et->n - 1;
+
+    while (i < j)
+    {
+        // Swap events
+        event_t tmp = et->event[i];
+        et->event[i] = et->event[j];
+        et->event[j] = tmp;
+        i++;
+        j--;
+    }
+}
+
 // Wrapper function for numpy array with adapter trimming
-event_table getevents_simple(size_t nsample, float *rawptr, int is_rna)
+// For RNA-seq: events are reversed to match the 3'->5' pore transit direction
+event_table getevents_simple(size_t nsample, float *rawptr)
 {
     // Parameters from f5c/scrappie defaults
     int trim_start = 200;      // Trim 200 samples from start
@@ -555,7 +576,13 @@ event_table getevents_simple(size_t nsample, float *rawptr, int is_rna)
     detector_param_t const *ed_params = &RNA_DEFAULTS;
 
     // Detect events on the trimmed signal
-    return detect_events_simple(rt, *ed_params);
+    event_table et = detect_events_simple(rt, *ed_params);
+
+    // Reverse events for RNA (RNA transits pore 3'->5', so first event = 3' end)
+    // This makes events align with the reversed transcript sequence
+    reverse_event_table(&et);
+
+    return et;
 }
 
 void free_event_table(event_table *et)

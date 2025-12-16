@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Example: Raw Signal to Sequence Alignment
+Example: Raw Signal to Sequence Alignment (RNA-only)
 
 Demonstrates the complete pipeline for aligning nanopore raw signal
-directly to a reference sequence using real pore models.
+directly to a reference RNA sequence using real pore models.
 
 Pipeline:
 1. Raw signal → Event detection (MAD-based adapter trimming)
@@ -15,7 +15,10 @@ This uses f5c's full 3-state HMM algorithm with:
 - BAD_EVENT state: Noisy events to skip
 - KMER_SKIP state: Kmers with no events
 - Dynamic transition probabilities
-- Real pore models (RNA R9.4, RNA004, DNA R9.4)
+- Real RNA pore models (RNA R9.4 5-mer, RNA004 9-mer)
+
+Note: Events are automatically reversed to match 3'→5' pore direction.
+For DRS data, you should reverse the sequence before alignment.
 """
 
 import numpy as np
@@ -30,20 +33,19 @@ except ImportError:
     sys.exit(1)
 
 
-def generate_synthetic_signal(sequence, kmer_size=5, is_rna=False):
+def generate_synthetic_signal(sequence, kmer_size=5):
     """
-    Generate synthetic nanopore signal for a given sequence.
+    Generate synthetic nanopore RNA signal for a given sequence.
 
     Args:
-        sequence: DNA/RNA sequence string
+        sequence: RNA sequence string (with U bases)
         kmer_size: Size of kmers (5 or 9)
-        is_rna: Whether this is RNA (True) or DNA (False)
 
     Returns:
         1D numpy array of float32 raw signal values
     """
     # Simplified model levels (these would come from real pore models)
-    base_to_level = {"A": 100.0, "C": 95.0, "G": 105.0, "T": 90.0, "U": 90.0}
+    base_to_level = {"A": 100.0, "C": 95.0, "G": 105.0, "U": 90.0}
 
     signal = []
 
@@ -81,12 +83,16 @@ def example_rna_alignment():
     print(f"\nSequence: {sequence}")
     print(f"Length: {len(sequence)} bases")
 
+    # For DRS, reverse the sequence to match 3'→5' pore transit
+    reversed_seq = sequence[::-1]
+    print(f"Reversed (3'→5'): {reversed_seq}")
+
     # Generate synthetic signal
-    raw_signal = generate_synthetic_signal(sequence, kmer_size=5, is_rna=True)
+    raw_signal = generate_synthetic_signal(sequence, kmer_size=5)
     print(f"Raw signal: {len(raw_signal)} samples")
 
-    # Align raw signal to sequence
-    result = eventalign(raw_signal, sequence, is_rna=1, kmer_size=5)
+    # Align raw signal to reversed sequence (RNA-only mode)
+    result = eventalign(raw_signal, reversed_seq, kmer_size=5)
 
     # Display results
     print(f"\nAlignment Results:")
@@ -101,7 +107,7 @@ def example_rna_alignment():
     base_to_event = result["base_to_event_map"]
     for i in range(min(10, len(base_to_event))):
         kmer_pos = i
-        kmer_seq = sequence[i : i + 5]
+        kmer_seq = reversed_seq[i : i + 5]
         event_indices = base_to_event[i]
         n_events = len(event_indices) if event_indices else 0
         print(f"  Kmer {kmer_pos:3d} ({kmer_seq}): {n_events} events")
@@ -109,23 +115,27 @@ def example_rna_alignment():
     return result
 
 
-def example_dna_alignment():
-    """Example: DNA sequence alignment with R9.4 5-mer model"""
+def example_rna_shorter():
+    """Example: Shorter RNA sequence alignment"""
     print("\n" + "=" * 70)
-    print("Example 2: DNA Alignment (R9.4 5-mer model)")
+    print("Example 2: RNA Alignment (Shorter Sequence)")
     print("=" * 70)
 
-    # DNA sequence
-    sequence = "ATGCGATACGTAGCTAGCTAGCTAGCTGCTAGCTAGCTA"
+    # Shorter RNA sequence
+    sequence = "AUGCGAUACGUAGCUAGCUA"
     print(f"\nSequence: {sequence}")
     print(f"Length: {len(sequence)} bases")
 
+    # For DRS, reverse the sequence
+    reversed_seq = sequence[::-1]
+    print(f"Reversed (3'→5'): {reversed_seq}")
+
     # Generate synthetic signal
-    raw_signal = generate_synthetic_signal(sequence, kmer_size=5, is_rna=False)
+    raw_signal = generate_synthetic_signal(sequence, kmer_size=5)
     print(f"Raw signal: {len(raw_signal)} samples")
 
-    # Align raw signal to sequence
-    result = eventalign(raw_signal, sequence, is_rna=0, kmer_size=5)
+    # Align raw signal to reversed sequence (RNA-only mode)
+    result = eventalign(raw_signal, reversed_seq, kmer_size=5)
 
     # Display results
     print(f"\nAlignment Results:")
@@ -140,7 +150,7 @@ def example_dna_alignment():
     base_to_event = result["base_to_event_map"]
     for i in range(min(10, len(base_to_event))):
         kmer_pos = i
-        kmer_seq = sequence[i : i + 5]
+        kmer_seq = reversed_seq[i : i + 5]
         event_indices = base_to_event[i]
         n_events = len(event_indices) if event_indices else 0
         print(f"  Kmer {kmer_pos:3d} ({kmer_seq}): {n_events} events")
@@ -159,12 +169,16 @@ def example_rna004_alignment():
     print(f"\nSequence: {sequence}")
     print(f"Length: {len(sequence)} bases")
 
+    # For DRS, reverse the sequence
+    reversed_seq = sequence[::-1]
+    print(f"Reversed (3'→5'): {reversed_seq}")
+
     # Generate synthetic signal
-    raw_signal = generate_synthetic_signal(sequence, kmer_size=9, is_rna=True)
+    raw_signal = generate_synthetic_signal(sequence, kmer_size=9)
     print(f"Raw signal: {len(raw_signal)} samples")
 
-    # Align raw signal to sequence (will auto-select RNA004 9-mer model)
-    result = eventalign(raw_signal, sequence, is_rna=1, kmer_size=9)
+    # Align raw signal to reversed sequence (will auto-select RNA004 9-mer model)
+    result = eventalign(raw_signal, reversed_seq, kmer_size=9)
 
     # Display results
     print(f"\nAlignment Results:")
@@ -179,7 +193,7 @@ def example_rna004_alignment():
     base_to_event = result["base_to_event_map"]
     for i in range(min(10, len(base_to_event))):
         kmer_pos = i
-        kmer_seq = sequence[i : i + 9]
+        kmer_seq = reversed_seq[i : i + 9]
         event_indices = base_to_event[i]
         n_events = len(event_indices) if event_indices else 0
         print(f"  Kmer {kmer_pos:3d} ({kmer_seq}): {n_events} events")
@@ -193,11 +207,15 @@ def example_with_adapters():
     print("Example 4: Soft-Clipping with Untrimmed Adapters")
     print("=" * 70)
 
-    sequence = "ATGCGATACGTAGCTAGCTAGCTAGCTGCTAGCTAGCTA"
+    sequence = "AUGCGAUACGUAGCUAGCUAGCUAGCUGCUAGCUAGCUA"
     print(f"\nSequence: {sequence}")
 
+    # For DRS, reverse the sequence
+    reversed_seq = sequence[::-1]
+    print(f"Reversed (3'→5'): {reversed_seq}")
+
     # Generate signal with long adapter regions
-    raw_signal = generate_synthetic_signal(sequence, kmer_size=5, is_rna=False)
+    raw_signal = generate_synthetic_signal(sequence, kmer_size=5)
 
     # Add extra noisy adapter signal
     pre_adapter = np.random.normal(75, 15, 500)  # Long pre-adapter
@@ -207,7 +225,7 @@ def example_with_adapters():
     print(f"Raw signal: {len(raw_signal)} samples (includes long adapters)")
 
     # Align - soft-clipping should handle adapters automatically
-    result = eventalign(raw_signal, sequence, is_rna=0, kmer_size=5)
+    result = eventalign(raw_signal, reversed_seq, kmer_size=5)
 
     print(f"\nAlignment Results:")
     print(f"  Events detected: {result['n_events']}")
@@ -222,13 +240,13 @@ def example_with_adapters():
 
 
 if __name__ == "__main__":
-    print("\nRaw Signal to Sequence Alignment Examples")
-    print("Using f5c's 3-state HMM with real pore models\n")
+    print("\nRaw Signal to Sequence Alignment Examples (RNA-only)")
+    print("Using f5c's 3-state HMM with real RNA pore models\n")
 
     # Run examples
     try:
         example_rna_alignment()
-        example_dna_alignment()
+        example_rna_shorter()
         example_rna004_alignment()
         example_with_adapters()
 

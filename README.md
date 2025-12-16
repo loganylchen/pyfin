@@ -31,21 +31,25 @@ pip install -e ".[all]"
 
 ## Features
 
-### Event Detection and Alignment (f5c-compatible)
+### Event Detection and Alignment (f5c-compatible, RNA-only)
 
-PyFin includes f5c-compatible algorithms for nanopore signal processing:
+PyFin includes f5c-compatible algorithms for nanopore RNA signal processing.
+Events are automatically reversed to match the 3'→5' pore transit direction for DRS data.
 
 ```python
 from fin._f5c import detect_events, eventalign, profile_hmm_eventalign
 
-# Detect events from raw signal
+# Detect events from raw signal (RNA-only, automatically reversed)
 events = detect_events(raw_signal)
 
+# For DRS data, reverse the sequence to match 3'→5' pore direction
+reversed_seq = sequence[::-1]
+
 # Simple event-to-kmer alignment
-alignment = eventalign(raw_signal, sequence, is_rna=True)
+alignment = eventalign(raw_signal, reversed_seq)
 
 # Full f5c Profile HMM alignment (recommended)
-result = profile_hmm_eventalign(raw_signal, sequence, is_rna=True)
+result = profile_hmm_eventalign(raw_signal, reversed_seq)
 for record in result['alignment']:
     print(f"{record['ref_kmer']} @ {record['ref_position']}: {record['hmm_state']}")
 ```

@@ -52,7 +52,7 @@ def debug_eventalign():
     print("\n" + "=" * 70)
     print("EVENT DETECTION")
     print("=" * 70)
-    events = detect_events(signal, is_rna=False)
+    events = detect_events(signal)  # RNA-only mode
     print(f"Detected {len(events)} events")
     print("\nFirst 10 events:")
     for i in range(min(10, len(events))):
@@ -68,7 +68,7 @@ def debug_eventalign():
     print("=" * 70)
 
     print("\nRunning eventalign...")
-    result = eventalign(signal, sequence, is_rna=False, kmer_size=5)
+    result = eventalign(signal, sequence, kmer_size=5)  # RNA-only mode
 
     print(f"\nResults:")
     print(f"  n_events: {result['n_events']}")

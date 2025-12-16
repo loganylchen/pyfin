@@ -30,16 +30,19 @@ except ImportError as e:
     _eventalign_cuda_import_error = str(e)
 
 
-def detect_events(raw_signal: np.ndarray, is_rna: bool = True) -> list[dict]:
+def detect_events(raw_signal: np.ndarray) -> list[dict]:
     """
-    High-level wrapper for nanopore event detection (C-backed).
+    High-level wrapper for nanopore RNA event detection (C-backed).
+
+    For Direct RNA Sequencing (DRS), events are automatically reversed
+    to match the 3'→5' pore transit direction. This means the first event
+    corresponds to the 3' end of the transcript.
 
     Args:
         raw_signal: 1D numpy array of raw nanopore signal values (must be float32).
-        is_rna: If True, use RNA-specific detection parameters (default: DNA).
 
     Returns:
-        List of event dicts, each with:
+        List of event dicts (in 3'→5' order), each with:
             - mean: Event mean current (float)
             - stdv: Event standard deviation (float)
             - start: Start index of the event (int)
@@ -66,29 +69,31 @@ def detect_events(raw_signal: np.ndarray, is_rna: bool = True) -> list[dict]:
         raw_signal = raw_signal.astype(np.float32)
         print("Warning: raw_signal converted to float32 (required for C backend)")
 
-    # Call C function (convert is_rna to int: 1/0)
-    return get_events(raw_signal, int(is_rna))
+    # Call C function (RNA mode with reversed events)
+    return get_events(raw_signal)
 
 
 def eventalign(
     raw_signal: np.ndarray,
     sequence: str,
-    is_rna: bool = False,
     kmer_size: int = 5,
     model: dict = None,
 ) -> dict:
     """
-    Align detected events to a reference sequence.
+    Align detected RNA events to a reference sequence.
+
+    RNA-only: Events are automatically reversed to match 3'->5' pore direction.
 
     This function performs event-to-sequence alignment, creating a mapping
     between k-mers in the sequence and events in the raw signal.
 
     Args:
         raw_signal: 1D numpy array of raw nanopore signal (float32).
-        sequence: Reference DNA/RNA sequence string (e.g., "ACGTACGT").
-        is_rna: If True, use RNA-specific detection parameters (default: False).
-        kmer_size: Size of k-mers for alignment (default: 5).
-        model: Optional k-mer model dictionary (default: uses built-in model).
+        sequence: Reference RNA sequence string (e.g., "ACGUACGU").
+                  For DRS data, you should reverse the sequence to match
+                  the 3'->5' pore transit direction.
+        kmer_size: Size of k-mers for alignment (5 or 9, default: 5).
+        model: Optional k-mer model dictionary (default: uses built-in RNA model).
 
     Returns:
         dict with keys:
@@ -107,12 +112,9 @@ def eventalign(
 
     Example:
         >>> signal = np.random.randn(10000).astype(np.float32)
-        >>> sequence = "ACGTACGTACGT"
-        >>> result = eventalign(signal, sequence, is_rna=False, kmer_size=5)
+        >>> sequence = "ACGUACGUACGU"[::-1]  # Reverse for DRS
+        >>> result = eventalign(signal, sequence, kmer_size=5)
         >>> print(f"Detected {result['n_events']} events")
-        >>> print(f"Scaling: {result['scaling']}")
-        >>> for i, mapping in enumerate(result['base_to_event_map']):
-        >>>     print(f"K-mer {mapping['kmer']}: events {mapping['start']}-{mapping['stop']}")
     """
     if not _EVENTALIGN_AVAILABLE:
         raise RuntimeError(
@@ -136,27 +138,29 @@ def eventalign(
     if len(sequence) < kmer_size:
         raise ValueError(f"sequence length ({len(sequence)}) must be >= kmer_size ({kmer_size})")
 
-    # Call C extension
-    return _eventalign_c(raw_signal, sequence, model, int(is_rna), kmer_size)
+    # Call C extension (RNA-only)
+    return _eventalign_c(raw_signal, sequence, model, kmer_size)
 
 
 def profile_hmm_eventalign(
     raw_signal: np.ndarray,
     sequence: str,
-    is_rna: bool = False,
     kmer_size: int = 5,
     events_per_base: float = 3.0,
 ) -> dict:
     """
     Full f5c Profile HMM eventalign with detailed alignment output.
 
+    RNA-only: Events are automatically reversed to match 3'->5' pore direction.
+
     This is the true f5c eventalign implementation using Viterbi HMM.
     Returns detailed event_alignment_t structures with HMM states.
 
     Args:
         raw_signal: 1D numpy array of raw nanopore signal (float32).
-        sequence: Reference DNA/RNA sequence string.
-        is_rna: If True, use RNA-specific parameters (default: False).
+        sequence: Reference RNA sequence string.
+                  For DRS data, you should reverse the sequence to match
+                  the 3'->5' pore transit direction.
         kmer_size: Size of k-mers (5 or 9, default: 5).
         events_per_base: Expected events per base (default: 3.0).
 
@@ -199,10 +203,8 @@ def profile_hmm_eventalign(
     if len(sequence) < kmer_size:
         raise ValueError(f"sequence length ({len(sequence)}) must be >= kmer_size ({kmer_size})")
 
-    # Call C extension
-    return _profile_hmm_eventalign_c(
-        raw_signal, sequence, None, int(is_rna), kmer_size, events_per_base
-    )
+    # Call C extension (RNA-only)
+    return _profile_hmm_eventalign_c(raw_signal, sequence, None, kmer_size, events_per_base)
 
 
 def is_available() -> bool:
@@ -238,20 +240,22 @@ def eventalign_cuda_is_available() -> bool:
 def profile_hmm_eventalign_cuda(
     raw_signal: np.ndarray,
     sequence: str,
-    is_rna: bool = False,
     kmer_size: int = 5,
     events_per_base: float = 3.0,
 ) -> dict:
     """
     GPU-accelerated Profile HMM eventalign using CUDA.
 
+    RNA-only: Events are automatically reversed to match 3'->5' pore direction.
+
     This is the CUDA-accelerated version of profile_hmm_eventalign.
     Provides significant speedup for large signals on NVIDIA GPUs.
 
     Args:
         raw_signal: 1D numpy array of raw nanopore signal (float32).
-        sequence: Reference DNA/RNA sequence string.
-        is_rna: If True, use RNA-specific parameters (default: False).
+        sequence: Reference RNA sequence string.
+                  For DRS data, you should reverse the sequence to match
+                  the 3'->5' pore transit direction.
         kmer_size: Size of k-mers (5 or 9, default: 5).
         events_per_base: Expected events per base (default: 3.0).
 
@@ -282,29 +286,30 @@ def profile_hmm_eventalign_cuda(
     if len(sequence) < kmer_size:
         raise ValueError(f"sequence length ({len(sequence)}) must be >= kmer_size ({kmer_size})")
 
-    return _profile_hmm_eventalign_cuda(
-        raw_signal, sequence, None, int(is_rna), kmer_size, events_per_base
-    )
+    # Call CUDA extension (RNA-only)
+    return _profile_hmm_eventalign_cuda(raw_signal, sequence, None, kmer_size, events_per_base)
 
 
 def eventalign_cuda(
     raw_signal: np.ndarray,
     sequence: str,
-    is_rna: bool = False,
     kmer_size: int = 5,
     model: dict = None,
 ) -> dict:
     """
     GPU-accelerated event-to-sequence alignment using CUDA.
 
+    RNA-only: Events are automatically reversed to match 3'->5' pore direction.
+
     This is the CUDA-accelerated version of eventalign.
     Provides significant speedup for large signals on NVIDIA GPUs.
 
     Args:
         raw_signal: 1D numpy array of raw nanopore signal (float32).
-        sequence: Reference DNA/RNA sequence string.
-        is_rna: If True, use RNA-specific parameters (default: False).
-        kmer_size: Size of k-mers (default: 5).
+        sequence: Reference RNA sequence string.
+                  For DRS data, you should reverse the sequence to match
+                  the 3'->5' pore transit direction.
+        kmer_size: Size of k-mers (5 or 9, default: 5).
         model: Optional k-mer model dictionary.
 
     Returns:
@@ -334,7 +339,8 @@ def eventalign_cuda(
     if len(sequence) < kmer_size:
         raise ValueError(f"sequence length ({len(sequence)}) must be >= kmer_size ({kmer_size})")
 
-    return _eventalign_cuda(raw_signal, sequence, model, int(is_rna), kmer_size)
+    # Call CUDA extension (RNA-only)
+    return _eventalign_cuda(raw_signal, sequence, model, kmer_size)
 
 
 # Export public functions
