@@ -283,12 +283,13 @@ class RegionTranscriptAnalyzer:
         """
         Perform eventalign of a read's signal to a transcript sequence.
 
-        RNA-only mode: Events are automatically reversed internally to match
-        the 5'→3' sequence direction. No sequence reversal needed.
+        For Direct RNA Sequencing (DRS), the RNA strand passes through the pore
+        in the 3'→5' direction, so we need to reverse the transcript sequence
+        (which is stored 5'→3') before alignment.
 
         Args:
             signal: Calibrated nanopore signal
-            transcript_seq: Transcript sequence in standard 5'→3' direction
+            transcript_seq: Transcript sequence (DNA/RNA, stored 5'→3')
             use_profile_hmm: Use Profile HMM (True) or simple ABEA (False)
 
         Returns:

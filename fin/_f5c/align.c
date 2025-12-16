@@ -151,24 +151,25 @@ static float *make_pre_flanking(int32_t num_events)
 }
 
 // Calculate post-flanking probabilities (from f5c)
+// post_flank[i] = log probability of soft-clipping events i..n_events-1
 static float *make_post_flanking(int32_t num_events)
 {
-    float *post_flank = (float *)calloc(num_events, sizeof(float));
+    // Allocate num_events + 1 elements (rows 0..num_events)
+    float *post_flank = (float *)calloc(num_events + 1, sizeof(float));
     if (!post_flank)
         return NULL;
 
+    // post_flank[num_events] = log(1 - TRANS_START_TO_CLIP) = no clipping
+    post_flank[num_events] = logf(1.0f - TRANS_START_TO_CLIP);
+
     if (num_events > 0)
     {
-        post_flank[num_events - 1] = logf(1.0f - TRANS_START_TO_CLIP);
+        // post_flank[num_events-1] = soft-clip last 1 event
+        post_flank[num_events - 1] = logf(TRANS_START_TO_CLIP) + (-3.0f) + logf(1.0f - TRANS_CLIP_SELF);
 
-        if (num_events > 1)
+        for (int i = num_events - 2; i >= 0; --i)
         {
-            post_flank[num_events - 2] = logf(TRANS_START_TO_CLIP) + (-3.0f) + logf(1.0f - TRANS_CLIP_SELF);
-
-            for (int i = num_events - 3; i >= 0; --i)
-            {
-                post_flank[i] = logf(TRANS_CLIP_SELF) + (-3.0f) + post_flank[i + 1];
-            }
+            post_flank[i] = logf(TRANS_CLIP_SELF) + (-3.0f) + post_flank[i + 1];
         }
     }
 
@@ -560,7 +561,7 @@ int32_t align_with_flanking_cpu(
 // Profile HMM Eventalign (Full f5c implementation)
 //-----------------------------------------------------------------------------
 
-// Profile HMM fill function (Viterbi algorithm)
+// Profile HMM fill function (Viterbi algorithm) - with soft-clipping like f5c
 static void profile_hmm_fill_generic_r9(
     float **dp_matrix,
     uint8_t **path_matrix,
@@ -571,25 +572,31 @@ static void profile_hmm_fill_generic_r9(
     simple_model_t *models,
     uint32_t kmer_size,
     simple_scalings_t scaling,
-    BlockTransitions *transitions)
+    BlockTransitions *transitions,
+    float *pre_flank,
+    float *post_flank)
 {
-    // Initialize first column (before any events)
-    for (int32_t ki = 0; ki < n_kmers; ++ki)
+    // Initialize all cells to -INFINITY
+    for (int32_t ei = 0; ei <= n_events; ++ei)
     {
-        for (int s = 0; s < NUM_STATES; ++s)
+        for (int32_t ki = 0; ki < n_kmers; ++ki)
         {
-            int state_idx = ki * NUM_STATES + s;
-            dp_matrix[0][state_idx] = -INFINITY;
-            path_matrix[0][state_idx] = 0;
+            for (int s = 0; s < NUM_STATES; ++s)
+            {
+                int state_idx = ki * NUM_STATES + s;
+                dp_matrix[ei][state_idx] = -INFINITY;
+                path_matrix[ei][state_idx] = 0;
+            }
         }
     }
 
-    // Start at first kmer, match state
-    dp_matrix[0][0 * NUM_STATES + STATE_MATCH] = 0.0f;
-
-    // Fill DP table
-    for (int32_t ei = 0; ei < n_events; ++ei)
+    // Fill DP table - f5c style with pre_flank soft-clipping
+    // Row 0 is before any events (initialization)
+    // Rows 1..n_events correspond to events 0..n_events-1
+    for (int32_t row = 1; row <= n_events; ++row)
     {
+        int32_t event_idx = row - 1;
+
         for (int32_t ki = 0; ki < n_kmers; ++ki)
         {
             // Get kmer from sequence
@@ -597,7 +604,8 @@ static void profile_hmm_fill_generic_r9(
             uint32_t kmer_rank = get_kmer_rank(kmer_ptr, kmer_size);
 
             // Get emission probability
-            float lp_emission = log_probability_match(scaling, models, events.event, ei, kmer_rank);
+            float lp_emission = log_probability_match(scaling, models, events.event, event_idx, kmer_rank);
+            float lp_emission_b = 0.0f; // Bad event penalty
 
             // Calculate scores for each state
             for (int s = 0; s < NUM_STATES; ++s)
@@ -611,60 +619,76 @@ static void profile_hmm_fill_generic_r9(
                 {
                     // Match state - event aligns to this kmer
 
-                    // From same kmer match (stay)
-                    if (ki < n_kmers)
+                    // From same kmer match (stay) - previous row, same kmer
                     {
                         int prev_idx = ki * NUM_STATES + STATE_MATCH;
-                        scores.x[HMT_FROM_SAME_M] = dp_matrix[ei][prev_idx] + transitions[ki].lp_mm_self + lp_emission;
+                        scores.x[HMT_FROM_SAME_M] = dp_matrix[row - 1][prev_idx] + transitions[ki].lp_mm_self;
                     }
 
-                    // From previous kmer match (advance)
+                    // From previous kmer match (advance) - previous row, previous kmer
                     if (ki > 0)
                     {
                         int prev_idx = (ki - 1) * NUM_STATES + STATE_MATCH;
-                        scores.x[HMT_FROM_PREV_M] = dp_matrix[ei][prev_idx] + transitions[ki - 1].lp_mm_next + lp_emission;
+                        scores.x[HMT_FROM_PREV_M] = dp_matrix[row - 1][prev_idx] + transitions[ki - 1].lp_mm_next;
                     }
 
-                    // From same kmer bad event
-                    if (ki < n_kmers)
+                    // From same kmer bad event - previous row, same kmer
                     {
                         int prev_idx = ki * NUM_STATES + STATE_BAD_EVENT;
-                        scores.x[HMT_FROM_SAME_B] = dp_matrix[ei][prev_idx] + transitions[ki].lp_bm_self + lp_emission;
+                        scores.x[HMT_FROM_SAME_B] = dp_matrix[row - 1][prev_idx] + transitions[ki].lp_bm_self;
                     }
 
-                    // From previous kmer bad event
+                    // From previous kmer bad event - previous row, previous kmer
                     if (ki > 0)
                     {
                         int prev_idx = (ki - 1) * NUM_STATES + STATE_BAD_EVENT;
-                        scores.x[HMT_FROM_PREV_B] = dp_matrix[ei][prev_idx] + transitions[ki - 1].lp_bm_next + lp_emission;
+                        scores.x[HMT_FROM_PREV_B] = dp_matrix[row - 1][prev_idx] + transitions[ki - 1].lp_bm_next;
                     }
 
-                    // From previous kmer skip
+                    // From previous kmer skip - previous row, previous kmer
                     if (ki > 0)
                     {
                         int prev_idx = (ki - 1) * NUM_STATES + STATE_KMER_SKIP;
-                        scores.x[HMT_FROM_PREV_K] = dp_matrix[ei][prev_idx] + transitions[ki - 1].lp_km + lp_emission;
+                        scores.x[HMT_FROM_PREV_K] = dp_matrix[row - 1][prev_idx] + transitions[ki - 1].lp_km;
+                    }
+
+                    // From soft-clip (pre-flank) - only allowed for first kmer (ki == 0)
+                    // This allows skipping the first N events with a penalty
+                    // Note: emission is added later, so this just provides the start probability
+                    if (ki == 0)
+                    {
+                        // pre_flank[row-1] gives log prob of skipping events 0..(row-2)
+                        // and then transitioning from clip to match state
+                        scores.x[HMT_FROM_SOFT] = pre_flank[row - 1];
                     }
                 }
                 else if (s == STATE_BAD_EVENT)
                 {
                     // Bad event state - ignore this event
 
-                    // From match to bad event
+                    // From match to bad event - previous row, same kmer
                     int prev_idx = ki * NUM_STATES + STATE_MATCH;
-                    scores.x[HMT_FROM_SAME_M] = dp_matrix[ei][prev_idx] + transitions[ki].lp_mb;
+                    scores.x[HMT_FROM_SAME_M] = dp_matrix[row - 1][prev_idx] + transitions[ki].lp_mb;
 
-                    // From bad event to bad event
+                    // From bad event to bad event - previous row, same kmer
                     prev_idx = ki * NUM_STATES + STATE_BAD_EVENT;
-                    scores.x[HMT_FROM_SAME_B] = dp_matrix[ei][prev_idx] + transitions[ki].lp_bb;
+                    scores.x[HMT_FROM_SAME_B] = dp_matrix[row - 1][prev_idx] + transitions[ki].lp_bb;
                 }
                 else if (s == STATE_KMER_SKIP)
                 {
                     // Kmer skip state - no event for this kmer
-                    // Note: KMER_SKIP doesn't consume events, so it stays at same event row
-                    // We skip this state in the forward pass for simplicity
-                    // (full implementation would handle this differently)
-                    scores.x[HMT_FROM_PREV_M] = -INFINITY;
+                    // Note: KMER_SKIP doesn't consume events, operates on same row
+                    if (ki > 0)
+                    {
+                        int prev_idx = (ki - 1) * NUM_STATES + STATE_MATCH;
+                        scores.x[HMT_FROM_PREV_M] = dp_matrix[row][prev_idx] + transitions[ki - 1].lp_mk;
+
+                        prev_idx = (ki - 1) * NUM_STATES + STATE_BAD_EVENT;
+                        scores.x[HMT_FROM_PREV_B] = dp_matrix[row][prev_idx] + transitions[ki - 1].lp_bk;
+
+                        prev_idx = (ki - 1) * NUM_STATES + STATE_KMER_SKIP;
+                        scores.x[HMT_FROM_PREV_K] = dp_matrix[row][prev_idx] + transitions[ki - 1].lp_kk;
+                    }
                 }
 
                 // Find best path and score
@@ -679,15 +703,28 @@ static void profile_hmm_fill_generic_r9(
                     }
                 }
 
-                dp_matrix[ei + 1][curr_state_idx] = best_score;
-                path_matrix[ei + 1][curr_state_idx] = best_movement;
+                // Add emission for MATCH and BAD_EVENT states (not KMER_SKIP)
+                if (s == STATE_MATCH)
+                {
+                    dp_matrix[row][curr_state_idx] = best_score + lp_emission;
+                }
+                else if (s == STATE_BAD_EVENT)
+                {
+                    dp_matrix[row][curr_state_idx] = best_score + lp_emission_b;
+                }
+                else
+                {
+                    dp_matrix[row][curr_state_idx] = best_score; // KMER_SKIP has no emission
+                }
+                path_matrix[row][curr_state_idx] = best_movement;
             }
         }
     }
 }
 
 // Traceback through HMM to get alignment path
-static int32_t profile_hmm_traceback(
+// Now uses post_flank to find best ending position (soft-clipping at end)
+static int32_t profile_hmm_traceback_with_flanking(
     event_alignment_t **out_alignment,
     uint8_t **path_matrix,
     float **dp_matrix,
@@ -697,20 +734,28 @@ static int32_t profile_hmm_traceback(
     int32_t n_events,
     simple_model_t *models,
     uint32_t kmer_size,
-    simple_scalings_t scaling)
+    simple_scalings_t scaling,
+    float *post_flank)
 {
-    // Find best end position
+    // Find best end position using post_flank
+    // Search over all events at the last kmer, considering post-clipping penalty
     float best_score = -INFINITY;
-    int best_kmer = n_kmers - 1;
+    int best_event_row = n_events;
     int best_state = STATE_MATCH;
 
-    for (int s = 0; s < NUM_STATES; ++s)
+    for (int32_t row = 1; row <= n_events; ++row)
     {
-        int state_idx = (n_kmers - 1) * NUM_STATES + s;
-        if (dp_matrix[n_events][state_idx] > best_score)
+        for (int s = 0; s < NUM_STATES; ++s)
         {
-            best_score = dp_matrix[n_events][state_idx];
-            best_state = s;
+            int state_idx = (n_kmers - 1) * NUM_STATES + s;
+            // post_flank[row] gives log prob of soft-clipping events row..n_events-1
+            float score = dp_matrix[row][state_idx] + post_flank[row];
+            if (score > best_score)
+            {
+                best_score = score;
+                best_event_row = row;
+                best_state = s;
+            }
         }
     }
 
@@ -720,9 +765,9 @@ static int32_t profile_hmm_traceback(
         return -1;
 
     int align_idx = 0;
-    int curr_kmer = best_kmer;
+    int curr_kmer = n_kmers - 1;
     int curr_state = best_state;
-    int curr_event = n_events - 1;
+    int curr_event = best_event_row - 1; // Convert row to event index
 
     // Traceback
     while (curr_event >= 0 && curr_kmer >= 0)
@@ -857,6 +902,12 @@ static int32_t profile_hmm_traceback(
             else
                 curr_state = STATE_KMER_SKIP;
         }
+        else if (movement == HMT_FROM_SOFT)
+        {
+            // Came from soft-clip state - this is the start of the alignment
+            // All events before this were soft-clipped (skipped)
+            break;
+        }
         else
         {
             break; // Unknown movement or start
@@ -929,15 +980,34 @@ int32_t profile_hmm_align(
         }
     }
 
-    // Run Viterbi HMM
+    // Create pre-flanking and post-flanking arrays for soft-clipping
+    float *pre_flank = make_pre_flanking(n_events);
+    float *post_flank = make_post_flanking(n_events);
+
+    if (!pre_flank || !post_flank)
+    {
+        for (int i = 0; i <= n_events; ++i)
+        {
+            free(dp_matrix[i]);
+            free(path_matrix[i]);
+        }
+        free(dp_matrix);
+        free(path_matrix);
+        free(transitions);
+        free(pre_flank);
+        free(post_flank);
+        return -1;
+    }
+
+    // Run Viterbi HMM with soft-clipping
     profile_hmm_fill_generic_r9(dp_matrix, path_matrix, sequence, n_kmers,
                                 events, n_events, model, kmer_size,
-                                scaling, transitions);
+                                scaling, transitions, pre_flank, post_flank);
 
-    // Traceback to get alignment
-    int32_t n_aligned = profile_hmm_traceback(out_alignment, path_matrix, dp_matrix,
-                                              sequence, n_kmers, events, n_events,
-                                              model, kmer_size, scaling);
+    // Traceback to get alignment (using post_flank for soft-clipping at end)
+    int32_t n_aligned = profile_hmm_traceback_with_flanking(out_alignment, path_matrix, dp_matrix,
+                                                            sequence, n_kmers, events, n_events,
+                                                            model, kmer_size, scaling, post_flank);
 
     // Cleanup
     for (int i = 0; i <= n_events; ++i)
@@ -948,6 +1018,8 @@ int32_t profile_hmm_align(
     free(dp_matrix);
     free(path_matrix);
     free(transitions);
+    free(pre_flank);
+    free(post_flank);
 
     return n_aligned;
 }
