@@ -39,7 +39,7 @@ typedef struct
     float log_var;
 } simple_scalings_t;
 
-// Simplified aligned pair structure
+// Simplified aligned pair structure (for ABEA algorithm)
 typedef struct
 {
     int ref_pos;           // kmer index in sequence
@@ -47,13 +47,34 @@ typedef struct
     float log_probability; // Alignment probability
 } simple_aligned_pair_t;
 
+// Full event alignment structure (from f5c eventalign)
+#define MAX_KMER_SIZE 16
+typedef struct
+{
+    int32_t ref_position;               // Reference position (0-based)
+    char ref_kmer[MAX_KMER_SIZE + 1];   // Reference k-mer
+    int32_t event_idx;                  // Event index
+    char hmm_state;                     // 'M' = match, 'K' = kmer_skip, 'B' = bad_event
+    uint8_t strand_idx;                 // 0=template, 1=complement (for DNA)
+    char model_kmer[MAX_KMER_SIZE + 1]; // Model k-mer
+    float event_mean;                   // Observed event mean
+    float event_stdv;                   // Observed event stdv
+    float event_duration;               // Event duration
+    float model_mean;                   // Expected model mean
+    float model_stdv;                   // Expected model stdv
+    float scaled_model_mean;            // scale * model_mean + shift
+    float scaled_model_stdv;            // model_stdv * var
+} event_alignment_t;
+
 // Function prototypes for alignment
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
-    // CPU alignment function
+    // CPU alignment functions
+
+    // Simple ABEA alignment (fast, returns simple pairs)
     int32_t align_with_flanking_cpu(
         simple_aligned_pair_t **out_alignment,
         const char *sequence,
@@ -62,6 +83,17 @@ extern "C"
         simple_model_t *model,
         uint32_t kmer_size,
         simple_scalings_t scaling);
+
+    // Profile HMM eventalign (detailed, returns event_alignment_t)
+    int32_t profile_hmm_align(
+        event_alignment_t **out_alignment,
+        const char *sequence,
+        int32_t seq_len,
+        event_table events,
+        simple_model_t *model,
+        uint32_t kmer_size,
+        simple_scalings_t scaling,
+        float events_per_base);
 
 #ifdef __cplusplus
 }

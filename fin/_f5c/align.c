@@ -555,3 +555,383 @@ int32_t align_with_flanking_cpu(
     *out_alignment = alignment;
     return align_len;
 }
+
+//-----------------------------------------------------------------------------
+// Profile HMM Eventalign (Full f5c implementation)
+//-----------------------------------------------------------------------------
+
+// Profile HMM fill function (Viterbi algorithm)
+static void profile_hmm_fill_generic_r9(
+    float **dp_matrix,
+    uint8_t **path_matrix,
+    const char *sequence,
+    int32_t n_kmers,
+    event_table events,
+    int32_t n_events,
+    simple_model_t *models,
+    uint32_t kmer_size,
+    simple_scalings_t scaling,
+    BlockTransitions *transitions)
+{
+    // Initialize first column (before any events)
+    for (int32_t ki = 0; ki < n_kmers; ++ki)
+    {
+        for (int s = 0; s < NUM_STATES; ++s)
+        {
+            int state_idx = ki * NUM_STATES + s;
+            dp_matrix[0][state_idx] = -INFINITY;
+            path_matrix[0][state_idx] = 0;
+        }
+    }
+
+    // Start at first kmer, match state
+    dp_matrix[0][0 * NUM_STATES + STATE_MATCH] = 0.0f;
+
+    // Fill DP table
+    for (int32_t ei = 0; ei < n_events; ++ei)
+    {
+        for (int32_t ki = 0; ki < n_kmers; ++ki)
+        {
+            // Get kmer from sequence
+            const char *kmer_ptr = sequence + ki;
+            uint32_t kmer_rank = get_kmer_rank(kmer_ptr, kmer_size);
+
+            // Get emission probability
+            float lp_emission = log_probability_match(scaling, models, events.event, ei, kmer_rank);
+
+            // Calculate scores for each state
+            for (int s = 0; s < NUM_STATES; ++s)
+            {
+                int curr_state_idx = ki * NUM_STATES + s;
+                HMMUpdateScores scores;
+                for (int i = 0; i < HMT_NUM_MOVEMENT_TYPES; ++i)
+                    scores.x[i] = -INFINITY;
+
+                if (s == STATE_MATCH)
+                {
+                    // Match state - event aligns to this kmer
+
+                    // From same kmer match (stay)
+                    if (ki < n_kmers)
+                    {
+                        int prev_idx = ki * NUM_STATES + STATE_MATCH;
+                        scores.x[HMT_FROM_SAME_M] = dp_matrix[ei][prev_idx] + transitions[ki].lp_mm_self + lp_emission;
+                    }
+
+                    // From previous kmer match (advance)
+                    if (ki > 0)
+                    {
+                        int prev_idx = (ki - 1) * NUM_STATES + STATE_MATCH;
+                        scores.x[HMT_FROM_PREV_M] = dp_matrix[ei][prev_idx] + transitions[ki - 1].lp_mm_next + lp_emission;
+                    }
+
+                    // From same kmer bad event
+                    if (ki < n_kmers)
+                    {
+                        int prev_idx = ki * NUM_STATES + STATE_BAD_EVENT;
+                        scores.x[HMT_FROM_SAME_B] = dp_matrix[ei][prev_idx] + transitions[ki].lp_bm_self + lp_emission;
+                    }
+
+                    // From previous kmer bad event
+                    if (ki > 0)
+                    {
+                        int prev_idx = (ki - 1) * NUM_STATES + STATE_BAD_EVENT;
+                        scores.x[HMT_FROM_PREV_B] = dp_matrix[ei][prev_idx] + transitions[ki - 1].lp_bm_next + lp_emission;
+                    }
+
+                    // From previous kmer skip
+                    if (ki > 0)
+                    {
+                        int prev_idx = (ki - 1) * NUM_STATES + STATE_KMER_SKIP;
+                        scores.x[HMT_FROM_PREV_K] = dp_matrix[ei][prev_idx] + transitions[ki - 1].lp_km + lp_emission;
+                    }
+                }
+                else if (s == STATE_BAD_EVENT)
+                {
+                    // Bad event state - ignore this event
+
+                    // From match to bad event
+                    int prev_idx = ki * NUM_STATES + STATE_MATCH;
+                    scores.x[HMT_FROM_SAME_M] = dp_matrix[ei][prev_idx] + transitions[ki].lp_mb;
+
+                    // From bad event to bad event
+                    prev_idx = ki * NUM_STATES + STATE_BAD_EVENT;
+                    scores.x[HMT_FROM_SAME_B] = dp_matrix[ei][prev_idx] + transitions[ki].lp_bb;
+                }
+                else if (s == STATE_KMER_SKIP)
+                {
+                    // Kmer skip state - no event for this kmer
+                    // This doesn't consume an event, so we look at same event index (ei+1 row)
+
+                    if (ki > 0)
+                    {
+                        // From previous match to skip
+                        int prev_idx = (ki - 1) * NUM_STATES + STATE_MATCH;
+                        scores.x[HMT_FROM_PREV_M] = dp_matrix[ei + 1][prev_idx] + transitions[ki - 1].lp_mk;
+
+                        // From previous bad event to skip
+                        prev_idx = (ki - 1) * NUM_STATES + STATE_BAD_EVENT;
+                        scores.x[HMT_FROM_PREV_B] = dp_matrix[ei + 1][prev_idx] + transitions[ki - 1].lp_bk;
+
+                        // From previous skip to skip
+                        prev_idx = (ki - 1) * NUM_STATES + STATE_KMER_SKIP;
+                        scores.x[HMT_FROM_PREV_K] = dp_matrix[ei + 1][prev_idx] + transitions[ki - 1].lp_kk;
+                    }
+                }
+
+                // Find best path and score
+                float best_score = -INFINITY;
+                uint8_t best_movement = 0;
+                for (int m = 0; m < HMT_NUM_MOVEMENT_TYPES; ++m)
+                {
+                    if (scores.x[m] > best_score)
+                    {
+                        best_score = scores.x[m];
+                        best_movement = m;
+                    }
+                }
+
+                dp_matrix[ei + 1][curr_state_idx] = best_score;
+                path_matrix[ei + 1][curr_state_idx] = best_movement;
+            }
+        }
+    }
+}
+
+// Traceback through HMM to get alignment path
+static int32_t profile_hmm_traceback(
+    event_alignment_t **out_alignment,
+    uint8_t **path_matrix,
+    float **dp_matrix,
+    const char *sequence,
+    int32_t n_kmers,
+    event_table events,
+    int32_t n_events,
+    simple_model_t *models,
+    uint32_t kmer_size,
+    simple_scalings_t scaling)
+{
+    // Find best end position
+    float best_score = -INFINITY;
+    int best_kmer = n_kmers - 1;
+    int best_state = STATE_MATCH;
+
+    for (int s = 0; s < NUM_STATES; ++s)
+    {
+        int state_idx = (n_kmers - 1) * NUM_STATES + s;
+        if (dp_matrix[n_events][state_idx] > best_score)
+        {
+            best_score = dp_matrix[n_events][state_idx];
+            best_state = s;
+        }
+    }
+
+    // Allocate alignment array (worst case: all events)
+    event_alignment_t *alignment = (event_alignment_t *)malloc(n_events * sizeof(event_alignment_t));
+    if (!alignment)
+        return -1;
+
+    int align_idx = 0;
+    int curr_kmer = best_kmer;
+    int curr_state = best_state;
+    int curr_event = n_events - 1;
+
+    // Traceback
+    while (curr_event >= 0 && curr_kmer >= 0)
+    {
+        int state_idx = curr_kmer * NUM_STATES + curr_state;
+        uint8_t movement = path_matrix[curr_event + 1][state_idx];
+
+        // Record alignment for match states
+        if (curr_state == STATE_MATCH && curr_event >= 0)
+        {
+            event_alignment_t *aln = &alignment[align_idx++];
+
+            // Fill in alignment details
+            aln->ref_position = curr_kmer;
+            aln->event_idx = curr_event;
+            aln->hmm_state = 'M';
+            aln->strand_idx = 0;
+
+            // Copy kmers
+            strncpy(aln->ref_kmer, sequence + curr_kmer, kmer_size);
+            aln->ref_kmer[kmer_size] = '\0';
+            strncpy(aln->model_kmer, sequence + curr_kmer, kmer_size);
+            aln->model_kmer[kmer_size] = '\0';
+
+            // Event statistics
+            aln->event_mean = events.event[curr_event].mean;
+            aln->event_stdv = events.event[curr_event].stdv;
+            aln->event_duration = events.event[curr_event].length;
+
+            // Model statistics
+            uint32_t kmer_rank = get_kmer_rank(sequence + curr_kmer, kmer_size);
+            aln->model_mean = models[kmer_rank].level_mean;
+            aln->model_stdv = models[kmer_rank].level_stdv;
+            aln->scaled_model_mean = scaling.scale * aln->model_mean + scaling.shift;
+            aln->scaled_model_stdv = aln->model_stdv * scaling.var;
+        }
+        else if (curr_state == STATE_BAD_EVENT && curr_event >= 0)
+        {
+            // Record bad events too
+            event_alignment_t *aln = &alignment[align_idx++];
+            aln->ref_position = curr_kmer;
+            aln->event_idx = curr_event;
+            aln->hmm_state = 'B';
+            aln->strand_idx = 0;
+
+            strncpy(aln->ref_kmer, sequence + curr_kmer, kmer_size);
+            aln->ref_kmer[kmer_size] = '\0';
+            strncpy(aln->model_kmer, sequence + curr_kmer, kmer_size);
+            aln->model_kmer[kmer_size] = '\0';
+
+            aln->event_mean = events.event[curr_event].mean;
+            aln->event_stdv = events.event[curr_event].stdv;
+            aln->event_duration = events.event[curr_event].length;
+
+            uint32_t kmer_rank = get_kmer_rank(sequence + curr_kmer, kmer_size);
+            aln->model_mean = models[kmer_rank].level_mean;
+            aln->model_stdv = models[kmer_rank].level_stdv;
+            aln->scaled_model_mean = scaling.scale * aln->model_mean + scaling.shift;
+            aln->scaled_model_stdv = aln->model_stdv * scaling.var;
+        }
+        else if (curr_state == STATE_KMER_SKIP)
+        {
+            // Record kmer skips
+            event_alignment_t *aln = &alignment[align_idx++];
+            aln->ref_position = curr_kmer;
+            aln->event_idx = -1; // No event
+            aln->hmm_state = 'K';
+            aln->strand_idx = 0;
+
+            strncpy(aln->ref_kmer, sequence + curr_kmer, kmer_size);
+            aln->ref_kmer[kmer_size] = '\0';
+            strncpy(aln->model_kmer, sequence + curr_kmer, kmer_size);
+            aln->model_kmer[kmer_size] = '\0';
+
+            aln->event_mean = 0.0f;
+            aln->event_stdv = 0.0f;
+            aln->event_duration = 0.0f;
+
+            uint32_t kmer_rank = get_kmer_rank(sequence + curr_kmer, kmer_size);
+            aln->model_mean = models[kmer_rank].level_mean;
+            aln->model_stdv = models[kmer_rank].level_stdv;
+            aln->scaled_model_mean = scaling.scale * aln->model_mean + scaling.shift;
+            aln->scaled_model_stdv = aln->model_stdv * scaling.var;
+        }
+
+        // Move to previous state based on movement type
+        if (movement == HMT_FROM_SAME_M || movement == HMT_FROM_SAME_B)
+        {
+            // Stay at same kmer, previous event
+            curr_event--;
+            curr_state = (movement == HMT_FROM_SAME_M) ? STATE_MATCH : STATE_BAD_EVENT;
+        }
+        else if (movement == HMT_FROM_PREV_M || movement == HMT_FROM_PREV_B || movement == HMT_FROM_PREV_K)
+        {
+            // Move to previous kmer
+            if (curr_state != STATE_KMER_SKIP)
+                curr_event--; // Kmer skip doesn't consume event
+            curr_kmer--;
+
+            if (movement == HMT_FROM_PREV_M)
+                curr_state = STATE_MATCH;
+            else if (movement == HMT_FROM_PREV_B)
+                curr_state = STATE_BAD_EVENT;
+            else
+                curr_state = STATE_KMER_SKIP;
+        }
+        else
+        {
+            break; // Unknown movement or start
+        }
+    }
+
+    // Reverse alignment (we traced backwards)
+    for (int i = 0; i < align_idx / 2; ++i)
+    {
+        event_alignment_t temp = alignment[i];
+        alignment[i] = alignment[align_idx - 1 - i];
+        alignment[align_idx - 1 - i] = temp;
+    }
+
+    *out_alignment = alignment;
+    return align_idx;
+}
+
+// Main Profile HMM alignment function
+int32_t profile_hmm_align(
+    event_alignment_t **out_alignment,
+    const char *sequence,
+    int32_t seq_len,
+    event_table events,
+    simple_model_t *model,
+    uint32_t kmer_size,
+    simple_scalings_t scaling,
+    float events_per_base)
+{
+    int32_t n_kmers = seq_len - kmer_size + 1;
+    int32_t n_events = events.n;
+
+    if (n_kmers <= 0 || n_events <= 0)
+        return 0;
+
+    // Calculate transition probabilities
+    BlockTransitions *transitions = calculate_transitions(n_kmers, events_per_base);
+    if (!transitions)
+        return -1;
+
+    // Allocate DP and path matrices
+    int n_states = n_kmers * NUM_STATES;
+    float **dp_matrix = (float **)malloc((n_events + 1) * sizeof(float *));
+    uint8_t **path_matrix = (uint8_t **)malloc((n_events + 1) * sizeof(uint8_t *));
+
+    if (!dp_matrix || !path_matrix)
+    {
+        free(transitions);
+        free(dp_matrix);
+        free(path_matrix);
+        return -1;
+    }
+
+    for (int i = 0; i <= n_events; ++i)
+    {
+        dp_matrix[i] = (float *)malloc(n_states * sizeof(float));
+        path_matrix[i] = (uint8_t *)malloc(n_states * sizeof(uint8_t));
+
+        if (!dp_matrix[i] || !path_matrix[i])
+        {
+            for (int j = 0; j <= i; ++j)
+            {
+                free(dp_matrix[j]);
+                free(path_matrix[j]);
+            }
+            free(dp_matrix);
+            free(path_matrix);
+            free(transitions);
+            return -1;
+        }
+    }
+
+    // Run Viterbi HMM
+    profile_hmm_fill_generic_r9(dp_matrix, path_matrix, sequence, n_kmers,
+                                events, n_events, model, kmer_size,
+                                scaling, transitions);
+
+    // Traceback to get alignment
+    int32_t n_aligned = profile_hmm_traceback(out_alignment, path_matrix, dp_matrix,
+                                              sequence, n_kmers, events, n_events,
+                                              model, kmer_size, scaling);
+
+    // Cleanup
+    for (int i = 0; i <= n_events; ++i)
+    {
+        free(dp_matrix[i]);
+        free(path_matrix[i]);
+    }
+    free(dp_matrix);
+    free(path_matrix);
+    free(transitions);
+
+    return n_aligned;
+}

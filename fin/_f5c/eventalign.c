@@ -28,7 +28,7 @@
 // Model data is included from model.h (static arrays)
 // We'll load models directly from the built-in data
 
-// Import CPU alignment function
+// Import CPU alignment functions
 extern int32_t align_with_flanking_cpu(
     simple_aligned_pair_t **out_alignment,
     const char *sequence,
@@ -37,6 +37,16 @@ extern int32_t align_with_flanking_cpu(
     simple_model_t *model,
     uint32_t kmer_size,
     simple_scalings_t scaling);
+
+extern int32_t profile_hmm_align(
+    event_alignment_t **out_alignment,
+    const char *sequence,
+    int32_t seq_len,
+    event_table events,
+    simple_model_t *model,
+    uint32_t kmer_size,
+    simple_scalings_t scaling,
+    float events_per_base);
 
 // Import GPU alignment function (if CUDA is available)
 #ifdef CUDA_ENABLED
@@ -289,6 +299,186 @@ static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
     return result;
 }
 
+// Python wrapper for profile HMM eventalign (f5c version with detailed output)
+static PyObject *py_profile_hmm_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    PyArrayObject *raw_arr;
+    const char *sequence;
+    PyObject *model_dict = NULL;
+    int is_rna = 0;
+    int kmer_size = 5;
+    float events_per_base = 3.0f; // Default from f5c
+
+    static char *kwlist[] = {"raw_signal", "sequence", "model", "is_rna", "kmer_size", "events_per_base", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|Oiif", kwlist,
+                                     &raw_arr, &sequence, &model_dict, &is_rna, &kmer_size, &events_per_base))
+    {
+        return NULL;
+    }
+
+    // Validate inputs
+    if (PyArray_TYPE(raw_arr) != NPY_FLOAT32 || PyArray_NDIM(raw_arr) != 1)
+    {
+        PyErr_SetString(PyExc_TypeError, "raw_signal must be 1D float32 numpy array");
+        return NULL;
+    }
+
+    if (!PyArray_IS_C_CONTIGUOUS(raw_arr))
+    {
+        PyErr_SetString(PyExc_ValueError, "raw_signal must be contiguous");
+        return NULL;
+    }
+
+    int seq_len = strlen(sequence);
+    if (seq_len < kmer_size)
+    {
+        PyErr_SetString(PyExc_ValueError, "sequence too short for kmer_size");
+        return NULL;
+    }
+
+    // Get raw signal data
+    size_t nsample = (size_t)PyArray_SIZE(raw_arr);
+    float *rawptr = (float *)PyArray_DATA(raw_arr);
+
+    // Step 1: Detect events
+    event_table et = getevents_simple(nsample, rawptr, is_rna);
+    if (et.n == 0 || !et.event)
+    {
+        PyErr_SetString(PyExc_RuntimeError, "Event detection failed");
+        return NULL;
+    }
+
+    // Calculate events per base if needed
+    if (events_per_base <= 0.0f)
+    {
+        events_per_base = (float)et.n / (float)(seq_len - kmer_size + 1);
+    }
+
+    // Step 2: Load real pore model
+    uint32_t model_id;
+    uint32_t model_kmer_size;
+
+    if (is_rna)
+    {
+        if (kmer_size == 9)
+        {
+            model_id = MODEL_ID_RNA_RNA004_NUCLEOTIDE;
+            model_kmer_size = 9;
+        }
+        else
+        {
+            model_id = MODEL_ID_RNA_R9_NUCLEOTIDE;
+            model_kmer_size = 5;
+        }
+    }
+    else
+    {
+        model_id = MODEL_ID_DNA_R9_NUCLEOTIDE;
+        model_kmer_size = 5;
+    }
+
+    if (kmer_size != model_kmer_size)
+    {
+        kmer_size = model_kmer_size;
+    }
+
+    int n_kmers_model = 1 << (kmer_size * 2);
+    simple_model_t *model = (simple_model_t *)malloc(n_kmers_model * sizeof(simple_model_t));
+    if (!model)
+    {
+        free_event_table(&et);
+        return PyErr_NoMemory();
+    }
+
+    // Load model data
+    float *model_data = NULL;
+    if (model_id == MODEL_ID_RNA_R9_NUCLEOTIDE)
+    {
+        model_data = rna002_model_builtin_data;
+    }
+    else if (model_id == MODEL_ID_RNA_RNA004_NUCLEOTIDE)
+    {
+        model_data = rna004_model_builtin_data;
+    }
+    else
+    {
+        model_data = rna002_model_builtin_data;
+        kmer_size = 5;
+    }
+
+    for (int i = 0; i < n_kmers_model; ++i)
+    {
+        model[i].level_mean = model_data[i * 2 + 0];
+        model[i].level_stdv = model_data[i * 2 + 1];
+        model[i].level_log_stdv = logf(model[i].level_stdv);
+    }
+
+    // Step 3: Estimate scaling
+    simple_scalings_t scaling = estimate_scalings(sequence, seq_len, model, kmer_size, et);
+
+    // Step 4: Profile HMM alignment (f5c version)
+    event_alignment_t *alignment = NULL;
+    int n_aligned = profile_hmm_align(&alignment, sequence, seq_len, et, model,
+                                      kmer_size, scaling, events_per_base);
+
+    if (n_aligned <= 0 || !alignment)
+    {
+        free(model);
+        free_event_table(&et);
+        PyErr_SetString(PyExc_RuntimeError, "Profile HMM alignment failed");
+        return NULL;
+    }
+
+    // Step 5: Create Python list of alignment records
+    PyObject *alignment_list = PyList_New(n_aligned);
+    if (!alignment_list)
+    {
+        free(alignment);
+        free(model);
+        free_event_table(&et);
+        return NULL;
+    }
+
+    for (int i = 0; i < n_aligned; ++i)
+    {
+        event_alignment_t *aln = &alignment[i];
+        PyObject *record = PyDict_New();
+
+        PyDict_SetItemString(record, "ref_position", PyLong_FromLong(aln->ref_position));
+        PyDict_SetItemString(record, "ref_kmer", PyUnicode_FromString(aln->ref_kmer));
+        PyDict_SetItemString(record, "event_idx", PyLong_FromLong(aln->event_idx));
+        PyDict_SetItemString(record, "hmm_state", PyUnicode_FromFormat("%c", aln->hmm_state));
+        PyDict_SetItemString(record, "strand_idx", PyLong_FromLong(aln->strand_idx));
+        PyDict_SetItemString(record, "model_kmer", PyUnicode_FromString(aln->model_kmer));
+        PyDict_SetItemString(record, "event_mean", PyFloat_FromDouble(aln->event_mean));
+        PyDict_SetItemString(record, "event_stdv", PyFloat_FromDouble(aln->event_stdv));
+        PyDict_SetItemString(record, "event_duration", PyFloat_FromDouble(aln->event_duration));
+        PyDict_SetItemString(record, "model_mean", PyFloat_FromDouble(aln->model_mean));
+        PyDict_SetItemString(record, "model_stdv", PyFloat_FromDouble(aln->model_stdv));
+        PyDict_SetItemString(record, "scaled_model_mean", PyFloat_FromDouble(aln->scaled_model_mean));
+        PyDict_SetItemString(record, "scaled_model_stdv", PyFloat_FromDouble(aln->scaled_model_stdv));
+
+        PyList_SetItem(alignment_list, i, record);
+    }
+
+    // Create return dictionary
+    PyObject *result = PyDict_New();
+    PyDict_SetItemString(result, "alignment", alignment_list);
+    PyDict_SetItemString(result, "scaling", Py_BuildValue("{s:f,s:f}", "scale", scaling.scale, "shift", scaling.shift));
+    PyDict_SetItemString(result, "n_events", PyLong_FromLong(et.n));
+    PyDict_SetItemString(result, "n_aligned", PyLong_FromLong(n_aligned));
+    PyDict_SetItemString(result, "events_per_base", PyFloat_FromDouble(events_per_base));
+
+    // Cleanup
+    Py_DECREF(alignment_list);
+    free(alignment);
+    free(model);
+    free_event_table(&et);
+
+    return result;
+}
+
 // Method definitions
 static PyMethodDef EventalignMethods[] = {
     {"eventalign", (PyCFunction)py_eventalign, METH_VARARGS | METH_KEYWORDS,
@@ -321,6 +511,34 @@ static PyMethodDef EventalignMethods[] = {
      "    - KMER_SKIP state: Kmer with no event\n"
      "    - Soft-clipping: TRANS_START_TO_CLIP=0.5, TRANS_CLIP_SELF=0.9\n"
      "    - Dynamic transitions based on events_per_base ratio\n"},
+    {"profile_hmm_eventalign", (PyCFunction)py_profile_hmm_eventalign, METH_VARARGS | METH_KEYWORDS,
+     "Full f5c Profile HMM eventalign with detailed alignment output.\n\n"
+     "This is the true f5c eventalign implementation using Viterbi HMM.\n"
+     "Returns detailed event_alignment_t structures with HMM states.\n\n"
+     "Args:\n"
+     "    raw_signal: 1D numpy float32 array of raw signal\n"
+     "    sequence: Reference DNA/RNA sequence string\n"
+     "    model: Optional k-mer model dict (default: built-in pore models)\n"
+     "    is_rna: int (1 for RNA, 0 for DNA, default: 0)\n"
+     "    kmer_size: k-mer size (5 or 9, default: auto-selected)\n"
+     "    events_per_base: Expected events per base (default: 3.0)\n\n"
+     "Returns:\n"
+     "    dict with keys:\n"
+     "        - alignment: list of dicts with full event_alignment_t data\n"
+     "          Each record contains:\n"
+     "            * ref_position: Reference position (0-based)\n"
+     "            * ref_kmer: Reference k-mer string\n"
+     "            * event_idx: Event index (-1 for kmer skips)\n"
+     "            * hmm_state: 'M' (match), 'K' (kmer_skip), 'B' (bad_event)\n"
+     "            * strand_idx: Strand index (0=template)\n"
+     "            * model_kmer: Model k-mer string\n"
+     "            * event_mean, event_stdv, event_duration: Observed event stats\n"
+     "            * model_mean, model_stdv: Expected model stats\n"
+     "            * scaled_model_mean, scaled_model_stdv: Scaled model stats\n"
+     "        - scaling: dict with 'scale' and 'shift'\n"
+     "        - n_events: Total number of events detected\n"
+     "        - n_aligned: Number of alignment records\n"
+     "        - events_per_base: Events per base ratio used\n"},
     {NULL, NULL, 0, NULL}};
 
 // Module definition

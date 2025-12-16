@@ -13,60 +13,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from fin import detect_events, eventalign
 import pickle
-
-def generate_signal_from_sequence(sequence, samples_per_base=50, noise_level=2.5, seed=42):
-    """
-    Generate synthetic nanopore signal from a DNA/RNA sequence.
-    
-    Each base has a characteristic current level:
-    - A: 100 pA
-    - C: 95 pA  
-    - G: 105 pA
-    - T/U: 90 pA
-    
-    Args:
-        sequence: DNA/RNA sequence string
-        samples_per_base: Average samples per base
-        noise_level: Standard deviation of Gaussian noise
-        seed: Random seed for reproducibility
-    
-    Returns:
-        signal: 1D float32 numpy array of synthetic signal
-    """
-    np.random.seed(seed)
-    
-    # Base-to-current mapping
-    base_levels = {
-        'A': 100.0,
-        'C': 95.0,
-        'G': 105.0,
-        'T': 90.0,
-        'U': 90.0
-    }
-    
-    signal = []
-    
-    # Add adapter region (trimmed by event detection)
-    adapter_length = 250
-    adapter = np.random.normal(loc=150.0, scale=20.0, size=adapter_length)
-    signal.extend(adapter)
-    
-    # Generate signal for each base
-    for base in sequence:
-        level = base_levels.get(base.upper(), 100.0)
-        # Variable duration per base
-        duration = int(np.random.normal(samples_per_base, 10))
-        duration = max(30, duration)  # At least 30 samples
-        
-        # Generate samples with noise
-        base_signal = np.random.normal(loc=level, scale=noise_level, size=duration)
-        signal.extend(base_signal)
-    
-    # Add tail region
-    tail = np.random.normal(loc=110.0, scale=15.0, size=50)
-    signal.extend(tail)
-    
-    return np.array(signal, dtype=np.float32)
+import pod5
 
 
 def visualize_eventalign(raw_signal, sequence, result, kmer_size=5):
