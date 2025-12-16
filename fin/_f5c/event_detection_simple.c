@@ -579,7 +579,8 @@ event_table getevents_simple(size_t nsample, float *rawptr)
     event_table et = detect_events_simple(rt, *ed_params);
 
     // Reverse events for RNA (RNA transits pore 3'->5', so first event = 3' end)
-    // This makes events align with the reversed transcript sequence
+    // After reversal: first event = 5' end, matching the 5'->3' sequence direction
+    // This means users should NOT reverse their sequence - just use original 5'->3' sequence
     reverse_event_table(&et);
 
     return et;

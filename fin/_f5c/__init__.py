@@ -82,16 +82,16 @@ def eventalign(
     """
     Align detected RNA events to a reference sequence.
 
-    RNA-only: Events are automatically reversed to match 3'->5' pore direction.
+    RNA-only: Events are automatically reversed internally to match the
+    5'->3' sequence direction. You do NOT need to reverse your sequence.
 
     This function performs event-to-sequence alignment, creating a mapping
     between k-mers in the sequence and events in the raw signal.
 
     Args:
         raw_signal: 1D numpy array of raw nanopore signal (float32).
-        sequence: Reference RNA sequence string (e.g., "ACGUACGU").
-                  For DRS data, you should reverse the sequence to match
-                  the 3'->5' pore transit direction.
+        sequence: Reference RNA sequence string in standard 5'->3' direction.
+                  Do NOT reverse the sequence - event reversal is handled internally.
         kmer_size: Size of k-mers for alignment (5 or 9, default: 5).
         model: Optional k-mer model dictionary (default: uses built-in RNA model).
 
@@ -112,7 +112,7 @@ def eventalign(
 
     Example:
         >>> signal = np.random.randn(10000).astype(np.float32)
-        >>> sequence = "ACGUACGUACGU"[::-1]  # Reverse for DRS
+        >>> sequence = "ACGUACGUACGU"  # Use original 5'->3' sequence
         >>> result = eventalign(signal, sequence, kmer_size=5)
         >>> print(f"Detected {result['n_events']} events")
     """
@@ -151,16 +151,16 @@ def profile_hmm_eventalign(
     """
     Full f5c Profile HMM eventalign with detailed alignment output.
 
-    RNA-only: Events are automatically reversed to match 3'->5' pore direction.
+    RNA-only: Events are automatically reversed internally to match the
+    5'->3' sequence direction. You do NOT need to reverse your sequence.
 
     This is the true f5c eventalign implementation using Viterbi HMM.
     Returns detailed event_alignment_t structures with HMM states.
 
     Args:
         raw_signal: 1D numpy array of raw nanopore signal (float32).
-        sequence: Reference RNA sequence string.
-                  For DRS data, you should reverse the sequence to match
-                  the 3'->5' pore transit direction.
+        sequence: Reference RNA sequence string in standard 5'->3' direction.
+                  Do NOT reverse the sequence - event reversal is handled internally.
         kmer_size: Size of k-mers (5 or 9, default: 5).
         events_per_base: Expected events per base (default: 3.0).
 
@@ -246,16 +246,16 @@ def profile_hmm_eventalign_cuda(
     """
     GPU-accelerated Profile HMM eventalign using CUDA.
 
-    RNA-only: Events are automatically reversed to match 3'->5' pore direction.
+    RNA-only: Events are automatically reversed internally to match the
+    5'->3' sequence direction. You do NOT need to reverse your sequence.
 
     This is the CUDA-accelerated version of profile_hmm_eventalign.
     Provides significant speedup for large signals on NVIDIA GPUs.
 
     Args:
         raw_signal: 1D numpy array of raw nanopore signal (float32).
-        sequence: Reference RNA sequence string.
-                  For DRS data, you should reverse the sequence to match
-                  the 3'->5' pore transit direction.
+        sequence: Reference RNA sequence string in standard 5'->3' direction.
+                  Do NOT reverse the sequence - event reversal is handled internally.
         kmer_size: Size of k-mers (5 or 9, default: 5).
         events_per_base: Expected events per base (default: 3.0).
 
@@ -299,16 +299,16 @@ def eventalign_cuda(
     """
     GPU-accelerated event-to-sequence alignment using CUDA.
 
-    RNA-only: Events are automatically reversed to match 3'->5' pore direction.
+    RNA-only: Events are automatically reversed internally to match the
+    5'->3' sequence direction. You do NOT need to reverse your sequence.
 
     This is the CUDA-accelerated version of eventalign.
     Provides significant speedup for large signals on NVIDIA GPUs.
 
     Args:
         raw_signal: 1D numpy array of raw nanopore signal (float32).
-        sequence: Reference RNA sequence string.
-                  For DRS data, you should reverse the sequence to match
-                  the 3'->5' pore transit direction.
+        sequence: Reference RNA sequence string in standard 5'->3' direction.
+                  Do NOT reverse the sequence - event reversal is handled internally.
         kmer_size: Size of k-mers (5 or 9, default: 5).
         model: Optional k-mer model dictionary.
 

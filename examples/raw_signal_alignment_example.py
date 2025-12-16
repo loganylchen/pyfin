@@ -17,8 +17,8 @@ This uses f5c's full 3-state HMM algorithm with:
 - Dynamic transition probabilities
 - Real RNA pore models (RNA R9.4 5-mer, RNA004 9-mer)
 
-Note: Events are automatically reversed to match 3'→5' pore direction.
-For DRS data, you should reverse the sequence before alignment.
+Note: Events are automatically reversed internally to match the 5'→3' sequence direction.
+You do NOT need to reverse your sequence - use it directly in standard 5'→3' orientation.
 """
 
 import numpy as np
@@ -80,19 +80,15 @@ def example_rna_alignment():
 
     # RNA sequence (note: U instead of T)
     sequence = "AUGCGAUACGUAGCUAGCUAGCUAGCUGCUAGCUAGCUA"
-    print(f"\nSequence: {sequence}")
+    print(f"\nSequence (5'->3'): {sequence}")
     print(f"Length: {len(sequence)} bases")
-
-    # For DRS, reverse the sequence to match 3'→5' pore transit
-    reversed_seq = sequence[::-1]
-    print(f"Reversed (3'→5'): {reversed_seq}")
 
     # Generate synthetic signal
     raw_signal = generate_synthetic_signal(sequence, kmer_size=5)
     print(f"Raw signal: {len(raw_signal)} samples")
 
-    # Align raw signal to reversed sequence (RNA-only mode)
-    result = eventalign(raw_signal, reversed_seq, kmer_size=5)
+    # RNA-only mode: events are reversed internally, use original sequence
+    result = eventalign(raw_signal, sequence, kmer_size=5)
 
     # Display results
     print(f"\nAlignment Results:")
@@ -107,7 +103,7 @@ def example_rna_alignment():
     base_to_event = result["base_to_event_map"]
     for i in range(min(10, len(base_to_event))):
         kmer_pos = i
-        kmer_seq = reversed_seq[i : i + 5]
+        kmer_seq = sequence[i : i + 5]
         event_indices = base_to_event[i]
         n_events = len(event_indices) if event_indices else 0
         print(f"  Kmer {kmer_pos:3d} ({kmer_seq}): {n_events} events")
@@ -123,19 +119,15 @@ def example_rna_shorter():
 
     # Shorter RNA sequence
     sequence = "AUGCGAUACGUAGCUAGCUA"
-    print(f"\nSequence: {sequence}")
+    print(f"\nSequence (5'->3'): {sequence}")
     print(f"Length: {len(sequence)} bases")
-
-    # For DRS, reverse the sequence
-    reversed_seq = sequence[::-1]
-    print(f"Reversed (3'→5'): {reversed_seq}")
 
     # Generate synthetic signal
     raw_signal = generate_synthetic_signal(sequence, kmer_size=5)
     print(f"Raw signal: {len(raw_signal)} samples")
 
-    # Align raw signal to reversed sequence (RNA-only mode)
-    result = eventalign(raw_signal, reversed_seq, kmer_size=5)
+    # RNA-only mode: events are reversed internally, use original sequence
+    result = eventalign(raw_signal, sequence, kmer_size=5)
 
     # Display results
     print(f"\nAlignment Results:")
@@ -150,7 +142,7 @@ def example_rna_shorter():
     base_to_event = result["base_to_event_map"]
     for i in range(min(10, len(base_to_event))):
         kmer_pos = i
-        kmer_seq = reversed_seq[i : i + 5]
+        kmer_seq = sequence[i : i + 5]
         event_indices = base_to_event[i]
         n_events = len(event_indices) if event_indices else 0
         print(f"  Kmer {kmer_pos:3d} ({kmer_seq}): {n_events} events")
@@ -166,19 +158,15 @@ def example_rna004_alignment():
 
     # Longer RNA sequence for 9-mer model
     sequence = "AUGCGAUACGUAGCUAGCUAGCUAGCUGCUAGCUAGCUAGGCUAGCUAGCUA"
-    print(f"\nSequence: {sequence}")
+    print(f"\nSequence (5'->3'): {sequence}")
     print(f"Length: {len(sequence)} bases")
-
-    # For DRS, reverse the sequence
-    reversed_seq = sequence[::-1]
-    print(f"Reversed (3'→5'): {reversed_seq}")
 
     # Generate synthetic signal
     raw_signal = generate_synthetic_signal(sequence, kmer_size=9)
     print(f"Raw signal: {len(raw_signal)} samples")
 
-    # Align raw signal to reversed sequence (will auto-select RNA004 9-mer model)
-    result = eventalign(raw_signal, reversed_seq, kmer_size=9)
+    # RNA-only mode: events are reversed internally, use original sequence
+    result = eventalign(raw_signal, sequence, kmer_size=9)
 
     # Display results
     print(f"\nAlignment Results:")
@@ -193,7 +181,7 @@ def example_rna004_alignment():
     base_to_event = result["base_to_event_map"]
     for i in range(min(10, len(base_to_event))):
         kmer_pos = i
-        kmer_seq = reversed_seq[i : i + 9]
+        kmer_seq = sequence[i : i + 9]
         event_indices = base_to_event[i]
         n_events = len(event_indices) if event_indices else 0
         print(f"  Kmer {kmer_pos:3d} ({kmer_seq}): {n_events} events")
@@ -208,11 +196,7 @@ def example_with_adapters():
     print("=" * 70)
 
     sequence = "AUGCGAUACGUAGCUAGCUAGCUAGCUGCUAGCUAGCUA"
-    print(f"\nSequence: {sequence}")
-
-    # For DRS, reverse the sequence
-    reversed_seq = sequence[::-1]
-    print(f"Reversed (3'→5'): {reversed_seq}")
+    print(f"\nSequence (5'->3'): {sequence}")
 
     # Generate signal with long adapter regions
     raw_signal = generate_synthetic_signal(sequence, kmer_size=5)
@@ -225,7 +209,7 @@ def example_with_adapters():
     print(f"Raw signal: {len(raw_signal)} samples (includes long adapters)")
 
     # Align - soft-clipping should handle adapters automatically
-    result = eventalign(raw_signal, reversed_seq, kmer_size=5)
+    result = eventalign(raw_signal, sequence, kmer_size=5)
 
     print(f"\nAlignment Results:")
     print(f"  Events detected: {result['n_events']}")

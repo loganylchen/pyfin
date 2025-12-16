@@ -235,7 +235,8 @@ def main():
     print("\n[4] Aligning events to reference sequence...")
     kmer_size = 5
     try:
-        result = eventalign(raw_signal, sequence[::-1], kmer_size=kmer_size)  # RNA-only
+        # RNA-only mode: events are reversed internally, use original sequence
+        result = eventalign(raw_signal, sequence, kmer_size=kmer_size)
         print(f"    ✓ Alignment complete!")
         print(f"    ✓ K-mer size: {kmer_size}")
         print(f"    ✓ Number of k-mers: {len(result['base_to_event_map'])}")

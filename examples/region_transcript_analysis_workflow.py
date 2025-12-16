@@ -120,8 +120,8 @@ class RegionTranscriptAnalyzer:
         """
         Initialize the analyzer.
 
-        RNA-only: For Direct RNA Sequencing (DRS), sequences are automatically
-        reversed to match the 3'→5' pore transit direction.
+        RNA-only: Events are automatically reversed internally to match the
+        5'→3' sequence direction. You do NOT need to reverse sequences.
 
         Args:
             bam_path: Path to BAM file (reads mapped to genome)
@@ -283,13 +283,12 @@ class RegionTranscriptAnalyzer:
         """
         Perform eventalign of a read's signal to a transcript sequence.
 
-        For Direct RNA Sequencing (DRS), the RNA strand passes through the pore
-        in the 3'→5' direction, so we need to reverse the transcript sequence
-        (which is stored 5'→3') before alignment.
+        RNA-only mode: Events are automatically reversed internally to match
+        the 5'→3' sequence direction. No sequence reversal needed.
 
         Args:
             signal: Calibrated nanopore signal
-            transcript_seq: Transcript sequence (DNA/RNA, stored 5'→3')
+            transcript_seq: Transcript sequence in standard 5'→3' direction
             use_profile_hmm: Use Profile HMM (True) or simple ABEA (False)
 
         Returns:
@@ -300,27 +299,24 @@ class RegionTranscriptAnalyzer:
             return None
 
         try:
-            # For DRS (RNA), reverse the sequence since RNA passes 3'→5' through pore
-            # RNA-only mode: always reverse the sequence
-            align_seq = transcript_seq[::-1]  # Reverse the sequence
+            # RNA-only mode: events are automatically reversed internally
+            # Use the original 5'→3' sequence directly - no reversal needed
 
             if use_profile_hmm:
                 result = profile_hmm_eventalign(
                     raw_signal=signal,
-                    sequence=align_seq,
+                    sequence=transcript_seq,
                     kmer_size=self.kmer_size,
                 )
             else:
                 result = eventalign(
                     raw_signal=signal,
-                    sequence=align_seq,
+                    sequence=transcript_seq,
                     kmer_size=self.kmer_size,
                 )
 
-            # Store original and aligned sequence info for reference
-            result["original_sequence"] = transcript_seq
-            result["aligned_sequence"] = align_seq
-            result["sequence_reversed"] = True  # RNA-only mode
+            # Store sequence info for reference
+            result["sequence"] = transcript_seq
 
             return result
         except Exception as e:
@@ -1176,14 +1172,12 @@ def run_demo():
         signal = np.random.randn(1000).astype(np.float32) * 10 + 120
         sequence = "ACGUACGUACGUACGUACGUACGUACGU"
 
-        # For DRS, the RNA passes through the pore 3'→5', so we align to reversed sequence
-        # This mimics what happens with real DRS data
-        reversed_seq = sequence[::-1]
-        print(f"Original sequence (5'→3'):  {sequence}")
-        print(f"Reversed sequence (3'→5'):  {reversed_seq}")
+        # RNA-only mode: events are reversed internally to match 5'→3' sequence
+        # No need to reverse the sequence - use it directly
+        print(f"Sequence (5'→3'): {sequence}")
         print()
 
-        result = profile_hmm_eventalign(raw_signal=signal, sequence=reversed_seq, kmer_size=5)
+        result = profile_hmm_eventalign(raw_signal=signal, sequence=sequence, kmer_size=5)
 
         print(f"Signal length: {len(signal)} samples")
         print(f"Sequence length: {len(sequence)} bases")
@@ -1194,7 +1188,7 @@ def run_demo():
             f"shift={result['scaling']['shift']:.1f}"
         )
         print()
-        print("First 5 alignment records (aligned to reversed/3'→5' sequence):")
+        print("First 5 alignment records:")
         for aln in result["alignment"][:5]:
             print(
                 f"  Position {aln['ref_position']}: {aln['ref_kmer']} "
