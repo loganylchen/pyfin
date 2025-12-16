@@ -236,10 +236,10 @@ class Pod5Reader:
 
         try:
             # Apply calibration to convert to picoamperes
-            calibrated_signal = read.signal.astype(float)
-            calibrated_signal = (
-                calibrated_signal + read.calibration.offset
-            ) * read.calibration.scale
+            calibrated_signal = read.signal_pa.astype(float)
+            # calibrated_signal = (
+            #     calibrated_signal + read.calibration.offset
+            # ) * read.calibration.scale
 
             metadata = {
                 "read_id": read_id,
