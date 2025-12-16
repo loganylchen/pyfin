@@ -243,7 +243,7 @@ class Pod5Reader:
 
             metadata = {
                 "read_id": read_id,
-                "duration": len(read.signal),
+                "duration": len(read.signal_pa),
                 "sample_rate": read.run_info.sample_rate,
                 "channel_id": read.pore,
                 "start_sample": read.start_sample,
@@ -262,6 +262,7 @@ class Pod5Reader:
 
         except Exception as e:
             logger.error(f"Failed to calibrate signal for read {read_id}: {e}")
+            raise
             return None
 
     def get_batch_reads(self, read_ids: List[str]) -> List[Optional[p5.Read]]:
