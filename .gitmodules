@@ -1,6 +1,0 @@
-[submodule "third_party/f5c"]
-	path = third_party/f5c
-	url = https://github.com/hasindu2008/f5c
-[submodule "third_party/opendba"]
-	path = third_party/opendba
-	url = https://github.com/nodrogluap/OpenDBA.git
