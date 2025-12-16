@@ -425,16 +425,35 @@ class RegionTranscriptAnalyzer:
                 alignment = self.eventalign_read_to_transcript(signal, tx_seq)
 
                 if alignment:
-                    read_result["alignments"].append(
-                        {
-                            "transcript_id": tx_id,
-                            "n_events": alignment.get("n_events", 0),
-                            "n_aligned": alignment.get(
-                                "n_aligned", alignment.get("n_aligned_pairs", 0)
-                            ),
-                            "scaling": alignment.get("scaling", {}),
-                        }
-                    )
+                    # Include full alignment details, not just summary
+                    alignment_record = {
+                        "transcript_id": tx_id,
+                        "transcript_length": len(tx_seq),
+                        "n_events": alignment.get("n_events", 0),
+                        "n_aligned": alignment.get(
+                            "n_aligned", alignment.get("n_aligned_pairs", 0)
+                        ),
+                        "events_per_base": alignment.get("events_per_base", 0),
+                        "scaling": alignment.get("scaling", {}),
+                        # Full alignment details per position
+                        "alignment_details": [
+                            {
+                                "ref_position": aln.get("ref_position"),
+                                "ref_kmer": aln.get("ref_kmer"),
+                                "event_idx": aln.get("event_idx"),
+                                "hmm_state": aln.get("hmm_state"),
+                                "event_mean": aln.get("event_mean"),
+                                "event_stdv": aln.get("event_stdv"),
+                                "event_duration": aln.get("event_duration"),
+                                "model_mean": aln.get("model_mean"),
+                                "model_stdv": aln.get("model_stdv"),
+                                "scaled_model_mean": aln.get("scaled_model_mean"),
+                                "scaled_model_stdv": aln.get("scaled_model_stdv"),
+                            }
+                            for aln in alignment.get("alignment", [])
+                        ],
+                    }
+                    read_result["alignments"].append(alignment_record)
 
             result["read_alignments"].append(read_result)
 
