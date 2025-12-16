@@ -405,7 +405,7 @@ class RegionTranscriptAnalyzer:
         read_signals = []
 
         for read in reads:
-            read_id = read["query_name"]
+            read_id = read.query_name
 
             # Get signal from POD5
             signal = self.get_signal_for_read(read_id, pod5_reader)
