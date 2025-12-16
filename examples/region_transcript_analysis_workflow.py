@@ -517,6 +517,7 @@ class RegionTranscriptAnalyzer:
                 )
 
                 self.region_results[region_id] = region_result
+                break
 
         # Compile final results
         final_results = {
