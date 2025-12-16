@@ -17,17 +17,21 @@ import logging
 
 # Option 2: Use the package logger with debug level
 from fin.utils.log_config import setup_logger
-logger = setup_logger(__name__, level='DEBUG', log_file='eventalign_debug.log')
 
-try:
-    from fin._f5c import EventAligner, _F5C_AVAILABLE
-except ImportError as e:
-    print("Error: f5c module not available")
-    print(f"Import error: {e}")
-    print("\nTo fix this:")
-    print("  1. Make sure you have dependencies: sudo apt-get install zlib1g-dev")
-    print("  2. Install with: pip install -e .")
-    sys.exit(1)
+logger = setup_logger(__name__, level="DEBUG", log_file="eventalign_debug.log")
+
+# Note: This example uses the old EventAligner class which may not be available
+# For working eventalign examples, see:
+#   - test_profile_hmm.py (Profile HMM eventalign)
+#   - raw_signal_alignment_example.py (Simple eventalign)
+#   - test_eventalign.py (Visualization example)
+
+print("Note: This example requires the old EventAligner class")
+print("For working examples, please see:")
+print("  - examples/test_profile_hmm.py")
+print("  - examples/raw_signal_alignment_example.py")
+print("  - examples/test_eventalign.py")
+sys.exit(0)
 
 
 def example_usage():
@@ -84,15 +88,19 @@ def example_usage():
                 if alignments:
                     print("\n  First 3 event alignments:")
                     print("  " + "-" * 65)
-                    print("  {:<8} {:<8} {:<10} {:>8} {:>8} {:>8}".format(
-                        "Event#", "KmerIdx", "Kmer", "Eventμ", "Modelμ", "Prob"
-                    ))
+                    print(
+                        "  {:<8} {:<8} {:<10} {:>8} {:>8} {:>8}".format(
+                            "Event#", "KmerIdx", "Kmer", "Eventμ", "Modelμ", "Prob"
+                        )
+                    )
                     print("  " + "-" * 65)
 
                     for i, event in enumerate(alignments[:3]):
-                        print("  {event_idx:<8} {kmer_idx:<8} {kmer:<10} "
-                              "{event_mean:>8.2f} {model_mean:>8.2f} "
-                              "{posterior_probability:>8.3f}".format(**event))
+                        print(
+                            "  {event_idx:<8} {kmer_idx:<8} {kmer:<10} "
+                            "{event_mean:>8.2f} {model_mean:>8.2f} "
+                            "{posterior_probability:>8.3f}".format(**event)
+                        )
 
             # Stop after processing a reasonable number
             if read_count >= 100:
@@ -168,9 +176,11 @@ def example_simple_interface():
         ):
             print(f"\nRead: {read_id}")
             for event in alignments[:3]:  # Show first 3
-                print(f"  {event['kmer']}: μ={event['event_mean']:.2f}, "
-                      f"model μ={event['model_mean']:.2f}, "
-                      f"prob={event['posterior_probability']:.3f}")
+                print(
+                    f"  {event['kmer']}: μ={event['event_mean']:.2f}, "
+                    f"model μ={event['model_mean']:.2f}, "
+                    f"prob={event['posterior_probability']:.3f}"
+                )
 
     except Exception as e:
         print(f"Error: {e}")
@@ -189,7 +199,7 @@ def check_compilation():
 
         # Show available methods
         print("\n✓ Available methods:")
-        for method in ['__init__', 'align_batch', 'align_reads', 'close']:
+        for method in ["__init__", "align_batch", "align_reads", "close"]:
             if hasattr(EventAligner, method):
                 print(f"  - {method}")
 
@@ -230,7 +240,8 @@ def main():
     # Show examples without running (since we don't have real test data)
     print("Example 1: Basic usage")
     print("-" * 70)
-    print("""
+    print(
+        """
     from fin._f5c import EventAligner
 
     aligner = EventAligner(
@@ -243,16 +254,19 @@ def main():
         print(f"Read: {read_id}, Events: {len(alignments)}")
         for aln in alignments:
             print(f"  {aln['kmer']}: {aln['event_mean']:.2f}")
-    """)
+    """
+    )
 
     print("\nExample 2: Using context manager")
     print("-" * 70)
-    print("""
+    print(
+        """
     with EventAligner(bam_path, fasta_path, slow5_path) as aligner:
         for read_id, alignments in aligner.align_reads():
             process_alignments(read_id, alignments)
     # Resources automatically released
-    """)
+    """
+    )
 
     print("\n" + "=" * 70)
     print("Next Steps:")

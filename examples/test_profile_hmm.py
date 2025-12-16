@@ -6,13 +6,20 @@ Compare with simple ABEA alignment
 
 import numpy as np
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "/home/logan/Projects/pyfin")
+# Add parent directory to path if needed
+parent_dir = Path(__file__).parent.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
 
 try:
     from fin import _eventalign
 except ImportError as e:
     print(f"Error importing _eventalign: {e}")
+    print("Make sure to build the extensions first:")
+    print("  cd /home/logan/Projects/pyfin")
+    print("  python setup.py build_ext --inplace")
     print("Try building with: python setup.py build_ext --inplace")
     sys.exit(1)
 
