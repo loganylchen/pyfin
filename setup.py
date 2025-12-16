@@ -73,7 +73,7 @@ class MultiExt(build_ext):
         extensions_to_build = []
         for ext in self.extensions:
             if not hasattr(ext, "ext_type"):
-                raise ValueError(f"Extension {ext.name} must have 'ext_type' (f5c/dtw)!")
+                raise ValueError(f"Extension {ext.name} must have 'ext_type' (f5c/dtw/f5c_cuda)!")
 
             if ext.ext_type == "dtw":
                 if not cuda_available:
@@ -81,15 +81,59 @@ class MultiExt(build_ext):
                     print("Install CUDA Toolkit to enable GPU acceleration features")
                     continue
                 self._configure_cuda_extension(ext)
+            elif ext.ext_type == "f5c_cuda":
+                if not cuda_available:
+                    print(
+                        f"WARNING: Skipping CUDA eventalign extension {ext.name} - nvcc not found"
+                    )
+                    print("GPU-accelerated eventalign will not be available")
+                    continue
+                self._configure_f5c_cuda_extension(ext)
             elif ext.ext_type == "f5c":
                 apply_f5c_compile(ext)
             else:
-                raise ValueError(f"Unknown ext_type: {ext.ext_type} (must be f5c/dtw)")
+                raise ValueError(f"Unknown ext_type: {ext.ext_type} (must be f5c/dtw/f5c_cuda)")
 
             extensions_to_build.append(ext)
 
         self.extensions = extensions_to_build
         super().build_extensions()
+
+    def _configure_f5c_cuda_extension(self, ext):
+        """Configure f5c CUDA extension compilation (eventalign with GPU)"""
+        cuda_home = find_cuda_home()
+        if not cuda_home:
+            raise RuntimeError("CUDA_HOME not found")
+
+        import sysconfig
+        import numpy
+
+        python_include = sysconfig.get_path("include")
+        numpy_include = numpy.get_include()
+
+        # Add CUDA, Python, and NumPy include paths
+        ext.include_dirs.append(os.path.join(cuda_home, "include"))
+        ext.include_dirs.append(python_include)
+        ext.include_dirs.append(numpy_include)
+        ext.include_dirs.append("fin/_f5c")
+
+        ext.library_dirs = [os.path.join(cuda_home, "lib64")]
+        ext.libraries = ["cudart"]
+
+        # Compiler flags for nvcc with CUDA_ENABLED defined
+        ext.extra_compile_args = [
+            "--compiler-options",
+            "-fPIC",
+            "-std=c++14",
+            "-O3",
+            "-DCUDA_ENABLED",  # Enable CUDA code paths in eventalign.c
+            "--generate-code=arch=compute_80,code=sm_80",  # Ampere
+        ]
+
+        ext.extra_link_args = [
+            f'-L{os.path.join(cuda_home, "lib64")}',
+            "-lcudart",
+        ]
 
     def _configure_cuda_extension(self, ext):
         """Configure CUDA extension compilation"""
@@ -131,7 +175,7 @@ class MultiExt(build_ext):
 
     def build_extension(self, ext):
         # Use nvcc for CUDA extensions
-        if hasattr(ext, "ext_type") and ext.ext_type == "dtw":
+        if hasattr(ext, "ext_type") and ext.ext_type in ("dtw", "f5c_cuda"):
             self._compile_cuda_extension(ext)
         else:
             # Build non-CUDA extensions normally
@@ -234,14 +278,13 @@ f5c_extension = Extension(
 )
 f5c_extension.ext_type = "f5c"
 
-# Eventalign extension
+# Eventalign extension (CPU only)
 eventalign_extension = Extension(
     name="fin._f5c._eventalign",
     sources=[
         os.path.join(F5C_DIR, "eventalign.c"),
         os.path.join(F5C_DIR, "event_detection_simple.c"),
         os.path.join(F5C_DIR, "align.c"),  # CPU alignment with 3-state HMM
-        # Note: model.c not needed - we load models directly from model.h arrays
     ],
     depends=[
         os.path.join(F5C_DIR, "event_detection_simple.h"),
@@ -251,6 +294,23 @@ eventalign_extension = Extension(
     include_dirs=[F5C_DIR],
 )
 eventalign_extension.ext_type = "f5c"
+
+# CUDA Eventalign extension (GPU accelerated) - built only if CUDA is available
+cuda_eventalign_extension = Extension(
+    name="fin._f5c._eventalign_cuda",
+    sources=[
+        os.path.join(F5C_DIR, "eventalign.c"),
+        os.path.join(F5C_DIR, "event_detection_simple.c"),
+        os.path.join(F5C_DIR, "align.cu"),  # GPU alignment with CUDA
+    ],
+    depends=[
+        os.path.join(F5C_DIR, "event_detection_simple.h"),
+        os.path.join(F5C_DIR, "align_common.h"),
+        os.path.join(F5C_DIR, "model.h"),
+    ],
+    include_dirs=[F5C_DIR],
+)
+cuda_eventalign_extension.ext_type = "f5c_cuda"
 
 # DTW/CUDA extension with Python bindings
 OPENDBA_DIR = os.path.join("fin", "_dtw")
@@ -288,10 +348,15 @@ def main():
         packages=["fin", "fin.io", "fin.utils", "fin.analysis", "fin._f5c", "fin._dtw"],
         package_dir={"fin": "fin"},
         package_data={
-            "fin": ["*.py", "*.c", "*.h", "*.yaml", "*.yml"],
+            "fin": ["*.py", "*.c", "*.cu", "*.h", "*.yaml", "*.yml"],
         },
         include_package_data=True,
-        ext_modules=[f5c_extension, eventalign_extension, cuda_dtw_extension],
+        ext_modules=[
+            f5c_extension,
+            eventalign_extension,
+            cuda_eventalign_extension,
+            cuda_dtw_extension,
+        ],
         cmdclass={"build_ext": MultiExt},
         python_requires=">=3.8",
         install_requires=[

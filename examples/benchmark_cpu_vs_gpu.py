@@ -3,7 +3,7 @@
 Benchmark: CPU vs GPU Performance for Eventalign and DTW
 
 This script benchmarks the performance of:
-1. Event alignment (eventalign) - CPU or GPU depending on build
+1. Event alignment (eventalign) - CPU vs GPU (CUDA)
 2. DTW pairwise distance - CPU fallback vs CUDA
 
 Requirements:
@@ -25,17 +25,29 @@ import sys
 from typing import Optional
 import numpy as np
 
-# Check what's available
+# Check what's available - CPU eventalign
 try:
     from fin._f5c import (
         profile_hmm_eventalign,
         eventalign_is_available,
     )
 
-    EVENTALIGN_AVAILABLE = eventalign_is_available()
+    EVENTALIGN_CPU_AVAILABLE = eventalign_is_available()
 except ImportError:
-    EVENTALIGN_AVAILABLE = False
+    EVENTALIGN_CPU_AVAILABLE = False
 
+# Check what's available - CUDA eventalign
+try:
+    from fin._f5c import (
+        profile_hmm_eventalign_cuda,
+        eventalign_cuda_is_available,
+    )
+
+    EVENTALIGN_CUDA_AVAILABLE = eventalign_cuda_is_available()
+except ImportError:
+    EVENTALIGN_CUDA_AVAILABLE = False
+
+# Check DTW CUDA
 try:
     from fin._dtw import (
         dtw_pairwise,
@@ -115,15 +127,15 @@ def generate_synthetic_signal(
     return np.concatenate(signal_parts).astype(np.float32)
 
 
-def benchmark_eventalign(signal_sizes: list, iterations: int = 3) -> list:
+def benchmark_eventalign_cpu(signal_sizes: list, iterations: int = 3) -> list:
     """
-    Benchmark eventalign performance across different signal sizes.
+    Benchmark CPU eventalign performance across different signal sizes.
 
     Returns:
         List of (signal_size, seq_length, n_events, time_ms, events_per_ms) tuples
     """
-    if not EVENTALIGN_AVAILABLE:
-        print("WARNING: Eventalign is not available - skipping benchmark")
+    if not EVENTALIGN_CPU_AVAILABLE:
+        print("WARNING: CPU Eventalign is not available - skipping benchmark")
         return []
 
     results = []
@@ -142,6 +154,49 @@ def benchmark_eventalign(signal_sizes: list, iterations: int = 3) -> list:
         for i in range(iterations):
             start = time.perf_counter()
             result = profile_hmm_eventalign(
+                raw_signal=signal, sequence=sequence, is_rna=False, kmer_size=5, events_per_base=3.0
+            )
+            elapsed = time.perf_counter() - start
+            times.append(elapsed)
+            n_events = result.get("n_events", 0)
+
+        avg_time_ms = np.mean(times) * 1000
+        events_per_ms = n_events / avg_time_ms if avg_time_ms > 0 else 0
+
+        results.append(
+            (len(signal), seq_length, n_events, f"{avg_time_ms:.2f}", f"{events_per_ms:.1f}")
+        )
+
+    return results
+
+
+def benchmark_eventalign_cuda(signal_sizes: list, iterations: int = 3) -> list:
+    """
+    Benchmark CUDA (GPU) eventalign performance across different signal sizes.
+
+    Returns:
+        List of (signal_size, seq_length, n_events, time_ms, events_per_ms) tuples
+    """
+    if not EVENTALIGN_CUDA_AVAILABLE:
+        print("WARNING: CUDA Eventalign is not available - skipping benchmark")
+        return []
+
+    results = []
+
+    for signal_size in signal_sizes:
+        # Create sequence that will generate approximately this signal size
+        seq_length = signal_size // 15  # ~15 samples per base
+        seq_length = max(20, seq_length)  # At least 20 bases
+
+        sequence = generate_random_sequence(seq_length)
+        signal = generate_synthetic_signal(sequence)
+
+        times = []
+        n_events = 0
+
+        for i in range(iterations):
+            start = time.perf_counter()
+            result = profile_hmm_eventalign_cuda(
                 raw_signal=signal, sequence=sequence, is_rna=False, kmer_size=5, events_per_base=3.0
             )
             elapsed = time.perf_counter() - start
@@ -281,22 +336,23 @@ def print_system_info():
         ["NumPy Version", np.__version__],
         ["GPU (nvidia-smi)", cuda_info],
         ["", ""],
-        ["Eventalign Available", "Yes ✓" if EVENTALIGN_AVAILABLE else "No ✗"],
-        ["DTW CUDA Available", "Yes ✓" if DTW_CUDA_AVAILABLE else "No ✗"],
+        ["Eventalign CPU", "Yes ✓" if EVENTALIGN_CPU_AVAILABLE else "No ✗"],
+        ["Eventalign CUDA", "Yes ✓" if EVENTALIGN_CUDA_AVAILABLE else "No ✗"],
+        ["DTW CUDA", "Yes ✓" if DTW_CUDA_AVAILABLE else "No ✗"],
     ]
 
     print_table(["Component", "Status"], info_rows)
 
     # Build instructions if something is missing
-    if not EVENTALIGN_AVAILABLE or not DTW_CUDA_AVAILABLE:
+    if not EVENTALIGN_CPU_AVAILABLE or not EVENTALIGN_CUDA_AVAILABLE or not DTW_CUDA_AVAILABLE:
         print("\n" + "-" * 60)
         print(" BUILD INSTRUCTIONS")
         print("-" * 60)
-        if not EVENTALIGN_AVAILABLE:
-            print("\nTo enable eventalign:")
+        if not EVENTALIGN_CPU_AVAILABLE:
+            print("\nTo enable CPU eventalign:")
             print("  pip install -e /path/to/pyfin")
-        if not DTW_CUDA_AVAILABLE:
-            print("\nTo enable CUDA DTW:")
+        if not EVENTALIGN_CUDA_AVAILABLE or not DTW_CUDA_AVAILABLE:
+            print("\nTo enable CUDA extensions (GPU eventalign + DTW):")
             print("  1. Install CUDA Toolkit (nvcc must be in PATH)")
             print("  2. CUDA_HOME=/usr/local/cuda pip install -e /path/to/pyfin")
 
@@ -336,19 +392,41 @@ def main():
     # Print system info
     print_system_info()
 
-    # Benchmark Eventalign
+    # Benchmark Eventalign CPU
     print("\n")
-    eventalign_results = benchmark_eventalign(signal_sizes, args.iterations)
-    if eventalign_results:
+    eventalign_cpu_results = benchmark_eventalign_cpu(signal_sizes, args.iterations)
+    if eventalign_cpu_results:
         print_table(
             ["Signal Size", "Seq Length", "Events", "Time (ms)", "Events/ms"],
-            eventalign_results,
-            title="EVENTALIGN BENCHMARK (Profile HMM)",
+            eventalign_cpu_results,
+            title="EVENTALIGN BENCHMARK (CPU - Profile HMM)",
         )
 
-        # Note about CPU/GPU
-        print("\nNote: Eventalign uses CPU or GPU depending on build configuration.")
-        print("      Build with CUDA_ENABLED=1 for GPU acceleration.")
+    # Benchmark Eventalign CUDA
+    print("\n")
+    eventalign_cuda_results = benchmark_eventalign_cuda(signal_sizes, args.iterations)
+    if eventalign_cuda_results:
+        print_table(
+            ["Signal Size", "Seq Length", "Events", "Time (ms)", "Events/ms"],
+            eventalign_cuda_results,
+            title="EVENTALIGN BENCHMARK (CUDA - Profile HMM)",
+        )
+
+    # Show eventalign speedup comparison if both available
+    if eventalign_cpu_results and eventalign_cuda_results:
+        print("\n")
+        comparison_rows = []
+        for cpu_row, cuda_row in zip(eventalign_cpu_results, eventalign_cuda_results):
+            cpu_time = float(cpu_row[3])
+            cuda_time = float(cuda_row[3])
+            speedup = f"{cpu_time/cuda_time:.1f}x" if cuda_time > 0 else "N/A"
+            comparison_rows.append((cpu_row[0], cpu_row[2], cpu_row[3], cuda_row[3], speedup))
+
+        print_table(
+            ["Signal Size", "Events", "CPU Time (ms)", "CUDA Time (ms)", "Speedup"],
+            comparison_rows,
+            title="EVENTALIGN SPEEDUP COMPARISON (CPU vs CUDA)",
+        )
 
     # Benchmark DTW CUDA
     print("\n")

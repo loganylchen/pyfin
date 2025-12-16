@@ -9,7 +9,7 @@ except ImportError as e:
     _EVENT_AVAILABLE = False
     _import_error = str(e)
 
-# Try to import eventalign extension
+# Try to import eventalign extension (CPU)
 try:
     from ._eventalign import eventalign as _eventalign_c
     from ._eventalign import profile_hmm_eventalign as _profile_hmm_eventalign_c
@@ -18,6 +18,16 @@ try:
 except ImportError as e:
     _EVENTALIGN_AVAILABLE = False
     _eventalign_import_error = str(e)
+
+# Try to import CUDA eventalign extension (GPU)
+try:
+    from ._eventalign_cuda import eventalign as _eventalign_cuda
+    from ._eventalign_cuda import profile_hmm_eventalign as _profile_hmm_eventalign_cuda
+
+    _EVENTALIGN_CUDA_AVAILABLE = True
+except ImportError as e:
+    _EVENTALIGN_CUDA_AVAILABLE = False
+    _eventalign_cuda_import_error = str(e)
 
 
 def detect_events(raw_signal: np.ndarray, is_rna: bool = True) -> list[dict]:
@@ -207,12 +217,124 @@ def is_available() -> bool:
 
 def eventalign_is_available() -> bool:
     """
-    Check if the eventalign extension is available.
+    Check if the eventalign extension (CPU) is available.
 
     Returns:
         bool: True if extension is available, False otherwise
     """
     return _EVENTALIGN_AVAILABLE
+
+
+def eventalign_cuda_is_available() -> bool:
+    """
+    Check if the CUDA (GPU) eventalign extension is available.
+
+    Returns:
+        bool: True if CUDA extension is available, False otherwise
+    """
+    return _EVENTALIGN_CUDA_AVAILABLE
+
+
+def profile_hmm_eventalign_cuda(
+    raw_signal: np.ndarray,
+    sequence: str,
+    is_rna: bool = False,
+    kmer_size: int = 5,
+    events_per_base: float = 3.0,
+) -> dict:
+    """
+    GPU-accelerated Profile HMM eventalign using CUDA.
+
+    This is the CUDA-accelerated version of profile_hmm_eventalign.
+    Provides significant speedup for large signals on NVIDIA GPUs.
+
+    Args:
+        raw_signal: 1D numpy array of raw nanopore signal (float32).
+        sequence: Reference DNA/RNA sequence string.
+        is_rna: If True, use RNA-specific parameters (default: False).
+        kmer_size: Size of k-mers (5 or 9, default: 5).
+        events_per_base: Expected events per base (default: 3.0).
+
+    Returns:
+        Same as profile_hmm_eventalign
+
+    Raises:
+        RuntimeError: If CUDA eventalign extension is not available.
+    """
+    if not _EVENTALIGN_CUDA_AVAILABLE:
+        raise RuntimeError(
+            f"CUDA eventalign extension is not available. "
+            f"Import error: {_eventalign_cuda_import_error}\n"
+            f"Build with CUDA: CUDA_HOME=/usr/local/cuda pip install -e ."
+        )
+
+    # Validate inputs
+    if not isinstance(raw_signal, np.ndarray):
+        raise TypeError(f"raw_signal must be a numpy array (got {type(raw_signal)})")
+    if raw_signal.ndim != 1:
+        raise TypeError(f"raw_signal must be 1D (got {raw_signal.ndim}D)")
+    if raw_signal.dtype != np.float32:
+        raw_signal = raw_signal.astype(np.float32)
+
+    if not isinstance(sequence, str):
+        raise TypeError(f"sequence must be a string (got {type(sequence)})")
+
+    if len(sequence) < kmer_size:
+        raise ValueError(f"sequence length ({len(sequence)}) must be >= kmer_size ({kmer_size})")
+
+    return _profile_hmm_eventalign_cuda(
+        raw_signal, sequence, None, int(is_rna), kmer_size, events_per_base
+    )
+
+
+def eventalign_cuda(
+    raw_signal: np.ndarray,
+    sequence: str,
+    is_rna: bool = False,
+    kmer_size: int = 5,
+    model: dict = None,
+) -> dict:
+    """
+    GPU-accelerated event-to-sequence alignment using CUDA.
+
+    This is the CUDA-accelerated version of eventalign.
+    Provides significant speedup for large signals on NVIDIA GPUs.
+
+    Args:
+        raw_signal: 1D numpy array of raw nanopore signal (float32).
+        sequence: Reference DNA/RNA sequence string.
+        is_rna: If True, use RNA-specific parameters (default: False).
+        kmer_size: Size of k-mers (default: 5).
+        model: Optional k-mer model dictionary.
+
+    Returns:
+        Same as eventalign
+
+    Raises:
+        RuntimeError: If CUDA eventalign extension is not available.
+    """
+    if not _EVENTALIGN_CUDA_AVAILABLE:
+        raise RuntimeError(
+            f"CUDA eventalign extension is not available. "
+            f"Import error: {_eventalign_cuda_import_error}\n"
+            f"Build with CUDA: CUDA_HOME=/usr/local/cuda pip install -e ."
+        )
+
+    # Validate inputs
+    if not isinstance(raw_signal, np.ndarray):
+        raise TypeError(f"raw_signal must be a numpy array (got {type(raw_signal)})")
+    if raw_signal.ndim != 1:
+        raise TypeError(f"raw_signal must be 1D (got {raw_signal.ndim}D)")
+    if raw_signal.dtype != np.float32:
+        raw_signal = raw_signal.astype(np.float32)
+
+    if not isinstance(sequence, str):
+        raise TypeError(f"sequence must be a string (got {type(sequence)})")
+
+    if len(sequence) < kmer_size:
+        raise ValueError(f"sequence length ({len(sequence)}) must be >= kmer_size ({kmer_size})")
+
+    return _eventalign_cuda(raw_signal, sequence, model, int(is_rna), kmer_size)
 
 
 # Export public functions
