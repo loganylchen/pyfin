@@ -437,14 +437,17 @@ class RegionTranscriptAnalyzer:
         figsize: Tuple[int, int] = (12, 10),
     ) -> Optional[Path]:
         """
-        Generate a heatmap visualization of the DTW distance matrix.
+        Generate a clustered heatmap visualization of the DTW distance matrix.
+
+        Creates a heatmap with hierarchical clustering dendrograms on both
+        rows and columns, reordering the matrix to group similar reads together.
 
         Args:
-            distance_matrix: Pairwise DTW distance matrix
+            distance_matrix: Pairwise DTW distance matrix (symmetric)
             read_ids: List of read IDs
             output_path: Path to save the heatmap image
             title: Plot title
-            cluster_result: Optional clustering result for dendrogram
+            cluster_result: Optional clustering result (will compute if not provided)
             figsize: Figure size
 
         Returns:
@@ -458,38 +461,76 @@ class RegionTranscriptAnalyzer:
             dist_matrix = np.array(distance_matrix)
             n_reads = len(read_ids)
 
-            # Create figure with optional dendrogram
-            if cluster_result and SCIPY_AVAILABLE and "linkage_matrix" in cluster_result:
-                fig = plt.figure(figsize=(figsize[0] + 2, figsize[1]))
+            # Create clustered heatmap with dendrograms on both axes
+            if SCIPY_AVAILABLE and n_reads >= 2:
+                # Get or compute linkage matrix
+                if cluster_result and "linkage_matrix" in cluster_result:
+                    linkage_matrix = np.array(cluster_result["linkage_matrix"])
+                else:
+                    # Compute linkage from distance matrix
+                    from scipy.spatial.distance import squareform
 
-                # Create grid for dendrogram + heatmap
-                gs = fig.add_gridspec(1, 2, width_ratios=[1, 4], wspace=0.02)
+                    condensed_dist = squareform(dist_matrix)
+                    linkage_matrix = linkage(condensed_dist, method="average")
 
-                # Dendrogram on the left
-                ax_dendro = fig.add_subplot(gs[0])
-                linkage_matrix = np.array(cluster_result["linkage_matrix"])
-                dendro = dendrogram(
+                # Create figure with grid for dendrograms + heatmap + colorbar
+                # Layout:
+                #   [empty]     [col_dendro]  [empty]
+                #   [row_dendro] [heatmap]    [colorbar]
+                fig = plt.figure(figsize=(figsize[0] + 3, figsize[1] + 2))
+
+                # Grid ratios: left dendrogram, main heatmap, colorbar
+                gs = fig.add_gridspec(
+                    2,
+                    3,
+                    width_ratios=[1.5, 6, 0.3],
+                    height_ratios=[1.5, 6],
+                    wspace=0.02,
+                    hspace=0.02,
+                )
+
+                # Top dendrogram (columns)
+                ax_col_dendro = fig.add_subplot(gs[0, 1])
+                col_dendro = dendrogram(
+                    linkage_matrix,
+                    orientation="top",
+                    no_labels=True,
+                    ax=ax_col_dendro,
+                    color_threshold=0,
+                    above_threshold_color="C0",
+                )
+                ax_col_dendro.set_xticks([])
+                ax_col_dendro.set_yticks([])
+                ax_col_dendro.spines["top"].set_visible(False)
+                ax_col_dendro.spines["right"].set_visible(False)
+                ax_col_dendro.spines["bottom"].set_visible(False)
+                ax_col_dendro.spines["left"].set_visible(False)
+
+                # Left dendrogram (rows)
+                ax_row_dendro = fig.add_subplot(gs[1, 0])
+                row_dendro = dendrogram(
                     linkage_matrix,
                     orientation="left",
-                    labels=read_ids,
-                    ax=ax_dendro,
-                    leaf_font_size=8,
+                    no_labels=True,
+                    ax=ax_row_dendro,
+                    color_threshold=0,
+                    above_threshold_color="C0",
                 )
-                ax_dendro.set_xlabel("Distance")
-                ax_dendro.set_title("Clustering")
+                ax_row_dendro.set_xticks([])
+                ax_row_dendro.set_yticks([])
+                ax_row_dendro.spines["top"].set_visible(False)
+                ax_row_dendro.spines["right"].set_visible(False)
+                ax_row_dendro.spines["bottom"].set_visible(False)
+                ax_row_dendro.spines["left"].set_visible(False)
 
-                # Reorder matrix according to dendrogram
-                order = dendro["leaves"]
+                # Get the ordering from dendrogram (same for both since matrix is symmetric)
+                order = row_dendro["leaves"]
                 ordered_matrix = dist_matrix[order][:, order]
                 ordered_ids = [read_ids[i] for i in order]
 
-                # Heatmap on the right
-                ax_heat = fig.add_subplot(gs[1])
+                # Main heatmap
+                ax_heat = fig.add_subplot(gs[1, 1])
                 im = ax_heat.imshow(ordered_matrix, cmap="viridis", aspect="auto")
-
-                # Add colorbar
-                cbar = plt.colorbar(im, ax=ax_heat, shrink=0.8)
-                cbar.set_label("DTW Distance")
 
                 # Labels
                 if n_reads <= 30:
@@ -498,13 +539,21 @@ class RegionTranscriptAnalyzer:
                     ax_heat.set_yticks(range(n_reads))
                     ax_heat.set_yticklabels(ordered_ids, fontsize=8)
                 else:
+                    ax_heat.set_xticks([])
+                    ax_heat.set_yticks([])
                     ax_heat.set_xlabel(f"Reads (n={n_reads})")
                     ax_heat.set_ylabel(f"Reads (n={n_reads})")
 
-                ax_heat.set_title(title)
+                # Colorbar
+                ax_cbar = fig.add_subplot(gs[1, 2])
+                cbar = plt.colorbar(im, cax=ax_cbar)
+                cbar.set_label("DTW Distance")
+
+                # Title at the top
+                fig.suptitle(title, fontsize=14, fontweight="bold", y=0.98)
 
             else:
-                # Simple heatmap without dendrogram
+                # Simple heatmap without dendrogram (scipy not available or < 2 reads)
                 fig, ax = plt.subplots(figsize=figsize)
                 im = ax.imshow(dist_matrix, cmap="viridis", aspect="auto")
 
@@ -524,15 +573,17 @@ class RegionTranscriptAnalyzer:
 
                 ax.set_title(title)
 
-            plt.tight_layout()
             plt.savefig(output_path, dpi=150, bbox_inches="tight")
             plt.close(fig)
 
-            logger.info(f"  Saved DTW heatmap to: {output_path}")
+            logger.info(f"  Saved clustered DTW heatmap to: {output_path}")
             return output_path
 
         except Exception as e:
             logger.error(f"Failed to generate heatmap: {e}")
+            import traceback
+
+            traceback.print_exc()
             return None
 
     def analyze_region(
