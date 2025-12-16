@@ -20,7 +20,9 @@ from fin.io.region_separator import RegionSeparator, FusionReadDetector, separat
 
 def setup():
     """Setup logging and imports."""
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
     print("Set up logging and imports completed.\n")
 
 
@@ -44,7 +46,7 @@ def example_basic_usage():
             bam_file=bam_file,
             gtf_file=gtf_file,
             output_dir=output_dir,
-            detect_fusions=True  # Enable fusion read detection
+            detect_fusions=True,  # Enable fusion read detection
         )
 
         # Extract gene regions (returns iterator)
@@ -81,15 +83,16 @@ def example_fusion_detection():
 
     # Create a fusion detector with custom parameters
     fusion_detector = FusionReadDetector(
-        min_alignment_blocks=2,      # Consider reads with ≥2 alignment blocks
-        max_block_gap=100000,        # Flag if gap > 100kb between blocks
-        min_block_size=50,           # Minimum block size
-        max_trimmed_bases=20         # Max soft-clipped bases at both ends
+        min_alignment_blocks=2,  # Consider reads with ≥2 alignment blocks
+        max_block_gap=100000,  # Flag if gap > 100kb between blocks
+        min_block_size=50,  # Minimum block size
+        max_trimmed_bases=20,  # Max soft-clipped bases at both ends
     )
 
     if os.path.exists(bam_file):
         import pysam
-        with pysam.AlignmentFile(bam_file, 'rb') as bam:
+
+        with pysam.AlignmentFile(bam_file, "rb") as bam:
             fusion_count = 0
             total_count = 0
 
@@ -103,7 +106,9 @@ def example_fusion_detection():
                     fusion_count += 1
 
             print(f"Analyzed {total_count} reads")
-            print(f"Detected {fusion_count} fusion-like reads ({fusion_count/total_count*100:.2f}%)")
+            print(
+                f"Detected {fusion_count} fusion-like reads ({fusion_count/total_count*100:.2f}%)"
+            )
     else:
         print("Please update the bam_file path above with your actual BAM file!")
 
@@ -126,10 +131,7 @@ def example_writing_output():
 
     if os.path.exists(bam_file) and os.path.exists(gtf_file):
         separator = RegionSeparator(
-            bam_file=bam_file,
-            gtf_file=gtf_file,
-            output_dir=output_dir,
-            detect_fusions=True
+            bam_file=bam_file, gtf_file=gtf_file, output_dir=output_dir, detect_fusions=True
         )
 
         # Write BAM files for genes with at least 10 reads
@@ -171,10 +173,10 @@ def example_convenient_function():
             bam_file=bam_file,
             gtf_file=gtf_file,
             output_dir=output_dir,
-            min_reads=5,               # Minimum reads per gene
-            detect_fusions=True,       # Filter fusion reads
-            write_bams=True,           # Write individual BAMs
-            region_list="output/regions.tsv"
+            min_reads=5,  # Minimum reads per gene
+            detect_fusions=True,  # Filter fusion reads
+            write_bams=True,  # Write individual BAMs
+            region_list="output/regions.tsv",
         )
 
         print(f"\nSuccessfully created {len(created_files)} BAM files")
@@ -201,10 +203,7 @@ def example_region_statistics():
 
     if os.path.exists(bam_file) and os.path.exists(gtf_file):
         separator = RegionSeparator(
-            bam_file=bam_file,
-            gtf_file=gtf_file,
-            output_dir=output_dir,
-            detect_fusions=True
+            bam_file=bam_file, gtf_file=gtf_file, output_dir=output_dir, detect_fusions=True
         )
 
         # Get statistics
@@ -218,8 +217,9 @@ def example_region_statistics():
         print(f"- Genes with reads: {stats['genes_with_reads']}/{stats['total_genes']}")
 
         # Find genes with most reads
-        sorted_genes = sorted(stats['reads_per_gene'].items(),
-                              key=lambda x: x[1], reverse=True)[:10]
+        sorted_genes = sorted(stats["reads_per_gene"].items(), key=lambda x: x[1], reverse=True)[
+            :10
+        ]
         print("\nTop 10 genes by read count:")
         for rank, (gene_id, read_count) in enumerate(sorted_genes, 1):
             print(f"{rank}. {gene_id}: {read_count} reads")
@@ -243,23 +243,24 @@ def example_custom_fusion_detector():
 
     # Create a stricter fusion detector
     strict_fusion_detector = FusionReadDetector(
-        min_alignment_blocks=3,       # Require at least 3 blocks
-        max_block_gap=50000,          # More sensitive to gaps
-        min_block_size=100,           # Larger minimum block size
-        max_trimmed_bases=10          # Stricter on clipping
+        min_alignment_blocks=3,  # Require at least 3 blocks
+        max_block_gap=50000,  # More sensitive to gaps
+        min_block_size=100,  # Larger minimum block size
+        max_trimmed_bases=10,  # Stricter on clipping
     )
 
     # Create a lenient fusion detector
     lenient_fusion_detector = FusionReadDetector(
-        min_alignment_blocks=2,       # Only require 2 blocks
-        max_block_gap=200000,         # Allow larger gaps
-        min_block_size=30,            # Smaller minimum block
-        max_trimmed_bases=50          # Allow more clipping
+        min_alignment_blocks=2,  # Only require 2 blocks
+        max_block_gap=200000,  # Allow larger gaps
+        min_block_size=30,  # Smaller minimum block
+        max_trimmed_bases=50,  # Allow more clipping
     )
 
     if os.path.exists(bam_file):
         import pysam
-        with pysam.AlignmentFile(bam_file, 'rb') as bam:
+
+        with pysam.AlignmentFile(bam_file, "rb") as bam:
             # Count with strict detector
             strict_count = sum(1 for r in bam if strict_fusion_detector.is_fusion_like(r))
 
