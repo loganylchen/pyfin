@@ -2,6 +2,7 @@
 POD5 file format parser
 """
 
+import sys
 from typing import List, Dict, Optional, Tuple, Any, Generator
 from pathlib import Path
 import logging
@@ -85,27 +86,28 @@ class Pod5Reader:
             raise RuntimeError("POD5 file not opened. Call open() first.")
         return self._read_count
 
-    def get_read(self, read_id: str) -> Optional[p5.Read]:
+    def get_read(self, read_id: str) -> Optional[Any]:
         """
-        Get a Read object for a specific read ID
+        Get a ReadRecord object for a specific read ID
 
         Args:
-            read_id: Read ID
+            read_id: Read ID (UUID string)
 
         Returns:
-            pod5.Read object or None if read not found
+            pod5.ReadRecord object or None if read not found
         """
         if self._pod5_file is None:
             raise RuntimeError("POD5 file not opened. Call open() first.")
 
         try:
-            return self._pod5_file.reads(read_id)
-        except KeyError:
+            # Use reads() with selection parameter to get specific read
+            for read_record in self._pod5_file.reads(selection=[read_id], missing_ok=True):
+                return read_record
             logger.warning(f"Read ID {read_id} not found in file")
             return None
         except Exception as e:
             logger.error(f"Failed to get read {read_id}: {e}")
-            return None
+            sys.exit(1)
 
     def get_all_read_data(self, read_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -123,75 +125,53 @@ class Pod5Reader:
 
         try:
             return {
-                "read_id": read_id,
+                "read_id": str(read.read_id),
                 "signal": read.signal.tolist(),
                 "signal_shape": read.signal.shape,
                 "signal_dtype": str(read.signal.dtype),
-                "pore": read.pore,
+                "pore": {
+                    "channel": read.pore.channel,
+                    "well": read.pore.well,
+                    "pore_type": read.pore.pore_type,
+                },
                 "calibration": {
                     "offset": float(read.calibration.offset),
                     "scale": float(read.calibration.scale),
                 },
                 "read_number": int(read.read_number),
                 "start_sample": int(read.start_sample),
-                "median_before": (
-                    float(read.median_before) if read.median_before is not None else None
-                ),
-                "end_reason": int(read.end_reason) if read.end_reason is not None else None,
+                "median_before": float(read.median_before),
+                "end_reason": {
+                    "name": str(read.end_reason.name),
+                    "forced": read.end_reason.forced,
+                },
                 "run_info": {
                     "acquisition_id": read.run_info.acquisition_id,
-                    "acquisition_start_time": read.run_info.acquisition_start_time,
+                    "acquisition_start_time": str(read.run_info.acquisition_start_time),
                     "adc_max": read.run_info.adc_max,
                     "adc_min": read.run_info.adc_min,
                     "context_tags": (
                         dict(read.run_info.context_tags) if read.run_info.context_tags else {}
                     ),
                     "device_id": read.run_info.device_id,
-                    "digitisation": read.run_info.digitisation,
+                    "sample_rate": read.run_info.sample_rate,
                     "flow_cell_id": read.run_info.flow_cell_id,
                     "flow_cell_product_code": read.run_info.flow_cell_product_code,
                     "protocol_name": read.run_info.protocol_name,
                     "protocol_run_id": read.run_info.protocol_run_id,
-                    "protocol_start_time": read.run_info.protocol_start_time,
-                    "sample_rate": read.run_info.sample_rate,
-                    "sample_temperature": read.run_info.sample_temperature,
                     "sequencing_kit": read.run_info.sequencing_kit,
-                    "track_codec": read.run_info.track_codec,
-                    "version": read.run_info.version,
-                    "well_name": (
-                        read.run_info.well_name if hasattr(read.run_info, "well_name") else None
-                    ),
                 },
-                "tracked_scaling": (
-                    {
-                        "scale": (
-                            float(read.tracked_scaling.scale) if read.tracked_scaling else None
-                        ),
-                        "shift": (
-                            float(read.tracked_scaling.shift) if read.tracked_scaling else None
-                        ),
-                        "digitisation": (
-                            read.tracked_scaling.digitisation if read.tracked_scaling else None
-                        ),
-                        "variance": (
-                            float(read.tracked_scaling.variance) if read.tracked_scaling else None
-                        ),
-                    }
-                    if read.tracked_scaling
-                    else None
-                ),
-                "num_minknow_events": (
-                    read.num_minknow_events if hasattr(read, "num_minknow_events") else None
-                ),
+                "num_samples": read.num_samples,
+                "num_minknow_events": read.num_minknow_events,
             }
 
         except Exception as e:
             logger.error(f"Failed to extract data from read {read_id}: {e}")
-            return None
+            sys.exit(1)
 
     def get_signal(self, read_id: str) -> Optional[Tuple[List[int], Dict[str, Any]]]:
         """
-        Get raw signal for a specific read
+        Get raw signal (int16 ADC values) for a specific read
 
         Args:
             read_id: Read ID
@@ -204,25 +184,27 @@ class Pod5Reader:
             return None
 
         metadata = {
-            "read_id": read_id,
-            "duration": len(read.signal),
+            "read_id": str(read.read_id),
+            "duration": read.num_samples,
             "sample_rate": read.run_info.sample_rate,
-            "channel_id": read.pore,
+            "channel": read.pore.channel,
+            "well": read.pore.well,
             "start_sample": read.start_sample,
             "read_number": read.read_number,
             "calibration": {
                 "offset": float(read.calibration.offset),
                 "scale": float(read.calibration.scale),
             },
-            "digitisation": read.run_info.digitisation,
-            "median_before": float(read.median_before) if read.median_before is not None else None,
+            "median_before": float(read.median_before),
         }
 
         return read.signal.tolist(), metadata
 
     def get_calibrated_signal(self, read_id: str) -> Optional[Tuple[List[float], Dict[str, Any]]]:
         """
-        Get calibrated signal (converted to picoamperes) for a specific read
+        Get calibrated signal (converted to picoamperes) for a specific read.
+
+        Uses the ReadRecord.signal_pa property which returns calibrated float32 signal.
 
         Args:
             read_id: Read ID
@@ -235,54 +217,51 @@ class Pod5Reader:
             return None
 
         try:
-            # Apply calibration to convert to picoamperes
-            calibrated_signal = read.signal_pa.astype(float)
-            # calibrated_signal = (
-            #     calibrated_signal + read.calibration.offset
-            # ) * read.calibration.scale
+            # Use signal_pa property which returns pre-calibrated pA values
+            calibrated_signal = read.signal_pa
 
             metadata = {
-                "read_id": read_id,
-                "duration": len(read.signal_pa),
+                "read_id": str(read.read_id),
+                "duration": read.num_samples,
                 "sample_rate": read.run_info.sample_rate,
-                "channel_id": read.pore,
+                "channel": read.pore.channel,
+                "well": read.pore.well,
                 "start_sample": read.start_sample,
                 "read_number": read.read_number,
                 "calibration": {
                     "offset": float(read.calibration.offset),
                     "scale": float(read.calibration.scale),
                 },
-                "median_before": (
-                    float(read.median_before) if read.median_before is not None else None
-                ),
+                "median_before": float(read.median_before),
                 "unit": "picoamperes",
             }
 
             return calibrated_signal.tolist(), metadata
 
         except Exception as e:
-            logger.error(f"Failed to calibrate signal for read {read_id}: {e}")
-            raise
-            return None
+            logger.error(f"Failed to get calibrated signal for read {read_id}: {e}")
+            sys.exit(1)
 
-    def get_batch_reads(self, read_ids: List[str]) -> List[Optional[p5.Read]]:
+    def get_batch_reads(self, read_ids: List[str]) -> Generator[Any, None, None]:
         """
         Get multiple reads in batch (more efficient than individual reads)
 
         Args:
             read_ids: List of read IDs to retrieve
 
-        Returns:
-            List of pod5.Read objects or None for each read ID
+        Yields:
+            pod5.ReadRecord objects for each read ID found
         """
         if self._pod5_file is None:
             raise RuntimeError("POD5 file not opened. Call open() first.")
 
         try:
-            return self._pod5_file.reads(read_ids)
+            # Use reads() with selection parameter for batch access
+            for read_record in self._pod5_file.reads(selection=read_ids, missing_ok=True):
+                yield read_record
         except Exception as e:
             logger.error(f"Failed to get batch reads: {e}")
-            return [None] * len(read_ids)
+            sys.exit(1)
 
     def iterate_reads(self, batch_size: int = 1000) -> Generator[Dict[str, Any], None, None]:
         """
@@ -294,18 +273,14 @@ class Pod5Reader:
         Yields:
             Read data dictionary for each read
         """
-        if self._read_ids is None:
+        if self._pod5_file is None:
             raise RuntimeError("POD5 file not opened. Call open() first.")
 
-        for i in range(0, len(self._read_ids), batch_size):
-            batch = self._read_ids[i : i + batch_size]
-            reads = self.get_batch_reads(batch)
-
-            for read in reads:
-                if read is not None:
-                    read_data = self.get_all_read_data(read.read_id)
-                    if read_data:
-                        yield read_data
+        # Iterate over all reads using the reads() generator
+        for read_record in self._pod5_file.reads():
+            read_data = self.get_all_read_data(str(read_record.read_id))
+            if read_data:
+                yield read_data
 
     def get_file_info(self) -> Dict[str, Any]:
         """
@@ -318,27 +293,35 @@ class Pod5Reader:
             raise RuntimeError("POD5 file not opened. Call open() first.")
 
         try:
-            run_info = self._pod5_file.run_info
-            return {
+            # Get basic file info
+            info = {
                 "filename": str(self.file_path),
                 "num_reads": self._read_count,
-                "num_chunks": self._pod5_file.num_chunks,
-                "compression": str(self._pod5_file.compression),
-                "version": self._pod5_file.version,
-                "run_info": {
-                    "flow_cell_id": run_info.flow_cell_id,
-                    "sample_id": run_info.sample_id if hasattr(run_info, "sample_id") else None,
-                    "sequencing_kit": run_info.sequencing_kit,
-                    "protocol_name": run_info.protocol_name,
-                    "device_id": run_info.device_id,
-                    "sample_rate": run_info.sample_rate,
-                    "acquisition_id": run_info.acquisition_id,
-                    "acquisition_start_time": run_info.acquisition_start_time,
-                },
+                "batch_count": self._pod5_file.batch_count,
+                "is_vbz_compressed": self._pod5_file.is_vbz_compressed,
+                "file_version": str(self._pod5_file.file_version),
             }
+
+            # Try to get run_info from first read if available
+            if self._read_count > 0:
+                try:
+                    first_read = next(self._pod5_file.reads())
+                    run_info = first_read.run_info
+                    info["run_info"] = {
+                        "flow_cell_id": run_info.flow_cell_id,
+                        "sequencing_kit": run_info.sequencing_kit,
+                        "protocol_name": run_info.protocol_name,
+                        "device_id": run_info.device_id,
+                        "sample_rate": run_info.sample_rate,
+                        "acquisition_id": run_info.acquisition_id,
+                    }
+                except StopIteration:
+                    pass
+
+            return info
         except Exception as e:
             logger.error(f"Failed to get file info: {e}")
-            return {}
+            sys.exit(1)
 
     @staticmethod
     def convert_fast5_to_pod5(
@@ -371,10 +354,10 @@ class Pod5Reader:
                 return True
             else:
                 logger.error(f"Failed to convert: {result.stderr}")
-                return False
+                sys.exit(1)
         except FileNotFoundError:
             logger.error("pod5 command not found. Install pod5 tools for format conversion.")
-            return False
+            sys.exit(1)
         except Exception as e:
             logger.error(f"Error during conversion: {e}")
-            return False
+            sys.exit(1)
