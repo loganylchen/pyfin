@@ -14,13 +14,13 @@ if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
 
 try:
-    from fin import _eventalign
+    from fin._f5c import detect_events, eventalign, profile_hmm_eventalign
 except ImportError as e:
-    print(f"Error importing _eventalign: {e}")
+    print(f"Error importing eventalign extensions: {e}")
     print("Make sure to build the extensions first:")
-    print("  cd /home/logan/Projects/pyfin")
-    print("  python setup.py build_ext --inplace")
-    print("Try building with: python setup.py build_ext --inplace")
+    print(f"  cd {parent_dir}")
+    print("  pip install -e .")
+    print("Or try: python setup.py build_ext --inplace")
     sys.exit(1)
 
 
@@ -49,9 +49,7 @@ def test_profile_hmm():
     print("Test 1: Simple ABEA Alignment")
     print("-" * 70)
     try:
-        result_abea = _eventalign.eventalign(
-            raw_signal=signal, sequence=sequence, is_rna=1, kmer_size=5
-        )
+        result_abea = eventalign(raw_signal=signal, sequence=sequence, is_rna=True, kmer_size=5)
         print(f"✓ ABEA alignment successful")
         print(f"  Events detected: {result_abea['n_events']}")
         print(f"  Aligned pairs: {result_abea['n_aligned_pairs']}")
@@ -75,8 +73,8 @@ def test_profile_hmm():
     print("Test 2: Profile HMM Alignment (Full f5c)")
     print("-" * 70)
     try:
-        result_hmm = _eventalign.profile_hmm_eventalign(
-            raw_signal=signal, sequence=sequence, is_rna=1, kmer_size=5, events_per_base=3.0
+        result_hmm = profile_hmm_eventalign(
+            raw_signal=signal, sequence=sequence, is_rna=True, kmer_size=5, events_per_base=3.0
         )
         print(f"✓ Profile HMM alignment successful")
         print(f"  Events detected: {result_hmm['n_events']}")

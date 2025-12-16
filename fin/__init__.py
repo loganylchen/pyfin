@@ -11,20 +11,25 @@ from .utils.log_config import setup_logger, get_package_logger
 
 # Try to import optional extensions
 try:
-    from ._f5c._event import detect_events
+    from ._f5c import detect_events, is_available as f5c_is_available
 
     _F5C_AVAILABLE = True
 except ImportError:
     _F5C_AVAILABLE = False
     detect_events = None
+    f5c_is_available = lambda: False
 
 try:
-    from ._f5c import _eventalign
+    from ._f5c import eventalign
+    from ._f5c._eventalign import eventalign as _eventalign_raw
+    from ._f5c._eventalign import profile_hmm_eventalign
 
     _EVENTALIGN_AVAILABLE = True
 except ImportError:
     _EVENTALIGN_AVAILABLE = False
-    _eventalign = None
+    eventalign = None
+    _eventalign_raw = None
+    profile_hmm_eventalign = None
 
 
 # Initialize package logger
@@ -40,6 +45,6 @@ if not _EVENTALIGN_AVAILABLE:
 
 __all__ = ["io", "setup_logger", "get_package_logger"]
 if _F5C_AVAILABLE:
-    __all__.append("detect_events")
+    __all__.extend(["detect_events", "f5c_is_available"])
 if _EVENTALIGN_AVAILABLE:
-    __all__.append("_eventalign")
+    __all__.extend(["eventalign", "profile_hmm_eventalign"])

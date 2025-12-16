@@ -6,7 +6,12 @@ This directory contains example scripts demonstrating various features of the Py
 
 Build the extensions first:
 ```bash
-cd /home/logan/Projects/pyfin
+cd <project-root>
+pip install -e .
+```
+
+Or build extensions in-place:
+```bash
 python setup.py build_ext --inplace
 ```
 
@@ -79,6 +84,28 @@ python examples/test_all_examples.py
 - Interval/region management
 - Requires BAM files
 
+### Complete Workflows
+
+**region_transcript_analysis_workflow.py** ⭐ **COMPREHENSIVE WORKFLOW**
+- Complete pipeline for region-based transcript analysis
+- Inputs: BAM, genome FASTA, transcriptome FASTA, GTF, POD5
+- Features:
+  1. Separate reads into isolated genomic regions
+  2. Get candidate transcripts per region
+  3. Eventalign each read to all candidate transcripts
+  4. Compute DTW pairwise distances among reads
+- Run with `--demo` for synthetic data demonstration
+- Example:
+  ```bash
+  python region_transcript_analysis_workflow.py \
+      --bam reads.bam \
+      --genome genome.fa \
+      --transcriptome transcripts.fa \
+      --gtf annotation.gtf \
+      --pod5 signals.pod5 \
+      --output results/
+  ```
+
 ### Comparison Tools
 
 **compare_with_f5c.py**
@@ -105,21 +132,20 @@ python examples/test_all_examples.py
 
 Build the extensions:
 ```bash
-cd /home/logan/Projects/pyfin
-python setup.py build_ext --inplace
+cd <project-root>
+pip install -e .
 ```
 
 ### "ModuleNotFoundError: No module named 'fin'"
 
 Install the package:
 ```bash
-cd /home/logan/Projects/pyfin
 pip install -e .
 ```
 
 Or add to PYTHONPATH:
 ```bash
-export PYTHONPATH=/home/logan/Projects/pyfin:$PYTHONPATH
+export PYTHONPATH=<project-root>:$PYTHONPATH
 ```
 
 ### "CUDA not available"

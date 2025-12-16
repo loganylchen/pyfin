@@ -17,10 +17,14 @@ This will:
 
 import sys
 import numpy as np
+from pathlib import Path
 
-sys.path.insert(0, "/home/logan/Projects/pyfin")
+# Add parent directory to path for development
+parent_dir = Path(__file__).parent.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
 
-from fin import _eventalign
+from fin._f5c import profile_hmm_eventalign
 
 
 def parse_f5c_eventalign(tsv_file):

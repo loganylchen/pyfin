@@ -31,6 +31,25 @@ pip install -e ".[all]"
 
 ## Features
 
+### Event Detection and Alignment (f5c-compatible)
+
+PyFin includes f5c-compatible algorithms for nanopore signal processing:
+
+```python
+from fin._f5c import detect_events, eventalign, profile_hmm_eventalign
+
+# Detect events from raw signal
+events = detect_events(raw_signal)
+
+# Simple event-to-kmer alignment
+alignment = eventalign(raw_signal, sequence, is_rna=True)
+
+# Full f5c Profile HMM alignment (recommended)
+result = profile_hmm_eventalign(raw_signal, sequence, is_rna=True)
+for record in result['alignment']:
+    print(f"{record['ref_kmer']} @ {record['ref_position']}: {record['hmm_state']}")
+```
+
 ### File Format Readers
 
 - **FASTA Reader** (`FASTAReader`, `FASTARecord`): Read and manipulate FASTA files
