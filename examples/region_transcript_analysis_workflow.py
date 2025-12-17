@@ -391,7 +391,7 @@ class RegionTranscriptAnalyzer:
                     "standardized_level": float(row["standardized_level"]),
                     "start_idx": int(row["start_idx"]),
                     "end_idx": int(row["end_idx"]),
-                    "samples": [int(i) for i in row["samples"].split(",")],
+                    "samples": [float(i) for i in row["samples"].split(",")],
                 }
 
                 results[read_name].append(record)
