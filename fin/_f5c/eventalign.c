@@ -433,6 +433,8 @@ static PyObject *py_profile_hmm_eventalign(PyObject *self, PyObject *args, PyObj
         PyDict_SetItemString(record, "ref_position", PyLong_FromLong(aln->ref_position));
         PyDict_SetItemString(record, "ref_kmer", PyUnicode_FromString(aln->ref_kmer));
         PyDict_SetItemString(record, "event_idx", PyLong_FromLong(raw_event_idx));
+        PyDict_SetItemString(record, "signal_start", PyLong_FromUnsignedLongLong(aln->signal_start));
+        PyDict_SetItemString(record, "signal_length", PyFloat_FromDouble(aln->signal_length));
         PyDict_SetItemString(record, "hmm_state", PyUnicode_FromFormat("%c", aln->hmm_state));
         PyDict_SetItemString(record, "strand_idx", PyLong_FromLong(aln->strand_idx));
         PyDict_SetItemString(record, "model_kmer", PyUnicode_FromString(aln->model_kmer));

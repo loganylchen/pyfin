@@ -807,12 +807,16 @@ static int32_t profile_hmm_traceback_with_flanking(
                 aln->event_mean = events.event[curr_event].mean;
                 aln->event_stdv = events.event[curr_event].stdv;
                 aln->event_duration = events.event[curr_event].length;
+                aln->signal_start = events.event[curr_event].start;
+                aln->signal_length = events.event[curr_event].length;
             }
             else
             {
                 aln->event_mean = 0.0f;
                 aln->event_stdv = 0.0f;
                 aln->event_duration = 0.0f;
+                aln->signal_start = 0;
+                aln->signal_length = 0.0f;
             }
 
             // Model statistics
@@ -858,6 +862,8 @@ static int32_t profile_hmm_traceback_with_flanking(
             aln->event_mean = events.event[curr_event].mean;
             aln->event_stdv = events.event[curr_event].stdv;
             aln->event_duration = events.event[curr_event].length;
+            aln->signal_start = events.event[curr_event].start;
+            aln->signal_length = events.event[curr_event].length;
 
             if (curr_kmer + kmer_size <= strlen(sequence))
             {

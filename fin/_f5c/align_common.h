@@ -53,7 +53,9 @@ typedef struct
 {
     int32_t ref_position;               // Reference position (0-based)
     char ref_kmer[MAX_KMER_SIZE + 1];   // Reference k-mer
-    int32_t event_idx;                  // Event index
+    int32_t event_idx;                  // Event index (in raw signal order)
+    uint64_t signal_start;              // Start sample index in raw signal
+    float signal_length;                // Length of event in samples
     char hmm_state;                     // 'M' = match, 'K' = kmer_skip, 'B' = bad_event
     uint8_t strand_idx;                 // 0=template, 1=complement (for DNA)
     char model_kmer[MAX_KMER_SIZE + 1]; // Model k-mer
