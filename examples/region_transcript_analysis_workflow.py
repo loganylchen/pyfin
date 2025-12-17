@@ -220,7 +220,7 @@ class RegionTranscriptAnalyzer:
         return self.regions
 
     def get_candidate_transcripts_for_region(
-        self, chrom: str, start: int, end: int
+        self, chrom: str, start: int, end: int, strand: Optional[str] = None
     ) -> List[Tuple[str, str]]:
         """
         Get all candidate transcript sequences that overlap a region.
@@ -229,6 +229,7 @@ class RegionTranscriptAnalyzer:
             chrom: Chromosome name
             start: Region start (0-based)
             end: Region end
+            strand: Strand to filter ('+', '-', or None for both)
 
         Returns:
             List of (transcript_id, sequence) tuples
@@ -242,6 +243,10 @@ class RegionTranscriptAnalyzer:
             transcripts = reader.get_transcripts_in_region(chrom, start, end)
 
             for tx in transcripts:
+                # Filter by strand if specified
+                if strand is not None and tx.strand != strand:
+                    continue
+                    
                 tx_id = tx.transcript_id
                 if tx_id in self.transcriptome_sequences:
                     candidates.append((tx_id, self.transcriptome_sequences[tx_id]))
@@ -1654,9 +1659,10 @@ class RegionTranscriptAnalyzer:
             "summary": {},
         }
 
-        # Step 1: Get candidate transcripts for this region
+        # Step 1: Get candidate transcripts for this region (filter by strand)
+        region_strand = region.strand if hasattr(region, 'strand') else None
         candidates = self.get_candidate_transcripts_for_region(
-            region.chrom, region.start, region.end
+            region.chrom, region.start, region.end, strand=region_strand
         )
 
         if len(candidates) > max_transcripts:
@@ -1666,7 +1672,7 @@ class RegionTranscriptAnalyzer:
         result["candidate_transcripts"] = [
             {"transcript_id": tx_id, "length": len(seq)} for tx_id, seq in candidates
         ]
-        logger.info(f"  Found {len(candidates)} candidate transcripts")
+        logger.info(f"  Found {len(candidates)} candidate transcripts on strand {region_strand if region_strand else 'both'}")
 
         if not candidates:
             logger.warning(f"  No candidate transcripts found for region {region_id}")
