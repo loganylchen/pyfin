@@ -540,7 +540,11 @@ static struct PyModuleDef eventalign_module = {
     EventalignMethods};
 
 // Module initialization
+#ifdef CUDA_ENABLED
+PyMODINIT_FUNC PyInit__eventalign_cuda(void)
+#else
 PyMODINIT_FUNC PyInit__eventalign(void)
+#endif
 {
     import_array();
     return PyModule_Create(&eventalign_module);
