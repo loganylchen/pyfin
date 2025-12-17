@@ -248,14 +248,15 @@ class RegionTranscriptAnalyzer:
 
         return candidates
 
-    def get_reads_for_region(self, chrom: str, start: int, end: int) -> List[Dict[str, Any]]:
+    def get_reads_for_region(self, chrom: str, start: int, end: int, strand: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Get all reads mapping to a region.
+        Get all reads mapping to a region, optionally filtered by strand.
 
         Args:
             chrom: Chromosome name
             start: Region start (0-based)
             end: Region end
+            strand: Strand to filter ('+', '-', or None for both)
 
         Returns:
             List of read dictionaries
@@ -264,6 +265,12 @@ class RegionTranscriptAnalyzer:
 
         with BamReader(str(self.bam_path)) as reader:
             for read in reader.fetch(region=f"{chrom}:{start}-{end}"):
+                # Filter by strand if specified
+                if strand is not None:
+                    # BAM: is_reverse=False means forward (+), is_reverse=True means reverse (-)
+                    read_strand = '-' if (hasattr(read, 'is_reverse') and read.is_reverse) else '+'
+                    if read_strand != strand:
+                        continue
                 reads.append(read)
 
         return reads
@@ -1299,6 +1306,7 @@ class RegionTranscriptAnalyzer:
             region_chrom = region.chrom
             region_start = region.start
             region_end = region.end
+            region_strand = region.strand if hasattr(region, 'strand') else None
 
             # Get transcript structures from GTF
             transcript_structures = {}
@@ -1309,12 +1317,17 @@ class RegionTranscriptAnalyzer:
                         tx.sort_features()
                         transcript_structures[tx.transcript_id] = tx
 
-            # Get read mapping info from BAM
+            # Get read mapping info from BAM (filter by region strand)
             read_mapping_info = {}
             with BamReader(str(self.bam_path)) as bam_reader:
                 for read in bam_reader.fetch(region=f"{region_chrom}:{region_start}-{region_end}"):
                     read_id = read.query_name
                     if read_id in assignments.get("reads", []):
+                        # Filter by strand if region has strand information
+                        if region_strand is not None:
+                            read_strand = '-' if (hasattr(read, 'is_reverse') and read.is_reverse) else '+'
+                            if read_strand != region_strand:
+                                continue
                         # Get read alignment blocks
                         blocks = []
                         if hasattr(read, 'get_blocks'):
@@ -1659,14 +1672,15 @@ class RegionTranscriptAnalyzer:
             logger.warning(f"  No candidate transcripts found for region {region_id}")
             return result
 
-        # Step 2: Get reads for this region
-        reads = self.get_reads_for_region(region.chrom, region.start, region.end)
+        # Step 2: Get reads for this region (filter by strand)
+        region_strand = region.strand if hasattr(region, 'strand') else None
+        reads = self.get_reads_for_region(region.chrom, region.start, region.end, strand=region_strand)
 
         if len(reads) > max_reads:
             logger.info(f"  Limiting to {max_reads} reads (of {len(reads)})")
             reads = reads[:max_reads]
 
-        logger.info(f"  Processing {len(reads)} reads")
+        logger.info(f"  Processing {len(reads)} reads on strand {region_strand if region_strand else 'both'}")
 
         # Step 3: For each read, get signal and align to all transcripts
         read_signals = []
