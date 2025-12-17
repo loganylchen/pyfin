@@ -246,14 +246,16 @@ class RegionTranscriptAnalyzer:
                 # Filter by strand if specified
                 if strand is not None and tx.strand != strand:
                     continue
-                    
+
                 tx_id = tx.transcript_id
                 if tx_id in self.transcriptome_sequences:
                     candidates.append((tx_id, self.transcriptome_sequences[tx_id]))
 
         return candidates
 
-    def get_reads_for_region(self, chrom: str, start: int, end: int, strand: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_reads_for_region(
+        self, chrom: str, start: int, end: int, strand: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
         Get all reads mapping to a region, optionally filtered by strand.
 
@@ -273,7 +275,7 @@ class RegionTranscriptAnalyzer:
                 # Filter by strand if specified
                 if strand is not None:
                     # BAM: is_reverse=False means forward (+), is_reverse=True means reverse (-)
-                    read_strand = '-' if (hasattr(read, 'is_reverse') and read.is_reverse) else '+'
+                    read_strand = "-" if (hasattr(read, "is_reverse") and read.is_reverse) else "+"
                     if read_strand != strand:
                         continue
                 reads.append(read)
@@ -1225,20 +1227,24 @@ class RegionTranscriptAnalyzer:
             tx_idx = hard_assignments[i]
             tx_id = transcripts[tx_idx]
             confidence = R[i, tx_idx]
-            assignments.append({
-                "read_id": read_id,
-                "transcript_id": tx_id,
-                "confidence": float(confidence),
-                "probabilities": {tx: float(R[i, j]) for j, tx in enumerate(transcripts)},
-            })
+            assignments.append(
+                {
+                    "read_id": read_id,
+                    "transcript_id": tx_id,
+                    "confidence": float(confidence),
+                    "probabilities": {tx: float(R[i, j]) for j, tx in enumerate(transcripts)},
+                }
+            )
 
         # Group reads by transcript
         reads_per_transcript = defaultdict(list)
         for a in assignments:
-            reads_per_transcript[a["transcript_id"]].append({
-                "read_id": a["read_id"],
-                "confidence": a["confidence"],
-            })
+            reads_per_transcript[a["transcript_id"]].append(
+                {
+                    "read_id": a["read_id"],
+                    "confidence": a["confidence"],
+                }
+            )
 
         return {
             "status": "success",
@@ -1311,7 +1317,7 @@ class RegionTranscriptAnalyzer:
             region_chrom = region.chrom
             region_start = region.start
             region_end = region.end
-            region_strand = region.strand if hasattr(region, 'strand') else None
+            region_strand = region.strand if hasattr(region, "strand") else None
 
             # Get transcript structures from GTF
             transcript_structures = {}
@@ -1330,26 +1336,31 @@ class RegionTranscriptAnalyzer:
                     if read_id in assignments.get("reads", []):
                         # Filter by strand if region has strand information
                         if region_strand is not None:
-                            read_strand = '-' if (hasattr(read, 'is_reverse') and read.is_reverse) else '+'
+                            read_strand = (
+                                "-" if (hasattr(read, "is_reverse") and read.is_reverse) else "+"
+                            )
                             if read_strand != region_strand:
                                 continue
                         # Get read alignment blocks
                         blocks = []
-                        if hasattr(read, 'get_blocks'):
+                        if hasattr(read, "get_blocks"):
                             blocks = read.get_blocks()
-                        elif hasattr(read, 'reference_start') and hasattr(read, 'reference_end'):
+                        elif hasattr(read, "reference_start") and hasattr(read, "reference_end"):
                             blocks = [(read.reference_start, read.reference_end)]
-                        
+
                         read_mapping_info[read_id] = {
                             "blocks": blocks,
-                            "start": read.reference_start if hasattr(read, 'reference_start') else 0,
-                            "end": read.reference_end if hasattr(read, 'reference_end') else 0,
-                            "is_reverse": read.is_reverse if hasattr(read, 'is_reverse') else False,
+                            "start": (
+                                read.reference_start if hasattr(read, "reference_start") else 0
+                            ),
+                            "end": read.reference_end if hasattr(read, "reference_end") else 0,
+                            "is_reverse": read.is_reverse if hasattr(read, "is_reverse") else False,
                         }
 
             # Create figure with shared x-axis
             fig, axes = plt.subplots(
-                n_panels, 1,
+                n_panels,
+                1,
                 figsize=(figsize_per_panel[0], figsize_per_panel[1] * n_panels),
                 sharex=True,
             )
@@ -1373,16 +1384,23 @@ class RegionTranscriptAnalyzer:
                 if tx_struct:
                     # Draw introns as thin line
                     ax.hlines(
-                        exon_y, tx_struct.start, tx_struct.end,
-                        colors="darkblue", linewidth=1, alpha=0.5
+                        exon_y,
+                        tx_struct.start,
+                        tx_struct.end,
+                        colors="darkblue",
+                        linewidth=1,
+                        alpha=0.5,
                     )
 
                     # Draw exons as thick boxes
                     for exon_start, exon_end in tx_struct.exons:
                         rect = plt.Rectangle(
                             (exon_start, exon_y - exon_height / 2),
-                            exon_end - exon_start, exon_height,
-                            facecolor="darkblue", edgecolor="black", linewidth=0.5
+                            exon_end - exon_start,
+                            exon_height,
+                            facecolor="darkblue",
+                            edgecolor="black",
+                            linewidth=0.5,
                         )
                         ax.add_patch(rect)
 
@@ -1390,8 +1408,11 @@ class RegionTranscriptAnalyzer:
                     for cds_start, cds_end in tx_struct.cds:
                         rect = plt.Rectangle(
                             (cds_start, exon_y - exon_height / 2),
-                            cds_end - cds_start, exon_height,
-                            facecolor="navy", edgecolor="black", linewidth=0.5
+                            cds_end - cds_start,
+                            exon_height,
+                            facecolor="navy",
+                            edgecolor="black",
+                            linewidth=0.5,
                         )
                         ax.add_patch(rect)
 
@@ -1410,7 +1431,7 @@ class RegionTranscriptAnalyzer:
                     read_height = 0.02
                     read_spacing = 0.025
 
-                for read_idx, read_info in enumerate(assigned_reads[:min(n_reads_assigned, 30)]):
+                for read_idx, read_info in enumerate(assigned_reads[: min(n_reads_assigned, 30)]):
                     read_id = read_info["read_id"]
                     confidence = read_info["confidence"]
 
@@ -1427,9 +1448,12 @@ class RegionTranscriptAnalyzer:
                     for block_start, block_end in blocks:
                         rect = plt.Rectangle(
                             (block_start, read_y - read_height / 2),
-                            block_end - block_start, read_height,
-                            facecolor=color, edgecolor="gray",
-                            linewidth=0.3, alpha=alpha
+                            block_end - block_start,
+                            read_height,
+                            facecolor=color,
+                            edgecolor="gray",
+                            linewidth=0.3,
+                            alpha=alpha,
                         )
                         ax.add_patch(rect)
 
@@ -1439,7 +1463,9 @@ class RegionTranscriptAnalyzer:
                             ax.plot(
                                 [blocks[i][1], blocks[i + 1][0]],
                                 [read_y, read_y],
-                                color=color, linewidth=0.5, alpha=alpha * 0.7
+                                color=color,
+                                linewidth=0.5,
+                                alpha=alpha * 0.7,
                             )
 
                 # Labels and styling
@@ -1459,7 +1485,8 @@ class RegionTranscriptAnalyzer:
                 if panel_idx == 0:
                     ax.set_title(
                         f"{title}\nRegion: {region_chrom}:{region_start:,}-{region_end:,}",
-                        fontsize=12, fontweight="bold"
+                        fontsize=12,
+                        fontweight="bold",
                     )
 
             # X-axis label on bottom panel
@@ -1467,9 +1494,8 @@ class RegionTranscriptAnalyzer:
 
             # Format x-axis with comma separators
             from matplotlib.ticker import FuncFormatter
-            axes[-1].xaxis.set_major_formatter(
-                FuncFormatter(lambda x, p: f"{int(x):,}")
-            )
+
+            axes[-1].xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{int(x):,}"))
 
             plt.tight_layout()
             plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -1481,6 +1507,7 @@ class RegionTranscriptAnalyzer:
         except Exception as e:
             logger.error(f"Failed to generate transcript-read assignment plot: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -1543,18 +1570,31 @@ class RegionTranscriptAnalyzer:
 
             # Add count labels
             for i, (bar, count) in enumerate(zip(bars, counts)):
-                ax1.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height() / 2,
-                         str(count), va="center", fontsize=8)
+                ax1.text(
+                    bar.get_width() + 0.1,
+                    bar.get_y() + bar.get_height() / 2,
+                    str(count),
+                    va="center",
+                    fontsize=8,
+                )
 
             # Panel 2: Confidence distribution
             ax2 = fig.add_subplot(gs[0, 1])
             confidences = [a["confidence"] for a in all_assignments]
 
             ax2.hist(confidences, bins=20, color="forestgreen", alpha=0.7, edgecolor="black")
-            ax2.axvline(np.mean(confidences), color="red", linestyle="--",
-                        label=f"Mean: {np.mean(confidences):.3f}")
-            ax2.axvline(np.median(confidences), color="orange", linestyle="--",
-                        label=f"Median: {np.median(confidences):.3f}")
+            ax2.axvline(
+                np.mean(confidences),
+                color="red",
+                linestyle="--",
+                label=f"Mean: {np.mean(confidences):.3f}",
+            )
+            ax2.axvline(
+                np.median(confidences),
+                color="orange",
+                linestyle="--",
+                label=f"Median: {np.median(confidences):.3f}",
+            )
             ax2.set_xlabel("Assignment Confidence")
             ax2.set_ylabel("Count")
             ax2.set_title("Confidence Distribution")
@@ -1564,7 +1604,9 @@ class RegionTranscriptAnalyzer:
             ax3 = fig.add_subplot(gs[1, :])
 
             # Sort reads by their primary assignment for better visualization
-            read_order = sorted(range(len(reads)), key=lambda i: all_assignments[i]["transcript_id"])
+            read_order = sorted(
+                range(len(reads)), key=lambda i: all_assignments[i]["transcript_id"]
+            )
             R_sorted = R[read_order, :]
 
             # Limit display size
@@ -1573,24 +1615,36 @@ class RegionTranscriptAnalyzer:
 
             if R_sorted.shape[0] > max_reads_display:
                 R_display = R_sorted[:max_reads_display, :]
-                read_labels = [reads[read_order[i]][:12] + ".." 
-                               if len(reads[read_order[i]]) > 12 else reads[read_order[i]]
-                               for i in range(max_reads_display)]
+                read_labels = [
+                    (
+                        reads[read_order[i]][:12] + ".."
+                        if len(reads[read_order[i]]) > 12
+                        else reads[read_order[i]]
+                    )
+                    for i in range(max_reads_display)
+                ]
             else:
                 R_display = R_sorted
-                read_labels = [reads[read_order[i]][:12] + ".." 
-                               if len(reads[read_order[i]]) > 12 else reads[read_order[i]]
-                               for i in range(len(reads))]
+                read_labels = [
+                    (
+                        reads[read_order[i]][:12] + ".."
+                        if len(reads[read_order[i]]) > 12
+                        else reads[read_order[i]]
+                    )
+                    for i in range(len(reads))
+                ]
 
             if R_display.shape[1] > max_tx_display:
                 R_display = R_display[:, :max_tx_display]
-                tx_labels = [transcripts[i][:15] + ".." 
-                             if len(transcripts[i]) > 15 else transcripts[i]
-                             for i in range(max_tx_display)]
+                tx_labels = [
+                    transcripts[i][:15] + ".." if len(transcripts[i]) > 15 else transcripts[i]
+                    for i in range(max_tx_display)
+                ]
             else:
-                tx_labels = [transcripts[i][:15] + ".." 
-                             if len(transcripts[i]) > 15 else transcripts[i]
-                             for i in range(len(transcripts))]
+                tx_labels = [
+                    transcripts[i][:15] + ".." if len(transcripts[i]) > 15 else transcripts[i]
+                    for i in range(len(transcripts))
+                ]
 
             im = ax3.imshow(R_display, cmap="YlOrRd", aspect="auto", vmin=0, vmax=1)
             cbar = plt.colorbar(im, ax=ax3, shrink=0.8)
@@ -1624,6 +1678,7 @@ class RegionTranscriptAnalyzer:
         except Exception as e:
             logger.error(f"Failed to generate assignment summary: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -1660,7 +1715,7 @@ class RegionTranscriptAnalyzer:
         }
 
         # Step 1: Get candidate transcripts for this region (filter by strand)
-        region_strand = region.strand if hasattr(region, 'strand') else None
+        region_strand = region.strand if hasattr(region, "strand") else None
         candidates = self.get_candidate_transcripts_for_region(
             region.chrom, region.start, region.end, strand=region_strand
         )
@@ -1672,21 +1727,27 @@ class RegionTranscriptAnalyzer:
         result["candidate_transcripts"] = [
             {"transcript_id": tx_id, "length": len(seq)} for tx_id, seq in candidates
         ]
-        logger.info(f"  Found {len(candidates)} candidate transcripts on strand {region_strand if region_strand else 'both'}")
+        logger.info(
+            f"  Found {len(candidates)} candidate transcripts on strand {region_strand if region_strand else 'both'}"
+        )
 
         if not candidates:
             logger.warning(f"  No candidate transcripts found for region {region_id}")
             return result
 
         # Step 2: Get reads for this region (filter by strand)
-        region_strand = region.strand if hasattr(region, 'strand') else None
-        reads = self.get_reads_for_region(region.chrom, region.start, region.end, strand=region_strand)
+        region_strand = region.strand if hasattr(region, "strand") else None
+        reads = self.get_reads_for_region(
+            region.chrom, region.start, region.end, strand=region_strand
+        )
 
         if len(reads) > max_reads:
             logger.info(f"  Limiting to {max_reads} reads (of {len(reads)})")
             reads = reads[:max_reads]
 
-        logger.info(f"  Processing {len(reads)} reads on strand {region_strand if region_strand else 'both'}")
+        logger.info(
+            f"  Processing {len(reads)} reads on strand {region_strand if region_strand else 'both'}"
+        )
 
         # Step 3: For each read, get signal and align to all transcripts
         read_signals = []
@@ -1868,7 +1929,9 @@ class RegionTranscriptAnalyzer:
 
             if assignments.get("status") == "success":
                 result["assignments"] = assignments
-                logger.info(f"  Assigned {assignments['n_reads']} reads to {assignments['n_transcripts']} transcripts")
+                logger.info(
+                    f"  Assigned {assignments['n_reads']} reads to {assignments['n_transcripts']} transcripts"
+                )
 
                 # Step 10: Visualize transcript-read assignments on genome
                 tx_read_plot_path = self.output_dir / f"transcript_reads_{region_safe_id}.png"
@@ -1883,7 +1946,9 @@ class RegionTranscriptAnalyzer:
                     result["transcript_reads_plot_path"] = str(tx_read_plot)
 
                 # Step 11: Visualize assignment summary
-                assignment_summary_path = self.output_dir / f"assignment_summary_{region_safe_id}.png"
+                assignment_summary_path = (
+                    self.output_dir / f"assignment_summary_{region_safe_id}.png"
+                )
                 assignment_summary = self.plot_assignment_summary(
                     assignments,
                     assignment_summary_path,
