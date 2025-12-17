@@ -16,6 +16,13 @@
 #define TRANS_START_TO_CLIP 0.5f // Probability of entering clipping state
 #define TRANS_CLIP_SELF 0.9f     // Probability of staying in clipping state
 
+// Flags to modify the behaviour of the HMM (from f5c)
+enum HMMAlignmentFlags
+{
+    HAF_ALLOW_PRE_CLIP = 1, // allow events to go unmatched before the aligning region
+    HAF_ALLOW_POST_CLIP = 2 // allow events to go unmatched after the aligning region
+};
+
 // Alternative parameters for testing asymmetric clipping:
 // #define TRANS_START_TO_CLIP_PRE 0.3f   // Less aggressive at 5' end
 // #define TRANS_START_TO_CLIP_POST 0.7f  // More aggressive at 3' end
@@ -91,7 +98,9 @@ extern "C"
         event_table events,
         simple_model_t *model,
         uint32_t kmer_size,
-        simple_scalings_t scaling);
+        simple_scalings_t scaling,
+        uint32_t hmm_flags,
+        uint32_t e_start);
 
     // Profile HMM eventalign (detailed, returns event_alignment_t)
     int32_t profile_hmm_align(

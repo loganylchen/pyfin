@@ -237,7 +237,9 @@ int32_t align_with_flanking_cpu(
     event_table events,
     simple_model_t *model,
     uint32_t kmer_size,
-    simple_scalings_t scaling)
+    simple_scalings_t scaling,
+    uint32_t hmm_flags,
+    uint32_t e_start)
 {
     int32_t n_kmers = seq_len - kmer_size + 1;
     int32_t n_events = events.n;
@@ -368,7 +370,12 @@ int32_t align_with_flanking_cpu(
             scores.x[HMT_FROM_SAME_B] = bt->lp_bm_self + dp[row - 1][curr_offset + STATE_BAD_EVENT];
             scores.x[HMT_FROM_PREV_B] = bt->lp_bm_next + dp[row - 1][prev_offset + STATE_BAD_EVENT];
             scores.x[HMT_FROM_PREV_K] = bt->lp_km + dp[row - 1][prev_offset + STATE_KMER_SKIP];
-            scores.x[HMT_FROM_SOFT] = (kmer_idx == 0) ? lp_sm + pre_flank[row - 1] : -INFINITY;
+            // Match f5c: only allow pre-clip at first kmer if event_idx==e_start OR HAF_ALLOW_PRE_CLIP flag
+            scores.x[HMT_FROM_SOFT] = (kmer_idx == 0 &&
+                                       (event_idx == (int32_t)e_start ||
+                                        (hmm_flags & HAF_ALLOW_PRE_CLIP)))
+                                          ? lp_sm + pre_flank[row - 1]
+                                          : -INFINITY;
 
             update_cell(&dp[row][curr_offset + STATE_MATCH], &scores, lp_emission_m,
                         &prev_state_trace, &prev_block_trace, block, STATE_MATCH);
@@ -404,19 +411,27 @@ int32_t align_with_flanking_cpu(
     }
 
     // Find best ending: check post-flanking transitions
+    // Match f5c: only allow post-clip at last kmer if HAF_ALLOW_POST_CLIP flag OR at last event
     float best_score = -INFINITY;
     int best_block = -1;
     int best_state = -1;
+    int32_t last_kmer_idx = n_kmers - 1;
 
     for (int32_t block = 1; block < num_blocks - 1; ++block)
     {
+        int32_t kmer_idx = block - 1;
         int32_t offset = NUM_STATES * block;
         for (int state = 0; state < NUM_STATES; ++state)
         {
             float score = dp[n_events][offset + state];
-            if (state != STATE_KMER_SKIP) // Can't end on skip
+            // Only add post-flanking if at last kmer AND (flag set OR at last event)
+            if (kmer_idx == last_kmer_idx &&
+                ((hmm_flags & HAF_ALLOW_POST_CLIP) || n_events == (int32_t)events.n))
             {
-                score += post_flank[n_events - 1];
+                if (state != STATE_KMER_SKIP) // Can't end on skip
+                {
+                    score += post_flank[n_events - 1];
+                }
             }
             if (score > best_score)
             {

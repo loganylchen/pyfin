@@ -211,7 +211,9 @@ extern "C" int32_t align_with_flanking_gpu(
     event_table events,
     simple_model_t *model,
     uint32_t kmer_size,
-    simple_scalings_t scaling)
+    simple_scalings_t scaling,
+    uint32_t hmm_flags,
+    uint32_t e_start)
 {
     int32_t n_kmers = seq_len - kmer_size + 1;
     int32_t n_events = events.n;

@@ -36,7 +36,9 @@ extern int32_t align_with_flanking_cpu(
     event_table events,
     simple_model_t *model,
     uint32_t kmer_size,
-    simple_scalings_t scaling);
+    simple_scalings_t scaling,
+    uint32_t hmm_flags,
+    uint32_t e_start);
 
 extern int32_t profile_hmm_align(
     event_alignment_t **out_alignment,
@@ -60,7 +62,9 @@ extern "C"
         event_table events,
         simple_model_t *model,
         uint32_t kmer_size,
-        simple_scalings_t scaling);
+        simple_scalings_t scaling,
+        uint32_t hmm_flags,
+        uint32_t e_start);
 #endif
 
 // Simple scaling estimation (method of moments)
@@ -217,9 +221,15 @@ static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
     // Use enhanced alignment with soft-clipping support
     // By default, use CPU implementation (GPU can be enabled at compile time)
 #ifdef CUDA_ENABLED
-    int n_pairs = align_with_flanking_gpu(&aligned_pairs, sequence, seq_len, et, model, kmer_size, scaling);
+    // Match f5c: eventalign uses hmm_flags=0 (no pre/post-clipping)
+    uint32_t hmm_flags = 0;
+    uint32_t e_start = 0; // First event index
+    int n_pairs = align_with_flanking_gpu(&aligned_pairs, sequence, seq_len, et, model, kmer_size, scaling, hmm_flags, e_start);
 #else
-    int n_pairs = align_with_flanking_cpu(&aligned_pairs, sequence, seq_len, et, model, kmer_size, scaling);
+    // Match f5c: eventalign uses hmm_flags=0 (no pre/post-clipping)
+    uint32_t hmm_flags = 0;
+    uint32_t e_start = 0; // First event index
+    int n_pairs = align_with_flanking_cpu(&aligned_pairs, sequence, seq_len, et, model, kmer_size, scaling, hmm_flags, e_start);
 #endif
 
     if (n_pairs <= 0 || !aligned_pairs)
