@@ -147,6 +147,7 @@ class RegionTranscriptAnalyzer:
         pod5_path: str,
         output_dir: str,
         kmer_size: int = 5,
+        f5c_eventalign_path: Optional[str] = None,
     ):
         """
         Initialize the analyzer.
@@ -162,6 +163,7 @@ class RegionTranscriptAnalyzer:
             pod5_path: Path to POD5 signal file
             output_dir: Directory for output files
             kmer_size: K-mer size for eventalign (5 or 9, default: 5)
+            f5c_eventalign_path: Optional path to f5c eventalign output file
         """
         self.bam_path = Path(bam_path)
         self.genome_path = Path(genome_path)
@@ -170,6 +172,7 @@ class RegionTranscriptAnalyzer:
         self.pod5_path = Path(pod5_path)
         self.output_dir = Path(output_dir)
         self.kmer_size = kmer_size
+        self.f5c_eventalign_path = Path(f5c_eventalign_path) if f5c_eventalign_path else None
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -190,6 +193,7 @@ class RegionTranscriptAnalyzer:
         logger.info(f"  Transcriptome: {self.transcriptome_path}")
         logger.info(f"  GTF: {self.gtf_path}")
         logger.info(f"  POD5: {self.pod5_path}")
+        logger.info(f"  F5C Eventalign: {self.f5c_eventalign_path if self.f5c_eventalign_path else 'None'}")
         logger.info(f"  Output: {self.output_dir}")
 
         # Log eventalign backend availability
@@ -1362,12 +1366,14 @@ class RegionTranscriptAnalyzer:
         read_id: str = "",
         max_transcripts: int = 10,
         figsize_per_panel: Tuple[int, int] = (20, 6),
+        f5c_records: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Path]:
         """
         Visualize eventalign results for one read aligned to multiple transcripts.
 
         Creates a multi-panel figure where each panel shows the alignment
-        of the same read to a different candidate transcript.
+        of the same read to a different candidate transcript. If f5c records
+        are provided, adds a third panel showing f5c eventalign results.
 
         Args:
             signal: Raw nanopore signal
@@ -1376,6 +1382,7 @@ class RegionTranscriptAnalyzer:
             read_id: Read ID for title
             max_transcripts: Maximum number of transcripts to show
             figsize_per_panel: Size per transcript panel
+            f5c_records: Optional list of f5c eventalign records for comparison
 
         Returns:
             Path to saved image, or None if visualization failed
@@ -1390,14 +1397,18 @@ class RegionTranscriptAnalyzer:
 
         try:
             n_panels = min(len(alignments), max_transcripts)
+            
+            # Add extra panel for f5c if available
+            has_f5c = f5c_records is not None and len(f5c_records) > 0
+            total_panels = n_panels + (1 if has_f5c else 0)
 
             fig, axes = plt.subplots(
-                n_panels,
+                total_panels,
                 1,
-                figsize=(figsize_per_panel[0], figsize_per_panel[1] * n_panels),
+                figsize=(figsize_per_panel[0], figsize_per_panel[1] * total_panels),
             )
 
-            if n_panels == 1:
+            if total_panels == 1:
                 axes = [axes]
 
             for panel_idx, aln_data in enumerate(alignments[:max_transcripts]):
@@ -1545,10 +1556,79 @@ class RegionTranscriptAnalyzer:
 
                 ax.grid(True, alpha=0.3, linestyle=":")
 
+            # Add f5c panel if data is available
+            if has_f5c:
+                ax_f5c = axes[n_panels]  # Last panel
+                
+                # Sort f5c records by event_index
+                f5c_sorted = sorted(f5c_records, key=lambda x: x['event_index'])
+                
+                # Display entire signal
+                view_start = 0
+                view_end = len(signal)
+                
+                # Plot raw signal
+                ax_f5c.plot(signal, color="steelblue", alpha=0.5, linewidth=1, label="Raw signal")
+                
+                # Draw f5c event boundaries and means
+                for i, rec in enumerate(f5c_sorted):
+                    start_idx = rec['start_idx']
+                    end_idx = rec['end_idx']
+                    event_mean = rec['event_level_mean']
+                    model_mean = rec['model_mean']
+                    
+                    # Event boundary
+                    ax_f5c.axvline(start_idx, color="gray", alpha=0.3, linewidth=0.5, linestyle=":")
+                    
+                    # Event mean (red)
+                    ax_f5c.plot(
+                        [start_idx, end_idx],
+                        [event_mean, event_mean],
+                        color="red",
+                        linewidth=2.5,
+                        alpha=0.8,
+                    )
+                    
+                    # Model mean (green)
+                    ax_f5c.plot(
+                        [start_idx, end_idx],
+                        [model_mean, model_mean],
+                        color="limegreen",
+                        linewidth=2,
+                        linestyle="--",
+                        alpha=0.8,
+                    )
+                
+                # Set axis limits
+                ax_f5c.set_xlim(view_start, view_end)
+                
+                # Labels
+                ax_f5c.set_xlabel("Sample index (raw signal)", fontsize=11)
+                ax_f5c.set_ylabel("Signal (pA)", fontsize=10)
+                
+                contig = f5c_records[0]['contig'] if f5c_records else "unknown"
+                ax_f5c.set_title(
+                    f"F5C Eventalign: {contig} | Events: {len(f5c_records)}",
+                    fontsize=10,
+                    fontweight="bold",
+                    color="darkgreen",
+                )
+                
+                # Add legend
+                from matplotlib.lines import Line2D
+                legend_elements = [
+                    Line2D([0], [0], color="steelblue", alpha=0.5, linewidth=1, label="Raw signal"),
+                    Line2D([0], [0], color="red", linewidth=2.5, label="Event mean (f5c)"),
+                    Line2D([0], [0], color="limegreen", linewidth=2, linestyle="--", label="Model mean (f5c)"),
+                ]
+                ax_f5c.legend(handles=legend_elements, loc="upper right", fontsize=8)
+                ax_f5c.grid(True, alpha=0.3, linestyle=":")
+
             # Overall title
             read_label = read_id[:50] + "..." if len(read_id) > 50 else read_id
+            title_suffix = " + F5C Comparison" if has_f5c else ""
             fig.suptitle(
-                f"Eventalign: {read_label} → {n_panels} Candidate Transcripts",
+                f"Eventalign: {read_label} → {n_panels} Candidate Transcripts{title_suffix}",
                 fontsize=13,
                 fontweight="bold",
             )
@@ -2286,11 +2366,29 @@ class RegionTranscriptAnalyzer:
             region_safe_id = region_id.replace(":", "_").replace("-", "_")
             eventalign_plot_path = self.output_dir / f"eventalign_{region_safe_id}_first_read.png"
 
+            # Load f5c eventalign results for this read if available
+            f5c_records = None
+            if self.f5c_eventalign_path and self.f5c_eventalign_path.exists():
+                logger.info(f"  Loading f5c eventalign data for read: {first_read_info['read_id'][:30]}...")
+                try:
+                    f5c_data = self.read_f5c_eventalign_table(
+                        str(self.f5c_eventalign_path),
+                        read_id=first_read_info["read_id"]
+                    )
+                    f5c_records = f5c_data.get(first_read_info["read_id"], [])
+                    if f5c_records:
+                        logger.info(f"    Loaded {len(f5c_records)} f5c events for visualization")
+                    else:
+                        logger.info(f"    No f5c events found for this read")
+                except Exception as e:
+                    logger.warning(f"    Failed to load f5c data: {e}")
+
             eventalign_plot = self.plot_eventalign_multi_transcript(
                 signal=first_read_info["signal"],
                 alignments=first_read_info["alignments"],
                 output_path=eventalign_plot_path,
                 read_id=first_read_info["read_id"],
+                f5c_records=f5c_records,
             )
 
             if eventalign_plot:
@@ -3115,6 +3213,13 @@ def main():
     parser.add_argument("--gtf", type=str, help="Path to GTF annotation file")
     parser.add_argument("--pod5", "-p", type=str, help="Path to POD5 signal file")
     parser.add_argument(
+        "--f5c-eventalign",
+        "-f",
+        type=str,
+        default=None,
+        help="Path to f5c eventalign output file (.tsv or .tsv.gz) [optional]",
+    )
+    parser.add_argument(
         "--output",
         "-o",
         type=str,
@@ -3175,6 +3280,7 @@ def main():
         pod5_path=args.pod5,
         output_dir=args.output,
         kmer_size=args.kmer_size,
+        f5c_eventalign_path=args.f5c_eventalign,
     )
 
     results = analyzer.run_analysis(
