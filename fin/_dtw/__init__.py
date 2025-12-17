@@ -17,6 +17,12 @@ except ImportError as e:
     CUDA_AVAILABLE = False
     _import_error = str(e)
 
+# Log backend availability upon module import
+if CUDA_AVAILABLE:
+    print("🚀 DTW: GPU (CUDA) acceleration ENABLED")
+else:
+    print("💻 DTW: CPU implementation (CUDA not available)")
+
 
 def dtw_distance(
     seq1: Union[np.ndarray, list],

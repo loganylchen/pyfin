@@ -102,12 +102,20 @@ except ImportError as e:
 
 # Import DTW functions
 try:
-    from fin._dtw import dtw_pairwise, is_available as dtw_is_available
+    from fin._dtw import dtw_pairwise, is_available as dtw_is_available, CUDA_AVAILABLE as DTW_CUDA_AVAILABLE
 
     DTW_AVAILABLE = dtw_is_available()
+    
+    # Log backend availability (module already logged, this is for clarity in workflow)
+    if DTW_AVAILABLE:
+        if DTW_CUDA_AVAILABLE:
+            print("🚀 DTW: GPU (CUDA) acceleration ENABLED")
+        else:
+            print("💻 DTW: CPU implementation (CUDA not available)")
 except ImportError as e:
     DTW_AVAILABLE = False
-    print(f"Warning: DTW not available: {e}")
+    DTW_CUDA_AVAILABLE = False
+    print(f"⚠️  Warning: DTW not available: {e}")
 
 # Import EM assignment function
 try:
