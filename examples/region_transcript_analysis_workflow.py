@@ -91,6 +91,15 @@ except ImportError as e:
     DTW_AVAILABLE = False
     print(f"Warning: DTW not available: {e}")
 
+# Import EM assignment function
+try:
+    from fin.analysis.assignments import em_with_coherence
+
+    ASSIGNMENT_AVAILABLE = True
+except ImportError as e:
+    ASSIGNMENT_AVAILABLE = False
+    print(f"Warning: EM assignment not available: {e}")
+
 from fin.utils.log_config import get_package_logger
 
 logger = get_package_logger(__name__)
@@ -1102,6 +1111,504 @@ class RegionTranscriptAnalyzer:
             traceback.print_exc()
             return None
 
+    def assign_reads_to_transcripts(
+        self,
+        read_alignments: List[Dict[str, Any]],
+        dtw_distances: Optional[Dict[str, Any]] = None,
+        sigma: float = 1.0,
+        beta: float = 0.5,
+    ) -> Dict[str, Any]:
+        """
+        Assign reads to transcripts using EM algorithm with coherence.
+
+        Uses the eventalign quality scores as read-to-transcript distances,
+        and optionally DTW distances for read-to-read coherence.
+
+        Args:
+            read_alignments: List of read alignment results from analyze_region()
+            dtw_distances: Optional DTW distance matrix result
+            sigma: Temperature parameter for softmax
+            beta: Weight for coherence term (0 = no coherence)
+
+        Returns:
+            Dictionary with assignment results
+        """
+        if not ASSIGNMENT_AVAILABLE:
+            logger.warning("EM assignment not available")
+            return {"error": "EM assignment module not available"}
+
+        if not read_alignments:
+            return {"error": "No read alignments provided"}
+
+        # Build list of reads and transcripts
+        reads = []
+        transcripts = set()
+        for ra in read_alignments:
+            reads.append(ra.get("read_id", "unknown"))
+            for aln in ra.get("alignments", []):
+                transcripts.add(aln.get("transcript_id", "unknown"))
+
+        reads = list(reads)
+        transcripts = sorted(list(transcripts))
+        n_reads = len(reads)
+        n_tx = len(transcripts)
+
+        if n_reads == 0 or n_tx == 0:
+            return {"error": "No reads or transcripts found"}
+
+        # Build read-to-transcript distance matrix
+        # Use 1 - overall_score as distance (higher quality = lower distance)
+        tx_to_idx = {tx: i for i, tx in enumerate(transcripts)}
+        dist_read_to_tx = np.ones((n_reads, n_tx)) * 10.0  # Default high distance
+
+        for i, ra in enumerate(read_alignments):
+            for aln in ra.get("alignments", []):
+                tx_id = aln.get("transcript_id")
+                if tx_id in tx_to_idx:
+                    j = tx_to_idx[tx_id]
+                    qa = aln.get("quality_assessment", {})
+                    score = qa.get("overall_score", 0.0)
+                    # Convert score to distance (higher score = lower distance)
+                    dist_read_to_tx[i, j] = 1.0 - score
+
+        # Build read-to-read distance matrix from DTW or use identity
+        if dtw_distances and "matrix" in dtw_distances:
+            dtw_matrix = np.array(dtw_distances["matrix"])
+            dtw_read_ids = dtw_distances.get("read_ids", [])
+
+            # Map DTW indices to our read indices
+            dist_read_to_read = np.zeros((n_reads, n_reads))
+            read_to_idx = {r: i for i, r in enumerate(reads)}
+            dtw_read_to_idx = {r: i for i, r in enumerate(dtw_read_ids)}
+
+            for i, ri in enumerate(reads):
+                for j, rj in enumerate(reads):
+                    if ri in dtw_read_to_idx and rj in dtw_read_to_idx:
+                        di = dtw_read_to_idx[ri]
+                        dj = dtw_read_to_idx[rj]
+                        dist_read_to_read[i, j] = dtw_matrix[di, dj]
+        else:
+            # No DTW, use zeros (no coherence penalty)
+            dist_read_to_read = np.zeros((n_reads, n_reads))
+
+        # Normalize distances
+        if dist_read_to_tx.max() > 0:
+            dist_read_to_tx = dist_read_to_tx / dist_read_to_tx.max()
+        if dist_read_to_read.max() > 0:
+            dist_read_to_read = dist_read_to_read / dist_read_to_read.max()
+
+        # Run EM assignment
+        logger.info(f"Running EM assignment: {n_reads} reads -> {n_tx} transcripts")
+        R, hard_assignments, log_likelihoods = em_with_coherence(
+            dist_read_to_tx=dist_read_to_tx,
+            dist_read_to_read=dist_read_to_read,
+            sigma=sigma,
+            beta=beta,
+            verbose=True,
+        )
+
+        # Build result
+        assignments = []
+        for i, read_id in enumerate(reads):
+            tx_idx = hard_assignments[i]
+            tx_id = transcripts[tx_idx]
+            confidence = R[i, tx_idx]
+            assignments.append({
+                "read_id": read_id,
+                "transcript_id": tx_id,
+                "confidence": float(confidence),
+                "probabilities": {tx: float(R[i, j]) for j, tx in enumerate(transcripts)},
+            })
+
+        # Group reads by transcript
+        reads_per_transcript = defaultdict(list)
+        for a in assignments:
+            reads_per_transcript[a["transcript_id"]].append({
+                "read_id": a["read_id"],
+                "confidence": a["confidence"],
+            })
+
+        return {
+            "status": "success",
+            "n_reads": n_reads,
+            "n_transcripts": n_tx,
+            "transcripts": transcripts,
+            "reads": reads,
+            "assignments": assignments,
+            "reads_per_transcript": dict(reads_per_transcript),
+            "responsibility_matrix": R.tolist(),
+            "log_likelihoods": log_likelihoods,
+            "parameters": {"sigma": sigma, "beta": beta},
+        }
+
+    def plot_transcript_read_assignments(
+        self,
+        region: Any,
+        assignments: Dict[str, Any],
+        read_alignments: List[Dict[str, Any]],
+        output_path: Path,
+        title: str = "Transcript-Read Assignments",
+        figsize_per_panel: Tuple[int, int] = (16, 3),
+        max_transcripts: int = 10,
+    ) -> Optional[Path]:
+        """
+        Visualize transcript structures and assigned reads on genomic coordinates.
+
+        Creates a multi-panel figure where each panel shows:
+        - Transcript exon structure
+        - Reads assigned to that transcript (from BAM mapping)
+        - All panels share the same genomic x-axis for comparison
+
+        Args:
+            region: GenomicInterval with chrom, start, end
+            assignments: Result from assign_reads_to_transcripts()
+            read_alignments: List of read alignment results
+            output_path: Path to save the figure
+            title: Figure title
+            figsize_per_panel: Size per transcript panel
+            max_transcripts: Maximum number of transcripts to show
+
+        Returns:
+            Path to saved image, or None if visualization failed
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            logger.warning("matplotlib not available for visualization")
+            return None
+
+        if assignments.get("status") != "success":
+            logger.warning(f"Assignment failed: {assignments.get('error', 'unknown')}")
+            return None
+
+        try:
+            reads_per_tx = assignments.get("reads_per_transcript", {})
+            transcripts = assignments.get("transcripts", [])
+
+            # Limit transcripts to show
+            if len(transcripts) > max_transcripts:
+                # Sort by number of assigned reads, show top ones
+                tx_counts = [(tx, len(reads_per_tx.get(tx, []))) for tx in transcripts]
+                tx_counts.sort(key=lambda x: -x[1])
+                transcripts = [tx for tx, _ in tx_counts[:max_transcripts]]
+
+            n_panels = len(transcripts)
+            if n_panels == 0:
+                logger.warning("No transcripts to visualize")
+                return None
+
+            # Get genomic region bounds
+            region_chrom = region.chrom
+            region_start = region.start
+            region_end = region.end
+
+            # Get transcript structures from GTF
+            transcript_structures = {}
+            with GTFReader(str(self.gtf_path)) as reader:
+                reader.parse()
+                for tx in reader.iterate_transcripts():
+                    if tx.transcript_id in transcripts:
+                        tx.sort_features()
+                        transcript_structures[tx.transcript_id] = tx
+
+            # Get read mapping info from BAM
+            read_mapping_info = {}
+            with BamReader(str(self.bam_path)) as bam_reader:
+                for read in bam_reader.fetch(region=f"{region_chrom}:{region_start}-{region_end}"):
+                    read_id = read.query_name
+                    if read_id in assignments.get("reads", []):
+                        # Get read alignment blocks
+                        blocks = []
+                        if hasattr(read, 'get_blocks'):
+                            blocks = read.get_blocks()
+                        elif hasattr(read, 'reference_start') and hasattr(read, 'reference_end'):
+                            blocks = [(read.reference_start, read.reference_end)]
+                        
+                        read_mapping_info[read_id] = {
+                            "blocks": blocks,
+                            "start": read.reference_start if hasattr(read, 'reference_start') else 0,
+                            "end": read.reference_end if hasattr(read, 'reference_end') else 0,
+                            "is_reverse": read.is_reverse if hasattr(read, 'is_reverse') else False,
+                        }
+
+            # Create figure with shared x-axis
+            fig, axes = plt.subplots(
+                n_panels, 1,
+                figsize=(figsize_per_panel[0], figsize_per_panel[1] * n_panels),
+                sharex=True,
+            )
+
+            if n_panels == 1:
+                axes = [axes]
+
+            # Color palette for reads
+            colors = plt.cm.tab20.colors
+
+            for panel_idx, tx_id in enumerate(transcripts):
+                ax = axes[panel_idx]
+
+                # Get transcript structure
+                tx_struct = transcript_structures.get(tx_id)
+
+                # Draw transcript exons
+                exon_y = 0.8
+                exon_height = 0.15
+
+                if tx_struct:
+                    # Draw introns as thin line
+                    ax.hlines(
+                        exon_y, tx_struct.start, tx_struct.end,
+                        colors="darkblue", linewidth=1, alpha=0.5
+                    )
+
+                    # Draw exons as thick boxes
+                    for exon_start, exon_end in tx_struct.exons:
+                        rect = plt.Rectangle(
+                            (exon_start, exon_y - exon_height / 2),
+                            exon_end - exon_start, exon_height,
+                            facecolor="darkblue", edgecolor="black", linewidth=0.5
+                        )
+                        ax.add_patch(rect)
+
+                    # Draw CDS if available (slightly different color)
+                    for cds_start, cds_end in tx_struct.cds:
+                        rect = plt.Rectangle(
+                            (cds_start, exon_y - exon_height / 2),
+                            cds_end - cds_start, exon_height,
+                            facecolor="navy", edgecolor="black", linewidth=0.5
+                        )
+                        ax.add_patch(rect)
+
+                # Draw assigned reads
+                assigned_reads = reads_per_tx.get(tx_id, [])
+                n_reads_assigned = len(assigned_reads)
+
+                # Stack reads vertically
+                read_y_start = 0.55
+                read_height = 0.03
+                read_spacing = 0.04
+                max_stacked = 12  # Maximum reads to stack before condensing
+
+                if n_reads_assigned > max_stacked:
+                    # Condense display
+                    read_height = 0.02
+                    read_spacing = 0.025
+
+                for read_idx, read_info in enumerate(assigned_reads[:min(n_reads_assigned, 30)]):
+                    read_id = read_info["read_id"]
+                    confidence = read_info["confidence"]
+
+                    mapping = read_mapping_info.get(read_id)
+                    if not mapping:
+                        continue
+
+                    read_y = read_y_start - (read_idx % max_stacked) * read_spacing
+                    color = colors[read_idx % len(colors)]
+                    alpha = 0.4 + 0.5 * confidence  # Higher confidence = more opaque
+
+                    # Draw read blocks
+                    blocks = mapping.get("blocks", [(mapping["start"], mapping["end"])])
+                    for block_start, block_end in blocks:
+                        rect = plt.Rectangle(
+                            (block_start, read_y - read_height / 2),
+                            block_end - block_start, read_height,
+                            facecolor=color, edgecolor="gray",
+                            linewidth=0.3, alpha=alpha
+                        )
+                        ax.add_patch(rect)
+
+                    # Connect blocks with lines (for spliced reads)
+                    if len(blocks) > 1:
+                        for i in range(len(blocks) - 1):
+                            ax.plot(
+                                [blocks[i][1], blocks[i + 1][0]],
+                                [read_y, read_y],
+                                color=color, linewidth=0.5, alpha=alpha * 0.7
+                            )
+
+                # Labels and styling
+                ax.set_xlim(region_start, region_end)
+                ax.set_ylim(0, 1)
+
+                # Y-axis label with transcript info
+                tx_label = tx_id[:25] + "..." if len(tx_id) > 25 else tx_id
+                ax.set_ylabel(f"{tx_label}\n({n_reads_assigned} reads)", fontsize=9)
+                ax.set_yticks([])
+
+                # Add grid
+                ax.axhline(0.65, color="gray", linestyle="--", alpha=0.3, linewidth=0.5)
+                ax.grid(True, axis="x", alpha=0.3, linestyle=":")
+
+                # Panel title
+                if panel_idx == 0:
+                    ax.set_title(
+                        f"{title}\nRegion: {region_chrom}:{region_start:,}-{region_end:,}",
+                        fontsize=12, fontweight="bold"
+                    )
+
+            # X-axis label on bottom panel
+            axes[-1].set_xlabel("Genomic Position", fontsize=11)
+
+            # Format x-axis with comma separators
+            from matplotlib.ticker import FuncFormatter
+            axes[-1].xaxis.set_major_formatter(
+                FuncFormatter(lambda x, p: f"{int(x):,}")
+            )
+
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+            logger.info(f"  Saved transcript-read assignment plot to: {output_path}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"Failed to generate transcript-read assignment plot: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def plot_assignment_summary(
+        self,
+        assignments: Dict[str, Any],
+        output_path: Path,
+        title: str = "Read Assignment Summary",
+        figsize: Tuple[int, int] = (14, 10),
+    ) -> Optional[Path]:
+        """
+        Visualize assignment summary statistics.
+
+        Creates a figure with:
+        - Bar chart of reads per transcript
+        - Confidence distribution histogram
+        - Assignment probability heatmap
+
+        Args:
+            assignments: Result from assign_reads_to_transcripts()
+            output_path: Path to save the figure
+            title: Figure title
+            figsize: Figure size
+
+        Returns:
+            Path to saved image, or None if visualization failed
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            logger.warning("matplotlib not available for visualization")
+            return None
+
+        if assignments.get("status") != "success":
+            logger.warning(f"Assignment failed: {assignments.get('error', 'unknown')}")
+            return None
+
+        try:
+            reads_per_tx = assignments.get("reads_per_transcript", {})
+            transcripts = assignments.get("transcripts", [])
+            reads = assignments.get("reads", [])
+            R = np.array(assignments.get("responsibility_matrix", []))
+            all_assignments = assignments.get("assignments", [])
+
+            fig = plt.figure(figsize=figsize)
+            gs = fig.add_gridspec(2, 2, hspace=0.3, wspace=0.3)
+
+            # Panel 1: Reads per transcript (bar chart)
+            ax1 = fig.add_subplot(gs[0, 0])
+            tx_counts = [(tx, len(reads_per_tx.get(tx, []))) for tx in transcripts]
+            tx_counts.sort(key=lambda x: -x[1])
+
+            tx_labels = [t[:20] + ".." if len(t) > 20 else t for t, _ in tx_counts[:15]]
+            counts = [c for _, c in tx_counts[:15]]
+
+            bars = ax1.barh(range(len(tx_labels)), counts, color="steelblue", alpha=0.8)
+            ax1.set_yticks(range(len(tx_labels)))
+            ax1.set_yticklabels(tx_labels, fontsize=8)
+            ax1.set_xlabel("Number of Assigned Reads")
+            ax1.set_title("Reads per Transcript (Top 15)")
+            ax1.invert_yaxis()
+
+            # Add count labels
+            for i, (bar, count) in enumerate(zip(bars, counts)):
+                ax1.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height() / 2,
+                         str(count), va="center", fontsize=8)
+
+            # Panel 2: Confidence distribution
+            ax2 = fig.add_subplot(gs[0, 1])
+            confidences = [a["confidence"] for a in all_assignments]
+
+            ax2.hist(confidences, bins=20, color="forestgreen", alpha=0.7, edgecolor="black")
+            ax2.axvline(np.mean(confidences), color="red", linestyle="--",
+                        label=f"Mean: {np.mean(confidences):.3f}")
+            ax2.axvline(np.median(confidences), color="orange", linestyle="--",
+                        label=f"Median: {np.median(confidences):.3f}")
+            ax2.set_xlabel("Assignment Confidence")
+            ax2.set_ylabel("Count")
+            ax2.set_title("Confidence Distribution")
+            ax2.legend(fontsize=9)
+
+            # Panel 3: Responsibility matrix heatmap
+            ax3 = fig.add_subplot(gs[1, :])
+
+            # Sort reads by their primary assignment for better visualization
+            read_order = sorted(range(len(reads)), key=lambda i: all_assignments[i]["transcript_id"])
+            R_sorted = R[read_order, :]
+
+            # Limit display size
+            max_reads_display = 50
+            max_tx_display = 20
+
+            if R_sorted.shape[0] > max_reads_display:
+                R_display = R_sorted[:max_reads_display, :]
+                read_labels = [reads[read_order[i]][:12] + ".." 
+                               if len(reads[read_order[i]]) > 12 else reads[read_order[i]]
+                               for i in range(max_reads_display)]
+            else:
+                R_display = R_sorted
+                read_labels = [reads[read_order[i]][:12] + ".." 
+                               if len(reads[read_order[i]]) > 12 else reads[read_order[i]]
+                               for i in range(len(reads))]
+
+            if R_display.shape[1] > max_tx_display:
+                R_display = R_display[:, :max_tx_display]
+                tx_labels = [transcripts[i][:15] + ".." 
+                             if len(transcripts[i]) > 15 else transcripts[i]
+                             for i in range(max_tx_display)]
+            else:
+                tx_labels = [transcripts[i][:15] + ".." 
+                             if len(transcripts[i]) > 15 else transcripts[i]
+                             for i in range(len(transcripts))]
+
+            im = ax3.imshow(R_display, cmap="YlOrRd", aspect="auto", vmin=0, vmax=1)
+            cbar = plt.colorbar(im, ax=ax3, shrink=0.8)
+            cbar.set_label("Assignment Probability")
+
+            if len(read_labels) <= 50:
+                ax3.set_yticks(range(len(read_labels)))
+                ax3.set_yticklabels(read_labels, fontsize=6)
+            else:
+                ax3.set_ylabel(f"Reads (n={len(reads)})")
+
+            if len(tx_labels) <= 20:
+                ax3.set_xticks(range(len(tx_labels)))
+                ax3.set_xticklabels(tx_labels, rotation=45, ha="right", fontsize=7)
+            else:
+                ax3.set_xlabel(f"Transcripts (n={len(transcripts)})")
+
+            ax3.set_title("Assignment Probability Matrix (sorted by assignment)")
+            ax3.set_xlabel("Transcript")
+            ax3.set_ylabel("Read")
+
+            fig.suptitle(title, fontsize=14, fontweight="bold", y=1.02)
+
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+            logger.info(f"  Saved assignment summary plot to: {output_path}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"Failed to generate assignment summary: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def analyze_region(
         self, region, pod5_reader: Pod5Reader, max_reads: int = 10, max_transcripts: int = 50
     ) -> Dict[str, Any]:
@@ -1327,6 +1834,46 @@ class RegionTranscriptAnalyzer:
             if multi_metric_heatmap:
                 result["assessment_multi_metric_path"] = str(multi_metric_heatmap)
 
+        # Step 9: Assign reads to transcripts using EM algorithm
+        if result["read_alignments"] and ASSIGNMENT_AVAILABLE:
+            region_safe_id = region_id.replace(":", "_").replace("-", "_")
+            logger.info(f"  Running EM read-to-transcript assignment...")
+
+            assignments = self.assign_reads_to_transcripts(
+                result["read_alignments"],
+                dtw_distances=result.get("dtw_distances"),
+                sigma=1.0,
+                beta=0.5 if result.get("dtw_distances") else 0.0,
+            )
+
+            if assignments.get("status") == "success":
+                result["assignments"] = assignments
+                logger.info(f"  Assigned {assignments['n_reads']} reads to {assignments['n_transcripts']} transcripts")
+
+                # Step 10: Visualize transcript-read assignments on genome
+                tx_read_plot_path = self.output_dir / f"transcript_reads_{region_safe_id}.png"
+                tx_read_plot = self.plot_transcript_read_assignments(
+                    region,
+                    assignments,
+                    result["read_alignments"],
+                    tx_read_plot_path,
+                    title=f"Read Assignments - {region_id}",
+                )
+                if tx_read_plot:
+                    result["transcript_reads_plot_path"] = str(tx_read_plot)
+
+                # Step 11: Visualize assignment summary
+                assignment_summary_path = self.output_dir / f"assignment_summary_{region_safe_id}.png"
+                assignment_summary = self.plot_assignment_summary(
+                    assignments,
+                    assignment_summary_path,
+                    title=f"Assignment Summary - {region_id}",
+                )
+                if assignment_summary:
+                    result["assignment_summary_plot_path"] = str(assignment_summary)
+            else:
+                logger.warning(f"  Assignment failed: {assignments.get('error', 'unknown')}")
+
         # Summary statistics
         result["summary"] = {
             "num_transcripts": len(candidates),
@@ -1341,6 +1888,7 @@ class RegionTranscriptAnalyzer:
             "n_clusters": (
                 result.get("clustering", {}).get("n_clusters", 0) if result.get("clustering") else 0
             ),
+            "assignment_computed": result.get("assignments") is not None,
         }
 
         return result
@@ -1427,6 +1975,11 @@ class RegionTranscriptAnalyzer:
                 ),
                 "total_clusters": sum(
                     r["summary"].get("n_clusters", 0) for r in self.region_results.values()
+                ),
+                "regions_with_assignments": sum(
+                    1
+                    for r in self.region_results.values()
+                    if r["summary"].get("assignment_computed", False)
                 ),
             },
             "regions": self.region_results,
@@ -2053,9 +2606,14 @@ def main():
     print(f"Regions with DTW: {results['summary']['regions_with_dtw']}")
     print(f"Regions with clustering: {results['summary']['regions_with_clustering']}")
     print(f"Total clusters identified: {results['summary']['total_clusters']}")
-    print(f"\nResults saved to: {args.output}/analysis_results.json")
-    print(f"Eventalign plots: {args.output}/eventalign_*_first_read.png")
-    print(f"DTW heatmaps: {args.output}/dtw_heatmap_*.png")
+    print(f"\nOutput files saved to: {args.output}/")
+    print(f"  - analysis_results.json          : Complete analysis data")
+    print(f"  - eventalign_*_first_read.png    : Signal-sequence alignment visualization")
+    print(f"  - dtw_heatmap_*.png              : Read-read DTW distance heatmaps")
+    print(f"  - assessment_heatmap_*.png       : Eventalign quality heatmaps")
+    print(f"  - assessment_multi_*.png         : Multi-metric quality assessment")
+    print(f"  - transcript_reads_*.png         : Transcript structure with assigned reads")
+    print(f"  - assignment_summary_*.png       : Read assignment summary statistics")
 
 
 if __name__ == "__main__":
