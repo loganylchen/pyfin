@@ -673,7 +673,8 @@ class RegionTranscriptAnalyzer:
                 signal_start = aln.get("signal_start", 0)
                 signal_length = aln.get("signal_length", 0)
                 event_mean = aln.get("event_mean", 0)
-                scaled_model_mean = aln.get("scaled_model_mean", aln.get("model_mean", 0))
+                model_mean = aln.get("model_mean", 0)
+                scaled_model_mean = aln.get("scaled_model_mean", model_mean)
                 kmer = aln.get("ref_kmer", "")
                 state = aln.get("hmm_state", "M")
                 event_idx = aln.get("event_idx", i)
@@ -698,7 +699,19 @@ class RegionTranscriptAnalyzer:
                     alpha=0.9,
                 )
 
-                # Draw model expected level
+                # Draw raw model mean (unscaled)
+                if model_mean > 0:
+                    ax.hlines(
+                        model_mean,
+                        start_sample,
+                        end_sample,
+                        colors="orange",
+                        linewidth=1.5,
+                        linestyle=":",
+                        alpha=0.7,
+                    )
+
+                # Draw scaled model expected level
                 if scaled_model_mean > 0:
                     ax.hlines(
                         scaled_model_mean,
@@ -718,11 +731,11 @@ class RegionTranscriptAnalyzer:
                     color = state_colors.get(state, "gray")
 
                     # Position label above the event mean
-                    label_y = max(event_mean, scaled_model_mean) + 3
+                    label_y = max(event_mean, scaled_model_mean, model_mean) + 3
                     ax.text(
                         (start_sample + end_sample) / 2,
                         label_y,
-                        f"{kmer}\nidx:{event_idx} pos:{ref_pos}\nevent:{event_mean:.1f} model:{scaled_model_mean:.1f}",
+                        f"{kmer}\nidx:{event_idx} pos:{ref_pos}\nevent:{event_mean:.1f} model:{model_mean:.1f} scaled:{scaled_model_mean:.1f}",
                         fontsize=5,
                         ha="center",
                         va="bottom",
@@ -756,10 +769,18 @@ class RegionTranscriptAnalyzer:
                 Line2D(
                     [0],
                     [0],
+                    color="orange",
+                    linewidth=1.5,
+                    linestyle=":",
+                    label="Model mean (raw)",
+                ),
+                Line2D(
+                    [0],
+                    [0],
                     color="limegreen",
                     linewidth=2,
                     linestyle="--",
-                    label="Model mean (expected)",
+                    label="Model mean (scaled)",
                 ),
             ]
             ax.legend(handles=legend_elements, loc="upper right", fontsize=9)
