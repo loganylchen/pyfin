@@ -87,7 +87,7 @@ try:
 
     EVENTALIGN_AVAILABLE = is_available()
     EVENTALIGN_CUDA_AVAILABLE = eventalign_cuda_is_available()
-    
+
     # Log backend availability immediately upon import
     if EVENTALIGN_AVAILABLE:
         if EVENTALIGN_CUDA_AVAILABLE:
@@ -96,7 +96,7 @@ try:
             print("💻 Eventalign: Using CPU implementation (CUDA not available)")
     else:
         print("⚠️  Eventalign: Extension not available")
-        
+
 except ImportError as e:
     EVENTALIGN_AVAILABLE = False
     EVENTALIGN_CUDA_AVAILABLE = False
@@ -104,7 +104,11 @@ except ImportError as e:
 
 # Import DTW functions
 try:
-    from fin._dtw import dtw_pairwise, is_available as dtw_is_available, CUDA_AVAILABLE as DTW_CUDA_AVAILABLE
+    from fin._dtw import (
+        dtw_pairwise,
+        is_available as dtw_is_available,
+        CUDA_AVAILABLE as DTW_CUDA_AVAILABLE,
+    )
 
     DTW_AVAILABLE = dtw_is_available()
     # Note: Backend availability already logged by module import
@@ -193,7 +197,9 @@ class RegionTranscriptAnalyzer:
         logger.info(f"  Transcriptome: {self.transcriptome_path}")
         logger.info(f"  GTF: {self.gtf_path}")
         logger.info(f"  POD5: {self.pod5_path}")
-        logger.info(f"  F5C Eventalign: {self.f5c_eventalign_path if self.f5c_eventalign_path else 'None'}")
+        logger.info(
+            f"  F5C Eventalign: {self.f5c_eventalign_path if self.f5c_eventalign_path else 'None'}"
+        )
         logger.info(f"  Output: {self.output_dir}")
 
         # Log eventalign backend availability
@@ -351,46 +357,48 @@ class RegionTranscriptAnalyzer:
         results = defaultdict(list)
 
         # Determine if file is gzipped
-        is_gzipped = eventalign_file.endswith('.gz')
-        
+        is_gzipped = eventalign_file.endswith(".gz")
+
         open_func = gzip.open if is_gzipped else open
-        mode = 'rt' if is_gzipped else 'r'
+        mode = "rt" if is_gzipped else "r"
 
         logger.info(f"Reading f5c eventalign table: {eventalign_file}")
 
         with open_func(eventalign_file, mode) as f:
-            reader = csv.DictReader(f, delimiter='\t')
-            
+            reader = csv.DictReader(f, delimiter="\t")
+
             for row in reader:
-                read_name = row['read_name']
-                
+                read_name = row["read_name"]
+
                 # Filter by read_id if specified
                 if read_id is not None and read_name != read_id:
                     continue
 
                 # Parse the record
                 record = {
-                    'contig': row['contig'],
-                    'position': int(row['position']),
-                    'reference_kmer': row['reference_kmer'],
-                    'read_name': read_name,
-                    'strand': row['strand'],
-                    'event_index': int(row['event_index']),
-                    'event_level_mean': float(row['event_level_mean']),
-                    'event_stdv': float(row['event_stdv']),
-                    'event_length': float(row['event_length']),
-                    'model_kmer': row['model_kmer'],
-                    'model_mean': float(row['model_mean']),
-                    'model_stdv': float(row['model_stdv']),
-                    'standardized_level': float(row['standardized_level']),
-                    'start_idx': int(row['start_idx']),
-                    'end_idx': int(row['end_idx']),
-                    'samples': int(row['samples'])
+                    "contig": row["contig"],
+                    "position": int(row["position"]),
+                    "reference_kmer": row["reference_kmer"],
+                    "read_name": read_name,
+                    "strand": row["strand"],
+                    "event_index": int(row["event_index"]),
+                    "event_level_mean": float(row["event_level_mean"]),
+                    "event_stdv": float(row["event_stdv"]),
+                    "event_length": float(row["event_length"]),
+                    "model_kmer": row["model_kmer"],
+                    "model_mean": float(row["model_mean"]),
+                    "model_stdv": float(row["model_stdv"]),
+                    "standardized_level": float(row["standardized_level"]),
+                    "start_idx": int(row["start_idx"]),
+                    "end_idx": int(row["end_idx"]),
+                    "samples": [int(i) for i in row["samples"].split(",")],
                 }
-                
+
                 results[read_name].append(record)
 
-        logger.info(f"  Loaded {len(results)} reads with {sum(len(v) for v in results.values())} total events")
+        logger.info(
+            f"  Loaded {len(results)} reads with {sum(len(v) for v in results.values())} total events"
+        )
         return dict(results)
 
     def plot_f5c_eventalign_signal(
@@ -431,7 +439,7 @@ class RegionTranscriptAnalyzer:
 
         try:
             # Sort by event_index
-            records_sorted = sorted(f5c_records, key=lambda x: x['event_index'])
+            records_sorted = sorted(f5c_records, key=lambda x: x["event_index"])
 
             # Limit events for visualization
             if len(records_sorted) > max_events:
@@ -449,13 +457,13 @@ class RegionTranscriptAnalyzer:
 
             # Draw event boundaries, means, and model means
             for i, rec in enumerate(records_sorted):
-                start_idx = rec['start_idx']
-                end_idx = rec['end_idx']
-                event_mean = rec['event_level_mean']
-                model_mean = rec['model_mean']
-                kmer = rec['reference_kmer']
-                event_idx = rec['event_index']
-                position = rec['position']
+                start_idx = rec["start_idx"]
+                end_idx = rec["end_idx"]
+                event_mean = rec["event_level_mean"]
+                model_mean = rec["model_mean"]
+                kmer = rec["reference_kmer"]
+                event_idx = rec["event_index"]
+                position = rec["position"]
 
                 # Draw event boundary (vertical line)
                 ax.axvline(start_idx, color="gray", alpha=0.2, linewidth=0.5)
@@ -505,8 +513,8 @@ class RegionTranscriptAnalyzer:
             # Labels and title
             ax.set_xlabel("Sample index (raw signal)", fontsize=11)
             ax.set_ylabel("Signal level (pA)", fontsize=11)
-            
-            contig = f5c_records[0]['contig'] if f5c_records else transcript_id
+
+            contig = f5c_records[0]["contig"] if f5c_records else transcript_id
             ax.set_title(
                 f"F5C Eventalign: {read_id[:30]}{'...' if len(read_id) > 30 else ''} → {contig}\n"
                 f"Total Events: {len(f5c_records)}, Displayed: {len(records_sorted)}",
@@ -543,6 +551,7 @@ class RegionTranscriptAnalyzer:
         except Exception as e:
             logger.error(f"Failed to generate f5c eventalign visualization: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -1397,7 +1406,7 @@ class RegionTranscriptAnalyzer:
 
         try:
             n_panels = min(len(alignments), max_transcripts)
-            
+
             # Add extra panel for f5c if available
             has_f5c = f5c_records is not None and len(f5c_records) > 0
             total_panels = n_panels + (1 if has_f5c else 0)
@@ -1559,27 +1568,27 @@ class RegionTranscriptAnalyzer:
             # Add f5c panel if data is available
             if has_f5c:
                 ax_f5c = axes[n_panels]  # Last panel
-                
+
                 # Sort f5c records by event_index
-                f5c_sorted = sorted(f5c_records, key=lambda x: x['event_index'])
-                
+                f5c_sorted = sorted(f5c_records, key=lambda x: x["event_index"])
+
                 # Display entire signal
                 view_start = 0
                 view_end = len(signal)
-                
+
                 # Plot raw signal
                 ax_f5c.plot(signal, color="steelblue", alpha=0.5, linewidth=1, label="Raw signal")
-                
+
                 # Draw f5c event boundaries and means
                 for i, rec in enumerate(f5c_sorted):
-                    start_idx = rec['start_idx']
-                    end_idx = rec['end_idx']
-                    event_mean = rec['event_level_mean']
-                    model_mean = rec['model_mean']
-                    
+                    start_idx = rec["start_idx"]
+                    end_idx = rec["end_idx"]
+                    event_mean = rec["event_level_mean"]
+                    model_mean = rec["model_mean"]
+
                     # Event boundary
                     ax_f5c.axvline(start_idx, color="gray", alpha=0.3, linewidth=0.5, linestyle=":")
-                    
+
                     # Event mean (red)
                     ax_f5c.plot(
                         [start_idx, end_idx],
@@ -1588,7 +1597,7 @@ class RegionTranscriptAnalyzer:
                         linewidth=2.5,
                         alpha=0.8,
                     )
-                    
+
                     # Model mean (green)
                     ax_f5c.plot(
                         [start_idx, end_idx],
@@ -1598,28 +1607,36 @@ class RegionTranscriptAnalyzer:
                         linestyle="--",
                         alpha=0.8,
                     )
-                
+
                 # Set axis limits
                 ax_f5c.set_xlim(view_start, view_end)
-                
+
                 # Labels
                 ax_f5c.set_xlabel("Sample index (raw signal)", fontsize=11)
                 ax_f5c.set_ylabel("Signal (pA)", fontsize=10)
-                
-                contig = f5c_records[0]['contig'] if f5c_records else "unknown"
+
+                contig = f5c_records[0]["contig"] if f5c_records else "unknown"
                 ax_f5c.set_title(
                     f"F5C Eventalign: {contig} | Events: {len(f5c_records)}",
                     fontsize=10,
                     fontweight="bold",
                     color="darkgreen",
                 )
-                
+
                 # Add legend
                 from matplotlib.lines import Line2D
+
                 legend_elements = [
                     Line2D([0], [0], color="steelblue", alpha=0.5, linewidth=1, label="Raw signal"),
                     Line2D([0], [0], color="red", linewidth=2.5, label="Event mean (f5c)"),
-                    Line2D([0], [0], color="limegreen", linewidth=2, linestyle="--", label="Model mean (f5c)"),
+                    Line2D(
+                        [0],
+                        [0],
+                        color="limegreen",
+                        linewidth=2,
+                        linestyle="--",
+                        label="Model mean (f5c)",
+                    ),
                 ]
                 ax_f5c.legend(handles=legend_elements, loc="upper right", fontsize=8)
                 ax_f5c.grid(True, alpha=0.3, linestyle=":")
@@ -2305,7 +2322,9 @@ class RegionTranscriptAnalyzer:
                             "signal": signal,
                             "alignments": [],  # Store all alignments
                         }
-                        logger.info(f"  Starting eventalign visualization collection for read: {read_id[:30]}...")
+                        logger.info(
+                            f"  Starting eventalign visualization collection for read: {read_id[:30]}..."
+                        )
 
                     # Add all alignments for the first read
                     if first_read_info["read_id"] == read_id:
@@ -2315,7 +2334,9 @@ class RegionTranscriptAnalyzer:
                                 "transcript_id": tx_id,
                             }
                         )
-                        logger.debug(f"    Added alignment for transcript {tx_id} (total: {len(first_read_info['alignments'])})")
+                        logger.debug(
+                            f"    Added alignment for transcript {tx_id} (total: {len(first_read_info['alignments'])})"
+                        )
 
                     # Include full alignment details, not just summary
                     alignment_record = {
@@ -2369,11 +2390,12 @@ class RegionTranscriptAnalyzer:
             # Load f5c eventalign results for this read if available
             f5c_records = None
             if self.f5c_eventalign_path and self.f5c_eventalign_path.exists():
-                logger.info(f"  Loading f5c eventalign data for read: {first_read_info['read_id'][:30]}...")
+                logger.info(
+                    f"  Loading f5c eventalign data for read: {first_read_info['read_id'][:30]}..."
+                )
                 try:
                     f5c_data = self.read_f5c_eventalign_table(
-                        str(self.f5c_eventalign_path),
-                        read_id=first_read_info["read_id"]
+                        str(self.f5c_eventalign_path), read_id=first_read_info["read_id"]
                     )
                     f5c_records = f5c_data.get(first_read_info["read_id"], [])
                     if f5c_records:
