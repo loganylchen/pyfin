@@ -325,26 +325,12 @@ int32_t align_with_flanking_cpu(
     float lp_sm = 0.0f; // Log prob from start to match
     float BAD_EVENT_PENALTY = 0.0f;
 
-    // Row 0 is start state, initialize row 1 (first event)
-    for (int32_t block = 1; block < num_blocks - 1; ++block)
-    {
-        int32_t kmer_idx = block - 1;
-        int32_t curr_offset = NUM_STATES * block;
-        uint32_t rank = get_kmer_rank(&sequence[kmer_idx], kmer_size);
-
-        float emission = log_probability_match(scaling, model, events.event, 0, rank);
-
-        // Can start from soft clip (pre-flanking)
-        if (kmer_idx == 0)
-        {
-            dp[1][curr_offset + STATE_MATCH] = lp_sm + pre_flank[0] + emission;
-            traceback_state[1][curr_offset + STATE_MATCH] = -1;
-            traceback_kmer[1][curr_offset + STATE_MATCH] = -1;
-        }
-    }
+    // Row 0 is start state, row 1+ are filled in main loop
+    // (F5C starts the main loop at row=1, so initialization happens there with flag checks)
 
     // Fill DP table with f5c's 3-state HMM
-    for (int32_t row = 2; row <= n_events; ++row)
+    // F5C starts from row=1, which handles the first event with proper flag checking
+    for (int32_t row = 1; row <= n_events; ++row)
     {
         int32_t event_idx = row - 1;
 
