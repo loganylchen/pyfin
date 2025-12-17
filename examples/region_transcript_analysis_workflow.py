@@ -782,7 +782,7 @@ class RegionTranscriptAnalyzer:
             return None
 
     def analyze_region(
-        self, region, pod5_reader: Pod5Reader, max_reads: int = 100, max_transcripts: int = 50
+        self, region, pod5_reader: Pod5Reader, max_reads: int = 10, max_transcripts: int = 50
     ) -> Dict[str, Any]:
         """
         Perform full analysis on a single region.
