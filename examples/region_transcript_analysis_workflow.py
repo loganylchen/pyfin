@@ -1006,19 +1006,9 @@ class RegionTranscriptAnalyzer:
             # Plot raw signal
             ax.plot(signal, color="steelblue", alpha=0.5, linewidth=0.3, label="Raw signal")
 
-            # Determine signal range to display based on aligned events
-            if alignment_sorted:
-                min_start = min(a.get("signal_start", 0) for a in alignment_sorted)
-                max_end = max(
-                    a.get("signal_start", 0) + int(a.get("signal_length", 100))
-                    for a in alignment_sorted
-                )
-                # Add some padding
-                view_start = max(0, int(min_start) - 500)
-                view_end = min(len(signal), int(max_end) + 500)
-            else:
-                view_start = 0
-                view_end = len(signal)
+            # Display entire signal (no windowing)
+            view_start = 0
+            view_end = len(signal)
 
             # Draw event boundaries, means, and model means using signal_start/signal_length
             for i, aln in enumerate(alignment_sorted):
@@ -1034,9 +1024,6 @@ class RegionTranscriptAnalyzer:
 
                 start_sample = int(signal_start)
                 end_sample = int(signal_start + signal_length)
-
-                if end_sample <= view_start or start_sample >= view_end:
-                    continue
 
                 # Draw event boundary (vertical line)
                 ax.axvline(start_sample, color="gray", alpha=0.2, linewidth=0.5)
@@ -1243,18 +1230,12 @@ class RegionTranscriptAnalyzer:
                     ax.set_title(f"Transcript: {transcript_id[:40]}")
                     continue
 
-                # Determine view window
-                signal_starts = [a.get("signal_start", 0) for a in alignment_sorted]
-                signal_lengths = [a.get("signal_length", 0) for a in alignment_sorted]
-                view_start = int(max(0, min(signal_starts) - 100))
-                view_end = int(min(
-                    len(signal), max(s + l for s, l in zip(signal_starts, signal_lengths)) + 100
-                ))
+                # Display entire signal (no windowing)
+                view_start = 0
+                view_end = len(signal)
 
                 # Plot raw signal
-                x = np.arange(view_start, view_end)
-                y = signal[view_start:view_end]
-                ax.plot(x, y, color="steelblue", alpha=0.5, linewidth=1, label="Raw signal")
+                ax.plot(signal, color="steelblue", alpha=0.5, linewidth=1, label="Raw signal")
 
                 # Draw event boundaries and means
                 for i, aln in enumerate(alignment_sorted):
@@ -1268,8 +1249,7 @@ class RegionTranscriptAnalyzer:
                     sig_end = int(sig_start + sig_len)
 
                     # Event boundary
-                    if sig_start >= view_start and sig_start <= view_end:
-                        ax.axvline(sig_start, color="gray", alpha=0.3, linewidth=0.5, linestyle=":")
+                    ax.axvline(sig_start, color="gray", alpha=0.3, linewidth=0.5, linestyle=":")
 
                     # Event mean (red line)
                     event_mean = aln.get("event_mean")
