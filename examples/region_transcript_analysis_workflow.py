@@ -39,6 +39,8 @@ from collections import defaultdict
 import json
 
 import numpy as np
+import gzip
+import csv
 
 # Optional visualization imports
 try:
@@ -328,6 +330,217 @@ class RegionTranscriptAnalyzer:
 
         signal, metadata = result
         return np.array(signal, dtype=np.float32)
+
+    def read_f5c_eventalign_table(
+        self, eventalign_file: str, read_id: str = None
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Read f5c eventalign output table (compressed or uncompressed).
+
+        Args:
+            eventalign_file: Path to f5c eventalign output file (.tsv or .tsv.gz)
+            read_id: Optional specific read ID to filter (if None, load all reads)
+
+        Returns:
+            Dictionary mapping read_name to list of alignment records
+        """
+        results = defaultdict(list)
+
+        # Determine if file is gzipped
+        is_gzipped = eventalign_file.endswith('.gz')
+        
+        open_func = gzip.open if is_gzipped else open
+        mode = 'rt' if is_gzipped else 'r'
+
+        logger.info(f"Reading f5c eventalign table: {eventalign_file}")
+
+        with open_func(eventalign_file, mode) as f:
+            reader = csv.DictReader(f, delimiter='\t')
+            
+            for row in reader:
+                read_name = row['read_name']
+                
+                # Filter by read_id if specified
+                if read_id is not None and read_name != read_id:
+                    continue
+
+                # Parse the record
+                record = {
+                    'contig': row['contig'],
+                    'position': int(row['position']),
+                    'reference_kmer': row['reference_kmer'],
+                    'read_name': read_name,
+                    'strand': row['strand'],
+                    'event_index': int(row['event_index']),
+                    'event_level_mean': float(row['event_level_mean']),
+                    'event_stdv': float(row['event_stdv']),
+                    'event_length': float(row['event_length']),
+                    'model_kmer': row['model_kmer'],
+                    'model_mean': float(row['model_mean']),
+                    'model_stdv': float(row['model_stdv']),
+                    'standardized_level': float(row['standardized_level']),
+                    'start_idx': int(row['start_idx']),
+                    'end_idx': int(row['end_idx']),
+                    'samples': int(row['samples'])
+                }
+                
+                results[read_name].append(record)
+
+        logger.info(f"  Loaded {len(results)} reads with {sum(len(v) for v in results.values())} total events")
+        return dict(results)
+
+    def plot_f5c_eventalign_signal(
+        self,
+        signal: np.ndarray,
+        f5c_records: List[Dict[str, Any]],
+        output_path: Path,
+        read_id: str = "",
+        transcript_id: str = "",
+        max_events: int = 200,
+        figsize: Tuple[int, int] = (20, 8),
+    ) -> Optional[Path]:
+        """
+        Visualize f5c eventalign results for a single read.
+
+        Creates a panel showing raw signal with event boundaries, event means,
+        and model expected means from f5c eventalign output.
+
+        Args:
+            signal: Raw nanopore signal
+            f5c_records: List of f5c eventalign records for this read
+            output_path: Path to save the figure
+            read_id: Read ID for title
+            transcript_id: Transcript ID for title (from contig)
+            max_events: Maximum number of events to display
+            figsize: Figure size
+
+        Returns:
+            Path to saved image, or None if visualization failed
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            logger.warning("matplotlib not available for visualization")
+            return None
+
+        if not f5c_records:
+            logger.warning("No f5c records to visualize")
+            return None
+
+        try:
+            # Sort by event_index
+            records_sorted = sorted(f5c_records, key=lambda x: x['event_index'])
+
+            # Limit events for visualization
+            if len(records_sorted) > max_events:
+                records_sorted = records_sorted[:max_events]
+
+            # Create figure
+            fig, ax = plt.subplots(figsize=figsize)
+
+            # Plot raw signal
+            ax.plot(signal, color="steelblue", alpha=0.5, linewidth=0.3, label="Raw signal")
+
+            # Display entire signal
+            view_start = 0
+            view_end = len(signal)
+
+            # Draw event boundaries, means, and model means
+            for i, rec in enumerate(records_sorted):
+                start_idx = rec['start_idx']
+                end_idx = rec['end_idx']
+                event_mean = rec['event_level_mean']
+                model_mean = rec['model_mean']
+                kmer = rec['reference_kmer']
+                event_idx = rec['event_index']
+                position = rec['position']
+
+                # Draw event boundary (vertical line)
+                ax.axvline(start_idx, color="gray", alpha=0.2, linewidth=0.5)
+
+                # Draw event mean level (observed)
+                ax.hlines(
+                    event_mean,
+                    start_idx,
+                    end_idx,
+                    colors="red",
+                    linewidth=2.5,
+                    alpha=0.9,
+                )
+
+                # Draw model expected level
+                ax.hlines(
+                    model_mean,
+                    start_idx,
+                    end_idx,
+                    colors="limegreen",
+                    linewidth=2,
+                    linestyle="--",
+                    alpha=0.8,
+                )
+
+                # Annotate with k-mer and event info (sparse to avoid clutter)
+                n_display = len(records_sorted)
+                if i % max(1, n_display // 25) == 0 and kmer:
+                    label_y = max(event_mean, model_mean) + 3
+                    ax.text(
+                        (start_idx + end_idx) / 2,
+                        label_y,
+                        f"{kmer}\nidx:{event_idx} pos:{position}\nevent:{event_mean:.1f} model:{model_mean:.1f}",
+                        fontsize=5,
+                        ha="center",
+                        va="bottom",
+                        color="black",
+                        rotation=0,
+                        bbox=dict(
+                            boxstyle="round,pad=0.2", facecolor="white", alpha=0.7, edgecolor="none"
+                        ),
+                    )
+
+            # Set axis limits
+            ax.set_xlim(view_start, view_end)
+
+            # Labels and title
+            ax.set_xlabel("Sample index (raw signal)", fontsize=11)
+            ax.set_ylabel("Signal level (pA)", fontsize=11)
+            
+            contig = f5c_records[0]['contig'] if f5c_records else transcript_id
+            ax.set_title(
+                f"F5C Eventalign: {read_id[:30]}{'...' if len(read_id) > 30 else ''} → {contig}\n"
+                f"Total Events: {len(f5c_records)}, Displayed: {len(records_sorted)}",
+                fontsize=12,
+            )
+
+            # Add legend
+            from matplotlib.lines import Line2D
+
+            legend_elements = [
+                Line2D([0], [0], color="steelblue", alpha=0.5, linewidth=1, label="Raw signal"),
+                Line2D([0], [0], color="red", linewidth=2.5, label="Event mean (observed)"),
+                Line2D(
+                    [0],
+                    [0],
+                    color="limegreen",
+                    linewidth=2,
+                    linestyle="--",
+                    label="Model mean (expected)",
+                ),
+            ]
+            ax.legend(handles=legend_elements, loc="upper right", fontsize=9)
+
+            # Add grid for readability
+            ax.grid(True, alpha=0.3, linestyle=":")
+
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+            logger.info(f"  Saved f5c eventalign visualization to: {output_path}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"Failed to generate f5c eventalign visualization: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def eventalign_read_to_transcript(
         self, signal: np.ndarray, transcript_seq: str, use_profile_hmm: bool = True
