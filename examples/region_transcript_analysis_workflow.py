@@ -722,8 +722,8 @@ class RegionTranscriptAnalyzer:
                     ax.text(
                         (start_sample + end_sample) / 2,
                         label_y,
-                        f"{kmer}\nidx:{event_idx}\npos:{ref_pos}",
-                        fontsize=6,
+                        f"{kmer}\nidx:{event_idx} pos:{ref_pos}\nevent:{event_mean:.1f} model:{scaled_model_mean:.1f}",
+                        fontsize=5,
                         ha="center",
                         va="bottom",
                         color=color,
@@ -1563,7 +1563,8 @@ def run_demo():
             print(
                 f"  Position {aln['ref_position']}: {aln['ref_kmer']} "
                 f"(state={aln['hmm_state']}, event_idx={aln.get('event_idx', -1)}, "
-                f"signal_start={aln.get('signal_start', 0)}, event_mean={aln['event_mean']:.1f})"
+                f"signal_start={aln.get('signal_start', 0)}, "
+                f"event_mean={aln['event_mean']:.1f}, scaled_model_mean={aln.get('scaled_model_mean', 0):.1f})"
             )
 
         # Run quality assessment
