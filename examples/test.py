@@ -7,7 +7,8 @@ pod5_reader.open()
 read = pod5_reader.get_read("4816bde4-c87f-4eaf-96b9-2c8d3ce8d5d1")
 df = pd.DataFrame(detect_events(read.signal_pa))
 seq = "TCAACCGGGTTTTAC"
-eventalign_df = pd.DataFrame(profile_hmm_eventalign(read.signal_pa, seq[::-1], 5)["alignment"]).loc[
+result = profile_hmm_eventalign(read.signal_pa, seq[::-1], 5)
+eventalign_df = pd.DataFrame(result["alignment"]).loc[
     :,
     [
         "ref_position",
@@ -20,3 +21,5 @@ eventalign_df = pd.DataFrame(profile_hmm_eventalign(read.signal_pa, seq[::-1], 5
         "scaled_model_mean",
     ],
 ]
+df.loc[(df["mean"] > 79.85) & (df["mean"] < 79.86)]
+eventalign_df.loc[(eventalign_df["event_mean"] > 79.85) & (eventalign_df["event_mean"] < 79.86)]

@@ -34,18 +34,18 @@ def detect_events(raw_signal: np.ndarray) -> list[dict]:
     """
     High-level wrapper for nanopore RNA event detection (C-backed).
 
-    For Direct RNA Sequencing (DRS), events are automatically reversed
-    to match the 3'→5' pore transit direction. This means the first event
-    corresponds to the 3' end of the transcript.
+    For Direct RNA Sequencing (DRS), raw signal arrives in 3'→5' order
+    (as RNA transits the pore). Events are internally reversed so that
+    event[0] corresponds to the 5' end of the transcript.
 
     Args:
         raw_signal: 1D numpy array of raw nanopore signal values (must be float32).
 
     Returns:
-        List of event dicts (in 3'→5' order), each with:
+        List of event dicts (in 5'→3' order), each with:
             - mean: Event mean current (float)
             - stdv: Event standard deviation (float)
-            - start: Start index of the event (int)
+            - start: Start index of the event in raw signal (int)
             - length: Length of the event (float)
 
     Raises:
