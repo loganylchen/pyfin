@@ -105,13 +105,7 @@ try:
     from fin._dtw import dtw_pairwise, is_available as dtw_is_available, CUDA_AVAILABLE as DTW_CUDA_AVAILABLE
 
     DTW_AVAILABLE = dtw_is_available()
-    
-    # Log backend availability (module already logged, this is for clarity in workflow)
-    if DTW_AVAILABLE:
-        if DTW_CUDA_AVAILABLE:
-            print("🚀 DTW: GPU (CUDA) acceleration ENABLED")
-        else:
-            print("💻 DTW: CPU implementation (CUDA not available)")
+    # Note: Backend availability already logged by module import
 except ImportError as e:
     DTW_AVAILABLE = False
     DTW_CUDA_AVAILABLE = False
