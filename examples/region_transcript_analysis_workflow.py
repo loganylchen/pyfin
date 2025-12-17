@@ -1125,6 +1125,378 @@ class RegionTranscriptAnalyzer:
             traceback.print_exc()
             return None
 
+    def plot_eventalign_multi_transcript(
+        self,
+        signal: np.ndarray,
+        alignments: List[Dict[str, Any]],
+        output_path: Path,
+        read_id: str = "",
+        max_transcripts: int = 10,
+        figsize_per_panel: Tuple[int, int] = (20, 6),
+    ) -> Optional[Path]:
+        """
+        Visualize eventalign results for one read aligned to multiple transcripts.
+
+        Creates a multi-panel figure where each panel shows the alignment
+        of the same read to a different candidate transcript.
+
+        Args:
+            signal: Raw nanopore signal
+            alignments: List of dicts with 'alignment' and 'transcript_id'
+            output_path: Path to save the figure
+            read_id: Read ID for title
+            max_transcripts: Maximum number of transcripts to show
+            figsize_per_panel: Size per transcript panel
+
+        Returns:
+            Path to saved image, or None if visualization failed
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            logger.warning("matplotlib not available for visualization")
+            return None
+
+        if not alignments:
+            logger.warning("No alignments to visualize")
+            return None
+
+        try:
+            n_panels = min(len(alignments), max_transcripts)
+            
+            fig, axes = plt.subplots(
+                n_panels,
+                1,
+                figsize=(figsize_per_panel[0], figsize_per_panel[1] * n_panels),
+            )
+
+            if n_panels == 1:
+                axes = [axes]
+
+            for panel_idx, aln_data in enumerate(alignments[:max_transcripts]):
+                ax = axes[panel_idx]
+                eventalign_result = aln_data["alignment"]
+                transcript_id = aln_data["transcript_id"]
+                
+                # Extract alignment data
+                alignment = eventalign_result.get("alignment", [])
+                scaling = eventalign_result.get("scaling", {})
+                n_events = eventalign_result.get("n_events", 0)
+                n_aligned = eventalign_result.get("n_aligned", len(alignment))
+
+                if not alignment:
+                    ax.text(0.5, 0.5, f"No alignment data for {transcript_id}",
+                           ha='center', va='center', transform=ax.transAxes)
+                    ax.set_title(f"Transcript: {transcript_id[:40]}")
+                    continue
+
+                # Filter and sort alignments
+                alignment_sorted = [
+                    a for a in alignment
+                    if a.get("event_idx", -1) >= 0 and a.get("signal_start") is not None
+                ]
+                alignment_sorted.sort(key=lambda x: x.get("signal_start", 0))
+
+                if not alignment_sorted:
+                    ax.text(0.5, 0.5, f"No valid alignments for {transcript_id}",
+                           ha='center', va='center', transform=ax.transAxes)
+                    ax.set_title(f"Transcript: {transcript_id[:40]}")
+                    continue
+
+                # Determine view window
+                signal_starts = [a.get("signal_start", 0) for a in alignment_sorted]
+                signal_lengths = [a.get("signal_length", 0) for a in alignment_sorted]
+                view_start = max(0, min(signal_starts) - 100)
+                view_end = min(len(signal), max(s + l for s, l in zip(signal_starts, signal_lengths)) + 100)
+
+                # Plot raw signal
+                x = np.arange(view_start, view_end)
+                y = signal[view_start:view_end]
+                ax.plot(x, y, color="steelblue", alpha=0.5, linewidth=1, label="Raw signal")
+
+                # Draw event boundaries and means
+                for i, aln in enumerate(alignment_sorted):
+                    sig_start = aln.get("signal_start")
+                    sig_len = aln.get("signal_length", 0)
+                    
+                    if sig_start is None or sig_len <= 0:
+                        continue
+                    
+                    sig_end = sig_start + sig_len
+                    
+                    # Event boundary
+                    if sig_start >= view_start and sig_start <= view_end:
+                        ax.axvline(sig_start, color="gray", alpha=0.3, linewidth=0.5, linestyle=":")
+                    
+                    # Event mean (red line)
+                    event_mean = aln.get("event_mean")
+                    if event_mean is not None:
+                        ax.plot(
+                            [sig_start, sig_end],
+                            [event_mean, event_mean],
+                            color="red",
+                            linewidth=2.5,
+                            alpha=0.8,
+                        )
+                    
+                    # Raw model mean (orange dotted)
+                    model_mean = aln.get("model_mean")
+                    if model_mean is not None and model_mean > 0:
+                        ax.plot(
+                            [sig_start, sig_end],
+                            [model_mean, model_mean],
+                            color="orange",
+                            linewidth=1.5,
+                            linestyle=":",
+                            alpha=0.7,
+                        )
+                    
+                    # Scaled model mean (green dashed)
+                    scaled_model_mean = aln.get("scaled_model_mean")
+                    if scaled_model_mean is not None:
+                        ax.plot(
+                            [sig_start, sig_end],
+                            [scaled_model_mean, scaled_model_mean],
+                            color="limegreen",
+                            linewidth=2,
+                            linestyle="--",
+                            alpha=0.8,
+                        )
+
+                # Set axis limits
+                ax.set_xlim(view_start, view_end)
+
+                # Labels and title
+                if panel_idx == n_panels - 1:
+                    ax.set_xlabel("Sample index (raw signal)", fontsize=11)
+                ax.set_ylabel("Signal (pA)", fontsize=10)
+                
+                tx_label = transcript_id[:40] + "..." if len(transcript_id) > 40 else transcript_id
+                ax.set_title(
+                    f"Transcript: {tx_label} | "
+                    f"Events: {n_aligned}/{n_events} | "
+                    f"Scale: {scaling.get('scale', 0):.3f}, Shift: {scaling.get('shift', 0):.1f}",
+                    fontsize=10,
+                )
+
+                # Add legend only to first panel
+                if panel_idx == 0:
+                    from matplotlib.lines import Line2D
+                    legend_elements = [
+                        Line2D([0], [0], color="steelblue", alpha=0.5, linewidth=1, label="Raw signal"),
+                        Line2D([0], [0], color="red", linewidth=2.5, label="Event mean"),
+                        Line2D([0], [0], color="orange", linewidth=1.5, linestyle=":", label="Model mean (raw)"),
+                        Line2D([0], [0], color="limegreen", linewidth=2, linestyle="--", label="Model mean (scaled)"),
+                    ]
+                    ax.legend(handles=legend_elements, loc="upper right", fontsize=8)
+
+                ax.grid(True, alpha=0.3, linestyle=":")
+
+            # Overall title
+            read_label = read_id[:50] + "..." if len(read_id) > 50 else read_id
+            fig.suptitle(
+                f"Eventalign: {read_label} → {n_panels} Candidate Transcripts",
+                fontsize=13,
+                fontweight="bold",
+            )
+
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+            logger.info(f"  Saved multi-transcript eventalign plot to: {output_path}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"Failed to generate multi-transcript eventalign plot: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def plot_eventalign_multi_transcript(
+        self,
+        signal: np.ndarray,
+        alignments: List[Dict[str, Any]],
+        output_path: Path,
+        read_id: str = "",
+        max_transcripts: int = 10,
+        figsize_per_panel: Tuple[int, int] = (20, 6),
+    ) -> Optional[Path]:
+        """
+        Visualize eventalign results for one read aligned to multiple transcripts.
+
+        Creates a multi-panel figure where each panel shows the alignment
+        of the same read to a different candidate transcript.
+
+        Args:
+            signal: Raw nanopore signal
+            alignments: List of dicts with 'alignment' and 'transcript_id'
+            output_path: Path to save the figure
+            read_id: Read ID for title
+            max_transcripts: Maximum number of transcripts to show
+            figsize_per_panel: Size per transcript panel
+
+        Returns:
+            Path to saved image, or None if visualization failed
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            logger.warning("matplotlib not available for visualization")
+            return None
+
+        if not alignments:
+            logger.warning("No alignments to visualize")
+            return None
+
+        try:
+            n_panels = min(len(alignments), max_transcripts)
+            
+            fig, axes = plt.subplots(
+                n_panels,
+                1,
+                figsize=(figsize_per_panel[0], figsize_per_panel[1] * n_panels),
+            )
+
+            if n_panels == 1:
+                axes = [axes]
+
+            for panel_idx, aln_data in enumerate(alignments[:max_transcripts]):
+                ax = axes[panel_idx]
+                eventalign_result = aln_data["alignment"]
+                transcript_id = aln_data["transcript_id"]
+                
+                # Extract alignment data
+                alignment = eventalign_result.get("alignment", [])
+                scaling = eventalign_result.get("scaling", {})
+                n_events = eventalign_result.get("n_events", 0)
+                n_aligned = eventalign_result.get("n_aligned", len(alignment))
+
+                if not alignment:
+                    ax.text(0.5, 0.5, f"No alignment data for {transcript_id}",
+                           ha='center', va='center', transform=ax.transAxes)
+                    ax.set_title(f"Transcript: {transcript_id[:40]}")
+                    continue
+
+                # Filter and sort alignments
+                alignment_sorted = [
+                    a for a in alignment
+                    if a.get("event_idx", -1) >= 0 and a.get("signal_start") is not None
+                ]
+                alignment_sorted.sort(key=lambda x: x.get("signal_start", 0))
+
+                if not alignment_sorted:
+                    ax.text(0.5, 0.5, f"No valid alignments for {transcript_id}",
+                           ha='center', va='center', transform=ax.transAxes)
+                    ax.set_title(f"Transcript: {transcript_id[:40]}")
+                    continue
+
+                # Determine view window
+                signal_starts = [a.get("signal_start", 0) for a in alignment_sorted]
+                signal_lengths = [a.get("signal_length", 0) for a in alignment_sorted]
+                view_start = max(0, min(signal_starts) - 100)
+                view_end = min(len(signal), max(s + l for s, l in zip(signal_starts, signal_lengths)) + 100)
+
+                # Plot raw signal
+                x = np.arange(view_start, view_end)
+                y = signal[view_start:view_end]
+                ax.plot(x, y, color="steelblue", alpha=0.5, linewidth=1, label="Raw signal")
+
+                # Draw event boundaries and means
+                for i, aln in enumerate(alignment_sorted):
+                    sig_start = aln.get("signal_start")
+                    sig_len = aln.get("signal_length", 0)
+                    
+                    if sig_start is None or sig_len <= 0:
+                        continue
+                    
+                    sig_end = sig_start + sig_len
+                    
+                    # Event boundary
+                    if sig_start >= view_start and sig_start <= view_end:
+                        ax.axvline(sig_start, color="gray", alpha=0.3, linewidth=0.5, linestyle=":")
+                    
+                    # Event mean (red line)
+                    event_mean = aln.get("event_mean")
+                    if event_mean is not None:
+                        ax.plot(
+                            [sig_start, sig_end],
+                            [event_mean, event_mean],
+                            color="red",
+                            linewidth=2.5,
+                            alpha=0.8,
+                        )
+                    
+                    # Raw model mean (orange dotted)
+                    model_mean = aln.get("model_mean")
+                    if model_mean is not None and model_mean > 0:
+                        ax.plot(
+                            [sig_start, sig_end],
+                            [model_mean, model_mean],
+                            color="orange",
+                            linewidth=1.5,
+                            linestyle=":",
+                            alpha=0.7,
+                        )
+                    
+                    # Scaled model mean (green dashed)
+                    scaled_model_mean = aln.get("scaled_model_mean")
+                    if scaled_model_mean is not None:
+                        ax.plot(
+                            [sig_start, sig_end],
+                            [scaled_model_mean, scaled_model_mean],
+                            color="limegreen",
+                            linewidth=2,
+                            linestyle="--",
+                            alpha=0.8,
+                        )
+
+                # Set axis limits
+                ax.set_xlim(view_start, view_end)
+
+                # Labels and title
+                if panel_idx == n_panels - 1:
+                    ax.set_xlabel("Sample index (raw signal)", fontsize=11)
+                ax.set_ylabel("Signal (pA)", fontsize=10)
+                
+                tx_label = transcript_id[:40] + "..." if len(transcript_id) > 40 else transcript_id
+                ax.set_title(
+                    f"Transcript: {tx_label} | "
+                    f"Events: {n_aligned}/{n_events} | "
+                    f"Scale: {scaling.get('scale', 0):.3f}, Shift: {scaling.get('shift', 0):.1f}",
+                    fontsize=10,
+                )
+
+                # Add legend only to first panel
+                if panel_idx == 0:
+                    from matplotlib.lines import Line2D
+                    legend_elements = [
+                        Line2D([0], [0], color="steelblue", alpha=0.5, linewidth=1, label="Raw signal"),
+                        Line2D([0], [0], color="red", linewidth=2.5, label="Event mean"),
+                        Line2D([0], [0], color="orange", linewidth=1.5, linestyle=":", label="Model mean (raw)"),
+                        Line2D([0], [0], color="limegreen", linewidth=2, linestyle="--", label="Model mean (scaled)"),
+                    ]
+                    ax.legend(handles=legend_elements, loc="upper right", fontsize=8)
+
+                ax.grid(True, alpha=0.3, linestyle=":")
+
+            # Overall title
+            read_label = read_id[:50] + "..." if len(read_id) > 50 else read_id
+            fig.suptitle(
+                f"Eventalign: {read_label} → {n_panels} Candidate Transcripts",
+                fontsize=13,
+                fontweight="bold",
+            )
+
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+            logger.info(f"  Saved multi-transcript eventalign plot to: {output_path}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"Failed to generate multi-transcript eventalign plot: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def assign_reads_to_transcripts(
         self,
         read_alignments: List[Dict[str, Any]],
@@ -1776,14 +2148,20 @@ class RegionTranscriptAnalyzer:
                 alignment = self.eventalign_read_to_transcript(signal, tx_seq)
 
                 if alignment:
-                    # Save first read's first alignment for visualization
+                    # Save first read's all alignments for visualization
                     if first_read_info is None:
                         first_read_info = {
                             "read_id": read_id,
                             "signal": signal,
-                            "transcript_id": tx_id,
-                            "alignment": alignment,
+                            "alignments": [],  # Store all alignments
                         }
+                    
+                    # Add all alignments for the first read
+                    if first_read_info["read_id"] == read_id:
+                        first_read_info["alignments"].append({
+                            "alignment": alignment,
+                            "transcript_id": tx_id,
+                        })
 
                     # Include full alignment details, not just summary
                     alignment_record = {
@@ -1825,20 +2203,20 @@ class RegionTranscriptAnalyzer:
 
         logger.info(f"  Aligned {len(result['read_alignments'])} reads to transcripts")
 
-        # Step 4: Visualize the first read's eventalign result
-        if first_read_info is not None:
+        # Step 4: Visualize the first read's eventalign results to all candidates
+        if first_read_info is not None and first_read_info["alignments"]:
             logger.info(
-                f"  Visualizing eventalign for first read: {first_read_info['read_id'][:20]}..."
+                f"  Visualizing eventalign for first read: {first_read_info['read_id'][:20]}... "
+                f"({len(first_read_info['alignments'])} transcripts)"
             )
             region_safe_id = region_id.replace(":", "_").replace("-", "_")
             eventalign_plot_path = self.output_dir / f"eventalign_{region_safe_id}_first_read.png"
 
-            eventalign_plot = self.plot_eventalign_signal(
+            eventalign_plot = self.plot_eventalign_multi_transcript(
                 signal=first_read_info["signal"],
-                eventalign_result=first_read_info["alignment"],
+                alignments=first_read_info["alignments"],
                 output_path=eventalign_plot_path,
                 read_id=first_read_info["read_id"],
-                transcript_id=first_read_info["transcript_id"],
             )
 
             if eventalign_plot:
