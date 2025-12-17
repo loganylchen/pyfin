@@ -200,7 +200,8 @@ class MultiExt(build_ext):
         objects = []
         for source in ext.sources:
             source_path = Path(source)
-            obj_name = source_path.stem + ".o"
+            # Include suffix to avoid name collisions (align.c vs align.cu)
+            obj_name = source_path.stem + source_path.suffix.replace(".", "_") + ".o"
             obj_path = build_temp / obj_name
 
             # Determine file type and use appropriate compiler
