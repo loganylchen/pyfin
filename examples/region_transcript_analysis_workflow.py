@@ -595,6 +595,300 @@ class RegionTranscriptAnalyzer:
             traceback.print_exc()
             return None
 
+    def plot_assessment_heatmap(
+        self,
+        read_alignments: List[Dict[str, Any]],
+        output_path: Path,
+        metric: str = "overall_score",
+        title: str = "Eventalign Quality Assessment",
+        figsize: Tuple[int, int] = (14, 10),
+    ) -> Optional[Path]:
+        """
+        Generate a heatmap visualization of eventalign quality assessments.
+
+        Creates a heatmap showing how well each read aligns to each transcript,
+        based on the quality assessment metrics.
+
+        Args:
+            read_alignments: List of read alignment results from analyze_region()
+            output_path: Path to save the heatmap image
+            metric: Which metric to display. Options:
+                - "overall_score": Overall quality score (0-1)
+                - "correlation": Signal-model correlation
+                - "event_coverage": Fraction of events aligned
+                - "sequence_coverage": Fraction of sequence covered
+                - "match_fraction": Fraction of match states
+            title: Plot title
+            figsize: Figure size
+
+        Returns:
+            Path to saved image, or None if visualization failed
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            logger.warning("matplotlib not available for visualization")
+            return None
+
+        if not read_alignments:
+            logger.warning("No read alignments to visualize")
+            return None
+
+        try:
+            # Collect all unique transcripts and reads
+            all_transcripts = set()
+            all_reads = []
+            for ra in read_alignments:
+                read_id = ra.get("read_id", "unknown")
+                all_reads.append(read_id)
+                for aln in ra.get("alignments", []):
+                    all_transcripts.add(aln.get("transcript_id", "unknown"))
+
+            transcripts = sorted(list(all_transcripts))
+            reads = all_reads
+
+            if not transcripts or not reads:
+                logger.warning("No transcripts or reads found")
+                return None
+
+            # Build the score matrix
+            n_reads = len(reads)
+            n_transcripts = len(transcripts)
+            score_matrix = np.full((n_reads, n_transcripts), np.nan)
+
+            # Map transcript_id to column index
+            tx_to_idx = {tx: i for i, tx in enumerate(transcripts)}
+
+            # Fill in the matrix
+            for i, ra in enumerate(read_alignments):
+                for aln in ra.get("alignments", []):
+                    tx_id = aln.get("transcript_id")
+                    if tx_id not in tx_to_idx:
+                        continue
+
+                    j = tx_to_idx[tx_id]
+                    qa = aln.get("quality_assessment", {})
+
+                    if metric == "overall_score":
+                        score_matrix[i, j] = qa.get("overall_score", 0)
+                    elif metric == "correlation":
+                        fit = qa.get("signal_model_fit", {})
+                        score_matrix[i, j] = fit.get("correlation", 0)
+                    elif metric == "event_coverage":
+                        cov = qa.get("coverage", {})
+                        score_matrix[i, j] = cov.get("event_coverage", 0)
+                    elif metric == "sequence_coverage":
+                        cov = qa.get("coverage", {})
+                        score_matrix[i, j] = cov.get("sequence_coverage", 0)
+                    elif metric == "match_fraction":
+                        hmm = qa.get("hmm_states", {})
+                        score_matrix[i, j] = hmm.get("match_fraction", 0)
+                    else:
+                        score_matrix[i, j] = qa.get("overall_score", 0)
+
+            # Create figure
+            fig, ax = plt.subplots(figsize=figsize)
+
+            # Mask NaN values for visualization
+            masked_matrix = np.ma.masked_invalid(score_matrix)
+
+            # Choose colormap based on metric
+            if metric == "correlation":
+                # Correlation can be negative
+                cmap = "RdYlGn"
+                vmin, vmax = -1, 1
+            else:
+                # Most metrics are 0-1
+                cmap = "YlGnBu"
+                vmin, vmax = 0, 1
+
+            im = ax.imshow(masked_matrix, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
+
+            # Colorbar
+            cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+            metric_labels = {
+                "overall_score": "Overall Quality Score",
+                "correlation": "Signal-Model Correlation",
+                "event_coverage": "Event Coverage",
+                "sequence_coverage": "Sequence Coverage",
+                "match_fraction": "Match State Fraction",
+            }
+            cbar.set_label(metric_labels.get(metric, metric))
+
+            # Labels
+            # Truncate read IDs for display
+            read_labels = [r[:15] + "..." if len(r) > 15 else r for r in reads]
+            # Truncate transcript IDs for display
+            tx_labels = [t[:20] + "..." if len(t) > 20 else t for t in transcripts]
+
+            if n_reads <= 50:
+                ax.set_yticks(range(n_reads))
+                ax.set_yticklabels(read_labels, fontsize=7)
+            else:
+                ax.set_ylabel(f"Reads (n={n_reads})")
+
+            if n_transcripts <= 30:
+                ax.set_xticks(range(n_transcripts))
+                ax.set_xticklabels(tx_labels, rotation=45, ha="right", fontsize=7)
+            else:
+                ax.set_xlabel(f"Transcripts (n={n_transcripts})")
+
+            ax.set_title(f"{title}\nMetric: {metric_labels.get(metric, metric)}", fontsize=12)
+            ax.set_xlabel("Transcript")
+            ax.set_ylabel("Read")
+
+            # Add text annotations for small matrices
+            if n_reads <= 20 and n_transcripts <= 15:
+                for i in range(n_reads):
+                    for j in range(n_transcripts):
+                        val = score_matrix[i, j]
+                        if not np.isnan(val):
+                            # Choose text color based on value
+                            text_color = "white" if val < 0.5 else "black"
+                            ax.text(
+                                j, i, f"{val:.2f}",
+                                ha="center", va="center",
+                                fontsize=6, color=text_color
+                            )
+
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+            logger.info(f"  Saved assessment heatmap to: {output_path}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"Failed to generate assessment heatmap: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def plot_assessment_multi_metric(
+        self,
+        read_alignments: List[Dict[str, Any]],
+        output_path: Path,
+        title: str = "Eventalign Quality Assessment - Multi-Metric",
+        figsize: Tuple[int, int] = (20, 12),
+    ) -> Optional[Path]:
+        """
+        Generate a multi-panel heatmap showing multiple assessment metrics.
+
+        Creates a figure with multiple heatmaps side by side, each showing
+        a different quality metric for all read-transcript pairs.
+
+        Args:
+            read_alignments: List of read alignment results from analyze_region()
+            output_path: Path to save the heatmap image
+            title: Overall figure title
+            figsize: Figure size
+
+        Returns:
+            Path to saved image, or None if visualization failed
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            logger.warning("matplotlib not available for visualization")
+            return None
+
+        if not read_alignments:
+            logger.warning("No read alignments to visualize")
+            return None
+
+        try:
+            # Collect all unique transcripts and reads
+            all_transcripts = set()
+            all_reads = []
+            for ra in read_alignments:
+                read_id = ra.get("read_id", "unknown")
+                all_reads.append(read_id)
+                for aln in ra.get("alignments", []):
+                    all_transcripts.add(aln.get("transcript_id", "unknown"))
+
+            transcripts = sorted(list(all_transcripts))
+            reads = all_reads
+
+            if not transcripts or not reads:
+                logger.warning("No transcripts or reads found")
+                return None
+
+            n_reads = len(reads)
+            n_transcripts = len(transcripts)
+            tx_to_idx = {tx: i for i, tx in enumerate(transcripts)}
+
+            # Define metrics to display
+            metrics = [
+                ("overall_score", "Overall Score", "YlGnBu", 0, 1),
+                ("correlation", "Correlation", "RdYlGn", -1, 1),
+                ("sequence_coverage", "Seq Coverage", "YlGnBu", 0, 1),
+                ("match_fraction", "Match Fraction", "YlGnBu", 0, 1),
+            ]
+
+            # Build matrices for each metric
+            matrices = {}
+            for metric_key, _, _, _, _ in metrics:
+                matrices[metric_key] = np.full((n_reads, n_transcripts), np.nan)
+
+            for i, ra in enumerate(read_alignments):
+                for aln in ra.get("alignments", []):
+                    tx_id = aln.get("transcript_id")
+                    if tx_id not in tx_to_idx:
+                        continue
+                    j = tx_to_idx[tx_id]
+                    qa = aln.get("quality_assessment", {})
+
+                    matrices["overall_score"][i, j] = qa.get("overall_score", 0)
+                    fit = qa.get("signal_model_fit", {})
+                    matrices["correlation"][i, j] = fit.get("correlation", 0)
+                    cov = qa.get("coverage", {})
+                    matrices["sequence_coverage"][i, j] = cov.get("sequence_coverage", 0)
+                    hmm = qa.get("hmm_states", {})
+                    matrices["match_fraction"][i, j] = hmm.get("match_fraction", 0)
+
+            # Create multi-panel figure
+            fig, axes = plt.subplots(2, 2, figsize=figsize)
+            axes = axes.flatten()
+
+            for idx, (metric_key, metric_label, cmap, vmin, vmax) in enumerate(metrics):
+                ax = axes[idx]
+                matrix = matrices[metric_key]
+                masked_matrix = np.ma.masked_invalid(matrix)
+
+                im = ax.imshow(masked_matrix, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
+                cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+                cbar.set_label(metric_label, fontsize=9)
+
+                # Labels
+                read_labels = [r[:12] + ".." if len(r) > 12 else r for r in reads]
+                tx_labels = [t[:15] + ".." if len(t) > 15 else t for t in transcripts]
+
+                if n_reads <= 30:
+                    ax.set_yticks(range(n_reads))
+                    ax.set_yticklabels(read_labels, fontsize=6)
+                else:
+                    ax.set_ylabel(f"Reads (n={n_reads})", fontsize=9)
+
+                if n_transcripts <= 20:
+                    ax.set_xticks(range(n_transcripts))
+                    ax.set_xticklabels(tx_labels, rotation=45, ha="right", fontsize=6)
+                else:
+                    ax.set_xlabel(f"Transcripts (n={n_transcripts})", fontsize=9)
+
+                ax.set_title(metric_label, fontsize=11, fontweight="bold")
+                ax.set_xlabel("Transcript", fontsize=9)
+                ax.set_ylabel("Read", fontsize=9)
+
+            fig.suptitle(title, fontsize=14, fontweight="bold", y=1.02)
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+            logger.info(f"  Saved multi-metric assessment heatmap to: {output_path}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"Failed to generate multi-metric heatmap: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def plot_eventalign_signal(
         self,
         signal: np.ndarray,
@@ -1001,6 +1295,31 @@ class RegionTranscriptAnalyzer:
 
                 if heatmap_file:
                     result["heatmap_path"] = str(heatmap_file)
+
+        # Step 8: Generate assessment heatmaps
+        if result["read_alignments"]:
+            region_safe_id = region_id.replace(":", "_").replace("-", "_")
+
+            # Single metric heatmap (overall score)
+            assessment_heatmap_path = self.output_dir / f"assessment_heatmap_{region_safe_id}.png"
+            assessment_heatmap = self.plot_assessment_heatmap(
+                result["read_alignments"],
+                assessment_heatmap_path,
+                metric="overall_score",
+                title=f"Eventalign Quality - {region_id}",
+            )
+            if assessment_heatmap:
+                result["assessment_heatmap_path"] = str(assessment_heatmap)
+
+            # Multi-metric heatmap
+            multi_metric_path = self.output_dir / f"assessment_multi_{region_safe_id}.png"
+            multi_metric_heatmap = self.plot_assessment_multi_metric(
+                result["read_alignments"],
+                multi_metric_path,
+                title=f"Eventalign Quality Assessment - {region_id}",
+            )
+            if multi_metric_heatmap:
+                result["assessment_multi_metric_path"] = str(multi_metric_heatmap)
 
         # Summary statistics
         result["summary"] = {
