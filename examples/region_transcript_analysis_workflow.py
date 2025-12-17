@@ -2002,6 +2002,7 @@ class RegionTranscriptAnalyzer:
                             "signal": signal,
                             "alignments": [],  # Store all alignments
                         }
+                        logger.info(f"  Starting eventalign visualization collection for read: {read_id[:30]}...")
 
                     # Add all alignments for the first read
                     if first_read_info["read_id"] == read_id:
@@ -2011,6 +2012,7 @@ class RegionTranscriptAnalyzer:
                                 "transcript_id": tx_id,
                             }
                         )
+                        logger.debug(f"    Added alignment for transcript {tx_id} (total: {len(first_read_info['alignments'])})")
 
                     # Include full alignment details, not just summary
                     alignment_record = {
