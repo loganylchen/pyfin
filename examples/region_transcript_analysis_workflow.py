@@ -1161,7 +1161,7 @@ class RegionTranscriptAnalyzer:
 
         try:
             n_panels = min(len(alignments), max_transcripts)
-            
+
             fig, axes = plt.subplots(
                 n_panels,
                 1,
@@ -1175,7 +1175,7 @@ class RegionTranscriptAnalyzer:
                 ax = axes[panel_idx]
                 eventalign_result = aln_data["alignment"]
                 transcript_id = aln_data["transcript_id"]
-                
+
                 # Extract alignment data
                 alignment = eventalign_result.get("alignment", [])
                 scaling = eventalign_result.get("scaling", {})
@@ -1183,21 +1183,34 @@ class RegionTranscriptAnalyzer:
                 n_aligned = eventalign_result.get("n_aligned", len(alignment))
 
                 if not alignment:
-                    ax.text(0.5, 0.5, f"No alignment data for {transcript_id}",
-                           ha='center', va='center', transform=ax.transAxes)
+                    ax.text(
+                        0.5,
+                        0.5,
+                        f"No alignment data for {transcript_id}",
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                    )
                     ax.set_title(f"Transcript: {transcript_id[:40]}")
                     continue
 
                 # Filter and sort alignments
                 alignment_sorted = [
-                    a for a in alignment
+                    a
+                    for a in alignment
                     if a.get("event_idx", -1) >= 0 and a.get("signal_start") is not None
                 ]
                 alignment_sorted.sort(key=lambda x: x.get("signal_start", 0))
 
                 if not alignment_sorted:
-                    ax.text(0.5, 0.5, f"No valid alignments for {transcript_id}",
-                           ha='center', va='center', transform=ax.transAxes)
+                    ax.text(
+                        0.5,
+                        0.5,
+                        f"No valid alignments for {transcript_id}",
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                    )
                     ax.set_title(f"Transcript: {transcript_id[:40]}")
                     continue
 
@@ -1205,7 +1218,9 @@ class RegionTranscriptAnalyzer:
                 signal_starts = [a.get("signal_start", 0) for a in alignment_sorted]
                 signal_lengths = [a.get("signal_length", 0) for a in alignment_sorted]
                 view_start = max(0, min(signal_starts) - 100)
-                view_end = min(len(signal), max(s + l for s, l in zip(signal_starts, signal_lengths)) + 100)
+                view_end = min(
+                    len(signal), max(s + l for s, l in zip(signal_starts, signal_lengths)) + 100
+                )
 
                 # Plot raw signal
                 x = np.arange(view_start, view_end)
@@ -1216,16 +1231,16 @@ class RegionTranscriptAnalyzer:
                 for i, aln in enumerate(alignment_sorted):
                     sig_start = aln.get("signal_start")
                     sig_len = aln.get("signal_length", 0)
-                    
+
                     if sig_start is None or sig_len <= 0:
                         continue
-                    
+
                     sig_end = sig_start + sig_len
-                    
+
                     # Event boundary
                     if sig_start >= view_start and sig_start <= view_end:
                         ax.axvline(sig_start, color="gray", alpha=0.3, linewidth=0.5, linestyle=":")
-                    
+
                     # Event mean (red line)
                     event_mean = aln.get("event_mean")
                     if event_mean is not None:
@@ -1236,7 +1251,7 @@ class RegionTranscriptAnalyzer:
                             linewidth=2.5,
                             alpha=0.8,
                         )
-                    
+
                     # Raw model mean (orange dotted)
                     model_mean = aln.get("model_mean")
                     if model_mean is not None and model_mean > 0:
@@ -1248,7 +1263,7 @@ class RegionTranscriptAnalyzer:
                             linestyle=":",
                             alpha=0.7,
                         )
-                    
+
                     # Scaled model mean (green dashed)
                     scaled_model_mean = aln.get("scaled_model_mean")
                     if scaled_model_mean is not None:
@@ -1268,7 +1283,7 @@ class RegionTranscriptAnalyzer:
                 if panel_idx == n_panels - 1:
                     ax.set_xlabel("Sample index (raw signal)", fontsize=11)
                 ax.set_ylabel("Signal (pA)", fontsize=10)
-                
+
                 tx_label = transcript_id[:40] + "..." if len(transcript_id) > 40 else transcript_id
                 ax.set_title(
                     f"Transcript: {tx_label} | "
@@ -1280,11 +1295,28 @@ class RegionTranscriptAnalyzer:
                 # Add legend only to first panel
                 if panel_idx == 0:
                     from matplotlib.lines import Line2D
+
                     legend_elements = [
-                        Line2D([0], [0], color="steelblue", alpha=0.5, linewidth=1, label="Raw signal"),
+                        Line2D(
+                            [0], [0], color="steelblue", alpha=0.5, linewidth=1, label="Raw signal"
+                        ),
                         Line2D([0], [0], color="red", linewidth=2.5, label="Event mean"),
-                        Line2D([0], [0], color="orange", linewidth=1.5, linestyle=":", label="Model mean (raw)"),
-                        Line2D([0], [0], color="limegreen", linewidth=2, linestyle="--", label="Model mean (scaled)"),
+                        Line2D(
+                            [0],
+                            [0],
+                            color="orange",
+                            linewidth=1.5,
+                            linestyle=":",
+                            label="Model mean (raw)",
+                        ),
+                        Line2D(
+                            [0],
+                            [0],
+                            color="limegreen",
+                            linewidth=2,
+                            linestyle="--",
+                            label="Model mean (scaled)",
+                        ),
                     ]
                     ax.legend(handles=legend_elements, loc="upper right", fontsize=8)
 
@@ -1308,6 +1340,7 @@ class RegionTranscriptAnalyzer:
         except Exception as e:
             logger.error(f"Failed to generate multi-transcript eventalign plot: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -1347,7 +1380,7 @@ class RegionTranscriptAnalyzer:
 
         try:
             n_panels = min(len(alignments), max_transcripts)
-            
+
             fig, axes = plt.subplots(
                 n_panels,
                 1,
@@ -1361,7 +1394,7 @@ class RegionTranscriptAnalyzer:
                 ax = axes[panel_idx]
                 eventalign_result = aln_data["alignment"]
                 transcript_id = aln_data["transcript_id"]
-                
+
                 # Extract alignment data
                 alignment = eventalign_result.get("alignment", [])
                 scaling = eventalign_result.get("scaling", {})
@@ -1369,21 +1402,34 @@ class RegionTranscriptAnalyzer:
                 n_aligned = eventalign_result.get("n_aligned", len(alignment))
 
                 if not alignment:
-                    ax.text(0.5, 0.5, f"No alignment data for {transcript_id}",
-                           ha='center', va='center', transform=ax.transAxes)
+                    ax.text(
+                        0.5,
+                        0.5,
+                        f"No alignment data for {transcript_id}",
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                    )
                     ax.set_title(f"Transcript: {transcript_id[:40]}")
                     continue
 
                 # Filter and sort alignments
                 alignment_sorted = [
-                    a for a in alignment
+                    a
+                    for a in alignment
                     if a.get("event_idx", -1) >= 0 and a.get("signal_start") is not None
                 ]
                 alignment_sorted.sort(key=lambda x: x.get("signal_start", 0))
 
                 if not alignment_sorted:
-                    ax.text(0.5, 0.5, f"No valid alignments for {transcript_id}",
-                           ha='center', va='center', transform=ax.transAxes)
+                    ax.text(
+                        0.5,
+                        0.5,
+                        f"No valid alignments for {transcript_id}",
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                    )
                     ax.set_title(f"Transcript: {transcript_id[:40]}")
                     continue
 
@@ -1391,7 +1437,9 @@ class RegionTranscriptAnalyzer:
                 signal_starts = [a.get("signal_start", 0) for a in alignment_sorted]
                 signal_lengths = [a.get("signal_length", 0) for a in alignment_sorted]
                 view_start = max(0, min(signal_starts) - 100)
-                view_end = min(len(signal), max(s + l for s, l in zip(signal_starts, signal_lengths)) + 100)
+                view_end = min(
+                    len(signal), max(s + l for s, l in zip(signal_starts, signal_lengths)) + 100
+                )
 
                 # Plot raw signal
                 x = np.arange(view_start, view_end)
@@ -1402,16 +1450,16 @@ class RegionTranscriptAnalyzer:
                 for i, aln in enumerate(alignment_sorted):
                     sig_start = aln.get("signal_start")
                     sig_len = aln.get("signal_length", 0)
-                    
+
                     if sig_start is None or sig_len <= 0:
                         continue
-                    
+
                     sig_end = sig_start + sig_len
-                    
+
                     # Event boundary
                     if sig_start >= view_start and sig_start <= view_end:
                         ax.axvline(sig_start, color="gray", alpha=0.3, linewidth=0.5, linestyle=":")
-                    
+
                     # Event mean (red line)
                     event_mean = aln.get("event_mean")
                     if event_mean is not None:
@@ -1422,7 +1470,7 @@ class RegionTranscriptAnalyzer:
                             linewidth=2.5,
                             alpha=0.8,
                         )
-                    
+
                     # Raw model mean (orange dotted)
                     model_mean = aln.get("model_mean")
                     if model_mean is not None and model_mean > 0:
@@ -1434,7 +1482,7 @@ class RegionTranscriptAnalyzer:
                             linestyle=":",
                             alpha=0.7,
                         )
-                    
+
                     # Scaled model mean (green dashed)
                     scaled_model_mean = aln.get("scaled_model_mean")
                     if scaled_model_mean is not None:
@@ -1454,7 +1502,7 @@ class RegionTranscriptAnalyzer:
                 if panel_idx == n_panels - 1:
                     ax.set_xlabel("Sample index (raw signal)", fontsize=11)
                 ax.set_ylabel("Signal (pA)", fontsize=10)
-                
+
                 tx_label = transcript_id[:40] + "..." if len(transcript_id) > 40 else transcript_id
                 ax.set_title(
                     f"Transcript: {tx_label} | "
@@ -1466,11 +1514,28 @@ class RegionTranscriptAnalyzer:
                 # Add legend only to first panel
                 if panel_idx == 0:
                     from matplotlib.lines import Line2D
+
                     legend_elements = [
-                        Line2D([0], [0], color="steelblue", alpha=0.5, linewidth=1, label="Raw signal"),
+                        Line2D(
+                            [0], [0], color="steelblue", alpha=0.5, linewidth=1, label="Raw signal"
+                        ),
                         Line2D([0], [0], color="red", linewidth=2.5, label="Event mean"),
-                        Line2D([0], [0], color="orange", linewidth=1.5, linestyle=":", label="Model mean (raw)"),
-                        Line2D([0], [0], color="limegreen", linewidth=2, linestyle="--", label="Model mean (scaled)"),
+                        Line2D(
+                            [0],
+                            [0],
+                            color="orange",
+                            linewidth=1.5,
+                            linestyle=":",
+                            label="Model mean (raw)",
+                        ),
+                        Line2D(
+                            [0],
+                            [0],
+                            color="limegreen",
+                            linewidth=2,
+                            linestyle="--",
+                            label="Model mean (scaled)",
+                        ),
                     ]
                     ax.legend(handles=legend_elements, loc="upper right", fontsize=8)
 
@@ -1494,6 +1559,7 @@ class RegionTranscriptAnalyzer:
         except Exception as e:
             logger.error(f"Failed to generate multi-transcript eventalign plot: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -2155,13 +2221,15 @@ class RegionTranscriptAnalyzer:
                             "signal": signal,
                             "alignments": [],  # Store all alignments
                         }
-                    
+
                     # Add all alignments for the first read
                     if first_read_info["read_id"] == read_id:
-                        first_read_info["alignments"].append({
-                            "alignment": alignment,
-                            "transcript_id": tx_id,
-                        })
+                        first_read_info["alignments"].append(
+                            {
+                                "alignment": alignment,
+                                "transcript_id": tx_id,
+                            }
+                        )
 
                     # Include full alignment details, not just summary
                     alignment_record = {
@@ -2293,10 +2361,10 @@ class RegionTranscriptAnalyzer:
             if multi_metric_heatmap:
                 result["assessment_multi_metric_path"] = str(multi_metric_heatmap)
 
-        # Step 9: Assign reads to transcripts using EM algorithm
+        # Step 9: Assign reads to transcripts using EM algorithm (with DTW coherence)
         if result["read_alignments"] and ASSIGNMENT_AVAILABLE:
             region_safe_id = region_id.replace(":", "_").replace("-", "_")
-            logger.info(f"  Running EM read-to-transcript assignment...")
+            logger.info(f"  Running EM read-to-transcript assignment (with DTW coherence)...")
 
             assignments = self.assign_reads_to_transcripts(
                 result["read_alignments"],
@@ -2318,7 +2386,7 @@ class RegionTranscriptAnalyzer:
                     assignments,
                     result["read_alignments"],
                     tx_read_plot_path,
-                    title=f"Read Assignments - {region_id}",
+                    title=f"Read Assignments (with DTW) - {region_id}",
                 )
                 if tx_read_plot:
                     result["transcript_reads_plot_path"] = str(tx_read_plot)
@@ -2330,12 +2398,61 @@ class RegionTranscriptAnalyzer:
                 assignment_summary = self.plot_assignment_summary(
                     assignments,
                     assignment_summary_path,
-                    title=f"Assignment Summary - {region_id}",
+                    title=f"Assignment Summary (with DTW) - {region_id}",
                 )
                 if assignment_summary:
                     result["assignment_summary_plot_path"] = str(assignment_summary)
             else:
                 logger.warning(f"  Assignment failed: {assignments.get('error', 'unknown')}")
+
+        # Step 9b: Assign reads using eventalign quality only (no DTW coherence)
+        if result["read_alignments"] and ASSIGNMENT_AVAILABLE:
+            region_safe_id = region_id.replace(":", "_").replace("-", "_")
+            logger.info(f"  Running EM assignment based on eventalign quality only (no DTW)...")
+
+            assignments_ea = self.assign_reads_to_transcripts(
+                result["read_alignments"],
+                dtw_distances=None,  # Explicitly no DTW
+                sigma=1.0,
+                beta=0.0,  # No coherence term
+            )
+
+            if assignments_ea.get("status") == "success":
+                result["assignments_eventalign_only"] = assignments_ea
+                logger.info(
+                    f"  Eventalign-only assignment: {assignments_ea['n_reads']} reads to "
+                    f"{assignments_ea['n_transcripts']} transcripts"
+                )
+
+                # Visualize eventalign-only assignments on genome
+                tx_read_plot_ea_path = (
+                    self.output_dir / f"transcript_reads_eventalign_{region_safe_id}.png"
+                )
+                tx_read_plot_ea = self.plot_transcript_read_assignments(
+                    region,
+                    assignments_ea,
+                    result["read_alignments"],
+                    tx_read_plot_ea_path,
+                    title=f"Read Assignments (Eventalign Only) - {region_id}",
+                )
+                if tx_read_plot_ea:
+                    result["transcript_reads_eventalign_plot_path"] = str(tx_read_plot_ea)
+
+                # Visualize eventalign-only assignment summary
+                assignment_summary_ea_path = (
+                    self.output_dir / f"assignment_summary_eventalign_{region_safe_id}.png"
+                )
+                assignment_summary_ea = self.plot_assignment_summary(
+                    assignments_ea,
+                    assignment_summary_ea_path,
+                    title=f"Assignment Summary (Eventalign Only) - {region_id}",
+                )
+                if assignment_summary_ea:
+                    result["assignment_summary_eventalign_plot_path"] = str(assignment_summary_ea)
+            else:
+                logger.warning(
+                    f"  Eventalign-only assignment failed: {assignments_ea.get('error', 'unknown')}"
+                )
 
         # Summary statistics
         result["summary"] = {
@@ -3070,13 +3187,17 @@ def main():
     print(f"Regions with clustering: {results['summary']['regions_with_clustering']}")
     print(f"Total clusters identified: {results['summary']['total_clusters']}")
     print(f"\nOutput files saved to: {args.output}/")
-    print(f"  - analysis_results.json          : Complete analysis data")
-    print(f"  - eventalign_*_first_read.png    : Signal-sequence alignment visualization")
-    print(f"  - dtw_heatmap_*.png              : Read-read DTW distance heatmaps")
-    print(f"  - assessment_heatmap_*.png       : Eventalign quality heatmaps")
-    print(f"  - assessment_multi_*.png         : Multi-metric quality assessment")
-    print(f"  - transcript_reads_*.png         : Transcript structure with assigned reads")
-    print(f"  - assignment_summary_*.png       : Read assignment summary statistics")
+    print(f"  - analysis_results.json                      : Complete analysis data")
+    print(
+        f"  - eventalign_*_first_read.png                : Signal-sequence alignment (multi-transcript)"
+    )
+    print(f"  - dtw_heatmap_*.png                          : Read-read DTW distance heatmaps")
+    print(f"  - assessment_heatmap_*.png                   : Eventalign quality heatmaps")
+    print(f"  - assessment_multi_*.png                     : Multi-metric quality assessment")
+    print(f"  - transcript_reads_*.png                     : Read assignments with DTW coherence")
+    print(f"  - assignment_summary_*.png                   : Assignment summary with DTW")
+    print(f"  - transcript_reads_eventalign_*.png          : Read assignments (eventalign only)")
+    print(f"  - assignment_summary_eventalign_*.png        : Assignment summary (eventalign only)")
 
 
 if __name__ == "__main__":
