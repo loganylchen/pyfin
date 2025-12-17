@@ -29,6 +29,15 @@ except ImportError as e:
     _EVENTALIGN_CUDA_AVAILABLE = False
     _eventalign_cuda_import_error = str(e)
 
+# Log backend availability upon module import
+if _EVENTALIGN_AVAILABLE:
+    if _EVENTALIGN_CUDA_AVAILABLE:
+        print("🚀 Eventalign: GPU (CUDA) acceleration ENABLED")
+    else:
+        print("💻 Eventalign: Using CPU implementation (CUDA not available)")
+elif _EVENT_AVAILABLE:
+    print("ℹ️  Event detection available (eventalign not built)")
+
 
 def detect_events(raw_signal: np.ndarray) -> list[dict]:
     """

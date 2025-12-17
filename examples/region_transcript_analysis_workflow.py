@@ -75,12 +75,30 @@ from fin.io.io_pod5 import Pod5Reader
 
 # Import eventalign functions
 try:
-    from fin._f5c import detect_events, eventalign, profile_hmm_eventalign, is_available
+    from fin._f5c import (
+        detect_events,
+        eventalign,
+        profile_hmm_eventalign,
+        is_available,
+        eventalign_cuda_is_available,
+    )
 
     EVENTALIGN_AVAILABLE = is_available()
+    EVENTALIGN_CUDA_AVAILABLE = eventalign_cuda_is_available()
+    
+    # Log backend availability immediately upon import
+    if EVENTALIGN_AVAILABLE:
+        if EVENTALIGN_CUDA_AVAILABLE:
+            print("🚀 Eventalign: GPU (CUDA) acceleration ENABLED")
+        else:
+            print("💻 Eventalign: Using CPU implementation (CUDA not available)")
+    else:
+        print("⚠️  Eventalign: Extension not available")
+        
 except ImportError as e:
     EVENTALIGN_AVAILABLE = False
-    print(f"Warning: eventalign not available: {e}")
+    EVENTALIGN_CUDA_AVAILABLE = False
+    print(f"⚠️  Warning: eventalign not available: {e}")
 
 # Import DTW functions
 try:
@@ -169,6 +187,15 @@ class RegionTranscriptAnalyzer:
         logger.info(f"  GTF: {self.gtf_path}")
         logger.info(f"  POD5: {self.pod5_path}")
         logger.info(f"  Output: {self.output_dir}")
+
+        # Log eventalign backend availability
+        if EVENTALIGN_AVAILABLE:
+            if EVENTALIGN_CUDA_AVAILABLE:
+                logger.info("🚀 Eventalign backend: GPU (CUDA) acceleration available")
+            else:
+                logger.info("💻 Eventalign backend: CPU implementation only (CUDA not available)")
+        else:
+            logger.warning("⚠️  Eventalign: Extension not available")
 
     def load_references(self):
         """Load genome and transcriptome reference sequences."""
