@@ -323,7 +323,6 @@ int32_t align_with_flanking_cpu(
 
     // Initialize: start state transitions to first kmer
     float lp_sm = 0.0f; // Log prob from start to match
-    float lp_ms = 0.0f; // Log prob from match to end (for termination)
     float BAD_EVENT_PENALTY = 0.0f;
 
     // Row 0 is start state, row 1+ are filled in main loop
@@ -744,6 +743,7 @@ static int32_t profile_hmm_traceback_with_flanking(
     float best_score = -INFINITY;
     int best_event_row = n_events;
     int best_state = STATE_MATCH;
+    float lp_ms = 0.0f; // Log prob from match to end (for termination)
 
     for (int32_t row = 1; row <= n_events; ++row)
     {
@@ -805,7 +805,7 @@ static int32_t profile_hmm_traceback_with_flanking(
             }
 
             // Event statistics
-            if (curr_event >= 0 && curr_event < events.n)
+            if (curr_event >= 0 && curr_event < (int32_t)events.n)
             {
                 aln->event_mean = events.event[curr_event].mean;
                 aln->event_stdv = events.event[curr_event].stdv;
@@ -839,7 +839,7 @@ static int32_t profile_hmm_traceback_with_flanking(
                 aln->scaled_model_stdv = 0.0f;
             }
         }
-        else if (curr_state == STATE_BAD_EVENT && curr_event >= 0 && curr_event < events.n)
+        else if (curr_state == STATE_BAD_EVENT && curr_event >= 0 && curr_event < (int32_t)events.n)
         {
             // Record bad events too
             event_alignment_t *aln = &alignment[align_idx++];
