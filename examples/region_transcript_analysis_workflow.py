@@ -1183,7 +1183,7 @@ def main():
         "--max-regions", type=int, default=None, help="Maximum number of regions to analyze"
     )
     parser.add_argument(
-        "--max-reads", type=int, default=100, help="Maximum reads per region (default: 100)"
+        "--max-reads", type=int, default=10, help="Maximum reads per region (default: 10)"
     )
     parser.add_argument(
         "--max-transcripts",
