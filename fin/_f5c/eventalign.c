@@ -426,13 +426,15 @@ static PyObject *py_profile_hmm_eventalign(PyObject *self, PyObject *args, PyObj
         event_alignment_t *aln = &alignment[i];
         PyObject *record = PyDict_New();
 
-        // Convert event index to raw signal order (before internal reversal)
-        // Raw signal order: first event = 3' end, last event = 5' end
-        int raw_event_idx = (aln->event_idx >= 0) ? ((int)et.n - 1 - aln->event_idx) : -1;
+        // F5C compatibility: Use event index from reversed array (matches f5c behavior)
+        // After event reversal: event[0] = 5' end, event[n-1] = 3' end
+        // This matches sequence positions (position 0 = 5' end)
+        // F5C does NOT convert back to raw signal order in eventalign output
+        int event_idx_output = (aln->event_idx >= 0) ? aln->event_idx : -1;
 
         PyDict_SetItemString(record, "ref_position", PyLong_FromLong(aln->ref_position));
         PyDict_SetItemString(record, "ref_kmer", PyUnicode_FromString(aln->ref_kmer));
-        PyDict_SetItemString(record, "event_idx", PyLong_FromLong(raw_event_idx));
+        PyDict_SetItemString(record, "event_idx", PyLong_FromLong(event_idx_output));
         PyDict_SetItemString(record, "signal_start", PyLong_FromUnsignedLongLong(aln->signal_start));
         PyDict_SetItemString(record, "signal_length", PyFloat_FromDouble(aln->signal_length));
         PyDict_SetItemString(record, "hmm_state", PyUnicode_FromFormat("%c", aln->hmm_state));

@@ -10,8 +10,15 @@
 #include "event_detection_simple.h"
 
 // Soft-clipping transition probabilities (from f5c)
+// For RNA: events are reversed before alignment, so:
+//   - Pre-flanking clips events at the 5' end of sequence (END of raw signal)
+//   - Post-flanking clips events at the 3' end of sequence (START of raw signal)
 #define TRANS_START_TO_CLIP 0.5f // Probability of entering clipping state
 #define TRANS_CLIP_SELF 0.9f     // Probability of staying in clipping state
+
+// Alternative parameters for testing asymmetric clipping:
+// #define TRANS_START_TO_CLIP_PRE 0.3f   // Less aggressive at 5' end
+// #define TRANS_START_TO_CLIP_POST 0.7f  // More aggressive at 3' end
 
 // HMM states for alignment (from f5c R9 profile)
 typedef enum

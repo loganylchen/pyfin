@@ -562,8 +562,11 @@ static void reverse_event_table(event_table *et)
 event_table getevents_simple(size_t nsample, float *rawptr)
 {
     // Parameters from f5c/scrappie defaults
-    int trim_start = 200;      // Trim 200 samples from start
-    int trim_end = 10;         // Trim 10 samples from end
+    // For RNA Direct Sequencing:
+    //   Signal start (index 0) = 3' end of RNA (enters pore first)
+    //   Signal end (index N-1) = 5' end of RNA (exits pore last)
+    int trim_start = 200;      // Trim from START of signal (3' end of RNA, adapter region)
+    int trim_end = 10;         // Trim from END of signal (5' end of RNA, minimal trim)
     int varseg_chunk = 100;    // Chunk size for MAD calculation
     float varseg_thresh = 0.0; // Percentile threshold (0.0 = median)
 
@@ -594,8 +597,9 @@ event_table getevents_simple(size_t nsample, float *rawptr)
 event_table getevents_raw_order(size_t nsample, float *rawptr)
 {
     // Parameters from f5c/scrappie defaults
-    int trim_start = 200;
-    int trim_end = 10;
+    // Signal coordinates: start=3' end, end=5' end (for RNA)
+    int trim_start = 200; // Trim 3' end (adapter)
+    int trim_end = 10;    // Trim 5' end (minimal)
     int varseg_chunk = 100;
     float varseg_thresh = 0.0;
 
