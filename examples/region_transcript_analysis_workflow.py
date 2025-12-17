@@ -1217,10 +1217,10 @@ class RegionTranscriptAnalyzer:
                 # Determine view window
                 signal_starts = [a.get("signal_start", 0) for a in alignment_sorted]
                 signal_lengths = [a.get("signal_length", 0) for a in alignment_sorted]
-                view_start = max(0, min(signal_starts) - 100)
-                view_end = min(
+                view_start = int(max(0, min(signal_starts) - 100))
+                view_end = int(min(
                     len(signal), max(s + l for s, l in zip(signal_starts, signal_lengths)) + 100
-                )
+                ))
 
                 # Plot raw signal
                 x = np.arange(view_start, view_end)
@@ -1235,7 +1235,8 @@ class RegionTranscriptAnalyzer:
                     if sig_start is None or sig_len <= 0:
                         continue
 
-                    sig_end = sig_start + sig_len
+                    sig_start = int(sig_start)
+                    sig_end = int(sig_start + sig_len)
 
                     # Event boundary
                     if sig_start >= view_start and sig_start <= view_end:
