@@ -323,6 +323,7 @@ int32_t align_with_flanking_cpu(
 
     // Initialize: start state transitions to first kmer
     float lp_sm = 0.0f; // Log prob from start to match
+    float lp_ms = 0.0f; // Log prob from match to end (for termination)
     float BAD_EVENT_PENALTY = 0.0f;
 
     // Row 0 is start state, row 1+ are filled in main loop
@@ -749,8 +750,9 @@ static int32_t profile_hmm_traceback_with_flanking(
         for (int s = 0; s < NUM_STATES; ++s)
         {
             int state_idx = (n_kmers - 1) * NUM_STATES + s;
-            // post_flank[row] gives log prob of soft-clipping events row..n_events-1
-            float score = dp_matrix[row][state_idx] + post_flank[row];
+            // post_flank[row - 1] gives log prob of soft-clipping events (row-1)..n_events-1
+            // Add lp_ms (match-to-start transition) as in f5c
+            float score = dp_matrix[row][state_idx] + lp_ms + post_flank[row - 1];
             if (score > best_score)
             {
                 best_score = score;
