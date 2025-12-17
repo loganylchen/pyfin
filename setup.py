@@ -343,13 +343,13 @@ eventalign_extension = Extension(
 eventalign_extension.ext_type = "f5c"
 
 # CUDA Eventalign extension (GPU accelerated) - built only if CUDA is available
+# Note: align.cu contains both GPU and CPU code, so we don't need align.c
 cuda_eventalign_extension = Extension(
     name="fin._f5c._eventalign_cuda",
     sources=[
         os.path.join(F5C_DIR, "eventalign.c"),
         os.path.join(F5C_DIR, "event_detection_simple.c"),
-        os.path.join(F5C_DIR, "align.c"),  # CPU alignment functions (profile_hmm_align)
-        os.path.join(F5C_DIR, "align.cu"),  # GPU alignment with CUDA
+        os.path.join(F5C_DIR, "align.cu"),  # GPU alignment (includes CPU fallback code)
     ],
     depends=[
         os.path.join(F5C_DIR, "event_detection_simple.h"),
