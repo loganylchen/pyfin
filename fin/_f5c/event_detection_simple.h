@@ -53,8 +53,13 @@ event_table detect_events_simple(raw_table const rt, detector_param_t const edpa
 
 // High-level wrapper function for numpy arrays with adapter trimming
 // Uses RNA defaults for event detection
-// Events are returned in 3'->5' order (reversed) to match RNA pore transit direction
+// Events are REVERSED internally (5'->3' order) for sequence alignment
 event_table getevents_simple(size_t nsample, float *rawptr);
+
+// High-level wrapper that returns events in RAW SIGNAL order (no reversal)
+// Event[0] = first event in raw signal (3' end for RNA)
+// Event[n-1] = last event in raw signal (5' end for RNA)
+event_table getevents_raw_order(size_t nsample, float *rawptr);
 
 // Free event table memory
 void free_event_table(event_table *et);

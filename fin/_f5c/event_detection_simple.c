@@ -557,7 +557,8 @@ static void reverse_event_table(event_table *et)
 }
 
 // Wrapper function for numpy array with adapter trimming
-// For RNA-seq: events are reversed to match the 3'->5' pore transit direction
+// For RNA-seq: events are reversed to match the 5'->3' sequence direction
+// This is used internally by eventalign
 event_table getevents_simple(size_t nsample, float *rawptr)
 {
     // Parameters from f5c/scrappie defaults
@@ -582,6 +583,33 @@ event_table getevents_simple(size_t nsample, float *rawptr)
     // After reversal: first event = 5' end, matching the 5'->3' sequence direction
     // This means users should NOT reverse their sequence - just use original 5'->3' sequence
     reverse_event_table(&et);
+
+    return et;
+}
+
+// Wrapper function that returns events in RAW SIGNAL order (no reversal)
+// Event[0] = first event in raw signal (3' end for RNA)
+// Event[n-1] = last event in raw signal (5' end for RNA)
+// This matches the order expected when indexing into the raw signal
+event_table getevents_raw_order(size_t nsample, float *rawptr)
+{
+    // Parameters from f5c/scrappie defaults
+    int trim_start = 200;
+    int trim_end = 10;
+    int varseg_chunk = 100;
+    float varseg_thresh = 0.0;
+
+    // Create raw table
+    raw_table rt = {nsample, 0, nsample, rawptr};
+
+    // Trim adapters and segment the signal
+    rt = trim_and_segment_raw(rt, trim_start, trim_end, varseg_chunk, varseg_thresh);
+
+    // Use RNA detector parameters
+    detector_param_t const *ed_params = &RNA_DEFAULTS;
+
+    // Detect events on the trimmed signal - NO REVERSAL
+    event_table et = detect_events_simple(rt, *ed_params);
 
     return et;
 }

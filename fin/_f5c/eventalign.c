@@ -252,11 +252,15 @@ static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
     }
 
     // Fill in the mappings from aligned pairs
-    // Event indices match detect_events() output (both use reversed event table)
+    // Convert event indices to raw signal order (before internal reversal)
+    // Raw signal order: first event = 3' end, last event = 5' end
+    // So sequence[0] (5' end) should map to high event indices
     for (int i = 0; i < n_pairs; ++i)
     {
         int kmer_idx = aligned_pairs[i].ref_pos;
-        int event_idx = aligned_pairs[i].read_pos;
+        int internal_event_idx = aligned_pairs[i].read_pos;
+        // Convert to raw signal order: raw_idx = n_events - 1 - internal_idx
+        int raw_event_idx = (int)et.n - 1 - internal_event_idx;
 
         if (kmer_idx >= 0 && kmer_idx < n_kmers_seq)
         {
@@ -266,9 +270,9 @@ static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
 
             if (start == -1)
             {
-                PyDict_SetItemString(mapping, "start", PyLong_FromLong(event_idx));
+                PyDict_SetItemString(mapping, "start", PyLong_FromLong(raw_event_idx));
             }
-            PyDict_SetItemString(mapping, "stop", PyLong_FromLong(event_idx));
+            PyDict_SetItemString(mapping, "stop", PyLong_FromLong(raw_event_idx));
         }
     }
 
@@ -422,10 +426,13 @@ static PyObject *py_profile_hmm_eventalign(PyObject *self, PyObject *args, PyObj
         event_alignment_t *aln = &alignment[i];
         PyObject *record = PyDict_New();
 
-        // Event indices match detect_events() output (both use reversed event table)
+        // Convert event index to raw signal order (before internal reversal)
+        // Raw signal order: first event = 3' end, last event = 5' end
+        int raw_event_idx = (aln->event_idx >= 0) ? ((int)et.n - 1 - aln->event_idx) : -1;
+
         PyDict_SetItemString(record, "ref_position", PyLong_FromLong(aln->ref_position));
         PyDict_SetItemString(record, "ref_kmer", PyUnicode_FromString(aln->ref_kmer));
-        PyDict_SetItemString(record, "event_idx", PyLong_FromLong(aln->event_idx));
+        PyDict_SetItemString(record, "event_idx", PyLong_FromLong(raw_event_idx));
         PyDict_SetItemString(record, "hmm_state", PyUnicode_FromFormat("%c", aln->hmm_state));
         PyDict_SetItemString(record, "strand_idx", PyLong_FromLong(aln->strand_idx));
         PyDict_SetItemString(record, "model_kmer", PyUnicode_FromString(aln->model_kmer));
