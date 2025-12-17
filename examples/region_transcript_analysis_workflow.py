@@ -744,9 +744,13 @@ class RegionTranscriptAnalyzer:
                             # Choose text color based on value
                             text_color = "white" if val < 0.5 else "black"
                             ax.text(
-                                j, i, f"{val:.2f}",
-                                ha="center", va="center",
-                                fontsize=6, color=text_color
+                                j,
+                                i,
+                                f"{val:.2f}",
+                                ha="center",
+                                va="center",
+                                fontsize=6,
+                                color=text_color,
                             )
 
             plt.tight_layout()
@@ -759,6 +763,7 @@ class RegionTranscriptAnalyzer:
         except Exception as e:
             logger.error(f"Failed to generate assessment heatmap: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -886,6 +891,7 @@ class RegionTranscriptAnalyzer:
         except Exception as e:
             logger.error(f"Failed to generate multi-metric heatmap: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -1577,10 +1583,16 @@ def assess_eventalign_quality(
     # ========== 6. Events per Base ==========
     events_per_base = n_aligned / seq_len if seq_len > 0 else 0.0
     # Typical range is 1-5 events per base for good alignments
-    epb_score = min(1.0, events_per_base / 2.0) if events_per_base <= 5 else max(0.0, 1.0 - (events_per_base - 5) / 10)
+    epb_score = (
+        min(1.0, events_per_base / 2.0)
+        if events_per_base <= 5
+        else max(0.0, 1.0 - (events_per_base - 5) / 10)
+    )
 
     # ========== 7. Event Duration Statistics ==========
-    durations = [a.get("event_duration", 0) for a in valid_alignments if a.get("event_duration", 0) > 0]
+    durations = [
+        a.get("event_duration", 0) for a in valid_alignments if a.get("event_duration", 0) > 0
+    ]
     if durations:
         mean_duration = float(np.mean(durations))
         std_duration = float(np.std(durations))
@@ -1608,7 +1620,9 @@ def assess_eventalign_quality(
     # Check how much of the signal was soft-clipped (before/after alignment)
     if signal_starts:
         pre_clip_samples = int(min(signal_starts))
-        post_clip_samples = signal_length - int(max(s + l for s, l in zip(signal_starts, signal_lengths)))
+        post_clip_samples = signal_length - int(
+            max(s + l for s, l in zip(signal_starts, signal_lengths))
+        )
         pre_clip_fraction = pre_clip_samples / signal_length if signal_length > 0 else 0.0
         post_clip_fraction = post_clip_samples / signal_length if signal_length > 0 else 0.0
         total_clip_fraction = pre_clip_fraction + post_clip_fraction
@@ -1622,28 +1636,28 @@ def assess_eventalign_quality(
     # ========== 10. Overall Quality Score ==========
     # Weighted combination of key metrics
     weights = {
-        "correlation": 0.25,      # Signal-model correlation is very important
-        "match_fraction": 0.15,   # High match state fraction is good
-        "event_coverage": 0.10,   # Good event utilization
-        "sequence_coverage": 0.15,# Good sequence coverage
-        "continuity": 0.10,       # Continuous alignment without big gaps
-        "scaling": 0.10,          # Reasonable scaling parameters
-        "epb": 0.05,              # Reasonable events per base
-        "low_bad_events": 0.10,   # Low bad event fraction
+        "correlation": 0.25,  # Signal-model correlation is very important
+        "match_fraction": 0.15,  # High match state fraction is good
+        "event_coverage": 0.10,  # Good event utilization
+        "sequence_coverage": 0.15,  # Good sequence coverage
+        "continuity": 0.10,  # Continuous alignment without big gaps
+        "scaling": 0.10,  # Reasonable scaling parameters
+        "epb": 0.05,  # Reasonable events per base
+        "low_bad_events": 0.10,  # Low bad event fraction
     }
 
     # Normalize correlation to 0-1 (correlation can be negative)
     norm_correlation = (correlation + 1) / 2
 
     overall_score = (
-        weights["correlation"] * norm_correlation +
-        weights["match_fraction"] * match_fraction +
-        weights["event_coverage"] * event_coverage +
-        weights["sequence_coverage"] * sequence_coverage +
-        weights["continuity"] * continuity_score +
-        weights["scaling"] * scaling_quality +
-        weights["epb"] * epb_score +
-        weights["low_bad_events"] * (1 - bad_event_fraction)
+        weights["correlation"] * norm_correlation
+        + weights["match_fraction"] * match_fraction
+        + weights["event_coverage"] * event_coverage
+        + weights["sequence_coverage"] * sequence_coverage
+        + weights["continuity"] * continuity_score
+        + weights["scaling"] * scaling_quality
+        + weights["epb"] * epb_score
+        + weights["low_bad_events"] * (1 - bad_event_fraction)
     )
 
     # Quality grade
@@ -1663,7 +1677,6 @@ def assess_eventalign_quality(
         "status": "success",
         "overall_score": round(overall_score, 4),
         "grade": grade,
-
         # Coverage metrics
         "coverage": {
             "event_coverage": round(event_coverage, 4),
@@ -1675,7 +1688,6 @@ def assess_eventalign_quality(
             "n_aligned": n_aligned,
             "events_per_base": round(events_per_base, 3),
         },
-
         # HMM state distribution
         "hmm_states": {
             "match_fraction": round(match_fraction, 4),
@@ -1683,7 +1695,6 @@ def assess_eventalign_quality(
             "kmer_skip_fraction": round(kmer_skip_fraction, 4),
             "state_counts": state_counts,
         },
-
         # Signal-model fit
         "signal_model_fit": {
             "correlation": round(correlation, 4),
@@ -1692,7 +1703,6 @@ def assess_eventalign_quality(
             "rmse": round(rmse, 3),
             "nrmse": round(nrmse, 4),
         },
-
         # Continuity metrics
         "continuity": {
             "event_continuity_score": round(continuity_score, 4),
@@ -1701,7 +1711,6 @@ def assess_eventalign_quality(
             "mean_event_gap": round(mean_gap, 2),
             "max_position_gap": max_pos_gap,
         },
-
         # Event duration statistics
         "event_duration": {
             "mean": round(mean_duration, 3),
@@ -1709,7 +1718,6 @@ def assess_eventalign_quality(
             "min": round(min_duration, 3),
             "max": round(max_duration, 3),
         },
-
         # Scaling parameters
         "scaling": {
             "scale": round(scale, 4),
@@ -1720,7 +1728,6 @@ def assess_eventalign_quality(
             "shift_in_range": shift_ok,
             "var_in_range": var_ok,
         },
-
         # Soft-clipping info
         "soft_clipping": {
             "pre_clip_samples": pre_clip_samples,
@@ -1730,7 +1737,6 @@ def assess_eventalign_quality(
             "total_clip_fraction": round(max(0, total_clip_fraction), 4),
             "aligned_signal_range": [int(min_signal), int(max_signal)],
         },
-
         # Diagnostic messages
         "diagnostics": [],
     }
@@ -1739,25 +1745,41 @@ def assess_eventalign_quality(
     diagnostics = assessment["diagnostics"]
 
     if correlation < 0.5:
-        diagnostics.append(f"Low signal-model correlation ({correlation:.3f}). Possible sequence mismatch or poor scaling.")
+        diagnostics.append(
+            f"Low signal-model correlation ({correlation:.3f}). Possible sequence mismatch or poor scaling."
+        )
     if event_coverage < 0.3:
-        diagnostics.append(f"Low event coverage ({event_coverage:.1%}). Many events were not aligned.")
+        diagnostics.append(
+            f"Low event coverage ({event_coverage:.1%}). Many events were not aligned."
+        )
     if sequence_coverage < 0.5:
-        diagnostics.append(f"Low sequence coverage ({sequence_coverage:.1%}). Large portions of sequence not aligned.")
+        diagnostics.append(
+            f"Low sequence coverage ({sequence_coverage:.1%}). Large portions of sequence not aligned."
+        )
     if bad_event_fraction > 0.3:
-        diagnostics.append(f"High bad event fraction ({bad_event_fraction:.1%}). Signal quality may be poor.")
+        diagnostics.append(
+            f"High bad event fraction ({bad_event_fraction:.1%}). Signal quality may be poor."
+        )
     if max_gap > 50:
-        diagnostics.append(f"Large event index gap ({max_gap}). Possible signal dropout or alignment issue.")
+        diagnostics.append(
+            f"Large event index gap ({max_gap}). Possible signal dropout or alignment issue."
+        )
     if not scale_ok:
         diagnostics.append(f"Unusual scale parameter ({scale:.4f}). Expected 0.5-2.0.")
     if not shift_ok:
         diagnostics.append(f"Unusual shift parameter ({shift:.1f}). Expected -50 to +50.")
     if events_per_base < 0.5:
-        diagnostics.append(f"Very low events per base ({events_per_base:.2f}). Possible sequence length mismatch.")
+        diagnostics.append(
+            f"Very low events per base ({events_per_base:.2f}). Possible sequence length mismatch."
+        )
     if events_per_base > 10:
-        diagnostics.append(f"Very high events per base ({events_per_base:.2f}). Possible over-segmentation.")
+        diagnostics.append(
+            f"Very high events per base ({events_per_base:.2f}). Possible over-segmentation."
+        )
     if total_clip_fraction > 0.5:
-        diagnostics.append(f"High soft-clipping ({total_clip_fraction:.1%}). Much of signal not aligned.")
+        diagnostics.append(
+            f"High soft-clipping ({total_clip_fraction:.1%}). Much of signal not aligned."
+        )
 
     if not diagnostics:
         diagnostics.append("No issues detected. Alignment quality is good.")
@@ -1794,8 +1816,12 @@ def print_assessment_report(assessment: Dict[str, Any], verbose: bool = True) ->
     # Coverage summary
     cov = assessment["coverage"]
     print(f"\n📊 COVERAGE:")
-    print(f"   Events aligned:    {cov['n_aligned']:,} / {cov['n_events']:,} ({cov['event_coverage']:.1%})")
-    print(f"   Sequence covered:  {cov['aligned_positions']:,} / {cov['sequence_length']:,} positions ({cov['sequence_coverage']:.1%})")
+    print(
+        f"   Events aligned:    {cov['n_aligned']:,} / {cov['n_events']:,} ({cov['event_coverage']:.1%})"
+    )
+    print(
+        f"   Sequence covered:  {cov['aligned_positions']:,} / {cov['sequence_length']:,} positions ({cov['sequence_coverage']:.1%})"
+    )
     print(f"   Signal covered:    {cov['signal_coverage']:.1%}")
     print(f"   Events per base:   {cov['events_per_base']:.2f}")
 
@@ -1840,9 +1866,15 @@ def print_assessment_report(assessment: Dict[str, Any], verbose: bool = True) ->
         # Soft-clipping
         clip = assessment["soft_clipping"]
         print(f"\n✂️ SOFT-CLIPPING:")
-        print(f"   Pre-clip:          {clip['pre_clip_samples']:,} samples ({clip['pre_clip_fraction']:.1%})")
-        print(f"   Post-clip:         {clip['post_clip_samples']:,} samples ({clip['post_clip_fraction']:.1%})")
-        print(f"   Aligned range:     [{clip['aligned_signal_range'][0]:,}, {clip['aligned_signal_range'][1]:,}]")
+        print(
+            f"   Pre-clip:          {clip['pre_clip_samples']:,} samples ({clip['pre_clip_fraction']:.1%})"
+        )
+        print(
+            f"   Post-clip:         {clip['post_clip_samples']:,} samples ({clip['post_clip_fraction']:.1%})"
+        )
+        print(
+            f"   Aligned range:     [{clip['aligned_signal_range'][0]:,}, {clip['aligned_signal_range'][1]:,}]"
+        )
 
     # Diagnostics
     print(f"\n💡 DIAGNOSTICS:")
@@ -1954,7 +1986,7 @@ def main():
         "--max-regions", type=int, default=None, help="Maximum number of regions to analyze"
     )
     parser.add_argument(
-        "--max-reads", type=int, default=10, help="Maximum reads per region (default: 10)"
+        "--max-reads", type=int, default=100, help="Maximum reads per region (default: 100)"
     )
     parser.add_argument(
         "--max-transcripts",
