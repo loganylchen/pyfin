@@ -602,16 +602,15 @@ class RegionTranscriptAnalyzer:
         output_path: Path,
         read_id: str = "",
         transcript_id: str = "",
-        max_events: int = 100,
-        figsize: Tuple[int, int] = (16, 10),
+        max_events: int = 200,
+        figsize: Tuple[int, int] = (20, 8),
     ) -> Optional[Path]:
         """
         Visualize the eventalign result for a single read.
 
-        Creates a multi-panel figure showing:
-        1. Raw signal with event boundaries and k-mer annotations
-        2. Event means vs model expected means
-        3. HMM state distribution
+        Creates a single panel showing raw signal with event boundaries,
+        event means, and model expected means overlaid. Uses actual signal_start
+        and signal_length from eventalign results.
 
         Args:
             signal: Raw nanopore signal
@@ -639,187 +638,134 @@ class RegionTranscriptAnalyzer:
                 logger.warning("No alignment data to visualize")
                 return None
 
+            # Sort alignment by event_idx (raw signal order)
+            alignment_sorted = sorted(
+                [a for a in alignment if a.get("event_idx", -1) >= 0],
+                key=lambda x: x.get("event_idx", 0),
+            )
+
             # Limit events for visualization
-            if len(alignment) > max_events:
-                alignment = alignment[:max_events]
+            if len(alignment_sorted) > max_events:
+                alignment_sorted = alignment_sorted[:max_events]
 
-            # Create figure with subplots
-            fig = plt.figure(figsize=figsize)
-            gs = fig.add_gridspec(3, 1, height_ratios=[3, 1.5, 1], hspace=0.3)
-
-            # === Panel 1: Raw signal with event boundaries ===
-            ax_signal = fig.add_subplot(gs[0])
+            # Create single-panel figure
+            fig, ax = plt.subplots(figsize=figsize)
 
             # Plot raw signal
-            ax_signal.plot(signal, color="steelblue", alpha=0.7, linewidth=0.5, label="Raw signal")
+            ax.plot(signal, color="steelblue", alpha=0.5, linewidth=0.3, label="Raw signal")
 
-            # Collect event info for annotation
-            event_starts = []
-            event_ends = []
-            event_means = []
-            event_kmers = []
-            event_states = []
-            model_means = []
+            # Determine signal range to display based on aligned events
+            if alignment_sorted:
+                min_start = min(a.get("signal_start", 0) for a in alignment_sorted)
+                max_end = max(
+                    a.get("signal_start", 0) + int(a.get("signal_length", 100))
+                    for a in alignment_sorted
+                )
+                # Add some padding
+                view_start = max(0, int(min_start) - 500)
+                view_end = min(len(signal), int(max_end) + 500)
+            else:
+                view_start = 0
+                view_end = len(signal)
 
-            for aln in alignment:
-                event_idx = aln.get("event_idx", -1)
-                if event_idx < 0:
+            # Draw event boundaries, means, and model means using signal_start/signal_length
+            for i, aln in enumerate(alignment_sorted):
+                signal_start = aln.get("signal_start", 0)
+                signal_length = aln.get("signal_length", 0)
+                event_mean = aln.get("event_mean", 0)
+                scaled_model_mean = aln.get("scaled_model_mean", aln.get("model_mean", 0))
+                kmer = aln.get("ref_kmer", "")
+                state = aln.get("hmm_state", "M")
+                event_idx = aln.get("event_idx", i)
+                ref_pos = aln.get("ref_position", 0)
+
+                start_sample = int(signal_start)
+                end_sample = int(signal_start + signal_length)
+
+                if end_sample <= view_start or start_sample >= view_end:
                     continue
 
-                # Get event boundaries from the original events (approximate from event_idx)
-                # We'll use the event_mean as a horizontal line
-                event_mean = aln.get("event_mean", 0)
-                kmer = aln.get("ref_kmer", "")
-                state = aln.get("hmm_state", "")
-                scaled_model_mean = aln.get("scaled_model_mean", aln.get("model_mean", 0))
+                # Draw event boundary (vertical line)
+                ax.axvline(start_sample, color="gray", alpha=0.2, linewidth=0.5)
 
-                event_means.append(event_mean)
-                event_kmers.append(kmer)
-                event_states.append(state)
-                model_means.append(scaled_model_mean)
+                # Draw event mean level (observed)
+                ax.hlines(
+                    event_mean,
+                    start_sample,
+                    end_sample,
+                    colors="red",
+                    linewidth=2.5,
+                    alpha=0.9,
+                )
 
-            # Create synthetic event boundaries based on event indices
-            # (actual boundaries would require original event table)
-            n_display = len(event_means)
-            if n_display > 0:
-                samples_per_event = len(signal) // max(n_events, 1)
-
-                for i, (mean, kmer, state, model_mean) in enumerate(
-                    zip(event_means, event_kmers, event_states, model_means)
-                ):
-                    start_sample = i * samples_per_event
-                    end_sample = min((i + 1) * samples_per_event, len(signal))
-
-                    if start_sample >= len(signal):
-                        break
-
-                    # Draw event boundary
-                    ax_signal.axvline(start_sample, color="gray", alpha=0.3, linewidth=0.5)
-
-                    # Draw event mean level
-                    ax_signal.hlines(
-                        mean,
+                # Draw model expected level
+                if scaled_model_mean > 0:
+                    ax.hlines(
+                        scaled_model_mean,
                         start_sample,
                         end_sample,
-                        colors="red",
+                        colors="limegreen",
                         linewidth=2,
+                        linestyle="--",
                         alpha=0.8,
                     )
 
-                    # Draw model expected level
-                    if model_mean > 0:
-                        ax_signal.hlines(
-                            model_mean,
-                            start_sample,
-                            end_sample,
-                            colors="green",
-                            linewidth=1.5,
-                            linestyle="--",
-                            alpha=0.6,
-                        )
+                # Annotate with k-mer and event info (sparse to avoid clutter)
+                n_display = len(alignment_sorted)
+                if i % max(1, n_display // 25) == 0 and kmer:
+                    # Color by HMM state
+                    state_colors = {"M": "black", "K": "darkorange", "B": "red"}
+                    color = state_colors.get(state, "gray")
 
-                    # Annotate with k-mer (only every few events to avoid clutter)
-                    if i % max(1, n_display // 20) == 0 and kmer:
-                        # Color by HMM state
-                        state_colors = {"M": "black", "K": "orange", "B": "red"}
-                        color = state_colors.get(state, "gray")
-                        ax_signal.text(
-                            (start_sample + end_sample) / 2,
-                            mean + 5,
-                            f"{kmer}\n({state})",
-                            fontsize=7,
-                            ha="center",
-                            va="bottom",
-                            color=color,
-                            rotation=45,
-                        )
+                    # Position label above the event mean
+                    label_y = max(event_mean, scaled_model_mean) + 3
+                    ax.text(
+                        (start_sample + end_sample) / 2,
+                        label_y,
+                        f"{kmer}\nidx:{event_idx}\npos:{ref_pos}",
+                        fontsize=6,
+                        ha="center",
+                        va="bottom",
+                        color=color,
+                        rotation=0,
+                        bbox=dict(
+                            boxstyle="round,pad=0.2", facecolor="white", alpha=0.7, edgecolor="none"
+                        ),
+                    )
 
-            ax_signal.set_xlabel("Sample index")
-            ax_signal.set_ylabel("Signal level (pA)")
-            ax_signal.set_title(
-                f"Eventalign: Read {read_id[:20]}... → {transcript_id}\n"
-                f"Events: {n_events}, Aligned: {n_aligned}, "
-                f"Scale: {scaling.get('scale', 0):.3f}, Shift: {scaling.get('shift', 0):.1f}"
+            # Set axis limits to focus on aligned region
+            ax.set_xlim(view_start, view_end)
+
+            # Labels and title
+            ax.set_xlabel("Sample index (raw signal)", fontsize=11)
+            ax.set_ylabel("Signal level (pA)", fontsize=11)
+            ax.set_title(
+                f"Eventalign: {read_id[:30]}{'...' if len(read_id) > 30 else ''} → {transcript_id}\n"
+                f"Total Events: {n_events}, Aligned: {n_aligned}, "
+                f"Scale: {scaling.get('scale', 0):.4f}, Shift: {scaling.get('shift', 0):.2f}, "
+                f"Var: {scaling.get('var', 0):.4f}",
+                fontsize=12,
             )
 
             # Add legend
             from matplotlib.lines import Line2D
 
             legend_elements = [
-                Line2D([0], [0], color="steelblue", alpha=0.7, label="Raw signal"),
-                Line2D([0], [0], color="red", linewidth=2, label="Event mean"),
+                Line2D([0], [0], color="steelblue", alpha=0.5, linewidth=1, label="Raw signal"),
+                Line2D([0], [0], color="red", linewidth=2.5, label="Event mean (observed)"),
                 Line2D(
-                    [0], [0], color="green", linewidth=1.5, linestyle="--", label="Model expected"
+                    [0],
+                    [0],
+                    color="limegreen",
+                    linewidth=2,
+                    linestyle="--",
+                    label="Model mean (expected)",
                 ),
             ]
-            ax_signal.legend(handles=legend_elements, loc="upper right", fontsize=8)
+            ax.legend(handles=legend_elements, loc="upper right", fontsize=9)
 
-            # === Panel 2: Event means vs Model means ===
-            ax_compare = fig.add_subplot(gs[1])
-
-            if event_means and model_means:
-                x_pos = np.arange(len(event_means))
-                width = 0.35
-
-                ax_compare.bar(
-                    x_pos - width / 2,
-                    event_means,
-                    width,
-                    label="Event mean",
-                    color="red",
-                    alpha=0.7,
-                )
-                ax_compare.bar(
-                    x_pos + width / 2,
-                    model_means,
-                    width,
-                    label="Model mean (scaled)",
-                    color="green",
-                    alpha=0.7,
-                )
-
-                # Only show labels for some events
-                label_step = max(1, len(event_kmers) // 15)
-                ax_compare.set_xticks(x_pos[::label_step])
-                ax_compare.set_xticklabels(
-                    event_kmers[::label_step], rotation=45, ha="right", fontsize=7
-                )
-
-                ax_compare.set_xlabel("K-mer")
-                ax_compare.set_ylabel("Signal level (pA)")
-                ax_compare.set_title("Event Mean vs Model Expected")
-                ax_compare.legend(loc="upper right", fontsize=8)
-
-            # === Panel 3: HMM state distribution ===
-            ax_states = fig.add_subplot(gs[2])
-
-            if event_states:
-                state_counts = {}
-                for s in event_states:
-                    state_counts[s] = state_counts.get(s, 0) + 1
-
-                state_names = {
-                    "M": "Match",
-                    "K": "K-mer Skip",
-                    "B": "Bad Event",
-                }
-                state_colors_map = {
-                    "M": "forestgreen",
-                    "K": "orange",
-                    "B": "red",
-                }
-
-                labels = [state_names.get(s, s) for s in state_counts.keys()]
-                sizes = list(state_counts.values())
-                colors = [state_colors_map.get(s, "gray") for s in state_counts.keys()]
-
-                ax_states.barh(labels, sizes, color=colors, alpha=0.8)
-                ax_states.set_xlabel("Count")
-                ax_states.set_title("HMM State Distribution")
-
-                # Add count labels
-                for i, (label, size) in enumerate(zip(labels, sizes)):
-                    ax_states.text(size + 0.5, i, str(size), va="center", fontsize=9)
+            # Add grid for readability
+            ax.grid(True, alpha=0.3, linestyle=":")
 
             plt.tight_layout()
             plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -946,6 +892,8 @@ class RegionTranscriptAnalyzer:
                                 "ref_position": aln.get("ref_position"),
                                 "ref_kmer": aln.get("ref_kmer"),
                                 "event_idx": aln.get("event_idx"),
+                                "signal_start": aln.get("signal_start"),
+                                "signal_length": aln.get("signal_length"),
                                 "hmm_state": aln.get("hmm_state"),
                                 "event_mean": aln.get("event_mean"),
                                 "event_stdv": aln.get("event_stdv"),
@@ -1050,7 +998,7 @@ class RegionTranscriptAnalyzer:
     def run_analysis(
         self,
         max_regions: Optional[int] = None,
-        max_reads_per_region: int = 100,
+        max_reads_per_region: int = 10,
         max_transcripts_per_region: int = 50,
     ) -> Dict[str, Any]:
         """
