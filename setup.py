@@ -242,6 +242,8 @@ class MultiExt(build_ext):
         # Use nvcc for CUDA extensions
         if hasattr(ext, "ext_type") and ext.ext_type in ("dtw", "f5c_cuda", "align_cuda"):
             self._compile_cuda_extension(ext)
+        elif hasattr(ext, "ext_type") and ext.ext_type == "f5c_cpp":
+            self._compile_cpp_extension(ext)
         else:
             # Build non-CUDA extensions normally
             super().build_extension(ext)
@@ -371,6 +373,58 @@ class MultiExt(build_ext):
             print(result.stdout)
             print(result.stderr)
             raise RuntimeError(f"nvcc linking failed for {ext.name}")
+
+    def _compile_cpp_extension(self, ext):
+        """Compile C++ extension using g++ directly to ensure C++ mode for .c files with C++ code"""
+        cxx = shutil.which("g++") or shutil.which("clang++") or shutil.which("gcc")
+        if not cxx:
+            raise RuntimeError("C++ compiler (g++/clang++) not found")
+
+        build_temp = Path(self.build_temp)
+        build_lib = Path(self.build_lib)
+        build_temp.mkdir(parents=True, exist_ok=True)
+        ext_path = build_lib / self.get_ext_filename(ext.name)
+        ext_path.parent.mkdir(parents=True, exist_ok=True)
+
+        objects = []
+        for source in ext.sources:
+            source_path = Path(source)
+            obj_name = source_path.stem + source_path.suffix.replace(".", "_") + ".o"
+            obj_path = build_temp / obj_name
+
+            cmd = [cxx, "-c", str(source_path), "-o", str(obj_path), "-fPIC", "-std=c++17", "-O3"]
+            for inc_dir in ext.include_dirs:
+                cmd.extend(["-I", inc_dir])
+            if isinstance(ext.extra_compile_args, list):
+                cmd.extend(ext.extra_compile_args)
+
+            print(f"Compiling {source} with {cxx}...")
+            print(" ".join(cmd))
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(result.stdout)
+                print(result.stderr)
+                raise RuntimeError(f"C++ compilation failed for {source}")
+
+            objects.append(str(obj_path))
+
+        link_cmd = [cxx, "-shared", "-o", str(ext_path)] + objects
+        if hasattr(ext, "library_dirs"):
+            for lib_dir in ext.library_dirs:
+                link_cmd.extend(["-L", lib_dir])
+        if hasattr(ext, "libraries"):
+            for lib in ext.libraries:
+                link_cmd.append(f"-l{lib}")
+        if isinstance(ext.extra_link_args, list):
+            link_cmd.extend(ext.extra_link_args)
+
+        print(f"Linking {ext.name}...")
+        print(" ".join(link_cmd))
+        result = subprocess.run(link_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(result.stdout)
+            print(result.stderr)
+            raise RuntimeError(f"C++ linking failed for {ext.name}")
 
 
 # --------------------------
