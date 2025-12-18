@@ -513,9 +513,10 @@ align_cuda_extension = Extension(
         os.path.join(ALIGN_DIR, "nanopolish_read_db.c"),
     ],
     depends=[
-        os.path.join(F5C_DIR, "event_detection_simple.h"),
-        os.path.join(F5C_DIR, "align_common.h"),
-        os.path.join(F5C_DIR, "model.h"),
+        os.path.join(ALIGN_DIR, "event_detection_simple.h"),
+        os.path.join(ALIGN_DIR, "align_common.h"),
+        os.path.join(ALIGN_DIR, "model.h"),
+        os.path.join(ALIGN_DIR, "nanopolish_read_db.h"),
     ],
     include_dirs=[ALIGN_DIR],
 )
