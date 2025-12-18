@@ -86,17 +86,39 @@ class MultiExt(build_ext):
     def build_extension(self, ext):
         # For C++ extensions with .c files, override compiler to g++
         if hasattr(ext, "language") and ext.language == "c++":
-            # Save original compiler
-            original_compiler = self.compiler.compiler_so[0]
-            # Replace gcc with g++
+            # Save original compiler and linker
+            original_compiler_so = self.compiler.compiler_so.copy()
+            original_compiler_cxx = (
+                self.compiler.compiler_cxx.copy()
+                if hasattr(self.compiler, "compiler_cxx")
+                else None
+            )
+            original_linker_so = (
+                self.compiler.linker_so.copy() if hasattr(self.compiler, "linker_so") else None
+            )
+
+            # Replace gcc with g++ in all compiler commands
             self.compiler.compiler_so = [
                 c.replace("gcc", "g++") if "gcc" in c else c for c in self.compiler.compiler_so
             ]
+            if hasattr(self.compiler, "compiler_cxx"):
+                self.compiler.compiler_cxx = [
+                    c.replace("gcc", "g++") if "gcc" in c else c for c in self.compiler.compiler_cxx
+                ]
+            if hasattr(self.compiler, "linker_so"):
+                self.compiler.linker_so = [
+                    c.replace("gcc", "g++") if "gcc" in c else c for c in self.compiler.linker_so
+                ]
+
             try:
                 super().build_extension(ext)
             finally:
-                # Restore original compiler for next extension
-                self.compiler.compiler_so[0] = original_compiler
+                # Restore original compilers
+                self.compiler.compiler_so = original_compiler_so
+                if original_compiler_cxx is not None:
+                    self.compiler.compiler_cxx = original_compiler_cxx
+                if original_linker_so is not None:
+                    self.compiler.linker_so = original_linker_so
         else:
             super().build_extension(ext)
 
