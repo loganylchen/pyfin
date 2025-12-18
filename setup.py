@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
+import sysconfig
 
 # f5c source directory (relative to setup.py)
 # Use relative paths for all sources to comply with setuptools requirements
@@ -40,7 +41,7 @@ def apply_cpp_compile(ext):
         "-Wall",
     ]
     ext.extra_link_args += ["-lm", "-lstdc++"]
-    ext.include_dirs += [numpy.get_include()]
+    ext.include_dirs += [numpy.get_include(), sysconfig.get_path("include")]
     ext.language = "c++"
 
     # Override compiler to use g++ instead of gcc
