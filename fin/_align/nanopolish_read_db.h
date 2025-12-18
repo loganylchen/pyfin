@@ -84,8 +84,6 @@ class ReadDB {
     //
     std::map<std::string, ReadDBData> m_data;
 
-    //
-    faidx_t* m_fai;
 };
 
 #endif
