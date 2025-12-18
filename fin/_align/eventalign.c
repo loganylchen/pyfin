@@ -1181,7 +1181,7 @@ struct EventAlignmentParameters
     EventAlignmentParameters()
     {
         et = NULL;
-        record = NULL;
+        // record = NULL;  // Commented out - record field is not used
         model = NULL;
         kmer_size = 6;
 
