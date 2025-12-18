@@ -10,7 +10,7 @@
 #define MODEL_H
 
 
-static float rna002_5mer_model_builtin_data[] = {
+static float rna002_model_builtin_data[] = {
     108.90141,	2.67652,	//	AAAAA
     107.75423,	2.67652,	//	AAAAC
     101.72442,	2.67652,	//	AAAAG
@@ -1037,7 +1037,7 @@ static float rna002_5mer_model_builtin_data[] = {
     80.78433,	1.96960 	//	TTTTT
 };
 
-static float rna004_9mer_model_builtin_data[] = {
+static float rna004_model_builtin_data[] = {
 	100.595	,	2.16365	,	//	AAAAAAAAA
 	101.159	,	1.87508	,	//	AAAAAAAAC
 	100.052	,	2.40959	,	//	AAAAAAAAG
