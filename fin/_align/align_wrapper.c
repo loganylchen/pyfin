@@ -14,23 +14,45 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
 
-// Include f5c headers
-#include "f5c.h"
-#include "model.h"
-
-// Model IDs from f5c
-#define MODEL_ID_RNA_R9_NUCLEOTIDE 3
-#define MODEL_ID_RNA_RNA004_NUCLEOTIDE 6
-
-// Simplified structures for Python interface
+// Minimal type definitions from f5c (avoiding full f5c.h to prevent C++ dependencies)
 typedef struct
 {
-    float shift;
+    uint64_t start;
+    float length;
+    float mean;
+    float stdv;
+} event_t;
+
+typedef struct
+{
+    size_t n;
+    size_t start;
+    size_t end;
+    event_t *event;
+} event_table;
+
+typedef struct
+{
+    float level_mean;
+    float level_stdv;
+    float level_log_stdv;
+} model_t;
+
+typedef struct
+{
     float scale;
+    float shift;
     float var;
     float log_var;
-} simple_scalings_t;
+} scalings_t;
+
+typedef struct
+{
+    int ref_pos;
+    int read_pos;
+} AlignedPair;
 
 // Forward declarations - using f5c core functions
 extern int32_t align(
@@ -42,6 +64,9 @@ extern int32_t align(
     uint32_t kmer_size,
     scalings_t scaling,
     float epsilon);
+
+// Model loading function from model.c
+extern uint32_t set_model(model_t *model, uint32_t model_id);
 
 // Simple event detection - reuse from f5c
 event_table getevents_simple(size_t nsample, float *rawptr);
@@ -161,17 +186,17 @@ static PyObject *py_eventalign(PyObject *self, PyObject *args, PyObject *kwargs)
         return PyErr_NoMemory();
     }
 
-    // Select model data based on kmer size
-    float *model_data = (kmer_size == 9) ? rna004_model_builtin_data : rna002_model_builtin_data;
+    // Select model ID based on kmer size
+    uint32_t model_id = (kmer_size == 9) ? MODEL_ID_RNA_RNA004_NUCLEOTIDE : MODEL_ID_RNA_R9_NUCLEOTIDE;
 
-    // Load model
-    for (int i = 0; i < n_kmers_model; ++i)
+    // Load model using f5c's set_model function
+    uint32_t actual_kmer_size = set_model(model, model_id);
+    if (actual_kmer_size != kmer_size)
     {
-        model[i].level_mean = model_data[i * 2 + 0];
-        model[i].level_stdv = model_data[i * 2 + 1];
-#ifdef CACHED_LOG
-        model[i].level_log_stdv = logf(model[i].level_stdv);
-#endif
+        free(model);
+        free_event_table(&et);
+        PyErr_SetString(PyExc_RuntimeError, "Model kmer size mismatch");
+        return NULL;
     }
 
     // Estimate scaling
