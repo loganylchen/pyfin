@@ -17,7 +17,7 @@ from setuptools.command.build_ext import build_ext
 # Use relative paths for all sources to comply with setuptools requirements
 
 
-def apply_f5c_compile(ext):
+def apply_c_compile(ext):
     import numpy
 
     ext.extra_compile_args += [
@@ -30,7 +30,7 @@ def apply_f5c_compile(ext):
     ext.language = "c"
 
 
-def apply_align_cpp_compile(ext):
+def apply_cpp_compile(ext):
     import numpy
 
     # Force C++ compilation for .c files that use C++ headers
@@ -148,9 +148,9 @@ class MultiExt(build_ext):
                     continue
                 self._configure_f5c_cuda_extension(ext)
             elif ext.ext_type == "f5c":
-                apply_f5c_compile(ext)
+                apply_c_compile(ext)
             elif ext.ext_type == "align":
-                apply_align_cpp_compile(ext)
+                apply_c_compile(ext)
             elif ext.ext_type == "align_cuda":
                 if not cuda_available:
                     print(
@@ -513,8 +513,12 @@ align_cuda_extension = Extension(
         os.path.join(ALIGN_DIR, "nanopolish_read_db.c"),
     ],
     depends=[
-        os.path.join(ALIGN_DIR, "event_detection_simple.h"),
-        os.path.join(ALIGN_DIR, "align_common.h"),
+        os.path.join(ALIGN_DIR, "f5c.h"),
+        os.path.join(ALIGN_DIR, "f5cmisc.h"),
+        os.path.join(ALIGN_DIR, "matrix.h"),
+        os.path.join(ALIGN_DIR, "str.h"),
+        os.path.join(ALIGN_DIR, "logsum.h"),
+        os.path.join(ALIGN_DIR, "error.h"),
         os.path.join(ALIGN_DIR, "model.h"),
         os.path.join(ALIGN_DIR, "nanopolish_read_db.h"),
     ],
