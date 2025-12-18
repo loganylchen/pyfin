@@ -33,16 +33,18 @@ def apply_f5c_compile(ext):
 def apply_align_cpp_compile(ext):
     import numpy
 
+    # Force C++ compilation for .c files that use C++ headers
     ext.extra_compile_args += [
-        "-x",
-        "c++",
         "-O3",
         "-std=c++17",
         "-Wall",
     ]
-    ext.extra_link_args += ["-lm"]
+    ext.extra_link_args += ["-lm", "-lstdc++"]
     ext.include_dirs += [numpy.get_include()]
     ext.language = "c++"
+
+    # Override compiler to use g++ instead of gcc
+    ext.define_macros = [("__cplusplus", "1")]
 
 
 def find_cuda_home():
@@ -80,6 +82,23 @@ class CUDAExtension(Extension):
 class MultiExt(build_ext):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+    def build_extension(self, ext):
+        # For C++ extensions with .c files, override compiler to g++
+        if hasattr(ext, "language") and ext.language == "c++":
+            # Save original compiler
+            original_compiler = self.compiler.compiler_so[0]
+            # Replace gcc with g++
+            self.compiler.compiler_so = [
+                c.replace("gcc", "g++") if "gcc" in c else c for c in self.compiler.compiler_so
+            ]
+            try:
+                super().build_extension(ext)
+            finally:
+                # Restore original compiler for next extension
+                self.compiler.compiler_so[0] = original_compiler
+        else:
+            super().build_extension(ext)
 
     def build_extensions(self):
         # Filter out CUDA extensions if CUDA is not available
