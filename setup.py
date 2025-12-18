@@ -27,7 +27,7 @@ def apply_c_compile(ext):
         "-Wall",  # Show warnings (debug)
     ]
     ext.extra_link_args += ["-lm"]  # Example link flag for Type1
-    ext.include_dirs += [numpy.get_include()]
+    ext.include_dirs += [numpy.get_include(), sysconfig.get_path("include")]
     ext.language = "c"
 
 
