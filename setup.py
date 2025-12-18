@@ -29,6 +29,17 @@ def apply_f5c_compile(ext):
     ext.include_dirs += [numpy.get_include()]
     ext.language = "c"
 
+def apply_align_cpp_compile(ext):
+    import numpy
+    ext.extra_compile_args += [
+        "-x", "c++",
+        "-O3",
+        "-std=c++17",
+        "-Wall",
+    ]
+    ext.extra_link_args += ["-lm"]
+    ext.include_dirs += [numpy.get_include()]
+    ext.language = "c++"
 
 def find_cuda_home():
     """Find CUDA installation directory"""
@@ -73,7 +84,7 @@ class MultiExt(build_ext):
         extensions_to_build = []
         for ext in self.extensions:
             if not hasattr(ext, "ext_type"):
-                raise ValueError(f"Extension {ext.name} must have 'ext_type' (f5c/dtw/f5c_cuda)!")
+                raise ValueError(f"Extension {ext.name} must have 'ext_type' (f5c/dtw/f5c_cuda/align/align_cuda)!")
 
             if ext.ext_type == "dtw":
                 if not cuda_available:
@@ -91,8 +102,18 @@ class MultiExt(build_ext):
                 self._configure_f5c_cuda_extension(ext)
             elif ext.ext_type == "f5c":
                 apply_f5c_compile(ext)
+            elif ext.ext_type == "align":
+                apply_align_cpp_compile(ext)
+            elif ext.ext_type == "align_cuda":
+                if not cuda_available:
+                    print(
+                        f"WARNING: Skipping CUDA eventalign extension {ext.name} - nvcc not found"
+                    )
+                    print("GPU-accelerated eventalign will not be available")
+                    continue
+                self._configure_align_cuda_extension(ext)
             else:
-                raise ValueError(f"Unknown ext_type: {ext.ext_type} (must be f5c/dtw/f5c_cuda)")
+                raise ValueError(f"Unknown ext_type: {ext.ext_type} (must be f5c/align/dtw/f5c_cuda/align_cuda)")
 
             extensions_to_build.append(ext)
 
@@ -315,7 +336,6 @@ class MultiExt(build_ext):
 F5C_DIR = os.path.join("fin", "_f5c")
 ALIGN_DIR = os.path.join("fin", "_align")
 
-# New _align extension
 align_extension = Extension(
     name="fin._align._align",
     sources=[
@@ -338,8 +358,9 @@ align_extension = Extension(
         os.path.join(ALIGN_DIR, "nanopolish_read_db.h"),
     ],
     include_dirs=[ALIGN_DIR],
+    libraries=["hts", "z"],
 )
-align_extension.ext_type = "f5c"
+align_extension.ext_type = "f5c_cpp"
 
 f5c_extension = Extension(
     name="fin._f5c._event",
