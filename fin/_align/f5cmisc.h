@@ -10,6 +10,7 @@
 
 #include <sys/resource.h>
 #include <sys/time.h>
+#include <cmath>
 #include "f5c.h"
 #include "error.h"
 
