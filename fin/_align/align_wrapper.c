@@ -13,7 +13,7 @@
 #include <numpy/arrayobject.h>
 #include <stdlib.h>
 #include <string.h>
-#include <cmath>
+#include <math.h>
 
 // Include f5c headers
 #include "f5c.h"
@@ -44,8 +44,8 @@ extern int32_t align(
     float epsilon);
 
 // Simple event detection - reuse from f5c
-extern "C" event_table getevents_simple(size_t nsample, float *rawptr);
-extern "C" void free_event_table(event_table *et);
+event_table getevents_simple(size_t nsample, float *rawptr);
+void free_event_table(event_table *et);
 
 // Get kmer rank
 static inline uint32_t get_kmer_rank(const char *kmer, uint32_t k)
