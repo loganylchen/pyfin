@@ -283,7 +283,7 @@ class MultiExt(build_ext):
         # Use nvcc for CUDA extensions
         if hasattr(ext, "ext_type") and ext.ext_type in ("dtw", "f5c_cuda", "align_cuda"):
             self._compile_cuda_extension(ext)
-        elif hasattr(ext, "ext_type") and ext.ext_type == "f5c_cpp":
+        elif hasattr(ext, "ext_type") and ext.ext_type == "align":
             self._compile_cpp_extension(ext)
         else:
             # Build non-CUDA extensions normally
