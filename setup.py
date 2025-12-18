@@ -479,13 +479,11 @@ ALIGN_DIR = os.path.join("fin", "_align")
 align_extension = Extension(
     name="fin._align._align",
     sources=[
-        os.path.join(ALIGN_DIR, "align_python.c"),
-        os.path.join(ALIGN_DIR, "eventalign.c"),
+        os.path.join(ALIGN_DIR, "align_wrapper.c"),
         os.path.join(ALIGN_DIR, "align.c"),
         os.path.join(ALIGN_DIR, "hmm.c"),
         os.path.join(ALIGN_DIR, "model.c"),
-        os.path.join(ALIGN_DIR, "nanopolish_read_db.c"),
-        # Add other necessary source files here
+        os.path.join(F5C_DIR, "event_detection_simple.c"),  # Reuse from fin/_f5c
     ],
     depends=[
         os.path.join(ALIGN_DIR, "f5c.h"),
@@ -495,10 +493,10 @@ align_extension = Extension(
         os.path.join(ALIGN_DIR, "logsum.h"),
         os.path.join(ALIGN_DIR, "error.h"),
         os.path.join(ALIGN_DIR, "model.h"),
-        os.path.join(ALIGN_DIR, "nanopolish_read_db.h"),
+        os.path.join(F5C_DIR, "event_detection_simple.h"),
+        os.path.join(F5C_DIR, "model.h"),
     ],
-    include_dirs=[ALIGN_DIR],
-    libraries=["z"],
+    include_dirs=[ALIGN_DIR, F5C_DIR],
 )
 align_extension.ext_type = "align"
 
@@ -506,12 +504,11 @@ align_extension.ext_type = "align"
 align_cuda_extension = Extension(
     name="fin._align._align_cuda",
     sources=[
-        os.path.join(ALIGN_DIR, "align_python.c"),
-        os.path.join(ALIGN_DIR, "eventalign.c"),
+        os.path.join(ALIGN_DIR, "align_wrapper.c"),
         os.path.join(ALIGN_DIR, "align.cu"),
         os.path.join(ALIGN_DIR, "hmm.c"),
         os.path.join(ALIGN_DIR, "model.c"),
-        os.path.join(ALIGN_DIR, "nanopolish_read_db.c"),
+        os.path.join(F5C_DIR, "event_detection_simple.c"),  # Reuse from fin/_f5c
     ],
     depends=[
         os.path.join(ALIGN_DIR, "f5c.h"),
@@ -521,9 +518,10 @@ align_cuda_extension = Extension(
         os.path.join(ALIGN_DIR, "logsum.h"),
         os.path.join(ALIGN_DIR, "error.h"),
         os.path.join(ALIGN_DIR, "model.h"),
-        os.path.join(ALIGN_DIR, "nanopolish_read_db.h"),
+        os.path.join(F5C_DIR, "event_detection_simple.h"),
+        os.path.join(F5C_DIR, "model.h"),
     ],
-    include_dirs=[ALIGN_DIR],
+    include_dirs=[ALIGN_DIR, F5C_DIR],
 )
 align_cuda_extension.ext_type = "align_cuda"
 
