@@ -313,7 +313,33 @@ class MultiExt(build_ext):
 # --------------------------
 
 F5C_DIR = os.path.join("fin", "_f5c")
+ALIGN_DIR = os.path.join("fin", "_align")
 
+# New _align extension
+align_extension = Extension(
+    name="fin._align._align",
+    sources=[
+        os.path.join(ALIGN_DIR, "align_python.c"),
+        os.path.join(ALIGN_DIR, "eventalign.c"),
+        os.path.join(ALIGN_DIR, "align.c"),
+        os.path.join(ALIGN_DIR, "hmm.c"),
+        os.path.join(ALIGN_DIR, "model.c"),
+        os.path.join(ALIGN_DIR, "nanopolish_read_db.c"),
+        # Add other necessary source files here
+    ],
+    depends=[
+        os.path.join(ALIGN_DIR, "f5c.h"),
+        os.path.join(ALIGN_DIR, "f5cmisc.h"),
+        os.path.join(ALIGN_DIR, "matrix.h"),
+        os.path.join(ALIGN_DIR, "str.h"),
+        os.path.join(ALIGN_DIR, "logsum.h"),
+        os.path.join(ALIGN_DIR, "error.h"),
+        os.path.join(ALIGN_DIR, "model.h"),
+        os.path.join(ALIGN_DIR, "nanopolish_read_db.h"),
+    ],
+    include_dirs=[ALIGN_DIR],
+)
+align_extension.ext_type = "f5c"
 
 f5c_extension = Extension(
     name="fin._f5c._event",
@@ -395,7 +421,7 @@ def main():
         long_description=long_description,
         long_description_content_type="text/markdown",
         url="https://github.com/loganylchen/pyfin",
-        packages=["fin", "fin.io", "fin.utils", "fin.analysis", "fin._f5c", "fin._dtw"],
+        packages=["fin", "fin.io", "fin.utils", "fin.analysis", "fin._f5c", "fin._dtw", "fin._align"],
         package_dir={"fin": "fin"},
         package_data={
             "fin": ["*.py", "*.c", "*.cu", "*.h", "*.yaml", "*.yml"],
@@ -406,6 +432,7 @@ def main():
             eventalign_extension,
             cuda_eventalign_extension,
             cuda_dtw_extension,
+            align_extension,
         ],
         cmdclass={"build_ext": MultiExt},
         python_requires=">=3.8",
