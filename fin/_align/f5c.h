@@ -10,12 +10,6 @@
 
 #include <stdint.h>
 #include <stdio.h>
-
-#include <htslib/faidx.h>
-#include <htslib/hts.h>
-#include <htslib/sam.h>
-#include <slow5/slow5.h>
-
 #include "nanopolish_read_db.h"
 
 #include <string>
