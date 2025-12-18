@@ -151,7 +151,7 @@ class MultiExt(build_ext):
             elif ext.ext_type == "f5c":
                 apply_c_compile(ext)
             elif ext.ext_type == "align":
-                apply_cpp_compile(ext)
+                apply_c_compile(ext)
             elif ext.ext_type == "align_cuda":
                 if not cuda_available:
                     print(
