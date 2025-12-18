@@ -15,9 +15,6 @@
 #include <zlib.h>
 //#include "nanopolish_common.h"
 #include "nanopolish_read_db.h"
-#include <htslib/bgzf.h>
-#include <htslib/faidx.h>
-#include <htslib/kseq.h>
 #include <map>
 
 #define READ_DB_SUFFIX ".readdb"

@@ -12,7 +12,7 @@
 #include <map>
 #include <string>
 
-#include <htslib/faidx.h>
+
 
 struct ReadDBData {
     // path to the signal-level data for this read
