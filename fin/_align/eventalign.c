@@ -1216,280 +1216,280 @@ struct EventAlignmentParameters
     int region_end;
 };
 
-std::vector<event_alignment_t> align_read_to_ref(const EventAlignmentParameters &params, char *ref)
-{
-    // Sanity check input parameters
-    assert(params.et != NULL);
-    assert(params.record != NULL);
-    assert(params.model != NULL);
-    assert(params.kmer_size <= MAX_KMER_SIZE);
-    assert((params.region_start == -1 && params.region_end == -1) || (params.region_start <= params.region_end));
+// std::vector<event_alignment_t> align_read_to_ref(const EventAlignmentParameters &params, char *ref)
+// {
+//     // Sanity check input parameters
+//     assert(params.et != NULL);
+//     assert(params.record != NULL);
+//     assert(params.model != NULL);
+//     assert(params.kmer_size <= MAX_KMER_SIZE);
+//     assert((params.region_start == -1 && params.region_end == -1) || (params.region_start <= params.region_end));
 
-    std::vector<event_alignment_t> alignment_output;
+//     std::vector<event_alignment_t> alignment_output;
 
-    // Extract the reference subsequence for the entire alignment
-    // int fetched_len = 0;
-    int ref_offset = params.record->core.pos;
-    // std::string ref_name(params.hdr->target_name[params.record->core.tid]);
-    // std::string ref_seq = get_reference_region_ts(params.fai, ref_name.c_str(), ref_offset,
-    //                                               bam_endpos(params.record), &fetched_len);
-    // hasindu - a hack to get the reference sequence
-    std::string ref_seq = ref;
-    // fprintf(stderr, "std::string ref_seq len = %d\n",ref_seq.length());
+//     // Extract the reference subsequence for the entire alignment
+//     // int fetched_len = 0;
+//     int ref_offset = params.record->core.pos;
+//     // std::string ref_name(params.hdr->target_name[params.record->core.tid]);
+//     // std::string ref_seq = get_reference_region_ts(params.fai, ref_name.c_str(), ref_offset,
+//     //                                               bam_endpos(params.record), &fetched_len);
+//     // hasindu - a hack to get the reference sequence
+//     std::string ref_seq = ref;
+//     // fprintf(stderr, "std::string ref_seq len = %d\n",ref_seq.length());
 
-    // convert to upper case
-    std::transform(ref_seq.begin(), ref_seq.end(), ref_seq.begin(), ::toupper);
+//     // convert to upper case
+//     std::transform(ref_seq.begin(), ref_seq.end(), ref_seq.begin(), ::toupper);
 
-    // k from read pore model
-    const uint32_t k = params.kmer_size;
-    // If the reference sequence contains ambiguity codes
-    // switch them to the lexicographically lowest base
-    ref_seq = disambiguate(ref_seq);
-    std::string rc_ref_seq = reverse_complement(ref_seq);
+//     // k from read pore model
+//     const uint32_t k = params.kmer_size;
+//     // If the reference sequence contains ambiguity codes
+//     // switch them to the lexicographically lowest base
+//     ref_seq = disambiguate(ref_seq);
+//     std::string rc_ref_seq = reverse_complement(ref_seq);
 
-    // --hasindu : this is already done outside of this function
-    // Skip unmapped
-    // if((params.record->core.flag & BAM_FUNMAP) != 0) {
-    //     return alignment_output;
-    // }
+//     // --hasindu : this is already done outside of this function
+//     // Skip unmapped
+//     // if((params.record->core.flag & BAM_FUNMAP) != 0) {
+//     //     return alignment_output;
+//     // }
 
-    // Get the read-to-reference aligned segments
-    std::vector<AlignedSegment> aligned_segments = get_aligned_segments_two_params(params.record, 1);
-    // fprintf(stderr, "std::vector<AlignedSegment> aligned_segments len= %d\n",aligned_segments.size());
-    // fprintf(stderr, "std::vector<AlignedPair> aligned_segments[0] len= %d\n",aligned_segments[0].size());
+//     // Get the read-to-reference aligned segments
+//     std::vector<AlignedSegment> aligned_segments = get_aligned_segments_two_params(params.record, 1);
+//     // fprintf(stderr, "std::vector<AlignedSegment> aligned_segments len= %d\n",aligned_segments.size());
+//     // fprintf(stderr, "std::vector<AlignedPair> aligned_segments[0] len= %d\n",aligned_segments[0].size());
 
-    // std::ofstream file_wrong("wfile_worng");
-    // for(size_t i = 0; i < aligned_segments[0].size(); i++){
-    //     int ref_pos_0 = aligned_segments[0][i].ref_pos;
-    //     int read_pos_0 = aligned_segments[0][i].read_pos;
-    //     file_wrong  << ref_pos_0 << " " << read_pos_0 << "\n" ;
-    // }
+//     // std::ofstream file_wrong("wfile_worng");
+//     // for(size_t i = 0; i < aligned_segments[0].size(); i++){
+//     //     int ref_pos_0 = aligned_segments[0][i].ref_pos;
+//     //     int read_pos_0 = aligned_segments[0][i].read_pos;
+//     //     file_wrong  << ref_pos_0 << " " << read_pos_0 << "\n" ;
+//     // }
 
-    for (size_t segment_idx = 0; segment_idx < aligned_segments.size(); ++segment_idx)
-    {
+//     for (size_t segment_idx = 0; segment_idx < aligned_segments.size(); ++segment_idx)
+//     {
 
-        AlignedSegment &aligned_pairs = aligned_segments[segment_idx];
+//         AlignedSegment &aligned_pairs = aligned_segments[segment_idx];
 
-        if (params.region_start != -1 && params.region_end != -1)
-        {
-            // fprintf(stderr, "params.region_start = %d params.region_end = %d\n",params.region_start,params.region_end);
-            trim_aligned_pairs_to_ref_region(aligned_pairs, params.region_start, params.region_end);
-        }
+//         if (params.region_start != -1 && params.region_end != -1)
+//         {
+//             // fprintf(stderr, "params.region_start = %d params.region_end = %d\n",params.region_start,params.region_end);
+//             trim_aligned_pairs_to_ref_region(aligned_pairs, params.region_start, params.region_end);
+//         }
 
-        // Trim the aligned pairs to be within the range of the maximum kmer index
-        int max_kmer_idx = params.read_length - k;
-        trim_aligned_pairs_to_kmer(aligned_pairs, max_kmer_idx);
+//         // Trim the aligned pairs to be within the range of the maximum kmer index
+//         int max_kmer_idx = params.read_length - k;
+//         trim_aligned_pairs_to_kmer(aligned_pairs, max_kmer_idx);
 
-        if (aligned_pairs.empty())
-        {
-            return alignment_output;
-        }
+//         if (aligned_pairs.empty())
+//         {
+//             return alignment_output;
+//         }
 
-        // bool do_base_rc = bam_is_rev(params.record);
-        bool do_base_rc = 1;
-        bool rc_flags[2] = {do_base_rc, !do_base_rc}; // indexed by strand
-        const int align_stride = 100;                 // approximately how many reference bases to align to at once
-        const int output_stride = 50;                 // approximately how many event alignments to output at once
+//         // bool do_base_rc = bam_is_rev(params.record);
+//         bool do_base_rc = 1;
+//         bool rc_flags[2] = {do_base_rc, !do_base_rc}; // indexed by strand
+//         const int align_stride = 100;                 // approximately how many reference bases to align to at once
+//         const int output_stride = 50;                 // approximately how many event alignments to output at once
 
-        // get the event range of the read to re-align
-        int read_kidx_start = aligned_pairs.front().read_pos;
-        int read_kidx_end = aligned_pairs.back().read_pos;
+//         // get the event range of the read to re-align
+//         int read_kidx_start = aligned_pairs.front().read_pos;
+//         int read_kidx_end = aligned_pairs.back().read_pos;
 
-        if (do_base_rc)
-        {
-            read_kidx_start = flip_k_strand(params.read_length, read_kidx_start, k);
-            read_kidx_end = flip_k_strand(params.read_length, read_kidx_end, k);
-        }
+//         if (do_base_rc)
+//         {
+//             read_kidx_start = flip_k_strand(params.read_length, read_kidx_start, k);
+//             read_kidx_end = flip_k_strand(params.read_length, read_kidx_end, k);
+//         }
 
-        assert(read_kidx_start >= 0);
-        assert(read_kidx_end >= 0);
+//         assert(read_kidx_start >= 0);
+//         assert(read_kidx_end >= 0);
 
-        int first_event = get_closest_event_to(read_kidx_start, params.base_to_event_map, params.read_length - k + 1);
-        int last_event = get_closest_event_to(read_kidx_end, params.base_to_event_map, params.read_length - k + 1);
-        bool forward = first_event < last_event;
+//         int first_event = get_closest_event_to(read_kidx_start, params.base_to_event_map, params.read_length - k + 1);
+//         int last_event = get_closest_event_to(read_kidx_end, params.base_to_event_map, params.read_length - k + 1);
+//         bool forward = first_event < last_event;
 
-        int curr_start_event = first_event;
-        int curr_start_ref = aligned_pairs.front().ref_pos;
+//         int curr_start_event = first_event;
+//         int curr_start_ref = aligned_pairs.front().ref_pos;
 
-        // before while starts let's check all the vars
-        //  fprintf(stderr, "do_base_rc =  %s\n", do_base_rc ? "true" : "false");
-        //  fprintf(stderr, "first_event = %d last_event = %d\n",first_event,last_event);
-        //  fprintf(stderr, "forward =  %s\n", forward ? "true" : "false");
-        //  fprintf(stderr, "curr_start_event = %d curr_start_ref = %d\n",curr_start_event,curr_start_ref);
+//         // before while starts let's check all the vars
+//         //  fprintf(stderr, "do_base_rc =  %s\n", do_base_rc ? "true" : "false");
+//         //  fprintf(stderr, "first_event = %d last_event = %d\n",first_event,last_event);
+//         //  fprintf(stderr, "forward =  %s\n", forward ? "true" : "false");
+//         //  fprintf(stderr, "curr_start_event = %d curr_start_ref = %d\n",curr_start_event,curr_start_ref);
 
-        int curr_pair_idx = 0;
-        size_t tester_i = 0;
-        while ((forward && curr_start_event < last_event) ||
-               (!forward && curr_start_event > last_event))
-        {
+//         int curr_pair_idx = 0;
+//         size_t tester_i = 0;
+//         while ((forward && curr_start_event < last_event) ||
+//                (!forward && curr_start_event > last_event))
+//         {
 
-            // while(tester_i == 0 ){
-            // Get the index of the aligned pair approximately align_stride away
-            int end_pair_idx = get_end_pair(aligned_pairs, curr_start_ref + align_stride, curr_pair_idx);
+//             // while(tester_i == 0 ){
+//             // Get the index of the aligned pair approximately align_stride away
+//             int end_pair_idx = get_end_pair(aligned_pairs, curr_start_ref + align_stride, curr_pair_idx);
 
-            int curr_end_ref = aligned_pairs[end_pair_idx].ref_pos;
-            int curr_end_read = aligned_pairs[end_pair_idx].read_pos;
+//             int curr_end_ref = aligned_pairs[end_pair_idx].ref_pos;
+//             int curr_end_read = aligned_pairs[end_pair_idx].read_pos;
 
-            if (do_base_rc)
-            {
-                curr_end_read = flip_k_strand(params.read_length, curr_end_read, k);
-            }
-            assert(curr_end_read >= 0);
+//             if (do_base_rc)
+//             {
+//                 curr_end_read = flip_k_strand(params.read_length, curr_end_read, k);
+//             }
+//             assert(curr_end_read >= 0);
 
-            int s = curr_start_ref - ref_offset;
-            int l = curr_end_ref - curr_start_ref + 1;
+//             int s = curr_start_ref - ref_offset;
+//             int l = curr_end_ref - curr_start_ref + 1;
 
-            std::string fwd_subseq = ref_seq.substr(s, l);
-            std::string rc_subseq = rc_ref_seq.substr(ref_seq.length() - s - l, l);
-            assert(fwd_subseq.length() == rc_subseq.length());
+//             std::string fwd_subseq = ref_seq.substr(s, l);
+//             std::string rc_subseq = rc_ref_seq.substr(ref_seq.length() - s - l, l);
+//             assert(fwd_subseq.length() == rc_subseq.length());
 
-            //?       HMMInputSequence hmm_sequence(fwd_subseq, rc_subseq, pore_model->pmalphabet);
+//             //?       HMMInputSequence hmm_sequence(fwd_subseq, rc_subseq, pore_model->pmalphabet);
 
-            // lets print the things used to build hmm_sequence
-            //  std::ofstream wfile("wfile");
-            //  wfile << fwd_subseq << "\n";
-            //  wfile << rc_subseq << "\n";
+//             // lets print the things used to build hmm_sequence
+//             //  std::ofstream wfile("wfile");
+//             //  wfile << fwd_subseq << "\n";
+//             //  wfile << rc_subseq << "\n";
 
-            // Require a minimum amount of sequence to align to
-            if (fwd_subseq.length() < 2 * k)
-            {
-                break;
-            }
+//             // Require a minimum amount of sequence to align to
+//             if (fwd_subseq.length() < 2 * k)
+//             {
+//                 break;
+//             }
 
-            // printf("[SEGMENT_START] read: %s event start: %zu event end: %zu\n", params.sr->read_name.c_str(), input.event_start_idx, input.event_stop_idx);
+//             // printf("[SEGMENT_START] read: %s event start: %zu event end: %zu\n", params.sr->read_name.c_str(), input.event_start_idx, input.event_stop_idx);
 
-            // A limitation of the segment-by-segment alignment is that we can't jump
-            // over very large deletions wrt to the reference. The effect of this
-            // is that we can get segments that have very few alignable events. We
-            // just stop processing them for now
-            int input_event_stop_idx = get_closest_event_to(curr_end_read, params.base_to_event_map, params.read_length - k + 1);
+//             // A limitation of the segment-by-segment alignment is that we can't jump
+//             // over very large deletions wrt to the reference. The effect of this
+//             // is that we can get segments that have very few alignable events. We
+//             // just stop processing them for now
+//             int input_event_stop_idx = get_closest_event_to(curr_end_read, params.base_to_event_map, params.read_length - k + 1);
 
-            // fprintf(stderr, "input_event_stop_idx = %d curr_start_event = %d\n",input_event_stop_idx, curr_start_event);
-            if (abs((int)curr_start_event - input_event_stop_idx) < 2)
-                break;
-            uint8_t input_strand = 0;
+//             // fprintf(stderr, "input_event_stop_idx = %d curr_start_event = %d\n",input_event_stop_idx, curr_start_event);
+//             if (abs((int)curr_start_event - input_event_stop_idx) < 2)
+//                 break;
+//             uint8_t input_strand = 0;
 
-            int8_t event_stride = curr_start_event < input_event_stop_idx ? 1 : -1;
+//             int8_t event_stride = curr_start_event < input_event_stop_idx ? 1 : -1;
 
-            // fprintf(stderr, "event_stride =  %d\n",event_stride);
-            uint8_t input_rc = rc_flags[input_strand];
-            std::vector<HMMAlignmentState> event_alignment = profile_hmm_align(
-                fwd_subseq,             // std::string fwd_subseq,
-                rc_subseq,              // std::string rc_subseq,
-                params.et->event,       // event_t* event,
-                params.scalings,        // scalings_t scaling,
-                params.model,           // model_t* cpgmodel,
-                params.events_per_base, // double events_per_base
-                input_strand,           // uint8_t strand,
-                input_rc,               // uint8_t rc,
-                k,                      // uint32_t k, //kmer_size
-                curr_start_event,       // uint32_t e_start, //curr_start_event;
-                input_event_stop_idx,   // uint32_t e_end, //input_event_stop_idx
-                event_stride);          // int8_t event_stride) // event_stride
+//             // fprintf(stderr, "event_stride =  %d\n",event_stride);
+//             uint8_t input_rc = rc_flags[input_strand];
+//             std::vector<HMMAlignmentState> event_alignment = profile_hmm_align(
+//                 fwd_subseq,             // std::string fwd_subseq,
+//                 rc_subseq,              // std::string rc_subseq,
+//                 params.et->event,       // event_t* event,
+//                 params.scalings,        // scalings_t scaling,
+//                 params.model,           // model_t* cpgmodel,
+//                 params.events_per_base, // double events_per_base
+//                 input_strand,           // uint8_t strand,
+//                 input_rc,               // uint8_t rc,
+//                 k,                      // uint32_t k, //kmer_size
+//                 curr_start_event,       // uint32_t e_start, //curr_start_event;
+//                 input_event_stop_idx,   // uint32_t e_end, //input_event_stop_idx
+//                 event_stride);          // int8_t event_stride) // event_stride
 
-            // fprintf(stderr, "std::vector<HMMAlignmentState> event_alignment len= %d\n",event_alignment.size());
+//             // fprintf(stderr, "std::vector<HMMAlignmentState> event_alignment len= %d\n",event_alignment.size());
 
-            // std::ofstream wfile("wfile");
-            // for(size_t i = 0; i < event_alignment.size(); i++){
-            //     char state = event_alignment[i].state;
-            //     wfile << state ;//<< " " << read_pos_0 << "\n" ;
-            // }
+//             // std::ofstream wfile("wfile");
+//             // for(size_t i = 0; i < event_alignment.size(); i++){
+//             //     char state = event_alignment[i].state;
+//             //     wfile << state ;//<< " " << read_pos_0 << "\n" ;
+//             // }
 
-            // Output alignment
-            size_t num_output = 0;
-            size_t event_align_idx = 0;
+//             // Output alignment
+//             size_t num_output = 0;
+//             size_t event_align_idx = 0;
 
-            // If we aligned to the last event, output everything and stop
-            bool last_section = end_pair_idx == (int)aligned_pairs.size() - 1;
+//             // If we aligned to the last event, output everything and stop
+//             bool last_section = end_pair_idx == (int)aligned_pairs.size() - 1;
 
-            int last_event_output = 0;
-            int last_ref_kmer_output = 0;
+//             int last_event_output = 0;
+//             int last_ref_kmer_output = 0;
 
-            for (; event_align_idx < event_alignment.size() &&
-                   (num_output < output_stride || last_section);
-                 event_align_idx++)
-            {
+//             for (; event_align_idx < event_alignment.size() &&
+//                    (num_output < output_stride || last_section);
+//                  event_align_idx++)
+//             {
 
-                HMMAlignmentState &as = event_alignment[event_align_idx];
-                if (as.state != 'K' && (int)as.event_idx != curr_start_event)
-                {
+//                 HMMAlignmentState &as = event_alignment[event_align_idx];
+//                 if (as.state != 'K' && (int)as.event_idx != curr_start_event)
+//                 {
 
-                    event_alignment_t ea;
+//                     event_alignment_t ea;
 
-                    ea.ref_position = curr_start_ref + as.kmer_idx;
-                    std::string ref__kmer = ref_seq.substr(ea.ref_position - ref_offset, k);
-                    kmer_cpy(ea.ref_kmer, ref__kmer.c_str(), k);
+//                     ea.ref_position = curr_start_ref + as.kmer_idx;
+//                     std::string ref__kmer = ref_seq.substr(ea.ref_position - ref_offset, k);
+//                     kmer_cpy(ea.ref_kmer, ref__kmer.c_str(), k);
 
-                    // event
-                    ea.read_idx = params.read_idx;
-                    // ea.strand_idx = params.strand_idx;
-                    ea.event_idx = as.event_idx;
-                    ea.rc = rc_flags[0];
+//                     // event
+//                     ea.read_idx = params.read_idx;
+//                     // ea.strand_idx = params.strand_idx;
+//                     ea.event_idx = as.event_idx;
+//                     ea.rc = rc_flags[0];
 
-                    // hmm
-                    ea.hmm_state = as.state;
+//                     // hmm
+//                     ea.hmm_state = as.state;
 
-                    if (ea.hmm_state != 'B')
-                    {
-                        // hiruna
-                        // since we are using one strand, the rc flag should be rc_flags[0] and removed calling get_kmer and replaced it with code inside
-                        // from https://github.com/jts/nanopolish/blob/b9dc627e73816a415e4b96b14e8a8bf53622a6c9/src/hmm/nanopolish_hmm_input_sequence.h
-                        // ea.model_kmer = ! rc_flags[0] ? fwd_subseq.substr(as.kmer_idx, k) : rc_subseq.substr(rc_subseq.length() - as.kmer_idx - k, k);
-                        // hasindu : strcpy is wrong, use kmer_cpy instead
-                        if (rc_flags[0])
-                        {
-                            std::string kmer_one = rc_subseq.substr(rc_subseq.length() - as.kmer_idx - k, k);
-                            kmer_cpy(ea.model_kmer, kmer_one.c_str(), k);
-                        }
-                        else
-                        {
-                            std::string kmer_one = fwd_subseq.substr(as.kmer_idx, k);
-                            kmer_cpy(ea.model_kmer, kmer_one.c_str(), k);
-                        }
-                    }
-                    else
-                    {
-                        kmer_cpy(ea.model_kmer, std::string(k, 'N').c_str(), k);
-                        // ea.model_kmer = std::string(k, 'N');
-                    }
+//                     if (ea.hmm_state != 'B')
+//                     {
+//                         // hiruna
+//                         // since we are using one strand, the rc flag should be rc_flags[0] and removed calling get_kmer and replaced it with code inside
+//                         // from https://github.com/jts/nanopolish/blob/b9dc627e73816a415e4b96b14e8a8bf53622a6c9/src/hmm/nanopolish_hmm_input_sequence.h
+//                         // ea.model_kmer = ! rc_flags[0] ? fwd_subseq.substr(as.kmer_idx, k) : rc_subseq.substr(rc_subseq.length() - as.kmer_idx - k, k);
+//                         // hasindu : strcpy is wrong, use kmer_cpy instead
+//                         if (rc_flags[0])
+//                         {
+//                             std::string kmer_one = rc_subseq.substr(rc_subseq.length() - as.kmer_idx - k, k);
+//                             kmer_cpy(ea.model_kmer, kmer_one.c_str(), k);
+//                         }
+//                         else
+//                         {
+//                             std::string kmer_one = fwd_subseq.substr(as.kmer_idx, k);
+//                             kmer_cpy(ea.model_kmer, kmer_one.c_str(), k);
+//                         }
+//                     }
+//                     else
+//                     {
+//                         kmer_cpy(ea.model_kmer, std::string(k, 'N').c_str(), k);
+//                         // ea.model_kmer = std::string(k, 'N');
+//                     }
 
-                    // store
-                    alignment_output.push_back(ea);
+//                     // store
+//                     alignment_output.push_back(ea);
 
-                    // update
-                    last_event_output = as.event_idx;
-                    last_ref_kmer_output = curr_start_ref + as.kmer_idx;
+//                     // update
+//                     last_event_output = as.event_idx;
+//                     last_ref_kmer_output = curr_start_ref + as.kmer_idx;
 
-                    num_output += 1;
-                }
-            }
-            // Advance the pair iterator to the ref base
-            curr_start_event = last_event_output;
-            curr_start_ref = last_ref_kmer_output;
-            // printf("[SEGMENT_END] read: %s last event output: %zu ref pos: %zu (%s)\n", params.sr->read_name.c_str(), last_event_output, last_ref_kmer_output, ref_seq.substr(last_ref_kmer_output - ref_offset, k).c_str());
+//                     num_output += 1;
+//                 }
+//             }
+//             // Advance the pair iterator to the ref base
+//             curr_start_event = last_event_output;
+//             curr_start_ref = last_ref_kmer_output;
+//             // printf("[SEGMENT_END] read: %s last event output: %zu ref pos: %zu (%s)\n", params.sr->read_name.c_str(), last_event_output, last_ref_kmer_output, ref_seq.substr(last_ref_kmer_output - ref_offset, k).c_str());
 
-            curr_pair_idx = get_end_pair(aligned_pairs, curr_start_ref, curr_pair_idx);
+//             curr_pair_idx = get_end_pair(aligned_pairs, curr_start_ref, curr_pair_idx);
 
-            // hiruna
-            //  right now we don't use this to train
-            //  #if EVENTALIGN_TRAIN
-            //              // update training data for read
-            //              params.sr->parameters[params.strand_idx].add_training_from_alignment(hmm_sequence, input, event_alignment);
-            //              global_training[params.strand_idx].add_training_from_alignment(hmm_sequence, input, event_alignment);
-            //  #endif
+//             // hiruna
+//             //  right now we don't use this to train
+//             //  #if EVENTALIGN_TRAIN
+//             //              // update training data for read
+//             //              params.sr->parameters[params.strand_idx].add_training_from_alignment(hmm_sequence, input, event_alignment);
+//             //              global_training[params.strand_idx].add_training_from_alignment(hmm_sequence, input, event_alignment);
+//             //  #endif
 
-            if (num_output == 0)
-            {
-                break;
-            }
-            tester_i++;
-        } // for realignmentsegment
-        // fprintf(stderr, "tester_i = %d\n",tester_i);
-    } // for bam aligned segment
-    // fprintf(stderr, "alignment_output len = %d\n",alignment_output.size());
-    // assert(alignment_output.size() == 4451);
-    return alignment_output;
-}
+//             if (num_output == 0)
+//             {
+//                 break;
+//             }
+//             tester_i++;
+//         } // for realignmentsegment
+//         // fprintf(stderr, "tester_i = %d\n",tester_i);
+//     } // for bam aligned segment
+//     // fprintf(stderr, "alignment_output len = %d\n",alignment_output.size());
+//     // assert(alignment_output.size() == 4451);
+//     return alignment_output;
+// }
 
 // Return the duration of the specified event for one strand
 inline float get_duration_samples(const event_table *events, uint32_t event_idx)
