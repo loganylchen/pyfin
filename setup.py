@@ -492,56 +492,23 @@ cuda_dtw_extension = Extension(
 )
 cuda_dtw_extension.ext_type = "dtw"
 
-# Eventalign wrapper extension (CPU only)
-eventalign_cpu_extension = Extension(
-    name="fin._eventalign._eventalign_cpu",
+# Eventalign API wrapper - simplified interface for getevents and set_model
+eventalign_api_extension = Extension(
+    name="fin._eventalign._eventalign",
     sources=[
-        os.path.join(EVENTALIGN_DIR, "eventalign_wrapper.c"),
-        os.path.join(EVENTALIGN_DIR, "common_core.c"),
-        os.path.join(EVENTALIGN_DIR, "common_io.c"),
-        os.path.join(EVENTALIGN_DIR, "common_model.c"),
-        os.path.join(EVENTALIGN_DIR, "align.c"),
-        os.path.join(EVENTALIGN_DIR, "eventalign.c"),
+        os.path.join(EVENTALIGN_DIR, "event_api_wrapper.c"),
+        os.path.join(EVENTALIGN_DIR, "events.c"),
+        os.path.join(EVENTALIGN_DIR, "model.c"),
     ],
     depends=[
-        os.path.join(EVENTALIGN_DIR, "common_core.h"),
-        os.path.join(EVENTALIGN_DIR, "common_core.cuh"),
-        os.path.join(EVENTALIGN_DIR, "common_error.h"),
-        os.path.join(EVENTALIGN_DIR, "common_model.h"),
-        os.path.join(EVENTALIGN_DIR, "logsum.h"),
+        os.path.join(EVENTALIGN_DIR, "common.h"),
+        os.path.join(EVENTALIGN_DIR, "model.h"),
+        os.path.join(EVENTALIGN_DIR, "error.h"),
         os.path.join(EVENTALIGN_DIR, "ksort.h"),
-        os.path.join(EVENTALIGN_DIR, "str.h"),
-        os.path.join(EVENTALIGN_DIR, "matrix.h"),
     ],
     include_dirs=[EVENTALIGN_DIR],
 )
-eventalign_cpu_extension.ext_type = "align"
-
-# Eventalign wrapper extension (GPU accelerated) - built only if CUDA is available
-eventalign_gpu_extension = Extension(
-    name="fin._eventalign._eventalign_gpu",
-    sources=[
-        os.path.join(EVENTALIGN_DIR, "eventalign_wrapper.c"),
-        os.path.join(EVENTALIGN_DIR, "common_core.cu"),
-        os.path.join(EVENTALIGN_DIR, "common_io.c"),
-        os.path.join(EVENTALIGN_DIR, "common_model.c"),
-        os.path.join(EVENTALIGN_DIR, "align.c"),
-        os.path.join(EVENTALIGN_DIR, "eventalign.c"),
-        os.path.join(EVENTALIGN_DIR, "align.cu"),  # GPU alignment functions
-    ],
-    depends=[
-        os.path.join(EVENTALIGN_DIR, "common_core.h"),
-        os.path.join(EVENTALIGN_DIR, "common_core.cuh"),
-        os.path.join(EVENTALIGN_DIR, "common_error.h"),
-        os.path.join(EVENTALIGN_DIR, "common_model.h"),
-        os.path.join(EVENTALIGN_DIR, "logsum.h"),
-        os.path.join(EVENTALIGN_DIR, "ksort.h"),
-        os.path.join(EVENTALIGN_DIR, "str.h"),
-        os.path.join(EVENTALIGN_DIR, "matrix.h"),
-    ],
-    include_dirs=[EVENTALIGN_DIR],
-)
-eventalign_gpu_extension.ext_type = "align_cuda"
+eventalign_api_extension.ext_type = "align"
 
 
 # Main setup configuration
@@ -574,8 +541,7 @@ def main():
         include_package_data=True,
         ext_modules=[
             cuda_dtw_extension,
-            eventalign_cpu_extension,
-            eventalign_gpu_extension,
+            eventalign_api_extension,
         ],
         cmdclass={"build_ext": MultiExt},
         python_requires=">=3.8",

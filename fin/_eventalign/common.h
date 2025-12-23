@@ -12,11 +12,11 @@
 #include <stdio.h>
 #include <string>
 #include <vector> //required for eventalign
-#include <map>     // required for std::map
+#include <map>    // required for std::map
 #include <sys/resource.h>
 #include <sys/time.h>
 
-#include "common_error.h"
+#include "error.h"
 
 /*******************************
  * major hard coded parameters *
@@ -391,211 +391,14 @@ typedef struct
 
 } core_t;
 
-/* argument wrapper for the multithreaded framework used for data processing */
-typedef struct
-{
-    core_t *core;
-    db_t *db;
-    int32_t starti;
-    int32_t endi;
-    void (*func)(core_t *, db_t *, int);
-    int32_t thread_index;
-#ifdef WORK_STEAL
-    void *all_pthread_args;
-#endif
-#ifdef HAVE_CUDA
-    double ret1; // return value
-#endif
-} pthread_arg_t;
-
-/* argument wrapper for multithreaded framework used for input/processing/output interleaving */
-typedef struct
-{
-    core_t *core;
-    db_t *db;
-    // conditional variable for notifying the processing to the output threads
-    pthread_cond_t cond;
-    pthread_mutex_t mutex;
-    int8_t finished;
-} pthread_arg2_t;
-
-/* return status by the load_db - used for termination when all the data is processed */
-typedef struct
-{
-    int32_t num_reads;
-    int64_t num_bases;
-} ret_status_t;
-
 /******************************************
  * function prototype for major functions *
  ******************************************/
-
-/* initialise user specified options */
-void init_opt(opt_t *opt);
-
-/* initialise the core data structure */
-core_t *init_core(opt_t opt);
-
-/* free the core data structure */
-void free_core(core_t *core, opt_t opt);
-
-/* initialise a data batch */
-db_t *init_db(core_t *core, int32_t read_number, int32_t ref_number);
-
-/* load a data batch from disk */
-ret_status_t load_db(core_t *dg, db_t *db);
-
-/* completely process a data batch
-   (all steps: event detection, adaptive banded event alignment, ...., HMM) */
-void process_db(core_t *dg, db_t *db);
-
-/* align a data batch (perform ABEA for a data batch) */
-void align_db(core_t *core, db_t *db);
-
-/* write the output for a processed data batch */
-void output_db(core_t *core, db_t *db);
-
-/* completely free a data batch */
-void free_db(db_t *db);
-
-#ifdef HAVE_CUDA
-/* initalise GPU */
-void init_cuda(core_t *core);
-
-/* free the GPU*/
-void free_cuda(core_t *core);
-#endif
-
-/* Function prototypes for other non-major functions are in f5cmisc.h (and f5cmisc.cuh for CUDA)*/
-/* performance related parameter profiles for various systems*/
-int set_profile(char *profile, opt_t *opt);
 
 /* models */
 uint32_t set_model(model_t *model, uint32_t model_id);
 
 /* events */
-event_table getevents(size_t nsample, float *rawptr, int8_t rna);
-
-/* alignment related */
-scalings_t estimate_scalings_using_mom(char *sequence, int32_t sequence_len, model_t *pore_model, uint32_t kmer_size, event_table et);
-int32_t align(AlignedPair *out_2, char *sequence, int32_t sequence_len,
-              event_table events, model_t *models, uint32_t kmer_size, scalings_t scaling,
-              float sample_rate);
-int32_t postalign(event_alignment_t *alignment, index_pair_t *base_to_event_map, double *events_per_base,
-                  char *sequence, int32_t n_kmers, AlignedPair *event_alignment, int32_t n_events, uint32_t kmer_size);
-bool recalibrate_model(model_t *pore_model, uint32_t kmer_size, event_table et, scalings_t *scallings,
-                       const event_alignment_t *alignment_output, int32_t num_alignments, bool scale_var, int32_t minNumEventsToRescale);
-
-void realign_read(std::vector<event_alignment_t> *event_alignment_result, EventalignSummary *summary, FILE *summary_fp, char *ref,
-                  const bam_hdr_t *hdr, const bam1_t *record, int32_t read_length,
-                  size_t read_idx, int region_start, int region_end,
-                  event_table *events, model_t *model, uint32_t kmer_size, index_pair_t *base_to_event_map,
-                  scalings_t scaling, double events_per_base, float sample_rate);
-/* hmm */
-float profile_hmm_score(const char *m_seq, const char *m_rc_seq, event_t *event, scalings_t scaling,
-                        model_t *cpgmodel, uint32_t kmer_size, uint32_t event_start_idx,
-                        uint32_t event_stop_idx, uint8_t strand, int8_t event_stride,
-                        uint8_t rc, double events_per_base, uint32_t hmm_flags);
-float profile_hmm_score_r9(const char *m_seq,
-                           const char *m_rc_seq,
-                           event_t *event,
-                           scalings_t scaling,
-                           model_t *cpgmodel, uint32_t kmer_size,
-                           uint32_t event_start_idx,
-                           uint32_t event_stop_idx,
-                           uint8_t strand,
-                           int8_t event_stride,
-                           uint8_t rc,
-                           double events_per_base,
-                           uint32_t hmm_flags);
-
-void pthread_db(core_t *core, db_t *db, void (*func)(core_t *, db_t *, int));
-
-#ifdef HAVE_CUDA
-/* alignment on GPU */
-void align_cuda(core_t *core, db_t *db);
-#endif
-
-// taken from minimap2/misc
-static inline double realtime(void)
-{
-    struct timeval tp;
-    struct timezone tzp;
-    gettimeofday(&tp, &tzp);
-    return tp.tv_sec + tp.tv_usec * 1e-6;
-}
-
-// taken from minimap2/misc
-static inline double cputime(void)
-{
-    struct rusage r;
-    getrusage(RUSAGE_SELF, &r);
-    return r.ru_utime.tv_sec + r.ru_stime.tv_sec +
-           1e-6 * (r.ru_utime.tv_usec + r.ru_stime.tv_usec);
-}
-
-// taken from minimap2
-static inline long peakrss(void)
-{
-    struct rusage r;
-    getrusage(RUSAGE_SELF, &r);
-#ifdef __linux__
-    return r.ru_maxrss * 1024;
-#else
-    return r.ru_maxrss;
-#endif
-}
-
-// Prints to the provided buffer a nice number of bytes (KB, MB, GB, etc)
-// from https://www.mbeckler.org/blog/?p=114
-static inline void print_size(const char *name, uint64_t bytes)
-{
-    const char *suffixes[7];
-    suffixes[0] = "B";
-    suffixes[1] = "KB";
-    suffixes[2] = "MB";
-    suffixes[3] = "GB";
-    suffixes[4] = "TB";
-    suffixes[5] = "PB";
-    suffixes[6] = "EB";
-    uint64_t s = 0; // which suffix to use
-    double count = bytes;
-    while (count >= 1024 && s < 7)
-    {
-        s++;
-        count /= 1024;
-    }
-    if (count - floor(count) == 0.0)
-        fprintf(stderr, "[%s] %s : %d %s\n", __func__, name, (int)count, suffixes[s]);
-    else
-        fprintf(stderr, "[%s] %s : %.1f %s\n", __func__, name, count, suffixes[s]);
-}
-
-// replace u with t in a string
-static inline void replace_char(char *str, char u, char t)
-{
-    while (*str)
-    {
-        if (*str == u)
-        {
-            *str = t;
-        }
-        str++;
-    }
-}
-
-static inline int64_t mm_parse_num(const char *str) // taken from minimap2
-{
-    double x;
-    char *p;
-    x = strtod(str, &p);
-    if (*p == 'G' || *p == 'g')
-        x *= 1e9;
-    else if (*p == 'M' || *p == 'm')
-        x *= 1e6;
-    else if (*p == 'K' || *p == 'k')
-        x *= 1e3;
-    return (int64_t)(x + .499);
-}
+event_table getevents(size_t nsample, float *rawptr);
 
 #endif

@@ -194,3 +194,6 @@ logs/
 .claude
 
 testdata
+
+fin/_eventalign/_tmp
+fin/_eventalign/tmp
