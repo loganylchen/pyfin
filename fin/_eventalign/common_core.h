@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string>
 #include <vector> //required for eventalign
+#include <map>     // required for std::map
 #include <sys/resource.h>
 #include <sys/time.h>
 
