@@ -501,6 +501,7 @@ eventalign_cpu_extension = Extension(
         os.path.join(EVENTALIGN_DIR, "common_io.c"),
         os.path.join(EVENTALIGN_DIR, "common_model.c"),
         os.path.join(EVENTALIGN_DIR, "align.c"),
+        os.path.join(EVENTALIGN_DIR, "eventalign.c"),
     ],
     depends=[
         os.path.join(EVENTALIGN_DIR, "common_core.h"),
@@ -510,6 +511,7 @@ eventalign_cpu_extension = Extension(
         os.path.join(EVENTALIGN_DIR, "logsum.h"),
         os.path.join(EVENTALIGN_DIR, "ksort.h"),
         os.path.join(EVENTALIGN_DIR, "str.h"),
+        os.path.join(EVENTALIGN_DIR, "matrix.h"),
     ],
     include_dirs=[EVENTALIGN_DIR],
 )
@@ -524,6 +526,7 @@ eventalign_gpu_extension = Extension(
         os.path.join(EVENTALIGN_DIR, "common_io.c"),
         os.path.join(EVENTALIGN_DIR, "common_model.c"),
         os.path.join(EVENTALIGN_DIR, "align.c"),
+        os.path.join(EVENTALIGN_DIR, "eventalign.c"),
         os.path.join(EVENTALIGN_DIR, "align.cu"),  # GPU alignment functions
     ],
     depends=[
@@ -534,6 +537,7 @@ eventalign_gpu_extension = Extension(
         os.path.join(EVENTALIGN_DIR, "logsum.h"),
         os.path.join(EVENTALIGN_DIR, "ksort.h"),
         os.path.join(EVENTALIGN_DIR, "str.h"),
+        os.path.join(EVENTALIGN_DIR, "matrix.h"),
     ],
     include_dirs=[EVENTALIGN_DIR],
 )
