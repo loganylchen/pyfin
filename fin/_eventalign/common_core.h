@@ -1,0 +1,600 @@
+/* @file f5c.h
+**
+** high level interface to f5c framework - major definitions and function prototypes
+** @author: Hasindu Gamaarachchi (hasindu@unsw.edu.au)
+** @@
+******************************************************************************/
+
+#ifndef COMMON_H
+#define COMMON_H
+
+#include <stdint.h>
+#include <stdio.h>
+#include <string>
+#include <vector> //required for eventalign
+#include <sys/resource.h>
+#include <sys/time.h>
+
+#include "common_error.h"
+
+/*******************************
+ * major hard coded parameters *
+ *******************************/
+
+#define MAX_KMER_SIZE 9           // maximum k-mer size
+#define MAX_NUM_KMER 262144       // maximum number of k-mers in nucleotide model
+#define MAX_NUM_KMER_METH 1953125 // maximum number of k-mers in methylated model
+#define HAVE_CUDA 1               // if compiled for CUDA or not
+#define ALN_BANDWIDTH 100         // the band size in adaptive_banded_dynamic_alignment
+
+// CPU thread scheduling options for multithreading framework for processing
+#define WORK_STEAL 1        // simple work stealing enabled or not (no work stealing mean no load balancing)
+#define STEAL_THRESH 1      // stealing threshold for the CPU only sections
+#define STEAL_THRESH_CUDA 0 // stealing threshold for the CPU part in a GPU accelerated workload
+
+// set if input, processing and output are not to be interleaved (serial mode) - useful for debugging
+// #define IO_PROC_NO_INTERLEAVE 1
+
+// #define ALIGN_2D_ARRAY 1 //for CPU whether to use a 1D array or a 2D array
+//  note : (2D arrays are very slow due to mallocs when the number of threads is high)
+
+#define CACHED_LOG 1 // if the log values of scalings and the model k-mers are cached
+
+#define ESL_LOG_SUM 1 // enable the fast log sum for HMM
+
+#define MIN_CALIBRATION_VAR 2.5
+#define MAX_EVENT_TO_BP_RATIO 20
+#define AVG_EVENTS_PER_KMER_MAX 15.0f // if average events per base of a read >AVG_EVENTS_PER_KMER_MAX do not process
+
+// model types
+#define MODEL_TYPE_NUCLEOTIDE 1
+#define MODEL_TYPE_METH 2
+
+// default model IDs
+#define MODEL_ID_RNA002_NUCLEOTIDE 1
+#define MODEL_ID_RNA004_NUCLEOTIDE 2
+
+/// opts for autodetect
+#define OPT_PORE_R9 0
+#define OPT_PORE_R10 1
+#define OPT_PORE_RNA004 2
+
+// Flags to modify the behaviour of the HMM
+enum HMMAlignmentFlags
+{
+    HAF_ALLOW_PRE_CLIP = 1, // allow events to go unmatched before the aligning region
+    HAF_ALLOW_POST_CLIP = 2 // allow events to go unmatched after the aligning region
+};
+
+/**********************************
+ * data types and data structures *
+ **********************************/
+
+typedef int64_t ptr_t; // abstract pointer data type
+
+/* user specified options */
+typedef struct
+{
+    uint32_t flag;                     // flags
+    int32_t batch_size;                // max reads loaded at once: K
+    int64_t batch_size_bases;          // max bases loaded at once: B
+    int32_t mode;                      // mode of RNA002 (1) or RNA004 (2)
+    int32_t num_thread;                // t
+    int32_t min_num_events_to_rescale; // the minimum number of event for rescaling, 200 is the default
+
+    // todo : these are required only for HAVE_CUDA (but need to change the meth_main accordingly)
+    int32_t cuda_block_size;            //?
+    float cuda_max_readlen;             // max-lf
+    float cuda_avg_events_per_kmer;     // avg-epk
+    float cuda_max_avg_events_per_kmer; // max-epk
+    int32_t cuda_dev_id;
+    float cuda_mem_frac;
+} opt_t;
+
+/* a single signal-space event : adapted from taken from scrappie */
+typedef struct
+{
+    uint64_t start;
+    float length; // todo : cant be made int?
+    float mean;
+    float stdv;
+    // int32_t pos;   //todo : always -1 can be removed
+    // int32_t state; //todo : always -1 can be removed
+} event_t;
+
+/* event table : adapted from scrappie */
+typedef struct
+{
+    size_t n;     // todo : int32_t not enough?
+    size_t start; // todo : always 0?
+    size_t end;   // todo : always equal to n?
+    event_t *event;
+} event_table;
+
+/* k-mer model */
+typedef struct
+{
+    float level_mean;
+    float level_stdv;
+
+#ifdef CACHED_LOG
+    float level_log_stdv; // pre-calculated for efficiency
+#endif
+
+} model_t;
+
+/* scaling parameters for the signal : taken from nanopolish */
+typedef struct
+{
+    // direct parameters that must be set
+    float scale;
+    float shift;
+    // float drift; = 0 always?
+    float var; // set later when calibrating
+    // float scale_sd;
+    // float var_sd;
+
+#ifdef CACHED_LOG
+    float log_var; // derived parameters that are cached for efficiency
+#endif
+    // float scaled_var;
+    // float log_scaled_var;
+} scalings_t;
+
+/* from nanopolish */
+typedef struct
+{
+    int event_idx;
+    int kmer_idx;
+} EventKmerPair;
+
+/* from nanopolish */
+typedef struct
+{
+    int ref_pos;
+    int read_pos;
+} AlignedPair;
+
+/* from nanopolish */
+typedef struct
+{
+    int32_t start; // index of the event that maps first to the base
+    int32_t stop;  // inclusive // index of the event that maps last to the base
+} index_pair_t;
+
+/* from nanopolish */
+typedef struct
+{
+    // ref data
+    // char* ref_name;
+    char ref_kmer[MAX_KMER_SIZE + 1];
+    int32_t ref_position;
+
+    // event data
+    int32_t read_idx;
+    // int32_t strand_idx;
+    int32_t event_idx;
+    bool rc;
+
+    // hmm data
+    char model_kmer[MAX_KMER_SIZE + 1];
+    char hmm_state;
+} event_alignment_t;
+
+/* from nanopolish */
+struct ScoredSite
+{
+    // toto : clean up unused
+    ScoredSite()
+    {
+        ll_unmethylated[0] = 0;
+        ll_unmethylated[1] = 0;
+        ll_methylated[0] = 0;
+        ll_methylated[1] = 0;
+        strands_scored = 0;
+    }
+
+    std::string chromosome;
+    int start_position;
+    int end_position;
+    int n_cpg;
+    std::string sequence;
+
+    // scores per strand
+    double ll_unmethylated[2];
+    double ll_methylated[2];
+    int strands_scored;
+
+    //
+    static bool sort_by_position(const ScoredSite &a, const ScoredSite &b) { return a.start_position < b.start_position; }
+};
+
+/*  Summarize the event alignment for a read strand : taken from nanopolish*/
+typedef struct
+{
+    // //cleanup this part
+    // EventalignSummary() {
+    //     num_events = 0;
+    //     num_steps = 0;
+    //     num_stays = 0;
+    //     num_skips = 0;
+    //     sum_z_score = 0;
+    //     sum_duration = 0;
+    //     alignment_edit_distance = 0;
+    //     reference_span = 0;
+    // }
+
+    int num_events;
+    int num_steps;
+    int num_stays;
+    int num_skips;
+
+    double sum_duration;
+    double sum_z_score;
+    int alignment_edit_distance;
+    int reference_span;
+} EventalignSummary;
+
+typedef struct
+{
+    float *rawptr;    // raw signal (float is not the best datatype type though)
+    uint64_t nsample; // number of samples
+
+    //	Information for scaling raw data from ADC values to pA (are these duplicates?)
+    float digitisation;
+    float offset;
+    float range;
+    float sample_rate;
+
+    // computed scaling paramtersd
+    float scale;
+    float shift;
+    float drift;
+    float var;
+    float scale_sd;
+    float var_sd;
+
+    // derived parameters that are cached for efficiency. do we need these?
+    float log_var;
+    float scaled_var;
+    float log_scaled_var;
+
+} signal_t;
+
+/* a batch of read data (dynamic data based on the reads) */
+typedef struct
+{
+    int32_t batch_size;  // will these overflow?
+    int32_t n_read_size; // allocated size of the arrays
+    int32_t ref_num;     // number of reference sequences loaded
+    int32_t n_ref_rec;   // number of reference records loaded
+    int32_t n_read_rec;  // number of read records loaded
+    char **read_id;      // read identifiers
+    char **ref_sequence; // reference sequences
+    char **ref_name;     // read sequences
+    int32_t *read_len;   // read lengths
+    int32_t *ref_length; // reference sequence lengths
+    // fast5 file //should flatten this to reduce mallocs
+    signal_t **sig;
+    // event table
+    event_table *et;
+    // scaling
+    scalings_t *scalings;
+    // aligned pairs
+    AlignedPair **event_align_pairs;
+    int32_t *n_event_align_pairs;
+    // event alignments
+    event_alignment_t **event_alignment;
+    int32_t *n_event_alignment;
+    double *events_per_base; // todo : do we need double?
+    index_pair_t **base_to_event_map;
+    int32_t *read_stat_flag;
+    // extreme ugly hack till converted to C
+    //  An output map from reference positions to scored CpG sites
+    std::map<int, ScoredSite> **site_score_map;
+
+    // stats //set by the load_db
+    int64_t sum_bases;
+    int64_t total_reads; // total number mapped entries in the bam file (after filtering based on flags, mapq etc)
+
+    // eventalign related
+    EventalignSummary *eventalign_summary;
+    // another extremely ugly hack till converted to C
+    // TODO : convert this to a C array and get rid of include <vector>
+    std::vector<event_alignment_t> **event_alignment_result;
+    char **event_alignment_result_str;
+
+} db_t;
+
+/* cuda core data structure (allocated array pointers, mostly static data throughout the program lifetime).  */
+#ifdef HAVE_CUDA
+typedef struct
+{
+    ptr_t *event_ptr_host;
+    int32_t *n_events_host;
+    ptr_t *read_ptr_host;
+    int32_t *read_len_host;
+    scalings_t *scalings_host;
+    int32_t *n_event_align_pairs_host;
+
+    char *read;      // flattened reads sequences
+    ptr_t *read_ptr; // index pointer for flattedned "reads"
+    int32_t *read_len;
+    int64_t sum_read_len;
+    int32_t *n_events;
+    event_t *event_table;
+    ptr_t *event_ptr;
+    int64_t sum_n_events;
+    scalings_t *scalings;
+    AlignedPair *event_align_pairs;
+    int32_t *n_event_align_pairs;
+    float *bands;
+    uint8_t *trace;
+    EventKmerPair *band_lower_left;
+    model_t *model_kmer_cache;
+    model_t *model;
+
+    // dynamic arrays
+    uint64_t max_sum_read_len;
+    uint64_t max_sum_n_events;
+
+} cuda_data_t;
+#endif
+
+/* core data structure (mostly static data throughout the program lifetime) */
+typedef struct
+{
+
+    // models
+    model_t *model; // dna model
+    uint32_t kmer_size;
+
+    // options
+    opt_t opt;
+
+#ifdef HAVE_CUDA
+
+    // cuda arrays
+    cuda_data_t *cuda;
+
+    double align_kernel_time;
+    double align_pre_kernel_time;
+    double align_core_kernel_time;
+    double align_post_kernel_time;
+    double extra_load_cpu;
+    double align_cuda_malloc;
+    double align_cuda_memcpy;
+    double align_cuda_postprocess;
+    double align_cuda_preprocess;
+    double align_cuda_total_kernel;
+
+    // perf stats (can reduce to 16 bit integers)
+    int32_t previous_mem;
+    int32_t previous_count_mem;
+    int32_t previous_load;
+    int32_t previous_count_load;
+
+#endif
+
+    // stats //set by output_db
+    int64_t sum_bases;
+
+    // eventalign related
+    int8_t mode;
+    // IO proc related
+    pid_t *pids;
+    int *pipefd_p2c;
+    int *pipefd_c2p;
+    FILE **pipefp_p2c;
+    FILE **pipefp_c2p;
+
+} core_t;
+
+/* argument wrapper for the multithreaded framework used for data processing */
+typedef struct
+{
+    core_t *core;
+    db_t *db;
+    int32_t starti;
+    int32_t endi;
+    void (*func)(core_t *, db_t *, int);
+    int32_t thread_index;
+#ifdef WORK_STEAL
+    void *all_pthread_args;
+#endif
+#ifdef HAVE_CUDA
+    double ret1; // return value
+#endif
+} pthread_arg_t;
+
+/* argument wrapper for multithreaded framework used for input/processing/output interleaving */
+typedef struct
+{
+    core_t *core;
+    db_t *db;
+    // conditional variable for notifying the processing to the output threads
+    pthread_cond_t cond;
+    pthread_mutex_t mutex;
+    int8_t finished;
+} pthread_arg2_t;
+
+/* return status by the load_db - used for termination when all the data is processed */
+typedef struct
+{
+    int32_t num_reads;
+    int64_t num_bases;
+} ret_status_t;
+
+/******************************************
+ * function prototype for major functions *
+ ******************************************/
+
+/* initialise user specified options */
+void init_opt(opt_t *opt);
+
+/* initialise the core data structure */
+core_t *init_core(opt_t opt);
+
+/* free the core data structure */
+void free_core(core_t *core, opt_t opt);
+
+/* initialise a data batch */
+db_t *init_db(core_t *core, int32_t read_number, int32_t ref_number);
+
+/* load a data batch from disk */
+ret_status_t load_db(core_t *dg, db_t *db);
+
+/* completely process a data batch
+   (all steps: event detection, adaptive banded event alignment, ...., HMM) */
+void process_db(core_t *dg, db_t *db);
+
+/* align a data batch (perform ABEA for a data batch) */
+void align_db(core_t *core, db_t *db);
+
+/* write the output for a processed data batch */
+void output_db(core_t *core, db_t *db);
+
+/* completely free a data batch */
+void free_db(db_t *db);
+
+#ifdef HAVE_CUDA
+/* initalise GPU */
+void init_cuda(core_t *core);
+
+/* free the GPU*/
+void free_cuda(core_t *core);
+#endif
+
+/* Function prototypes for other non-major functions are in f5cmisc.h (and f5cmisc.cuh for CUDA)*/
+/* performance related parameter profiles for various systems*/
+int set_profile(char *profile, opt_t *opt);
+
+/* models */
+uint32_t set_model(model_t *model, uint32_t model_id);
+
+/* events */
+event_table getevents(size_t nsample, float *rawptr, int8_t rna);
+
+/* alignment related */
+scalings_t estimate_scalings_using_mom(char *sequence, int32_t sequence_len, model_t *pore_model, uint32_t kmer_size, event_table et);
+int32_t align(AlignedPair *out_2, char *sequence, int32_t sequence_len,
+              event_table events, model_t *models, uint32_t kmer_size, scalings_t scaling,
+              float sample_rate);
+int32_t postalign(event_alignment_t *alignment, index_pair_t *base_to_event_map, double *events_per_base,
+                  char *sequence, int32_t n_kmers, AlignedPair *event_alignment, int32_t n_events, uint32_t kmer_size);
+bool recalibrate_model(model_t *pore_model, uint32_t kmer_size, event_table et, scalings_t *scallings,
+                       const event_alignment_t *alignment_output, int32_t num_alignments, bool scale_var, int32_t minNumEventsToRescale);
+
+void realign_read(std::vector<event_alignment_t> *event_alignment_result, EventalignSummary *summary, FILE *summary_fp, char *ref,
+                  const bam_hdr_t *hdr, const bam1_t *record, int32_t read_length,
+                  size_t read_idx, int region_start, int region_end,
+                  event_table *events, model_t *model, uint32_t kmer_size, index_pair_t *base_to_event_map,
+                  scalings_t scaling, double events_per_base, float sample_rate);
+/* hmm */
+float profile_hmm_score(const char *m_seq, const char *m_rc_seq, event_t *event, scalings_t scaling,
+                        model_t *cpgmodel, uint32_t kmer_size, uint32_t event_start_idx,
+                        uint32_t event_stop_idx, uint8_t strand, int8_t event_stride,
+                        uint8_t rc, double events_per_base, uint32_t hmm_flags);
+float profile_hmm_score_r9(const char *m_seq,
+                           const char *m_rc_seq,
+                           event_t *event,
+                           scalings_t scaling,
+                           model_t *cpgmodel, uint32_t kmer_size,
+                           uint32_t event_start_idx,
+                           uint32_t event_stop_idx,
+                           uint8_t strand,
+                           int8_t event_stride,
+                           uint8_t rc,
+                           double events_per_base,
+                           uint32_t hmm_flags);
+
+void pthread_db(core_t *core, db_t *db, void (*func)(core_t *, db_t *, int));
+
+#ifdef HAVE_CUDA
+/* alignment on GPU */
+void align_cuda(core_t *core, db_t *db);
+#endif
+
+// taken from minimap2/misc
+static inline double realtime(void)
+{
+    struct timeval tp;
+    struct timezone tzp;
+    gettimeofday(&tp, &tzp);
+    return tp.tv_sec + tp.tv_usec * 1e-6;
+}
+
+// taken from minimap2/misc
+static inline double cputime(void)
+{
+    struct rusage r;
+    getrusage(RUSAGE_SELF, &r);
+    return r.ru_utime.tv_sec + r.ru_stime.tv_sec +
+           1e-6 * (r.ru_utime.tv_usec + r.ru_stime.tv_usec);
+}
+
+// taken from minimap2
+static inline long peakrss(void)
+{
+    struct rusage r;
+    getrusage(RUSAGE_SELF, &r);
+#ifdef __linux__
+    return r.ru_maxrss * 1024;
+#else
+    return r.ru_maxrss;
+#endif
+}
+
+// Prints to the provided buffer a nice number of bytes (KB, MB, GB, etc)
+// from https://www.mbeckler.org/blog/?p=114
+static inline void print_size(const char *name, uint64_t bytes)
+{
+    const char *suffixes[7];
+    suffixes[0] = "B";
+    suffixes[1] = "KB";
+    suffixes[2] = "MB";
+    suffixes[3] = "GB";
+    suffixes[4] = "TB";
+    suffixes[5] = "PB";
+    suffixes[6] = "EB";
+    uint64_t s = 0; // which suffix to use
+    double count = bytes;
+    while (count >= 1024 && s < 7)
+    {
+        s++;
+        count /= 1024;
+    }
+    if (count - floor(count) == 0.0)
+        fprintf(stderr, "[%s] %s : %d %s\n", __func__, name, (int)count, suffixes[s]);
+    else
+        fprintf(stderr, "[%s] %s : %.1f %s\n", __func__, name, count, suffixes[s]);
+}
+
+// replace u with t in a string
+static inline void replace_char(char *str, char u, char t)
+{
+    while (*str)
+    {
+        if (*str == u)
+        {
+            *str = t;
+        }
+        str++;
+    }
+}
+
+static inline int64_t mm_parse_num(const char *str) // taken from minimap2
+{
+    double x;
+    char *p;
+    x = strtod(str, &p);
+    if (*p == 'G' || *p == 'g')
+        x *= 1e9;
+    else if (*p == 'M' || *p == 'm')
+        x *= 1e6;
+    else if (*p == 'K' || *p == 'k')
+        x *= 1e3;
+    return (int64_t)(x + .499);
+}
+
+#endif
