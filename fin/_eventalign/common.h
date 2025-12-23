@@ -265,16 +265,20 @@ typedef struct
 /* a batch of read data (dynamic data based on the reads) */
 typedef struct
 {
-    int32_t batch_size;  // will these overflow?
-    int32_t n_read_size; // allocated size of the arrays
-    int32_t ref_num;     // number of reference sequences loaded
-    int32_t n_ref_rec;   // number of reference records loaded
-    int32_t n_read_rec;  // number of read records loaded
-    char **read_id;      // read identifiers
+    int32_t batch_size; // will these overflow?
+
+    int32_t read_idx;  // starting read index in the bam file
+    char **read_id;    // read identifiers
+    int32_t *read_len; // read lengths
+
+    int32_t ref_n;       // number of reference sequences loaded
     char **ref_sequence; // reference sequences
     char **ref_name;     // read sequences
-    int32_t *read_len;   // read lengths
-    int32_t *ref_length; // reference sequence lengths
+    int32_t *ref_len;    // reference sequence lengths
+
+    int32_t sum_bases;
+    int32_t total_reads;
+
     // fast5 file //should flatten this to reduce mallocs
     signal_t **sig;
     // event table
@@ -391,6 +395,12 @@ typedef struct
 
 } core_t;
 
+/* return status by the load_db - used for termination when all the data is processed */
+typedef struct
+{
+    int32_t num_reads;
+    int64_t num_bases;
+} ret_status_t;
 /******************************************
  * function prototype for major functions *
  ******************************************/
@@ -400,5 +410,9 @@ uint32_t set_model(model_t *model, uint32_t model_id);
 
 /* events */
 event_table getevents(size_t nsample, float *rawptr);
+
+/* initialise a data batch */
+db_t *init_db(int32_t batch_size);
+void free_db(db_t *db);
 
 #endif
