@@ -28,14 +28,16 @@ def example_getevents():
 
     # Detect events
     events = getevents(signal)
-
+    print(events)
     print(f"\nDetected {events['n_events']} events")
     print(f"\nFirst 5 events:")
     print(f"  {'Start':>10} {'Length':>10} {'Mean':>10} {'Stdv':>10}")
     print(f"  {'-'*10} {'-'*10} {'-'*10} {'-'*10}")
-    for i in range(min(5, events['n_events'])):
-        print(f"  {events['starts'][i]:10d} {events['lengths'][i]:10.1f} "
-              f"{events['means'][i]:10.2f} {events['stdvs'][i]:10.2f}")
+    for i in range(min(5, events["n_events"])):
+        print(
+            f"  {events['starts'][i]:10d} {events['lengths'][i]:10.1f} "
+            f"{events['means'][i]:10.2f} {events['stdvs'][i]:10.2f}"
+        )
 
 
 def example_set_model():
@@ -49,20 +51,28 @@ def example_set_model():
     model_002 = set_model(MODEL_RNA002)
     print(f"  K-mer size: {model_002['kmer_size']}")
     print(f"  Number of k-mers: {model_002['num_kmer']}")
-    print(f"  Mean level range: [{model_002['level_means'].min():.2f}, "
-          f"{model_002['level_means'].max():.2f}]")
-    print(f"  Stdv range: [{model_002['level_stdvs'].min():.4f}, "
-          f"{model_002['level_stdvs'].max():.4f}]")
+    print(
+        f"  Mean level range: [{model_002['level_means'].min():.2f}, "
+        f"{model_002['level_means'].max():.2f}]"
+    )
+    print(
+        f"  Stdv range: [{model_002['level_stdvs'].min():.4f}, "
+        f"{model_002['level_stdvs'].max():.4f}]"
+    )
 
     # Load RNA004 model (k=9)
     print("\nLoading RNA004 model (k=9)...")
     model_004 = set_model(MODEL_RNA004)
     print(f"  K-mer size: {model_004['kmer_size']}")
     print(f"  Number of k-mers: {model_004['num_kmer']}")
-    print(f"  Mean level range: [{model_004['level_means'].min():.2f}, "
-          f"{model_004['level_means'].max():.2f}]")
-    print(f"  Stdv range: [{model_004['level_stdvs'].min():.4f}, "
-          f"{model_004['level_stdvs'].max():.4f}]")
+    print(
+        f"  Mean level range: [{model_004['level_means'].min():.2f}, "
+        f"{model_004['level_means'].max():.2f}]"
+    )
+    print(
+        f"  Stdv range: [{model_004['level_stdvs'].min():.4f}, "
+        f"{model_004['level_stdvs'].max():.4f}]"
+    )
 
 
 def example_kmer_lookup():
@@ -78,7 +88,7 @@ def example_kmer_lookup():
     # RNA002 uses k=5, bases are A=0, C=1, G=2, T=3
     # Index = sum(base * 4^position) for position in 0..k-1
     def kmer_to_index(kmer: str) -> int:
-        base_to_val = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'U': 0}
+        base_to_val = {"A": 0, "C": 1, "G": 2, "T": 3, "U": 0}
         index = 0
         for i, base in enumerate(kmer):
             index = index * 4 + base_to_val[base.upper()]
@@ -92,8 +102,8 @@ def example_kmer_lookup():
     print(f"  {'-'*10} {'-'*10} {'-'*10} {'-'*10}")
     for kmer in kmers:
         idx = kmer_to_index(kmer)
-        mean = model['level_means'][idx]
-        stdv = model['level_stdvs'][idx]
+        mean = model["level_means"][idx]
+        stdv = model["level_stdvs"][idx]
         print(f"  {kmer:>10} {idx:10d} {mean:10.2f} {stdv:10.4f}")
 
 
