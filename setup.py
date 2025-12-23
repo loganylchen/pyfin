@@ -473,107 +473,10 @@ class MultiExt(build_ext):
 # Path Configuration
 # --------------------------
 
-F5C_DIR = os.path.join("fin", "_f5c")
-ALIGN_DIR = os.path.join("fin", "_align")
-
-align_extension = Extension(
-    name="fin._align._align",
-    sources=[
-        os.path.join(ALIGN_DIR, "align_wrapper.c"),
-        os.path.join(ALIGN_DIR, "align.c"),
-        os.path.join(ALIGN_DIR, "hmm.c"),
-        os.path.join(ALIGN_DIR, "model.c"),
-        os.path.join(F5C_DIR, "event_detection_simple.c"),  # Reuse from fin/_f5c
-    ],
-    depends=[
-        os.path.join(ALIGN_DIR, "f5c.h"),
-        os.path.join(ALIGN_DIR, "f5cmisc.h"),
-        os.path.join(ALIGN_DIR, "matrix.h"),
-        os.path.join(ALIGN_DIR, "str.h"),
-        os.path.join(ALIGN_DIR, "logsum.h"),
-        os.path.join(ALIGN_DIR, "error.h"),
-        os.path.join(ALIGN_DIR, "model.h"),
-        os.path.join(F5C_DIR, "event_detection_simple.h"),
-        os.path.join(F5C_DIR, "model.h"),
-    ],
-    include_dirs=[ALIGN_DIR, F5C_DIR],
-)
-align_extension.ext_type = "align"
-
-
-align_cuda_extension = Extension(
-    name="fin._align._align_cuda",
-    sources=[
-        os.path.join(ALIGN_DIR, "align_wrapper.c"),
-        os.path.join(ALIGN_DIR, "align.cu"),
-        os.path.join(ALIGN_DIR, "hmm.c"),
-        os.path.join(ALIGN_DIR, "model.c"),
-        os.path.join(F5C_DIR, "event_detection_simple.c"),  # Reuse from fin/_f5c
-    ],
-    depends=[
-        os.path.join(ALIGN_DIR, "f5c.h"),
-        os.path.join(ALIGN_DIR, "f5cmisc.h"),
-        os.path.join(ALIGN_DIR, "matrix.h"),
-        os.path.join(ALIGN_DIR, "str.h"),
-        os.path.join(ALIGN_DIR, "logsum.h"),
-        os.path.join(ALIGN_DIR, "error.h"),
-        os.path.join(ALIGN_DIR, "model.h"),
-        os.path.join(F5C_DIR, "event_detection_simple.h"),
-        os.path.join(F5C_DIR, "model.h"),
-    ],
-    include_dirs=[ALIGN_DIR, F5C_DIR],
-)
-align_cuda_extension.ext_type = "align_cuda"
-
-f5c_extension = Extension(
-    name="fin._f5c._event",
-    sources=[
-        os.path.join(F5C_DIR, "f5c_python.c"),
-        os.path.join(F5C_DIR, "event_detection_simple.c"),
-    ],
-    depends=[os.path.join(F5C_DIR, "event_detection_simple.h")],
-    include_dirs=[F5C_DIR],
-)
-f5c_extension.ext_type = "f5c"
-
-# Eventalign extension (CPU only)
-eventalign_extension = Extension(
-    name="fin._f5c._eventalign",
-    sources=[
-        os.path.join(F5C_DIR, "eventalign.c"),
-        os.path.join(F5C_DIR, "event_detection_simple.c"),
-        os.path.join(F5C_DIR, "align.c"),  # CPU alignment with 3-state HMM
-    ],
-    depends=[
-        os.path.join(F5C_DIR, "event_detection_simple.h"),
-        os.path.join(F5C_DIR, "align_common.h"),
-        os.path.join(F5C_DIR, "model.h"),
-    ],
-    include_dirs=[F5C_DIR],
-)
-eventalign_extension.ext_type = "f5c"
-
-# CUDA Eventalign extension (GPU accelerated) - built only if CUDA is available
-# Note: Needs align.c for profile_hmm_align (CPU implementation)
-cuda_eventalign_extension = Extension(
-    name="fin._f5c._eventalign_cuda",
-    sources=[
-        os.path.join(F5C_DIR, "eventalign.c"),
-        os.path.join(F5C_DIR, "event_detection_simple.c"),
-        os.path.join(F5C_DIR, "align.c"),  # CPU profile_hmm_align function
-        os.path.join(F5C_DIR, "align.cu"),  # GPU align_with_flanking_gpu
-    ],
-    depends=[
-        os.path.join(F5C_DIR, "event_detection_simple.h"),
-        os.path.join(F5C_DIR, "align_common.h"),
-        os.path.join(F5C_DIR, "model.h"),
-    ],
-    include_dirs=[F5C_DIR],
-)
-cuda_eventalign_extension.ext_type = "f5c_cuda"
+OPENDBA_DIR = os.path.join("fin", "_dtw")
+EVENTALIGN_DIR = os.path.join("fin", "_eventalign")
 
 # DTW/CUDA extension with Python bindings
-OPENDBA_DIR = os.path.join("fin", "_dtw")
 cuda_dtw_extension = Extension(
     name="fin._dtw._cuda_dtw",
     sources=[
@@ -588,6 +491,53 @@ cuda_dtw_extension = Extension(
     ],
 )
 cuda_dtw_extension.ext_type = "dtw"
+
+# Eventalign wrapper extension (CPU only)
+eventalign_cpu_extension = Extension(
+    name="fin._eventalign._eventalign_cpu",
+    sources=[
+        os.path.join(EVENTALIGN_DIR, "eventalign_wrapper.c"),
+        os.path.join(EVENTALIGN_DIR, "common_core.c"),
+        os.path.join(EVENTALIGN_DIR, "common_io.c"),
+        os.path.join(EVENTALIGN_DIR, "common_model.c"),
+        os.path.join(EVENTALIGN_DIR, "align.c"),
+    ],
+    depends=[
+        os.path.join(EVENTALIGN_DIR, "common_core.h"),
+        os.path.join(EVENTALIGN_DIR, "common_core.cuh"),
+        os.path.join(EVENTALIGN_DIR, "common_error.h"),
+        os.path.join(EVENTALIGN_DIR, "common_model.h"),
+        os.path.join(EVENTALIGN_DIR, "logsum.h"),
+        os.path.join(EVENTALIGN_DIR, "ksort.h"),
+        os.path.join(EVENTALIGN_DIR, "str.h"),
+    ],
+    include_dirs=[EVENTALIGN_DIR],
+)
+eventalign_cpu_extension.ext_type = "align"
+
+# Eventalign wrapper extension (GPU accelerated) - built only if CUDA is available
+eventalign_gpu_extension = Extension(
+    name="fin._eventalign._eventalign_gpu",
+    sources=[
+        os.path.join(EVENTALIGN_DIR, "eventalign_wrapper.c"),
+        os.path.join(EVENTALIGN_DIR, "common_core.cu"),
+        os.path.join(EVENTALIGN_DIR, "common_io.c"),
+        os.path.join(EVENTALIGN_DIR, "common_model.c"),
+        os.path.join(EVENTALIGN_DIR, "align.c"),
+        os.path.join(EVENTALIGN_DIR, "align.cu"),  # GPU alignment functions
+    ],
+    depends=[
+        os.path.join(EVENTALIGN_DIR, "common_core.h"),
+        os.path.join(EVENTALIGN_DIR, "common_core.cuh"),
+        os.path.join(EVENTALIGN_DIR, "common_error.h"),
+        os.path.join(EVENTALIGN_DIR, "common_model.h"),
+        os.path.join(EVENTALIGN_DIR, "logsum.h"),
+        os.path.join(EVENTALIGN_DIR, "ksort.h"),
+        os.path.join(EVENTALIGN_DIR, "str.h"),
+    ],
+    include_dirs=[EVENTALIGN_DIR],
+)
+eventalign_gpu_extension.ext_type = "align_cuda"
 
 
 # Main setup configuration
@@ -610,9 +560,8 @@ def main():
             "fin.io",
             "fin.utils",
             "fin.analysis",
-            "fin._f5c",
             "fin._dtw",
-            "fin._align",
+            "fin._eventalign",
         ],
         package_dir={"fin": "fin"},
         package_data={
@@ -620,12 +569,9 @@ def main():
         },
         include_package_data=True,
         ext_modules=[
-            f5c_extension,
-            eventalign_extension,
-            cuda_eventalign_extension,
             cuda_dtw_extension,
-            align_extension,
-            align_cuda_extension,
+            eventalign_cpu_extension,
+            eventalign_gpu_extension,
         ],
         cmdclass={"build_ext": MultiExt},
         python_requires=">=3.8",

@@ -101,80 +101,142 @@ void free_core(core_t *core, opt_t opt)
 /* initialise a data batch */
 db_t *init_db(core_t *core, int32_t read_number, int32_t ref_number)
 {
+    int32_t i;
+    int32_t total_entries = read_number * ref_number;
+
     db_t *db = (db_t *)(malloc(sizeof(db_t)));
-    MALLOC_CHK(db);
+    if (db == NULL) {
+        malloc_chk(NULL, __func__, __FILE__, __LINE__ - 2);
+        return NULL;
+    }
 
     db->read_id = (char **)malloc(sizeof(char *) * read_number);
-    MALLOC_CHK(db->read_id);
+    if (db->read_id == NULL) goto cleanup_db;
     db->ref_sequence = (char **)malloc(sizeof(char *) * ref_number);
-    MALLOC_CHK(db->ref_sequence);
+    if (db->ref_sequence == NULL) goto cleanup_read_id;
     db->ref_name = (char **)malloc(sizeof(char *) * ref_number);
-    MALLOC_CHK(db->ref_name);
+    if (db->ref_name == NULL) goto cleanup_ref_sequence;
     db->ref_length = (int32_t *)malloc(sizeof(int32_t) * ref_number);
-    MALLOC_CHK(db->ref_length);
+    if (db->ref_length == NULL) goto cleanup_ref_name;
 
     db->sig = (signal_t **)malloc(sizeof(signal_t *) * read_number);
-    MALLOC_CHK(db->sig);
-    db->et = (event_table *)malloc(sizeof(event_table) * read_number * ref_number);
-    MALLOC_CHK(db->et);
+    if (db->sig == NULL) goto cleanup_ref_length;
+    db->et = (event_table *)malloc(sizeof(event_table) * total_entries);
+    if (db->et == NULL) goto cleanup_sig;
 
     db->scalings =
-        (scalings_t *)malloc(sizeof(scalings_t) * read_number * ref_number);
-    MALLOC_CHK(db->scalings);
+        (scalings_t *)malloc(sizeof(scalings_t) * total_entries);
+    if (db->scalings == NULL) goto cleanup_et;
 
     db->event_align_pairs =
-        (AlignedPair **)malloc(sizeof(AlignedPair *) * read_number * ref_number);
-    MALLOC_CHK(db->event_align_pairs);
+        (AlignedPair **)malloc(sizeof(AlignedPair *) * total_entries);
+    if (db->event_align_pairs == NULL) goto cleanup_scalings;
     db->n_event_align_pairs =
-        (int32_t *)malloc(sizeof(int32_t) * read_number * ref_number);
-    MALLOC_CHK(db->n_event_align_pairs);
+        (int32_t *)malloc(sizeof(int32_t) * total_entries);
+    if (db->n_event_align_pairs == NULL) goto cleanup_event_align_pairs;
 
     db->event_alignment = (event_alignment_t **)malloc(
-        sizeof(event_alignment_t *) * read_number * ref_number);
-    MALLOC_CHK(db->event_alignment);
+        sizeof(event_alignment_t *) * total_entries);
+    if (db->event_alignment == NULL) goto cleanup_n_event_align_pairs;
     db->n_event_alignment =
-        (int32_t *)malloc(sizeof(int32_t) * read_number * ref_number);
-    MALLOC_CHK(db->n_event_alignment);
+        (int32_t *)malloc(sizeof(int32_t) * total_entries);
+    if (db->n_event_alignment == NULL) goto cleanup_event_alignment;
 
     db->events_per_base =
-        (double *)malloc(sizeof(double) * read_number * ref_number);
-    MALLOC_CHK(db->events_per_base);
+        (double *)malloc(sizeof(double) * total_entries);
+    if (db->events_per_base == NULL) goto cleanup_n_event_alignment;
 
     db->base_to_event_map =
-        (index_pair_t **)malloc(sizeof(index_pair_t *) * read_number * ref_number);
-    MALLOC_CHK(db->base_to_event_map);
+        (index_pair_t **)malloc(sizeof(index_pair_t *) * total_entries);
+    if (db->base_to_event_map == NULL) goto cleanup_events_per_base;
 
-    db->read_stat_flag = (int32_t *)malloc(sizeof(int32_t) * read_number * ref_number);
-    MALLOC_CHK(db->read_stat_flag);
+    db->read_stat_flag = (int32_t *)malloc(sizeof(int32_t) * total_entries);
+    if (db->read_stat_flag == NULL) goto cleanup_base_to_event_map;
 
-    db->site_score_map = (std::map<int, ScoredSite> **)malloc(sizeof(std::map<int, ScoredSite> *) * read_number * ref_number);
-    MALLOC_CHK(db->site_score_map);
+    db->site_score_map = (std::map<int, ScoredSite> **)malloc(sizeof(std::map<int, ScoredSite> *) * total_entries);
+    if (db->site_score_map == NULL) goto cleanup_read_stat_flag;
 
-    for (i = 0; i < read_number * ref_number; ++i)
+    for (i = 0; i < total_entries; ++i)
     {
         db->site_score_map[i] = new std::map<int, ScoredSite>;
-        NULL_CHK(db->site_score_map[i]);
+        if (db->site_score_map[i] == NULL) {
+            // Clean up already allocated maps
+            for (int32_t j = 0; j < i; j++) {
+                delete db->site_score_map[j];
+            }
+            goto cleanup_site_score_map_ptr;
+        }
     }
 
     db->total_reads = 0;
 
     // eventalign related
 
-    db->event_alignment_result = (std::vector<event_alignment_t> **)malloc(sizeof(std::vector<event_alignment_t> *) * read_number * ref_number);
-    MALLOC_CHK(db->event_alignment_result);
+    db->event_alignment_result = (std::vector<event_alignment_t> **)malloc(sizeof(std::vector<event_alignment_t> *) * total_entries);
+    if (db->event_alignment_result == NULL) goto cleanup_site_score_maps;
 
-    db->event_alignment_result_str = (char **)malloc(sizeof(char *) * read_number * ref_number);
-    MALLOC_CHK(db->event_alignment_result_str);
+    db->event_alignment_result_str = (char **)malloc(sizeof(char *) * total_entries);
+    if (db->event_alignment_result_str == NULL) goto cleanup_event_alignment_result;
 
-    for (i = 0; i < read_number * ref_number; ++i)
+    for (i = 0; i < total_entries; ++i)
     {
         db->event_alignment_result[i] = new std::vector<event_alignment_t>;
-        NULL_CHK(db->event_alignment_result[i]);
+        if (db->event_alignment_result[i] == NULL) {
+            // Clean up already allocated vectors
+            for (int32_t j = 0; j < i; j++) {
+                delete db->event_alignment_result[j];
+            }
+            goto cleanup_event_alignment_result_str;
+        }
         (db->eventalign_summary[i]).num_events = 0; // done here in the same loop for efficiency
         db->event_alignment_result_str[i] = NULL;
     }
 
     return db;
+
+    // Error cleanup paths (in reverse order of allocation)
+cleanup_event_alignment_result_str:
+    free(db->event_alignment_result_str);
+cleanup_event_alignment_result:
+    free(db->event_alignment_result);
+cleanup_site_score_maps:
+    for (i = 0; i < total_entries; i++) {
+        delete db->site_score_map[i];
+    }
+cleanup_site_score_map_ptr:
+    free(db->site_score_map);
+cleanup_read_stat_flag:
+    free(db->read_stat_flag);
+cleanup_base_to_event_map:
+    free(db->base_to_event_map);
+cleanup_events_per_base:
+    free(db->events_per_base);
+cleanup_n_event_alignment:
+    free(db->n_event_alignment);
+cleanup_event_alignment:
+    free(db->event_alignment);
+cleanup_n_event_align_pairs:
+    free(db->n_event_align_pairs);
+cleanup_event_align_pairs:
+    free(db->event_align_pairs);
+cleanup_scalings:
+    free(db->scalings);
+cleanup_et:
+    free(db->et);
+cleanup_sig:
+    free(db->sig);
+cleanup_ref_length:
+    free(db->ref_length);
+cleanup_ref_name:
+    free(db->ref_name);
+cleanup_ref_sequence:
+    free(db->ref_sequence);
+cleanup_read_id:
+    free(db->read_id);
+cleanup_db:
+    free(db);
+    MALLOC_CHK(NULL);
+    return NULL;
 }
 
 /* load a data batch from disk */

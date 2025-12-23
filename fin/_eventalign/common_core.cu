@@ -68,33 +68,41 @@ void init_cuda(core_t *core)
     core->cuda->read_len_host = (int32_t *)malloc(sizeof(int32_t) * batch_size);
     MALLOC_CHK(core->cuda->read_len_host);
     core->cuda->scalings_host = (scalings_t *)malloc(sizeof(scalings_t) * batch_size);
-    MALLOC_CHK(core->cuda->scalings_host);
+    if (core->cuda->scalings_host == NULL) goto cleanup_n_event_align_pairs_host;
     core->cuda->n_event_align_pairs_host = (int32_t *)malloc(sizeof(int32_t) * batch_size);
-    MALLOC_CHK(core->cuda->n_event_align_pairs_host);
+    if (core->cuda->n_event_align_pairs_host == NULL) goto cleanup_scalings_host;
 
-    // cuda arrays
+    // cuda arrays - Initialize pointers to NULL for cleanup
+    core->cuda->read_ptr = NULL;
+    core->cuda->read_len = NULL;
+    core->cuda->n_events = NULL;
+    core->cuda->event_ptr = NULL;
+    core->cuda->model = NULL;
+    core->cuda->n_event_align_pairs = NULL;
+#ifndef CUDA_DYNAMIC_MALLOC
+    core->cuda->read = NULL;
+    core->cuda->event_table = NULL;
+    core->cuda->model_kmer_cache = NULL;
+    core->cuda->event_align_pairs = NULL;
+    core->cuda->bands = NULL;
+    core->cuda->trace = NULL;
+    core->cuda->band_lower_left = NULL;
+#endif
 
-    cudaMalloc((void **)&(core->cuda->read_ptr), batch_size * sizeof(ptr_t));
-    CUDA_CHK();
-    cudaMalloc((void **)&(core->cuda->read_len), batch_size * sizeof(int32_t));
-    CUDA_CHK();
+    // cudaMalloc with error handling
+    if (cudaMalloc((void **)&(core->cuda->read_ptr), batch_size * sizeof(ptr_t)) != cudaSuccess) goto cleanup_cuda_base;
+    if (cudaMalloc((void **)&(core->cuda->read_len), batch_size * sizeof(int32_t)) != cudaSuccess) goto cleanup_read_ptr;
     // n_events
-    cudaMalloc((void **)&(core->cuda->n_events), batch_size * sizeof(int32_t));
-    CUDA_CHK();
-    cudaMalloc((void **)&(core->cuda->event_ptr), batch_size * sizeof(ptr_t));
-    CUDA_CHK();
+    if (cudaMalloc((void **)&(core->cuda->n_events), batch_size * sizeof(int32_t)) != cudaSuccess) goto cleanup_read_len;
+    if (cudaMalloc((void **)&(core->cuda->event_ptr), batch_size * sizeof(ptr_t)) != cudaSuccess) goto cleanup_n_events;
     // scalings : already linear
-    cudaMalloc((void **)&(core->cuda->scalings), batch_size * sizeof(scalings_t));
-    CUDA_CHK();
-    cudaMalloc((void **)&(core->cuda->model),
-               MAX_NUM_KMER * sizeof(model_t));
-    CUDA_CHK();
-    cudaMalloc((void **)&(core->cuda->n_event_align_pairs), batch_size * sizeof(int32_t));
-    CUDA_CHK();
+    if (cudaMalloc((void **)&(core->cuda->scalings), batch_size * sizeof(scalings_t)) != cudaSuccess) goto cleanup_event_ptr;
+    if (cudaMalloc((void **)&(core->cuda->model),
+               MAX_NUM_KMER * sizeof(model_t)) != cudaSuccess) goto cleanup_scalings;
+    if (cudaMalloc((void **)&(core->cuda->n_event_align_pairs), batch_size * sizeof(int32_t)) != cudaSuccess) goto cleanup_model;
     // model
-    cudaMemcpy(core->cuda->model, core->model, MAX_NUM_KMER * sizeof(model_t),
-               cudaMemcpyHostToDevice);
-    CUDA_CHK();
+    if (cudaMemcpy(core->cuda->model, core->model, MAX_NUM_KMER * sizeof(model_t),
+               cudaMemcpyHostToDevice) != cudaSuccess) goto cleanup_n_event_align_pairs;
 
 #ifndef CUDA_DYNAMIC_MALLOC
     // //dynamic arrays
@@ -150,24 +158,17 @@ void init_cuda(core_t *core)
 
     assert(read_capacity + event_table_capacity + model_kmer_cache_capacity + event_align_pairs_capacity + bands_capacity + trace_capacity + band_lower_left_capacity <= free_mem);
     // input arrays
-    cudaMalloc((void **)&(core->cuda->read), read_capacity); // with null char
-    CUDA_CHK();
-    cudaMalloc((void **)&(core->cuda->event_table), event_table_capacity);
-    CUDA_CHK();
-    cudaMalloc((void **)&(core->cuda->model_kmer_cache), model_kmer_cache_capacity);
-    CUDA_CHK();
+    if (cudaMalloc((void **)&(core->cuda->read), read_capacity) != cudaSuccess) goto cleanup_cuda_base; // with null char
+    if (cudaMalloc((void **)&(core->cuda->event_table), event_table_capacity) != cudaSuccess) goto cleanup_read;
+    if (cudaMalloc((void **)&(core->cuda->model_kmer_cache), model_kmer_cache_capacity) != cudaSuccess) goto cleanup_event_table;
 
     /**allocate output arrays for cuda**/
-    cudaMalloc((void **)&(core->cuda->event_align_pairs), event_align_pairs_capacity); // todo : need better huristic
-    CUDA_CHK();
+    if (cudaMalloc((void **)&(core->cuda->event_align_pairs), event_align_pairs_capacity) != cudaSuccess) goto cleanup_model_kmer_cache; // todo : need better huristic
 
     // scratch arrays
-    cudaMalloc((void **)&(core->cuda->bands), bands_capacity);
-    CUDA_CHK();
-    cudaMalloc((void **)&(core->cuda->trace), trace_capacity);
-    CUDA_CHK();
-    cudaMalloc((void **)&(core->cuda->band_lower_left), band_lower_left_capacity);
-    CUDA_CHK();
+    if (cudaMalloc((void **)&(core->cuda->bands), bands_capacity) != cudaSuccess) goto cleanup_event_align_pairs;
+    if (cudaMalloc((void **)&(core->cuda->trace), trace_capacity) != cudaSuccess) goto cleanup_bands;
+    if (cudaMalloc((void **)&(core->cuda->band_lower_left), band_lower_left_capacity) != cudaSuccess) goto cleanup_trace;
 
     STDERR("Max GPU capacity %.1fM bases", core->cuda->max_sum_read_len / (1000.0 * 1000.0));
     int64_t num_bases_gap = core->cuda->max_sum_read_len - core->opt.batch_size_bases;
@@ -185,10 +186,53 @@ void init_cuda(core_t *core)
 #endif
 
     return;
+
+    // Error cleanup paths (in reverse order of allocation)
+cleanup_trace:
+    if (core->cuda->trace != NULL) cudaFree(core->cuda->trace);
+cleanup_bands:
+    if (core->cuda->bands != NULL) cudaFree(core->cuda->bands);
+cleanup_event_align_pairs:
+    if (core->cuda->event_align_pairs != NULL) cudaFree(core->cuda->event_align_pairs);
+cleanup_model_kmer_cache:
+    if (core->cuda->model_kmer_cache != NULL) cudaFree(core->cuda->model_kmer_cache);
+cleanup_event_table:
+    if (core->cuda->event_table != NULL) cudaFree(core->cuda->event_table);
+cleanup_read:
+    if (core->cuda->read != NULL) cudaFree(core->cuda->read);
+cleanup_n_event_align_pairs:
+    if (core->cuda->n_event_align_pairs != NULL) cudaFree(core->cuda->n_event_align_pairs);
+cleanup_model:
+    if (core->cuda->model != NULL) cudaFree(core->cuda->model);
+cleanup_scalings:
+    if (core->cuda->scalings != NULL) cudaFree(core->cuda->scalings);
+cleanup_event_ptr:
+    if (core->cuda->event_ptr != NULL) cudaFree(core->cuda->event_ptr);
+cleanup_n_events:
+    if (core->cuda->n_events != NULL) cudaFree(core->cuda->n_events);
+cleanup_read_len:
+    if (core->cuda->read_len != NULL) cudaFree(core->cuda->read_len);
+cleanup_read_ptr:
+    if (core->cuda->read_ptr != NULL) cudaFree(core->cuda->read_ptr);
+cleanup_cuda_base:
+    free(core->cuda->n_event_align_pairs_host);
+cleanup_scalings_host:
+    free(core->cuda->scalings_host);
+cleanup_n_event_align_pairs_host:
+    free(core->cuda->event_ptr_host);
+    free(core->cuda->n_events_host);
+    free(core->cuda->read_ptr_host);
+    free(core->cuda->read_len_host);
+    free(core->cuda->cuda);
+    CUDA_CHK(); // Report any CUDA errors before exiting
+    exit(EXIT_FAILURE);
 }
 
 void free_cuda(core_t *core)
 {
+    if (core == NULL || core->cuda == NULL) {
+        return;
+    }
 
     free(core->cuda->event_ptr_host);
     free(core->cuda->n_events_host);
@@ -197,25 +241,69 @@ void free_cuda(core_t *core)
     free(core->cuda->scalings_host);
     free(core->cuda->n_event_align_pairs_host);
 
-    cudaFree(core->cuda->read_ptr);
-    cudaFree(core->cuda->read_len);
-    cudaFree(core->cuda->n_events);
-    cudaFree(core->cuda->event_ptr);
-    cudaFree(core->cuda->model); // constant memory
-    cudaFree(core->cuda->scalings);
-    cudaFree(core->cuda->n_event_align_pairs);
+    // Only free CUDA pointers if they were allocated
+    if (core->cuda->read_ptr != NULL) {
+        cudaFree(core->cuda->read_ptr);
+        core->cuda->read_ptr = NULL;
+    }
+    if (core->cuda->read_len != NULL) {
+        cudaFree(core->cuda->read_len);
+        core->cuda->read_len = NULL;
+    }
+    if (core->cuda->n_events != NULL) {
+        cudaFree(core->cuda->n_events);
+        core->cuda->n_events = NULL;
+    }
+    if (core->cuda->event_ptr != NULL) {
+        cudaFree(core->cuda->event_ptr);
+        core->cuda->event_ptr = NULL;
+    }
+    if (core->cuda->model != NULL) {
+        cudaFree(core->cuda->model); // constant memory
+        core->cuda->model = NULL;
+    }
+    if (core->cuda->scalings != NULL) {
+        cudaFree(core->cuda->scalings);
+        core->cuda->scalings = NULL;
+    }
+    if (core->cuda->n_event_align_pairs != NULL) {
+        cudaFree(core->cuda->n_event_align_pairs);
+        core->cuda->n_event_align_pairs = NULL;
+    }
 
 #ifndef CUDA_DYNAMIC_MALLOC
-    cudaFree(core->cuda->read);
-    cudaFree(core->cuda->event_table);
-    cudaFree(core->cuda->model_kmer_cache);
-    cudaFree(core->cuda->event_align_pairs);
-    cudaFree(core->cuda->bands);
-    cudaFree(core->cuda->trace);
-    cudaFree(core->cuda->band_lower_left);
+    if (core->cuda->read != NULL) {
+        cudaFree(core->cuda->read);
+        core->cuda->read = NULL;
+    }
+    if (core->cuda->event_table != NULL) {
+        cudaFree(core->cuda->event_table);
+        core->cuda->event_table = NULL;
+    }
+    if (core->cuda->model_kmer_cache != NULL) {
+        cudaFree(core->cuda->model_kmer_cache);
+        core->cuda->model_kmer_cache = NULL;
+    }
+    if (core->cuda->event_align_pairs != NULL) {
+        cudaFree(core->cuda->event_align_pairs);
+        core->cuda->event_align_pairs = NULL;
+    }
+    if (core->cuda->bands != NULL) {
+        cudaFree(core->cuda->bands);
+        core->cuda->bands = NULL;
+    }
+    if (core->cuda->trace != NULL) {
+        cudaFree(core->cuda->trace);
+        core->cuda->trace = NULL;
+    }
+    if (core->cuda->band_lower_left != NULL) {
+        cudaFree(core->cuda->band_lower_left);
+        core->cuda->band_lower_left = NULL;
+    }
 #endif
 
     free(core->cuda);
+    core->cuda = NULL;
     return;
 }
 
