@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <math.h>
 #include "model.h"
 #include "error.h"
 #include "common.h"
