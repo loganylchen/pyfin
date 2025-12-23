@@ -10,6 +10,8 @@
 #define ERROR_H
 
 #include <errno.h>
+#include <string.h> // for strerror
+#include <stdlib.h> // for exit
 
 #define WARN "[%s::WARNING]\033[1;33m "
 #define ERR "[%s::ERROR]\033[1;31m "
