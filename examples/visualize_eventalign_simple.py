@@ -347,6 +347,21 @@ def plot_comparison(
     ax3.legend(loc="upper right", fontsize=8)
 
     # =========================================================================
+    # Calculate statistics for first 3 panels
+    # =========================================================================
+    mean_diff = np.mean(differences)
+    std_diff = np.std(differences)
+    rmsd = np.sqrt(np.mean(differences**2))
+    corr = np.corrcoef(f5c_arr, ge_arr)[0, 1] if len(f5c_arr) > 1 else 0.0
+
+    # Model vs getevents statistics
+    f5c_model_means_arr = np.array(f5c_model_means)
+    mean_diff_model = np.mean(f5c_model_means_arr - ge_arr)
+    std_diff_model = np.std(f5c_model_means_arr - ge_arr)
+    rmsd_model = np.sqrt(np.mean((f5c_model_means_arr - ge_arr) ** 2))
+    corr_model = np.corrcoef(f5c_model_means_arr, ge_arr)[0, 1] if len(f5c_model_means_arr) > 1 else 0.0
+
+    # =========================================================================
     # Panel 4: K-mer model comparison (f5c model_mean vs raw pore model)
     # =========================================================================
     if rna002_model is not None:
@@ -369,29 +384,29 @@ def plot_comparison(
             raw_model_values.append(rna002_model["level_means"][idx])
             raw_model_indices.append(idx)
 
-        f5c_model_arr = np.array(f5c_model_values)
-        raw_model_arr = np.array(raw_model_values)
+        f5c_kmer_model_arr = np.array(f5c_model_values)
+        raw_kmer_model_arr = np.array(raw_model_values)
 
         # Scatter plot comparison
-        ax4.scatter(raw_model_arr, f5c_model_arr, c="#9467bd", alpha=0.6, s=20, edgecolors="black", linewidth=0.5)
+        ax4.scatter(raw_kmer_model_arr, f5c_kmer_model_arr, c="#9467bd", alpha=0.6, s=20, edgecolors="black", linewidth=0.5)
 
         # Add diagonal line for perfect match
-        min_val = min(f5c_model_arr.min(), raw_model_arr.min())
-        max_val = max(f5c_model_arr.max(), raw_model_arr.max())
+        min_val = min(f5c_kmer_model_arr.min(), raw_kmer_model_arr.min())
+        max_val = max(f5c_kmer_model_arr.max(), raw_kmer_model_arr.max())
         ax4.plot([min_val, max_val], [min_val, max_val], "k--", alpha=0.3, linewidth=1, label="Perfect match")
 
-        # Calculate statistics
-        model_diff = f5c_model_arr - raw_model_arr
-        mean_model_diff = np.mean(model_diff)
-        std_model_diff = np.std(model_diff)
-        rmsd_model = np.sqrt(np.mean(model_diff**2))
-        corr_model = np.corrcoef(f5c_model_arr, raw_model_arr)[0, 1] if len(f5c_model_arr) > 1 else 0.0
+        # Calculate statistics for k-mer comparison
+        kmer_model_diff = f5c_kmer_model_arr - raw_kmer_model_arr
+        mean_kmer_diff = np.mean(kmer_model_diff)
+        std_kmer_diff = np.std(kmer_model_diff)
+        rmsd_kmer = np.sqrt(np.mean(kmer_model_diff**2))
+        corr_kmer = np.corrcoef(f5c_kmer_model_arr, raw_kmer_model_arr)[0, 1] if len(f5c_kmer_model_arr) > 1 else 0.0
 
         ax4.set_xlabel("Raw Pore Model Mean (pA)", fontsize=11)
         ax4.set_ylabel("f5c Model Mean (pA)", fontsize=11)
         ax4.set_title(
             f"K-mer Model Comparison ({len(kmer_list)} unique kmers)\n"
-            f"Mean diff: {mean_model_diff:.2f} pA, RMSD: {rmsd_model:.2f} pA, Corr: {corr_model:.4f}",
+            f"Mean diff: {mean_kmer_diff:.2f} pA, RMSD: {rmsd_kmer:.2f} pA, Corr: {corr_kmer:.4f}",
             fontsize=12,
             fontweight="bold",
         )
@@ -415,9 +430,9 @@ def plot_comparison(
             f"  RMSD: {rmsd_model:.2f} pA\n"
             f"  Correlation: {corr_model:.4f}\n\n"
             f"K-mer Model (f5c vs raw):\n"
-            f"  Mean diff: {mean_model_diff:.2f} pA\n"
-            f"  RMSD: {rmsd_model:.2f} pA\n"
-            f"  Correlation: {corr_model:.4f}\n\n"
+            f"  Mean diff: {mean_kmer_diff:.2f} pA\n"
+            f"  RMSD: {rmsd_kmer:.2f} pA\n"
+            f"  Correlation: {corr_kmer:.4f}\n\n"
             f"Large diffs (>10pA): {np.sum(outlier_mask)}"
         )
     else:
