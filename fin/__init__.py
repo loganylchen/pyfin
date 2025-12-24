@@ -11,25 +11,26 @@ from .utils.log_config import setup_logger, get_package_logger
 
 # Try to import optional extensions
 try:
-    from ._f5c import detect_events, is_available as f5c_is_available
+    from ._eventalign import getevents, set_model, MODEL_RNA002, MODEL_RNA004
+    from ._eventalign import _EVENTALIGN_AVAILABLE
 
-    _F5C_AVAILABLE = True
-except ImportError:
-    _F5C_AVAILABLE = False
-    detect_events = None
-    f5c_is_available = lambda: False
-
-try:
-    from ._f5c import eventalign
-    from ._f5c._eventalign import eventalign as _eventalign_raw
-    from ._f5c._eventalign import profile_hmm_eventalign
-
-    _EVENTALIGN_AVAILABLE = True
-except ImportError:
+    _EVENTALIGN_IMPORT_ERROR = None
+except ImportError as e:
     _EVENTALIGN_AVAILABLE = False
-    eventalign = None
-    _eventalign_raw = None
-    profile_hmm_eventalign = None
+    getevents = None
+    set_model = None
+    MODEL_RNA002 = 1
+    MODEL_RNA004 = 2
+    _EVENTALIGN_IMPORT_ERROR = str(e)
+
+# Try to import _dtw extension (optional CUDA DTW)
+try:
+    from ._dtw import cuda_dtw, cuda_dtw_batch
+    _DTW_AVAILABLE = True
+except ImportError:
+    _DTW_AVAILABLE = False
+    cuda_dtw = None
+    cuda_dtw_batch = None
 
 
 # Initialize package logger
@@ -38,13 +39,22 @@ package_logger = get_package_logger(__name__, level="INFO")
 # Log package initialization
 package_logger.info(f"Package initialized - version {__version__}")
 
-if not _F5C_AVAILABLE:
-    package_logger.warning("f5c extension not available - event detection disabled")
 if not _EVENTALIGN_AVAILABLE:
-    package_logger.warning("eventalign extension not available")
+    package_logger.warning(
+        f"_eventalign extension not available - event detection disabled. "
+        f"Error: {_EVENTALIGN_IMPORT_ERROR}"
+    )
+if not _DTW_AVAILABLE:
+    package_logger.info("_dtw CUDA extension not available (optional)")
 
-__all__ = ["io", "setup_logger", "get_package_logger"]
-if _F5C_AVAILABLE:
-    __all__.extend(["detect_events", "f5c_is_available"])
+__all__ = [
+    "io",
+    "setup_logger",
+    "get_package_logger",
+]
+
 if _EVENTALIGN_AVAILABLE:
-    __all__.extend(["eventalign", "profile_hmm_eventalign"])
+    __all__.extend(["getevents", "set_model", "MODEL_RNA002", "MODEL_RNA004"])
+
+if _DTW_AVAILABLE:
+    __all__.extend(["cuda_dtw", "cuda_dtw_batch"])
