@@ -35,6 +35,7 @@ try:
     from ._eventalign import set_model as _set_model_c
     from ._eventalign import init_db_from_python as _init_db_from_python_c
     from ._eventalign import free_db as _free_db_c
+    from ._eventalign import run_eventalign as _run_eventalign_c
     from ._eventalign import MODEL_RNA002, MODEL_RNA004, MAX_KMER_SIZE, MAX_NUM_KMER
     _EVENTALIGN_AVAILABLE = True
 except ImportError as e:
@@ -85,6 +86,7 @@ __all__ = [
     "set_model",
     "init_db_from_python",
     "free_db",
+    "run_eventalign",
     "MODEL_RNA002",
     "MODEL_RNA004",
     "MAX_KMER_SIZE",
@@ -258,6 +260,87 @@ def free_db(db_ptr):
     """
     _check_available()
     _free_db_c(db_ptr)
+
+
+def run_eventalign(
+    read_ids,
+    read_seqs,
+    ref_seqs,
+    ref_names,
+    ref_lens,
+    signals,
+    sample_rates,
+    model_id=MODEL_RNA002,
+):
+    """
+    Run the full f5c eventalign pipeline from Python data.
+
+    This function performs the complete event alignment workflow:
+    1. Event detection from raw signal
+    2. Scaling estimation using read sequences
+    3. Pair-wise alignment of each read to all references
+    4. Post-alignment to generate base-to-event mappings
+
+    The results are identical to the original f5c eventalign, but without
+    requiring BAM/FASTA/SLOW5 files - all data is provided as Python lists.
+
+    Args:
+        read_ids: list of read identifier strings
+        read_seqs: list of read sequence strings (for scaling estimation)
+        ref_seqs: list of reference sequence strings (multiple references supported)
+        ref_names: list of reference name strings
+        ref_lens: list of reference sequence lengths (int)
+        signals: list of 1D float32 numpy arrays (raw signal data)
+        sample_rates: list of float sample rates for each read (Hz)
+        model_id: Model type - 1 for RNA002 (k=5), 2 for RNA004 (k=9). Default: MODEL_RNA002
+
+    Returns:
+        dict with keys:
+            - full: pair-wise event alignment results [read][ref] = list of dicts
+                Each dict has:
+                    - ref_kmer: reference k-mer string
+                    - ref_position: reference position (int)
+                    - event_idx: event index (int)
+                    - rc: reverse complement flag (bool)
+                    - model_kmer: model k-mer string
+                    - hmm_state: HMM state character
+            - mapping: pair-wise base-to-event mapping [read][ref] = dict
+                Each dict has:
+                    - start: list of start event indices for each base
+                    - stop: list of stop event indices for each base
+                    - events_per_base: average events per base (float)
+            - scalings: list of scaling dicts (one per read)
+                Each dict has: scale, shift, var
+            - events: list of detected event dicts (one per read)
+                Each dict has: starts, lengths, means, stdvs (numpy arrays)
+            - summary: dict with num_reads and num_refs
+
+    Example:
+        >>> from fin._eventalign import run_eventalign, MODEL_RNA002
+        >>> import numpy as np
+        >>>
+        >>> # Single read, single reference
+        >>> result = run_eventalign(
+        ...     read_ids=['read1'],
+        ...     read_seqs=['ACGTACGTACGT'],
+        ...     ref_seqs=['ACGTACGTACGT'],
+        ...     ref_names=['ref1'],
+        ...     ref_lens=[12],
+        ...     signals=[np.random.randn(10000).astype(np.float32)],
+        ...     sample_rates=[4000.0],
+        ...     model_id=MODEL_RNA002,
+        ... )
+        >>>
+        >>> # Access results
+        >>> print(f"Events detected: {len(result['events'][0]['means'])}")
+        >>> print(f"Alignment results: {len(result['full'][0][0])}")
+        >>> print(f"Scalings: {result['scalings'][0]}")
+    """
+    _check_available()
+    return _run_eventalign_c(
+        read_ids, read_seqs, ref_seqs, ref_names, ref_lens,
+        signals, sample_rates, model_id
+    )
 
 
 # Print availability status on import
