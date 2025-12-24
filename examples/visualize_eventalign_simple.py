@@ -29,9 +29,7 @@ def read_pod5_signal(pod5_path: str, read_id: str = None) -> tuple[np.ndarray, f
     try:
         import pod5
     except ImportError:
-        raise ImportError(
-            "pod5 package required. Install with: pip install pod5"
-        )
+        raise ImportError("pod5 package required. Install with: pip install pod5")
 
     with pod5.Reader(pod5_path) as reader:
         reads = list(reader.reads())
@@ -49,7 +47,7 @@ def read_pod5_signal(pod5_path: str, read_id: str = None) -> tuple[np.ndarray, f
             if len(reads) == 0:
                 raise ValueError(f"No reads found in {pod5_path}")
             read = reads[0]
-            signal = read.signal
+            signal = read.signal_pa
             sample_rate = read.run_info.sample_rate
             return signal, sample_rate, str(read.read_id)
 
@@ -89,9 +87,7 @@ def run_getevents(signal: np.ndarray):
     try:
         from fin._eventalign import getevents
     except ImportError:
-        raise ImportError(
-            "fin._eventalign module not available. Please build the package first."
-        )
+        raise ImportError("fin._eventalign module not available. Please build the package first.")
 
     # Convert signal to float32 if needed
     if signal.dtype != np.float32:
@@ -169,8 +165,11 @@ def plot_comparison(
             )
 
     ax1.set_ylabel("Current (pA)", fontsize=11)
-    ax1.set_title("Raw Signal with Event Detection: Blue=f5c, Green=getevents (ours)",
-                 fontsize=12, fontweight="bold")
+    ax1.set_title(
+        "Raw Signal with Event Detection: Blue=f5c, Green=getevents (ours)",
+        fontsize=12,
+        fontweight="bold",
+    )
     ax1.set_xlim(0, len(signal))
 
     legend_elements = [
@@ -192,15 +191,14 @@ def plot_comparison(
     ge_means_arr = ge_means[:n_compare]
 
     # Scatter plot comparison
-    ax2.scatter(x, f5c_means, c="#1f77b4", alpha=0.6, s=15,
-               label="f5c Event Mean", zorder=2)
-    ax2.scatter(x, ge_means_arr, c="#2ca02c", alpha=0.6, s=15,
-               label="getevents Mean", zorder=2)
+    ax2.scatter(x, f5c_means, c="#1f77b4", alpha=0.6, s=15, label="f5c Event Mean", zorder=2)
+    ax2.scatter(x, ge_means_arr, c="#2ca02c", alpha=0.6, s=15, label="getevents Mean", zorder=2)
 
     # Connect with lines to show differences
     for i in range(0, n_compare, max(1, n_compare // 200)):
-        ax2.plot([i, i], [f5c_means[i], ge_means_arr[i]], "gray",
-                alpha=0.2, linewidth=0.5, zorder=1)
+        ax2.plot(
+            [i, i], [f5c_means[i], ge_means_arr[i]], "gray", alpha=0.2, linewidth=0.5, zorder=1
+        )
 
     ax2.set_ylabel("Current (pA)", fontsize=11)
     ax2.set_title(f"Event Means Comparison ({n_compare} events)", fontsize=12, fontweight="bold")
@@ -226,8 +224,15 @@ def plot_comparison(
     if np.any(outlier_mask):
         outlier_x = np.array(x)[outlier_mask]
         outlier_y = np.array(differences)[outlier_mask]
-        ax3.scatter(outlier_x, outlier_y, c="red", s=30, alpha=0.8, zorder=3,
-                   label=f"Large diff (>10 pA): {np.sum(outlier_mask)}")
+        ax3.scatter(
+            outlier_x,
+            outlier_y,
+            c="red",
+            s=30,
+            alpha=0.8,
+            zorder=3,
+            label=f"Large diff (>10 pA): {np.sum(outlier_mask)}",
+        )
 
     ax3.set_xlabel("Event Index", fontsize=11)
     ax3.set_ylabel("Difference (f5c - getevents) [pA]", fontsize=11)
@@ -253,8 +258,14 @@ def plot_comparison(
         f"Correlation: {corr:.4f}\n"
         f"Large diffs (>10pA): {np.sum(outlier_mask)}"
     )
-    fig.text(0.02, 0.5, stats_text, fontsize=9, verticalalignment="center",
-            bbox=dict(boxstyle="round", facecolor="lightblue", alpha=0.5))
+    fig.text(
+        0.02,
+        0.5,
+        stats_text,
+        fontsize=9,
+        verticalalignment="center",
+        bbox=dict(boxstyle="round", facecolor="lightblue", alpha=0.5),
+    )
 
     plt.tight_layout(rect=[0, 0, 0.96, 1])
 
@@ -282,7 +293,8 @@ def main():
         help="Path to f5c eventalign TSV file",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=str,
         default=None,
         help="Path to save output figure",
