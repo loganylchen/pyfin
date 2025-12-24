@@ -122,17 +122,17 @@ cython_debug/
 *.fasta
 *.fastq
 *.fq
-*.fa
+# *.fa
 *.fna
 *.fast5
-*.pod5
+# *.pod5
 *.slow5
 *.blow5
 *.h5
 *.hdf5
 
 # Compressed files
-*.gz
+# *.gz
 *.bz2
 *.zip
 *.tar
@@ -193,7 +193,7 @@ logs/
 
 .claude
 
-testdata
+
 
 fin/_eventalign/_tmp
 fin/_eventalign/tmp
