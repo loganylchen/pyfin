@@ -155,10 +155,10 @@ def example_single_read_single_ref():
     events = result["events"][0]
     n_ev = len(events["starts"])
     print(f"  Total events: {n_ev}")
-    print(f"\n  First 5 events:")
+    print(f"\n  ALL events:")
     print(f"    {'Start':>10} {'Length':>10} {'Mean':>10} {'Stdv':>10}")
     print(f"    {'-'*10} {'-'*10} {'-'*10} {'-'*10}")
-    for i in range(min(5, n_ev)):
+    for i in range(n_ev):
         print(
             f"    {events['starts'][i]:10d} "
             f"{events['lengths'][i]:10.1f} "
@@ -198,8 +198,21 @@ def example_single_read_single_ref():
                 print(f"    Events per base: {mapping['events_per_base']:.2f}")
                 print(f"    First 10 bases: start=[{', '.join(map(str, start[:10]))}]")
                 print(f"                    stop=[{', '.join(map(str, stop[:10]))}]")
+
+                # Diagnostic info
+                print(f"\n  Alignment Statistics:")
+                print(f"    Status: {mapping.get('status', 'unknown')}")
+                print(f"    Aligned pairs: {mapping.get('n_aligned_pairs', 'N/A')}")
+                print(f"    Event alignments: {mapping.get('n_event_alignment', 'N/A')}")
             else:
-                print(f"  Read {i} vs Ref {j}: No alignment (may have failed QC)")
+                print(f"  Read {i} vs Ref {j}: No alignment")
+                # Show diagnostic info
+                mapping = result["mapping"][i][j]
+                print(f"    Status: {mapping.get('status', 'unknown')}")
+                print(f"    Events detected: {mapping.get('n_events', 'N/A')}")
+                print(f"    K-mers in reference: {mapping.get('n_kmers', 'N/A')}")
+                print(f"    Reference length: {mapping.get('ref_len', 'N/A')} bp")
+                print(f"    Read length: {mapping.get('read_len', 'N/A')} bp")
 
 
 def example_single_read_multi_ref():

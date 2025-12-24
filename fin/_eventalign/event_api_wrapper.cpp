@@ -789,6 +789,13 @@ py_run_eventalign(PyObject *self, PyObject *args, PyObject *kwds)
                         PyDict_SetItemString(mapping_dict, "stop", stop_list);
                         PyDict_SetItemString(mapping_dict, "events_per_base",
                             PyFloat_FromDouble(events_per_base));
+                        // Add alignment status
+                        PyDict_SetItemString(mapping_dict, "n_aligned_pairs",
+                            PyLong_FromLong(n_aligned_pairs));
+                        PyDict_SetItemString(mapping_dict, "n_event_alignment",
+                            PyLong_FromLong(n_event_alignment));
+                        PyDict_SetItemString(mapping_dict, "status",
+                            PyUnicode_FromString("success"));
 
                         Py_DECREF(start_list);
                         Py_DECREF(stop_list);
@@ -805,9 +812,27 @@ py_run_eventalign(PyObject *self, PyObject *args, PyObject *kwds)
                 full_results[i][j] = full_list;
                 mapping_results[i][j] = mapping_dict;
             } else {
-                // Alignment failed - set empty results
+                // Alignment failed - set empty results with diagnostic info
                 full_results[i][j] = PyList_New(0);
                 mapping_results[i][j] = PyDict_New();
+
+                // Add diagnostic information to help debug alignment failure
+                if (mapping_results[i][j]) {
+                    PyDict_SetItemString(mapping_results[i][j], "n_aligned_pairs",
+                        PyLong_FromLong(0));
+                    PyDict_SetItemString(mapping_results[i][j], "n_event_alignment",
+                        PyLong_FromLong(0));
+                    PyDict_SetItemString(mapping_results[i][j], "status",
+                        PyUnicode_FromString("no_alignment"));
+                    PyDict_SetItemString(mapping_results[i][j], "n_events",
+                        PyLong_FromLong(events[i].n));
+                    PyDict_SetItemString(mapping_results[i][j], "n_kmers",
+                        PyLong_FromLong(n_kmers));
+                    PyDict_SetItemString(mapping_results[i][j], "ref_len",
+                        PyLong_FromLong(ref_lens[j]));
+                    PyDict_SetItemString(mapping_results[i][j], "read_len",
+                        PyLong_FromLong(read_lens[i]));
+                }
             }
 
             free(event_align_pairs);
