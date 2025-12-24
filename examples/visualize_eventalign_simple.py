@@ -1,17 +1,19 @@
 #!/usr/bin/env python
 """
-Visualization of eventalign results from f5c.
+Visualization comparing f5c eventalign results vs getevents output.
 
-This script uses only the eventalign TSV file (which contains embedded raw samples)
-to visualize:
-- Raw signal with detected events
-- Event mean levels vs model mean levels (different colors)
-- Model comparison with z-scores
+This script:
+1. Reads raw signal from POD5 file
+2. Runs getevents to detect events
+3. Reads f5c eventalign results from TSV
+4. Compares the two event detection methods
 """
 
 import argparse
 import gzip
+import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -22,12 +24,38 @@ import seaborn as sns
 sns.set_style("whitegrid")
 
 
-def read_eventalign_tsv(tsv_path: str, max_events: int = None) -> list[dict]:
-    """
-    Read eventalign TSV file.
+def read_pod5_signal(pod5_path: str, read_id: str = None) -> tuple[np.ndarray, float, str]:
+    """Read raw signal from POD5 file."""
+    try:
+        import pod5
+    except ImportError:
+        raise ImportError(
+            "pod5 package required. Install with: pip install pod5"
+        )
 
-    Returns list of dicts with parsed data including raw samples.
-    """
+    with pod5.Reader(pod5_path) as reader:
+        reads = list(reader.reads())
+
+        if read_id:
+            # Find specific read
+            for read in reads:
+                if str(read.read_id) == read_id:
+                    signal = read.signal
+                    sample_rate = read.run_info.sample_rate
+                    return signal, sample_rate, str(read.read_id)
+            raise ValueError(f"Read ID {read_id} not found in {pod5_path}")
+        else:
+            # Return first read
+            if len(reads) == 0:
+                raise ValueError(f"No reads found in {pod5_path}")
+            read = reads[0]
+            signal = read.signal
+            sample_rate = read.run_info.sample_rate
+            return signal, sample_rate, str(read.read_id)
+
+
+def read_eventalign_tsv(tsv_path: str, max_events: int = None) -> list[dict]:
+    """Read eventalign TSV file from f5c."""
     events = []
     open_func = gzip.open if tsv_path.endswith(".gz") else open
 
@@ -39,242 +67,196 @@ def read_eventalign_tsv(tsv_path: str, max_events: int = None) -> list[dict]:
             if len(parts) < 15:
                 continue
 
-            # Parse comma-separated raw samples (column 16, 0-indexed)
-            raw_samples = (
-                np.array([float(x) for x in parts[15].split(",")])
-                if len(parts) > 15 and parts[15]
-                else np.array([])
-            )
-
             event = {
                 "ref_name": parts[0],
                 "ref_pos": int(parts[1]),
                 "ref_kmer": parts[2],
                 "read_id": parts[3],
-                "strand": parts[4],
                 "event_idx": int(parts[5]),
                 "event_mean": float(parts[6]),
                 "event_stdv": float(parts[7]),
-                "event_length": float(parts[8]),
-                "model_kmer": parts[9],
                 "model_mean": float(parts[10]),
                 "model_stdv": float(parts[11]),
                 "standardized_mean": float(parts[12]) if parts[12] != "inf" else 0.0,
-                "start_idx": int(parts[13]),
-                "end_idx": int(parts[14]),
-                "raw_samples": raw_samples,
             }
             events.append(event)
 
     return events
 
 
-def kmer_to_color(kmer: str) -> tuple[float, float, float]:
-    """Map k-mer to a unique color based on nucleotide composition."""
-    base_colors = {
-        "A": (0.8, 0.2, 0.2),   # Red
-        "C": (0.2, 0.2, 0.8),   # Blue
-        "G": (0.2, 0.8, 0.2),   # Green
-        "T": (0.8, 0.8, 0.2),   # Yellow
-        "U": (0.8, 0.2, 0.2),   # Red (same as A)
-        "N": (0.5, 0.5, 0.5),   # Gray
-    }
+def run_getevents(signal: np.ndarray):
+    """Run getevents from fin._eventalign module."""
+    try:
+        from fin._eventalign import getevents
+    except ImportError:
+        raise ImportError(
+            "fin._eventalign module not available. Please build the package first."
+        )
 
-    # Average color for k-mer
-    colors = [base_colors.get(base.upper(), (0.5, 0.5, 0.5)) for base in kmer]
-    return tuple(sum(c) / len(c) for c in zip(*colors))
+    # Convert signal to float32 if needed
+    if signal.dtype != np.float32:
+        signal = signal.astype(np.float32)
+
+    return getevents(signal)
 
 
-def plot_eventalign_visualization(
-    events: list[dict],
+def plot_comparison(
+    signal: np.ndarray,
+    f5c_events: list[dict],
+    getevents_result: dict,
     output_path: str = None,
-    show_n_events: int = None,
 ):
     """
-    Create visualization of eventalign results showing all events.
+    Create visualization comparing f5c events vs getevents output.
     """
-    # Show all events if not specified
-    display_events = events if show_n_events is None else events[:show_n_events]
-
-    # Reconstruct signal from embedded raw samples
-    all_samples = []
-    for ev in display_events:
-        if len(ev["raw_samples"]) > 0:
-            all_samples.extend(ev["raw_samples"].tolist())
-    signal = np.array(all_samples)
-
-    # Build sample index for each event
-    sample_positions = []
-    pos = 0
-    for ev in display_events:
-        sample_positions.append((pos, pos + len(ev["raw_samples"])))
-        pos += len(ev["raw_samples"])
+    # Parse getevents output
+    ge_starts = getevents_result["starts"]
+    ge_ends = ge_starts + getevents_result["lengths"]
+    ge_means = getevents_result["means"]
 
     # Create figure
-    fig = plt.figure(figsize=(18, 12))
-    gs = fig.add_gridspec(4, 1, height_ratios=[1, 1, 1.2, 1], hspace=0.4)
+    fig = plt.figure(figsize=(18, 10))
+    gs = fig.add_gridspec(3, 1, height_ratios=[1.2, 1, 1], hspace=0.35)
+
+    # Downsample signal for plotting
+    x_signal = np.arange(len(signal))
+    step = max(1, len(signal) // 50000)
 
     # =========================================================================
-    # Panel 1: Raw signal with ALL events overlaid
+    # Panel 1: Raw signal with both event detections
     # =========================================================================
     ax1 = fig.add_subplot(gs[0])
 
-    # Plot raw signal (downsample if too long for performance)
-    x_signal = np.arange(len(signal))
-    step = max(1, len(signal) // 50000)  # Downsample to at most 50000 points
-    ax1.plot(x_signal[::step], signal[::step], "k-", alpha=0.5, linewidth=0.5, label="Raw signal")
+    # Plot raw signal
+    ax1.plot(x_signal[::step], signal[::step], "k-", alpha=0.4, linewidth=0.5, label="Raw signal")
 
-    # Overlay ALL events with their mean levels (one color for observed, one for model)
-    for i, ev in enumerate(display_events):
-        start_pos, end_pos = sample_positions[i]
+    # Overlay f5c events (BLUE)
+    for ev in f5c_events:
+        # Use ref_pos as a proxy for position (not exactly sample position but ordered)
+        idx = ev["event_idx"]
+        if idx < len(ge_starts):
+            start_pos = int(ge_starts[idx])
+            end_pos = int(ge_ends[idx])
+        else:
+            continue
 
         if end_pos > start_pos:
-            # Event mean (observed) - BLUE
+            # F5C event mean (BLUE solid)
             ax1.hlines(
                 ev["event_mean"],
                 start_pos,
                 end_pos,
-                colors="#1f77b4",  # Blue for event mean
+                colors="#1f77b4",
                 linewidths=2,
                 alpha=0.8,
             )
 
-            # Model mean (expected) - ORANGE
+    # Overlay getevents results (GREEN)
+    for i in range(len(ge_means)):
+        start_pos = int(ge_starts[i])
+        end_pos = int(ge_ends[i])
+
+        if end_pos > start_pos:
+            # getevents mean (GREEN dashed)
             ax1.hlines(
-                ev["model_mean"],
+                ge_means[i],
                 start_pos,
                 end_pos,
-                colors="#ff7f0e",  # Orange for model mean
+                colors="#2ca02c",
                 linewidths=2,
-                alpha=0.6,
+                alpha=0.5,
                 linestyles="dashed",
             )
 
     ax1.set_ylabel("Current (pA)", fontsize=11)
-    ax1.set_title(f"Raw Signal with All {len(display_events)} Events (Blue=Observed, Orange=Model)",
+    ax1.set_title("Raw Signal with Event Detection: Blue=f5c, Green=getevents (ours)",
                  fontsize=12, fontweight="bold")
     ax1.set_xlim(0, len(signal))
 
-    # Custom legend
     legend_elements = [
-        mpatches.Patch(color="#1f77b4", label="Event Mean (Observed)"),
-        mpatches.Patch(color="#ff7f0e", label="Model Mean (Expected)"),
+        mpatches.Patch(color="#1f77b4", label="f5c Event Mean"),
+        mpatches.Patch(color="#2ca02c", label="getevents (ours)"),
     ]
     ax1.legend(handles=legend_elements, loc="upper right", fontsize=9)
 
     # =========================================================================
-    # Panel 2: Side-by-side comparison of Event Mean vs Model Mean
+    # Panel 2: Side-by-side comparison of event means
     # =========================================================================
     ax2 = fig.add_subplot(gs[1])
 
-    # Create bar positions
-    x_centers = []
-    bar_widths = []
-    for i, (start_pos, end_pos) in enumerate(sample_positions):
-        x_centers.append((start_pos + end_pos) / 2)
-        bar_widths.append(max(1, end_pos - start_pos))
+    # Align by event index
+    n_compare = min(len(f5c_events), len(ge_means))
+    x = np.arange(n_compare)
 
-    # Plot event means in BLUE
-    for i, ev in enumerate(display_events):
-        ax2.bar(
-            x_centers[i],
-            ev["event_mean"],
-            width=bar_widths[i],
-            color="#1f77b4",  # Blue
-            alpha=0.7,
-            edgecolor="none",
-            linewidth=0,
-        )
+    f5c_means = [ev["event_mean"] for ev in f5c_events[:n_compare]]
+    ge_means_arr = ge_means[:n_compare]
 
-    # Overlay model means in ORANGE (narrower bars on top)
-    for i, ev in enumerate(display_events):
-        ax2.bar(
-            x_centers[i],
-            ev["model_mean"],
-            width=bar_widths[i] * 0.5,  # Narrower for visibility
-            color="#ff7f0e",  # Orange
-            alpha=0.9,
-            edgecolor="white",
-            linewidth=0.5,
-        )
+    # Scatter plot comparison
+    ax2.scatter(x, f5c_means, c="#1f77b4", alpha=0.6, s=15,
+               label="f5c Event Mean", zorder=2)
+    ax2.scatter(x, ge_means_arr, c="#2ca02c", alpha=0.6, s=15,
+               label="getevents Mean", zorder=2)
+
+    # Connect with lines to show differences
+    for i in range(0, n_compare, max(1, n_compare // 200)):
+        ax2.plot([i, i], [f5c_means[i], ge_means_arr[i]], "gray",
+                alpha=0.2, linewidth=0.5, zorder=1)
 
     ax2.set_ylabel("Current (pA)", fontsize=11)
-    ax2.set_title("Event Mean Levels: Blue=Observed, Orange=Model (narrower bars)",
-                 fontsize=12, fontweight="bold")
-    ax2.set_xlim(0, len(signal))
+    ax2.set_title(f"Event Means Comparison ({n_compare} events)", fontsize=12, fontweight="bold")
+    ax2.legend(loc="upper right", fontsize=9)
 
     # =========================================================================
-    # Panel 3: Event alignment by reference position (all events)
+    # Panel 3: Difference plot and statistics
     # =========================================================================
     ax3 = fig.add_subplot(gs[2])
 
-    # Get data for ALL events
-    ref_positions = [ev["ref_pos"] for ev in display_events]
-    event_means = [ev["event_mean"] for ev in display_events]
-    model_means = [ev["model_mean"] for ev in display_events]
+    # Calculate differences
+    f5c_arr = np.array(f5c_means)
+    ge_arr = np.array(ge_means_arr)
+    differences = f5c_arr - ge_arr
+    relative_diff = differences / f5c_arr * 100
 
-    x = np.arange(len(display_events))
+    # Plot differences
+    ax3.plot(x, differences, "o-", color="#d62728", markersize=3, linewidth=0.8, alpha=0.7)
+    ax3.axhline(0, color="black", linestyle="-", alpha=0.5, linewidth=1)
 
-    # Scatter plot for better visualization of all events
-    # Event means (BLUE scatter)
-    ax3.scatter(x, event_means, c="#1f77b4", alpha=0.6, s=10,
-               label="Event Mean (Observed)", zorder=2)
-
-    # Model means (ORANGE scatter)
-    ax3.scatter(x, model_means, c="#ff7f0e", alpha=0.6, s=10,
-               label="Model Mean (Expected)", zorder=2)
-
-    # Connect with lines to show the relationship
-    for i in range(0, len(display_events), max(1, len(display_events) // 500)):
-        ax3.plot([i, i], [event_means[i], model_means[i]], "gray",
-                alpha=0.2, linewidth=0.5, zorder=1)
+    # Color outliers
+    outlier_mask = np.abs(differences) > 10
+    if np.any(outlier_mask):
+        outlier_x = np.array(x)[outlier_mask]
+        outlier_y = np.array(differences)[outlier_mask]
+        ax3.scatter(outlier_x, outlier_y, c="red", s=30, alpha=0.8, zorder=3,
+                   label=f"Large diff (>10 pA): {np.sum(outlier_mask)}")
 
     ax3.set_xlabel("Event Index", fontsize=11)
-    ax3.set_ylabel("Current (pA)", fontsize=11)
-    ax3.set_title(f"All {len(display_events)} Events: Observed vs Model (scatter plot)",
-                 fontsize=12, fontweight="bold")
+    ax3.set_ylabel("Difference (f5c - getevents) [pA]", fontsize=11)
+    ax3.set_title("Event Mean Differences", fontsize=12, fontweight="bold")
     ax3.legend(loc="upper right", fontsize=9)
 
     # =========================================================================
-    # Panel 4: Z-scores showing deviation from model
+    # Add statistics box
     # =========================================================================
-    ax4 = fig.add_subplot(gs[3])
+    mean_diff = np.mean(differences)
+    std_diff = np.std(differences)
+    rmsd = np.sqrt(np.mean(differences**2))
+    corr = np.corrcoef(f5c_arr, ge_arr)[0, 1]
 
-    z_scores = [ev["standardized_mean"] for ev in display_events]
-
-    ax4.plot(x, z_scores, "o-", color="#d62728", markersize=2, linewidth=0.8, alpha=0.7)
-    ax4.axhline(0, color="black", linestyle="-", alpha=0.5, linewidth=1)
-    ax4.axhline(2, color="red", linestyle="--", alpha=0.5, linewidth=1, label="+2σ")
-    ax4.axhline(-2, color="red", linestyle="--", alpha=0.5, linewidth=1, label="-2σ")
-
-    ax4.set_xlabel("Event Index", fontsize=11)
-    ax4.set_ylabel("Z-Score", fontsize=11)
-    ax4.set_title("Standardized Event Levels (deviation from model)",
-                 fontsize=12, fontweight="bold")
-    ax4.legend(loc="upper right", fontsize=9)
-
-    # Color outliers
-    outlier_mask = np.abs(z_scores) > 2
-    if np.any(outlier_mask):
-        outlier_x = np.array(x)[outlier_mask]
-        outlier_y = np.array(z_scores)[outlier_mask]
-        ax4.scatter(outlier_x, outlier_y, c="red", s=20, alpha=0.8, zorder=3)
-
-    # =========================================================================
-    # Add statistics text
-    # =========================================================================
     stats_text = (
-        f"Total events: {len(display_events)}\n"
-        f"Signal samples: {len(signal)}\n"
-        f"Mean event mean: {np.mean(event_means):.2f} pA\n"
-        f"Mean model mean: {np.mean(model_means):.2f} pA\n"
-        f"RMSD: {np.sqrt(np.mean((np.array(event_means) - np.array(model_means))**2)):.2f} pA\n"
-        f"Outliers (|z|>2): {np.sum(outlier_mask)}/{len(z_scores)}"
+        f"Statistics:\n"
+        f"f5c events: {len(f5c_events)}\n"
+        f"getevents: {getevents_result['n_events']}\n"
+        f"Compared: {n_compare}\n\n"
+        f"Mean diff: {mean_diff:.2f} pA\n"
+        f"Std diff: {std_diff:.2f} pA\n"
+        f"RMSD: {rmsd:.2f} pA\n"
+        f"Correlation: {corr:.4f}\n"
+        f"Large diffs (>10pA): {np.sum(outlier_mask)}"
     )
     fig.text(0.02, 0.5, stats_text, fontsize=9, verticalalignment="center",
-            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.3))
+            bbox=dict(boxstyle="round", facecolor="lightblue", alpha=0.5))
 
-    plt.tight_layout(rect=[0, 0, 0.98, 1])
+    plt.tight_layout(rect=[0, 0, 0.96, 1])
 
     if output_path:
         plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -285,14 +267,19 @@ def plot_eventalign_visualization(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize f5c eventalign results - showing all events"
+        description="Compare f5c eventalign events vs getevents output"
     )
     parser.add_argument(
-        "eventalign",
-        nargs="?",
+        "--pod5",
+        type=str,
+        default="examples/test_data/one_read.pod5",
+        help="Path to POD5 file",
+    )
+    parser.add_argument(
+        "--eventalign",
         type=str,
         default="examples/test_data/one_read.eventalign.tsv.gz",
-        help="Path to eventalign TSV file (can be gzipped)",
+        help="Path to f5c eventalign TSV file",
     )
     parser.add_argument(
         "--output", "-o",
@@ -300,54 +287,37 @@ def main():
         default=None,
         help="Path to save output figure",
     )
-    parser.add_argument(
-        "--n-events", "-n",
-        type=int,
-        default=None,
-        help="Number of events to display (default: all)",
-    )
-    parser.add_argument(
-        "--max-events",
-        type=int,
-        default=None,
-        help="Maximum events to read from file (default: all)",
-    )
 
     args = parser.parse_args()
 
     print("=" * 60)
-    print("F5C EventAlign Visualization (All Events)")
+    print("F5C vs getevents Comparison")
     print("=" * 60)
 
-    # Read eventalign results
-    print(f"\nReading: {args.eventalign}")
-    events = read_eventalign_tsv(args.eventalign, max_events=args.max_events)
-    print(f"  Total events: {len(events)}")
-
-    if len(events) == 0:
-        print("Error: No events found in eventalign file")
-        sys.exit(1)
-
-    # Get read info
-    read_id = events[0]["read_id"]
-    ref_name = events[0]["ref_name"]
+    # Read POD5 signal
+    print(f"\nReading POD5: {args.pod5}")
+    signal, sample_rate, read_id = read_pod5_signal(args.pod5)
     print(f"  Read ID: {read_id}")
-    print(f"  Reference: {ref_name}")
-    print(f"  Reference positions: {events[0]['ref_pos']} - {events[-1]['ref_pos']}")
+    print(f"  Signal length: {len(signal)} samples")
+    print(f"  Sample rate: {sample_rate} Hz")
 
-    # Count events with raw samples
-    n_with_samples = sum(1 for ev in events if len(ev["raw_samples"]) > 0)
-    print(f"  Events with raw samples: {n_with_samples}/{len(events)}")
+    # Run getevents
+    print(f"\nRunning getevents...")
+    getevents_result = run_getevents(signal)
+    print(f"  Detected {getevents_result['n_events']} events")
 
-    # Determine number of events to show
-    n_show = args.n_events if args.n_events else len(events)
+    # Read f5c eventalign results
+    print(f"\nReading f5c eventalign: {args.eventalign}")
+    f5c_events = read_eventalign_tsv(args.eventalign)
+    print(f"  Total events: {len(f5c_events)}")
 
     # Create visualization
-    print(f"\nCreating visualization (showing {n_show} events)...")
-    plot_eventalign_visualization(
-        events=events,
+    print(f"\nCreating comparison visualization...")
+    plot_comparison(
+        signal=signal,
+        f5c_events=f5c_events,
+        getevents_result=getevents_result,
         output_path=args.output,
-        show_n_events=n_show,
     )
 
     print("\n" + "=" * 60)
