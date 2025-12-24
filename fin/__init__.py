@@ -25,14 +25,16 @@ except ImportError as e:
 
 # Try to import _dtw extension (optional CUDA DTW)
 try:
-    from ._dtw import cuda_dtw, cuda_dtw_batch
+    from ._dtw import dtw_distance, dtw_pairwise, cleanup, is_available as dtw_is_available
 
     _DTW_IMPORT_ERROR = None
     _DTW_AVAILABLE = True
 except ImportError as e:
     _DTW_AVAILABLE = False
-    cuda_dtw = None
-    cuda_dtw_batch = None
+    dtw_distance = None
+    dtw_pairwise = None
+    cleanup = None
+    dtw_is_available = lambda: False
     _DTW_IMPORT_ERROR = str(e)
 
 
@@ -48,9 +50,8 @@ if not _EVENTALIGN_AVAILABLE:
         f"Error: {_EVENTALIGN_IMPORT_ERROR}"
     )
 if not _DTW_AVAILABLE:
-    package_logger.warning(
-        f"_dtw extension not available - CUDA DTW functions disabled. "
-        f"Error: {_DTW_IMPORT_ERROR}"
+    package_logger.info(
+        f"_dtw CUDA extension not available (optional). Error: {_DTW_IMPORT_ERROR}"
     )
 
 __all__ = [
@@ -63,4 +64,4 @@ if _EVENTALIGN_AVAILABLE:
     __all__.extend(["getevents", "set_model", "MODEL_RNA002", "MODEL_RNA004"])
 
 if _DTW_AVAILABLE:
-    __all__.extend(["cuda_dtw", "cuda_dtw_batch"])
+    __all__.extend(["dtw_distance", "dtw_pairwise", "cleanup", "dtw_is_available"])
