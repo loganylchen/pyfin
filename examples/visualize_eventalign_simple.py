@@ -106,8 +106,36 @@ def run_getevents(signal: np.ndarray):
     return getevents(signal)
 
 
+def load_rna002_model_tsv(tsv_path: str) -> dict:
+    """Load the RNA002 pore model from TSV file.
+
+    Returns a dict with:
+        - kmer_to_mean: dict mapping kmer to level_mean
+        - kmer_to_stdv: dict mapping kmer to level_stdv
+    """
+    model = {
+        "kmer_to_mean": {},
+        "kmer_to_stdv": {},
+    }
+
+    with open(tsv_path, "r") as f:
+        for line in f:
+            if line.startswith("kmer"):
+                continue  # Skip header
+            parts = line.strip().split("\t")
+            if len(parts) < 3:
+                continue
+            kmer = parts[0]
+            level_mean = float(parts[1])
+            level_stdv = float(parts[2])
+            model["kmer_to_mean"][kmer] = level_mean
+            model["kmer_to_stdv"][kmer] = level_stdv
+
+    return model
+
+
 def load_rna002_model():
-    """Load the RNA002 pore model."""
+    """Load the RNA002 pore model from C extension."""
     try:
         from fin._eventalign import set_model, MODEL_RNA002
     except ImportError:
@@ -181,12 +209,15 @@ def plot_comparison(
     signal: np.ndarray,
     f5c_events: list[dict],
     getevents_result: dict,
-    rna002_model: dict = None,
+    pore_model: dict = None,
     output_path: str = None,
 ):
     """
     Create visualization comparing f5c events vs getevents output.
     Events are aligned based on their signal position overlap, not by event index.
+
+    Args:
+        pore_model: dict with kmer_to_mean mapping (from TSV file) or C extension model dict
     """
     # Parse getevents output
     ge_starts = getevents_result["starts"]
@@ -200,10 +231,22 @@ def plot_comparison(
         f"  Matched {len(matches)} pairs out of {len(f5c_events)} f5c events and {len(ge_means)} getevents"
     )
 
+    # Add raw model mean to each f5c event if pore_model is provided
+    if pore_model is not None:
+        for ev in f5c_events:
+            kmer = ev["ref_kmer"]
+            # Get raw model mean from TSV (kmer_to_mean) or C extension (level_means with index)
+            if "kmer_to_mean" in pore_model:
+                ev["raw_model_mean"] = pore_model["kmer_to_mean"].get(kmer, ev["model_mean"])
+            else:
+                # C extension model format
+                idx = kmer_to_index(kmer, pore_model["kmer_size"])
+                ev["raw_model_mean"] = pore_model["level_means"][idx]
+
     # Create figure with 4 panels if model is provided, 3 otherwise
-    n_panels = 4 if rna002_model is not None else 3
-    height_ratios = [1.2, 1, 1] if rna002_model is None else [1.2, 1, 1, 1]
-    fig = plt.figure(figsize=(18, 12 if rna002_model else 10))
+    n_panels = 4 if pore_model is not None else 3
+    height_ratios = [1.2, 1, 1] if pore_model is None else [1.2, 1, 1, 1]
+    fig = plt.figure(figsize=(18, 12 if pore_model else 10))
     gs = fig.add_gridspec(n_panels, 1, height_ratios=height_ratios, hspace=0.35)
 
     # Downsample signal for plotting
@@ -243,6 +286,17 @@ def plot_comparison(
                 alpha=0.6,
                 linestyles="dotted",
             )
+            # Raw pore model mean from TSV (PURPLE dash-dot) - if pore_model is provided
+            if pore_model is not None and "raw_model_mean" in ev:
+                ax1.hlines(
+                    ev["raw_model_mean"],
+                    start_pos,
+                    end_pos,
+                    colors="#9467bd",
+                    linewidths=1.5,
+                    alpha=0.5,
+                    linestyles="dashdot",
+                )
 
     # Overlay getevents results (GREEN)
     for i in range(len(ge_means)):
@@ -263,7 +317,7 @@ def plot_comparison(
 
     ax1.set_ylabel("Current (pA)", fontsize=11)
     ax1.set_title(
-        "Raw Signal with Event Detection: Blue=f5c Event, Orange=f5c Model, Green=getevents (ours)",
+        "Raw Signal with Event Detection: Blue=f5c Event, Orange=f5c Model, Purple=Raw Model, Green=getevents",
         fontsize=12,
         fontweight="bold",
     )
@@ -272,8 +326,12 @@ def plot_comparison(
     legend_elements = [
         mpatches.Patch(color="#1f77b4", label="f5c Event Mean"),
         mpatches.Patch(color="#ff7f0e", label="f5c Model Mean"),
-        mpatches.Patch(color="#2ca02c", label="getevents (ours)"),
     ]
+    if pore_model is not None:
+        legend_elements.append(
+            mpatches.Patch(color="#9467bd", label="Raw Pore Model Mean (TSV)")
+        )
+    legend_elements.append(mpatches.Patch(color="#2ca02c", label="getevents (ours)"))
     ax1.legend(handles=legend_elements, loc="upper right", fontsize=9)
 
     # =========================================================================
@@ -293,6 +351,11 @@ def plot_comparison(
     ax2.scatter(x, f5c_means, c="#1f77b4", alpha=0.6, s=15, label="f5c Event Mean", zorder=3)
     ax2.scatter(x, f5c_model_means, c="#ff7f0e", alpha=0.6, s=15, label="f5c Model Mean", zorder=2)
     ax2.scatter(x, ge_means_matched, c="#2ca02c", alpha=0.6, s=15, label="getevents Mean", zorder=3)
+
+    # Add raw model mean from TSV if available
+    if pore_model is not None:
+        raw_model_means = [f5c_events[f5c_idx].get("raw_model_mean", f5c_model_means[i]) for i, (f5c_idx, _) in enumerate(matches)]
+        ax2.scatter(x, raw_model_means, c="#9467bd", alpha=0.6, s=15, label="Raw Model Mean", zorder=2)
 
     # Connect with lines to show differences
     for i in range(0, n_compare, max(1, n_compare // 200)):
@@ -322,6 +385,12 @@ def plot_comparison(
     # Plot differences
     ax3.plot(x, differences, "o-", color="#d62728", markersize=3, linewidth=0.8, alpha=0.7, label="f5c Event - getevents")
     ax3.plot(x, f5c_model_arr - ge_arr, "o-", color="#ff7f0e", markersize=3, linewidth=0.8, alpha=0.5, label="f5c Model - getevents")
+
+    # Add raw model mean difference if available
+    if pore_model is not None:
+        raw_model_means = np.array([f5c_events[f5c_idx].get("raw_model_mean", f5c_model_means[i]) for i, (f5c_idx, _) in enumerate(matches)])
+        ax3.plot(x, raw_model_means - ge_arr, "o-", color="#9467bd", markersize=3, linewidth=0.8, alpha=0.5, label="Raw Model - getevents")
+
     ax3.axhline(0, color="black", linestyle="-", alpha=0.5, linewidth=1)
 
     # Color outliers
@@ -364,7 +433,7 @@ def plot_comparison(
     # =========================================================================
     # Panel 4: K-mer model comparison (f5c model_mean vs raw pore model)
     # =========================================================================
-    if rna002_model is not None:
+    if pore_model is not None:
         ax4 = fig.add_subplot(gs[3])
 
         # Get unique kmers and their model means
@@ -372,17 +441,15 @@ def plot_comparison(
         for ev in f5c_events:
             kmer = ev["ref_kmer"]
             if kmer not in unique_kmers:
-                unique_kmers[kmer] = ev["model_mean"]
+                unique_kmers[kmer] = {
+                    "f5c_model_mean": ev["model_mean"],
+                    "raw_model_mean": ev.get("raw_model_mean", ev["model_mean"])
+                }
 
-        # Get raw model values for each kmer
+        # Get model values for each kmer
         kmer_list = list(unique_kmers.keys())
-        f5c_model_values = [unique_kmers[k] for k in kmer_list]
-        raw_model_values = []
-        raw_model_indices = []
-        for kmer in kmer_list:
-            idx = kmer_to_index(kmer, rna002_model["kmer_size"])
-            raw_model_values.append(rna002_model["level_means"][idx])
-            raw_model_indices.append(idx)
+        f5c_model_values = [unique_kmers[k]["f5c_model_mean"] for k in kmer_list]
+        raw_model_values = [unique_kmers[k]["raw_model_mean"] for k in kmer_list]
 
         f5c_kmer_model_arr = np.array(f5c_model_values)
         raw_kmer_model_arr = np.array(raw_model_values)
@@ -414,6 +481,13 @@ def plot_comparison(
         ax4.grid(True, alpha=0.3)
 
         # Update statistics text box to include k-mer model comparison
+        # Calculate raw model vs getevents statistics
+        raw_model_means_arr = np.array([f5c_events[f5c_idx].get("raw_model_mean", f5c_model_means[i]) for i, (f5c_idx, _) in enumerate(matches)])
+        mean_diff_raw = np.mean(raw_model_means_arr - ge_arr)
+        std_diff_raw = np.std(raw_model_means_arr - ge_arr)
+        rmsd_raw = np.sqrt(np.mean((raw_model_means_arr - ge_arr) ** 2))
+        corr_raw = np.corrcoef(raw_model_means_arr, ge_arr)[0, 1] if len(raw_model_means_arr) > 1 else 0.0
+
         stats_text = (
             f"Statistics:\n"
             f"f5c events: {len(f5c_events)}\n"
@@ -429,6 +503,11 @@ def plot_comparison(
             f"  Std diff: {std_diff_model:.2f} pA\n"
             f"  RMSD: {rmsd_model:.2f} pA\n"
             f"  Correlation: {corr_model:.4f}\n\n"
+            f"Raw Model vs getevents:\n"
+            f"  Mean diff: {mean_diff_raw:.2f} pA\n"
+            f"  Std diff: {std_diff_raw:.2f} pA\n"
+            f"  RMSD: {rmsd_raw:.2f} pA\n"
+            f"  Correlation: {corr_raw:.4f}\n\n"
             f"K-mer Model (f5c vs raw):\n"
             f"  Mean diff: {mean_kmer_diff:.2f} pA\n"
             f"  RMSD: {rmsd_kmer:.2f} pA\n"
@@ -461,7 +540,7 @@ def plot_comparison(
         0.02,
         0.5,
         stats_text,
-        fontsize=7 if rna002_model else 8,
+        fontsize=7 if pore_model else 8,
         verticalalignment="center",
         bbox=dict(boxstyle="round", facecolor="lightblue", alpha=0.5),
     )
@@ -498,6 +577,12 @@ def main():
         default=None,
         help="Path to save output figure",
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="examples/test_data/rna002_model.tsv",
+        help="Path to RNA002 pore model TSV file",
+    )
 
     args = parser.parse_args()
 
@@ -522,11 +607,10 @@ def main():
     f5c_events = read_eventalign_tsv(args.eventalign)
     print(f"  Total events: {len(f5c_events)}")
 
-    # Load RNA002 model for k-mer comparison
-    print(f"\nLoading RNA002 pore model...")
-    rna002_model = load_rna002_model()
-    print(f"  K-mer size: {rna002_model['kmer_size']}")
-    print(f"  Number of k-mers: {rna002_model['num_kmer']}")
+    # Load RNA002 pore model from TSV file
+    print(f"\nLoading RNA002 pore model from TSV: {args.model}")
+    pore_model = load_rna002_model_tsv(args.model)
+    print(f"  Loaded {len(pore_model['kmer_to_mean'])} k-mers")
 
     # Create visualization
     print(f"\nCreating comparison visualization...")
@@ -534,7 +618,7 @@ def main():
         signal=signal,
         f5c_events=f5c_events,
         getevents_result=getevents_result,
-        rna002_model=rna002_model,
+        pore_model=pore_model,
         output_path=args.output,
     )
 

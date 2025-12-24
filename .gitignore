@@ -114,7 +114,7 @@ cython_debug/
 
 # Data files
 *.csv
-*.tsv
+# *.tsv
 *.bed
 *.gtf
 *.gff
