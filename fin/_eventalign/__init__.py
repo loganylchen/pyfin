@@ -33,6 +33,8 @@ _EVENTALIGN_AVAILABLE = False
 try:
     from ._eventalign import getevents as _getevents_c
     from ._eventalign import set_model as _set_model_c
+    from ._eventalign import init_db_from_python as _init_db_from_python_c
+    from ._eventalign import free_db as _free_db_c
     from ._eventalign import MODEL_RNA002, MODEL_RNA004, MAX_KMER_SIZE, MAX_NUM_KMER
     _EVENTALIGN_AVAILABLE = True
 except ImportError as e:
@@ -81,6 +83,8 @@ except ImportError as e:
 __all__ = [
     "getevents",
     "set_model",
+    "init_db_from_python",
+    "free_db",
     "MODEL_RNA002",
     "MODEL_RNA004",
     "MAX_KMER_SIZE",
@@ -172,6 +176,88 @@ def set_model(model_id: int = MODEL_RNA002):
     """
     _check_available()
     return _set_model_c(model_id)
+
+
+def init_db_from_python(
+    read_ids,
+    read_seqs,
+    ref_seqs,
+    ref_names,
+    ref_lens,
+    signals,
+    signal_drifts=None,
+    signal_scales=None,
+    signal_shifts=None,
+):
+    """
+    Initialize a db_t structure from Python-provided data.
+
+    This function creates a db_t structure (used internally by f5c for event alignment)
+    populated with data provided directly from Python, rather than reading from BAM/SLOW5 files.
+
+    Args:
+        read_ids: list of read identifier strings
+        read_seqs: list of read sequence strings
+        ref_seqs: list of reference sequence strings
+        ref_names: list of reference name strings
+        ref_lens: list of reference sequence lengths (int)
+        signals: list of 1D float32 numpy arrays (raw signal data)
+        signal_drifts: list of float drift values (optional, default=None)
+        signal_scales: list of float scale values (optional, default=None)
+        signal_shifts: list of float shift values (optional, default=None)
+
+    Returns:
+        int: pointer to db_t structure (as Python int). Use this pointer with other
+             functions that operate on db_t, and call free_db() when done.
+
+    Example:
+        >>> from fin._eventalign import init_db_from_python, free_db
+        >>> import numpy as np
+        >>>
+        >>> read_ids = ['read1', 'read2']
+        >>> read_seqs = ['ACGTACGT', 'TGCATGCA']
+        >>> ref_seqs = ['ACGTACGT', 'TGCATGCA']
+        >>> ref_names = ['chr1', 'chr1']
+        >>> ref_lens = [8, 8]
+        >>> signals = [
+        ...     np.random.randn(10000).astype(np.float32),
+        ...     np.random.randn(12000).astype(np.float32),
+        ... ]
+        >>>
+        >>> db_ptr = init_db_from_python(
+        ...     read_ids, read_seqs, ref_seqs, ref_names, ref_lens, signals
+        ... )
+        >>> # ... use db_ptr with other functions ...
+        >>> free_db(db_ptr)
+    """
+    _check_available()
+    return _init_db_from_python_c(
+        read_ids,
+        read_seqs,
+        ref_seqs,
+        ref_names,
+        ref_lens,
+        signals,
+        signal_drifts,
+        signal_scales,
+        signal_shifts,
+    )
+
+
+def free_db(db_ptr):
+    """
+    Free a db_t structure created by init_db_from_python.
+
+    Args:
+        db_ptr: pointer to db_t structure (as returned by init_db_from_python)
+
+    Example:
+        >>> from fin._eventalign import init_db_from_python, free_db
+        >>> db_ptr = init_db_from_python(...)
+        >>> free_db(db_ptr)
+    """
+    _check_available()
+    _free_db_c(db_ptr)
 
 
 # Print availability status on import

@@ -412,4 +412,24 @@ event_table getevents(size_t nsample, float *rawptr);
 db_t *init_db(int32_t batch_size);
 void free_db(db_t *db);
 
+/* initialise a data batch from Python-provided data */
+db_t *init_db_from_python(
+    int32_t batch_size,
+    char **read_ids,
+    int32_t *read_ids_len,
+    char **read_seqs,
+    int32_t *read_lens,
+    char **ref_seqs,
+    int32_t *ref_seqs_len,
+    char **ref_names,
+    int32_t *ref_names_len,
+    int32_t *ref_lens,
+    int32_t ref_n,
+    float **signals,
+    uint64_t *signal_lens,
+    float *signal_drifts,
+    float *signal_scales,
+    float *signal_shifts
+);
+
 #endif

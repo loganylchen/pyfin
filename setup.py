@@ -497,6 +497,7 @@ eventalign_api_extension = Extension(
     name="fin._eventalign._eventalign",
     sources=[
         os.path.join(EVENTALIGN_DIR, "event_api_wrapper.cpp"),
+        os.path.join(EVENTALIGN_DIR, "common.c"),
         os.path.join(EVENTALIGN_DIR, "events.cpp"),
         os.path.join(EVENTALIGN_DIR, "model.cpp"),
     ],
@@ -507,6 +508,7 @@ eventalign_api_extension = Extension(
         os.path.join(EVENTALIGN_DIR, "ksort.h"),
     ],
     include_dirs=[EVENTALIGN_DIR],
+    language="c++",
 )
 eventalign_api_extension.ext_type = "align"
 
