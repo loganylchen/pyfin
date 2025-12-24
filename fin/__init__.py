@@ -26,11 +26,14 @@ except ImportError as e:
 # Try to import _dtw extension (optional CUDA DTW)
 try:
     from ._dtw import cuda_dtw, cuda_dtw_batch
+
+    _DTW_IMPORT_ERROR = None
     _DTW_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     _DTW_AVAILABLE = False
     cuda_dtw = None
     cuda_dtw_batch = None
+    _DTW_IMPORT_ERROR = str(e)
 
 
 # Initialize package logger
@@ -45,7 +48,10 @@ if not _EVENTALIGN_AVAILABLE:
         f"Error: {_EVENTALIGN_IMPORT_ERROR}"
     )
 if not _DTW_AVAILABLE:
-    package_logger.info("_dtw CUDA extension not available (optional)")
+    package_logger.warning(
+        f"_dtw extension not available - CUDA DTW functions disabled. "
+        f"Error: {_DTW_IMPORT_ERROR}"
+    )
 
 __all__ = [
     "io",
