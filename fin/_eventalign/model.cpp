@@ -23,7 +23,7 @@ uint32_t eval_num_kmer(uint32_t kmer_size, uint32_t type)
     return num_kmer;
 }
 
-uint32_t set_model(model_t *model, uint32_t model_id)
+extern "C" uint32_t set_model(model_t *model, uint32_t model_id)
 {
 
     uint32_t kmer_size = 0;

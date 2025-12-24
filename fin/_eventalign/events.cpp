@@ -591,7 +591,7 @@ event_table detect_events(raw_table const rt, detector_param const edparam)
 }
 
 // interface to scrappie functions
-event_table getevents(size_t nsample, float *rawptr)
+extern "C" event_table getevents(size_t nsample, float *rawptr)
 {
     event_table et;
     raw_table rt = (raw_table){nsample, 0, nsample, rawptr};

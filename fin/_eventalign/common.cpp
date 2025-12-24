@@ -69,7 +69,7 @@ db_t *init_db(int32_t batch_size)
     db->site_score_map = (std::map<int, ScoredSite> **)malloc(sizeof(std::map<int, ScoredSite> *) * db->batch_size);
     MALLOC_CHK(db->site_score_map);
 
-    for (i = 0; i < db->batch_size; ++i)
+    for (int i = 0; i < db->batch_size; ++i)
     {
         db->site_score_map[i] = new std::map<int, ScoredSite>;
         NULL_CHK(db->site_score_map[i]);
@@ -88,7 +88,7 @@ db_t *init_db(int32_t batch_size)
     db->event_alignment_result_str = (char **)malloc(sizeof(char *) * db->batch_size);
     MALLOC_CHK(db->event_alignment_result_str);
 
-    for (i = 0; i < db->batch_size; ++i)
+    for (int i = 0; i < db->batch_size; ++i)
     {
         db->event_alignment_result[i] = new std::vector<event_alignment_t>;
         NULL_CHK(db->event_alignment_result[i]);

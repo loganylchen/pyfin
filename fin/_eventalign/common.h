@@ -403,6 +403,9 @@ typedef struct
  ******************************************/
 
 /* models */
+#ifdef __cplusplus
+extern "C" {
+#endif
 uint32_t set_model(model_t *model, uint32_t model_id);
 
 /* events */
@@ -411,5 +414,8 @@ event_table getevents(size_t nsample, float *rawptr);
 /* initialise a data batch */
 db_t *init_db(int32_t batch_size);
 void free_db(db_t *db);
+#ifdef __cplusplus
+}
+#endif
 
 #endif
