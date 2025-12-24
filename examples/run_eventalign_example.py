@@ -117,7 +117,7 @@ def example_single_read_single_ref():
 
     # Create a synthetic read sequence (same as reference for simplicity)
     # In practice, this would be the actual read sequence
-    read_seq = ref_seq[:500]  # Use first 500bp as read sequence
+    read_seq = ref_seq  # Use first 500bp as read sequence
 
     print(f"\nRunning eventalign...")
     print(f"  Model: RNA002 (k=5)")
