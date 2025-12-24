@@ -53,7 +53,15 @@ def read_pod5_signal(pod5_path: str, read_id: str = None) -> tuple[np.ndarray, f
 
 
 def read_eventalign_tsv(tsv_path: str, max_events: int = None) -> list[dict]:
-    """Read eventalign TSV file from f5c."""
+    """Read eventalign TSV file from f5c.
+
+    TSV format columns:
+    0: ref_name, 1: ref_pos, 2: ref_kmer, 3: read_id, 4: strand,
+    5: event_idx, 6: event_mean, 7: event_stdv, 8: event_length,
+    9: model_kmer, 10: model_mean, 11: model_stdv,
+    12: standardized_mean, 13: start_idx (signal position),
+    14: end_idx (signal position)
+    """
     events = []
     open_func = gzip.open if tsv_path.endswith(".gz") else open
 
@@ -76,6 +84,8 @@ def read_eventalign_tsv(tsv_path: str, max_events: int = None) -> list[dict]:
                 "model_mean": float(parts[10]),
                 "model_stdv": float(parts[11]),
                 "standardized_mean": float(parts[12]) if parts[12] != "inf" else 0.0,
+                "start_idx": int(parts[13]),  # Signal start position
+                "end_idx": int(parts[14]),    # Signal end position
             }
             events.append(event)
 
@@ -96,6 +106,54 @@ def run_getevents(signal: np.ndarray):
     return getevents(signal)
 
 
+def find_matching_events(f5c_events: list[dict], ge_starts: np.ndarray, ge_ends: np.ndarray):
+    """
+    Find matching events between f5c and getevents based on signal position overlap.
+
+    An f5c event matches a getevents event if they overlap significantly.
+    Returns a list of (f5c_idx, ge_idx) tuples for matched pairs.
+    """
+    matches = []
+    ge_matched = set()
+
+    for f5c_idx, f5c_ev in enumerate(f5c_events):
+        f5c_start = f5c_ev["start_idx"]
+        f5c_end = f5c_ev["end_idx"]
+
+        # Find the best matching getevents event based on overlap
+        best_ge_idx = None
+        best_overlap = 0
+
+        for ge_idx in range(len(ge_starts)):
+            if ge_idx in ge_matched:
+                continue  # Skip already matched events
+
+            ge_start = ge_starts[ge_idx]
+            ge_end = ge_ends[ge_idx]
+
+            # Calculate overlap
+            overlap_start = max(f5c_start, ge_start)
+            overlap_end = min(f5c_end, ge_end)
+            overlap = max(0, overlap_end - overlap_start)
+
+            # Calculate overlap fraction (overlap relative to both events)
+            f5c_len = f5c_end - f5c_start
+            ge_len = ge_end - ge_start
+            min_len = min(f5c_len, ge_len)
+            overlap_ratio = overlap / min_len if min_len > 0 else 0
+
+            # Match if overlap ratio is > 0.3
+            if overlap_ratio > 0.3 and overlap_ratio > best_overlap:
+                best_overlap = overlap_ratio
+                best_ge_idx = ge_idx
+
+        if best_ge_idx is not None:
+            matches.append((f5c_idx, best_ge_idx))
+            ge_matched.add(best_ge_idx)
+
+    return matches
+
+
 def plot_comparison(
     signal: np.ndarray,
     f5c_events: list[dict],
@@ -104,11 +162,17 @@ def plot_comparison(
 ):
     """
     Create visualization comparing f5c events vs getevents output.
+    Events are aligned based on their signal position overlap, not by event index.
     """
     # Parse getevents output
     ge_starts = getevents_result["starts"]
     ge_ends = ge_starts + getevents_result["lengths"]
     ge_means = getevents_result["means"]
+
+    # Find matching events based on signal position overlap
+    matches = find_matching_events(f5c_events, ge_starts, ge_ends)
+
+    print(f"  Matched {len(matches)} pairs out of {len(f5c_events)} f5c events and {len(ge_means)} getevents")
 
     # Create figure
     fig = plt.figure(figsize=(18, 10))
@@ -126,17 +190,12 @@ def plot_comparison(
     # Plot raw signal
     ax1.plot(x_signal[::step], signal[::step], "k-", alpha=0.4, linewidth=0.5, label="Raw signal")
 
-    # Overlay f5c events (BLUE)
+    # Overlay f5c events (BLUE) - use actual signal positions from TSV
     for ev in f5c_events:
-        # Use ref_pos as a proxy for position (not exactly sample position but ordered)
-        idx = ev["event_idx"]
-        if idx < len(ge_starts):
-            start_pos = int(ge_starts[idx])
-            end_pos = int(ge_ends[idx])
-        else:
-            continue
+        start_pos = ev["start_idx"]
+        end_pos = ev["end_idx"]
 
-        if end_pos > start_pos:
+        if end_pos > start_pos and end_pos < len(signal):
             # F5C event mean (BLUE solid)
             ax1.hlines(
                 ev["event_mean"],
@@ -152,7 +211,7 @@ def plot_comparison(
         start_pos = int(ge_starts[i])
         end_pos = int(ge_ends[i])
 
-        if end_pos > start_pos:
+        if end_pos > start_pos and end_pos < len(signal):
             # getevents mean (GREEN dashed)
             ax1.hlines(
                 ge_means[i],
@@ -179,29 +238,29 @@ def plot_comparison(
     ax1.legend(handles=legend_elements, loc="upper right", fontsize=9)
 
     # =========================================================================
-    # Panel 2: Side-by-side comparison of event means
+    # Panel 2: Side-by-side comparison of matched event means
     # =========================================================================
     ax2 = fig.add_subplot(gs[1])
 
-    # Align by event index
-    n_compare = min(len(f5c_events), len(ge_means))
+    # Use matched pairs for comparison
+    n_compare = len(matches)
     x = np.arange(n_compare)
 
-    f5c_means = [ev["event_mean"] for ev in f5c_events[:n_compare]]
-    ge_means_arr = ge_means[:n_compare]
+    f5c_means = [f5c_events[f5c_idx]["event_mean"] for f5c_idx, _ in matches]
+    ge_means_matched = [ge_means[ge_idx] for _, ge_idx in matches]
 
     # Scatter plot comparison
     ax2.scatter(x, f5c_means, c="#1f77b4", alpha=0.6, s=15, label="f5c Event Mean", zorder=2)
-    ax2.scatter(x, ge_means_arr, c="#2ca02c", alpha=0.6, s=15, label="getevents Mean", zorder=2)
+    ax2.scatter(x, ge_means_matched, c="#2ca02c", alpha=0.6, s=15, label="getevents Mean", zorder=2)
 
     # Connect with lines to show differences
     for i in range(0, n_compare, max(1, n_compare // 200)):
         ax2.plot(
-            [i, i], [f5c_means[i], ge_means_arr[i]], "gray", alpha=0.2, linewidth=0.5, zorder=1
+            [i, i], [f5c_means[i], ge_means_matched[i]], "gray", alpha=0.2, linewidth=0.5, zorder=1
         )
 
     ax2.set_ylabel("Current (pA)", fontsize=11)
-    ax2.set_title(f"Event Means Comparison ({n_compare} events)", fontsize=12, fontweight="bold")
+    ax2.set_title(f"Matched Event Means Comparison ({n_compare} matched pairs)", fontsize=12, fontweight="bold")
     ax2.legend(loc="upper right", fontsize=9)
 
     # =========================================================================
@@ -209,11 +268,10 @@ def plot_comparison(
     # =========================================================================
     ax3 = fig.add_subplot(gs[2])
 
-    # Calculate differences
+    # Calculate differences for matched pairs
     f5c_arr = np.array(f5c_means)
-    ge_arr = np.array(ge_means_arr)
+    ge_arr = np.array(ge_means_matched)
     differences = f5c_arr - ge_arr
-    relative_diff = differences / f5c_arr * 100
 
     # Plot differences
     ax3.plot(x, differences, "o-", color="#d62728", markersize=3, linewidth=0.8, alpha=0.7)
@@ -234,9 +292,9 @@ def plot_comparison(
             label=f"Large diff (>10 pA): {np.sum(outlier_mask)}",
         )
 
-    ax3.set_xlabel("Event Index", fontsize=11)
+    ax3.set_xlabel("Matched Event Pair Index", fontsize=11)
     ax3.set_ylabel("Difference (f5c - getevents) [pA]", fontsize=11)
-    ax3.set_title("Event Mean Differences", fontsize=12, fontweight="bold")
+    ax3.set_title("Event Mean Differences (Matched by Signal Position)", fontsize=12, fontweight="bold")
     ax3.legend(loc="upper right", fontsize=9)
 
     # =========================================================================
@@ -245,13 +303,13 @@ def plot_comparison(
     mean_diff = np.mean(differences)
     std_diff = np.std(differences)
     rmsd = np.sqrt(np.mean(differences**2))
-    corr = np.corrcoef(f5c_arr, ge_arr)[0, 1]
+    corr = np.corrcoef(f5c_arr, ge_arr)[0, 1] if len(f5c_arr) > 1 else 0.0
 
     stats_text = (
         f"Statistics:\n"
         f"f5c events: {len(f5c_events)}\n"
         f"getevents: {getevents_result['n_events']}\n"
-        f"Compared: {n_compare}\n\n"
+        f"Matched pairs: {n_compare}\n\n"
         f"Mean diff: {mean_diff:.2f} pA\n"
         f"Std diff: {std_diff:.2f} pA\n"
         f"RMSD: {rmsd:.2f} pA\n"

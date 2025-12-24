@@ -496,9 +496,9 @@ cuda_dtw_extension.ext_type = "dtw"
 eventalign_api_extension = Extension(
     name="fin._eventalign._eventalign",
     sources=[
-        os.path.join(EVENTALIGN_DIR, "event_api_wrapper.c"),
-        os.path.join(EVENTALIGN_DIR, "events.c"),
-        os.path.join(EVENTALIGN_DIR, "model.c"),
+        os.path.join(EVENTALIGN_DIR, "event_api_wrapper.cpp"),
+        os.path.join(EVENTALIGN_DIR, "events.cpp"),
+        os.path.join(EVENTALIGN_DIR, "model.cpp"),
     ],
     depends=[
         os.path.join(EVENTALIGN_DIR, "common.h"),
