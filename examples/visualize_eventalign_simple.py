@@ -192,7 +192,7 @@ def plot_comparison(
     # Plot raw signal
     ax1.plot(x_signal[::step], signal[::step], "k-", alpha=0.4, linewidth=0.5, label="Raw signal")
 
-    # Overlay f5c events (BLUE) - use actual signal positions from TSV
+    # Overlay f5c events (BLUE) and f5c model means (ORANGE) - use actual signal positions from TSV
     for ev in f5c_events:
         start_pos = ev["start_idx"]
         end_pos = ev["end_idx"]
@@ -206,6 +206,16 @@ def plot_comparison(
                 colors="#1f77b4",
                 linewidths=2,
                 alpha=0.8,
+            )
+            # F5C model mean (ORANGE dotted)
+            ax1.hlines(
+                ev["model_mean"],
+                start_pos,
+                end_pos,
+                colors="#ff7f0e",
+                linewidths=1.5,
+                alpha=0.6,
+                linestyles="dotted",
             )
 
     # Overlay getevents results (GREEN)
@@ -227,7 +237,7 @@ def plot_comparison(
 
     ax1.set_ylabel("Current (pA)", fontsize=11)
     ax1.set_title(
-        "Raw Signal with Event Detection: Blue=f5c, Green=getevents (ours)",
+        "Raw Signal with Event Detection: Blue=f5c Event, Orange=f5c Model, Green=getevents (ours)",
         fontsize=12,
         fontweight="bold",
     )
@@ -235,6 +245,7 @@ def plot_comparison(
 
     legend_elements = [
         mpatches.Patch(color="#1f77b4", label="f5c Event Mean"),
+        mpatches.Patch(color="#ff7f0e", label="f5c Model Mean"),
         mpatches.Patch(color="#2ca02c", label="getevents (ours)"),
     ]
     ax1.legend(handles=legend_elements, loc="upper right", fontsize=9)
@@ -249,11 +260,13 @@ def plot_comparison(
     x = np.arange(n_compare)
 
     f5c_means = [f5c_events[f5c_idx]["event_mean"] for f5c_idx, _ in matches]
+    f5c_model_means = [f5c_events[f5c_idx]["model_mean"] for f5c_idx, _ in matches]
     ge_means_matched = [ge_means[ge_idx] for _, ge_idx in matches]
 
     # Scatter plot comparison
-    ax2.scatter(x, f5c_means, c="#1f77b4", alpha=0.6, s=15, label="f5c Event Mean", zorder=2)
-    ax2.scatter(x, ge_means_matched, c="#2ca02c", alpha=0.6, s=15, label="getevents Mean", zorder=2)
+    ax2.scatter(x, f5c_means, c="#1f77b4", alpha=0.6, s=15, label="f5c Event Mean", zorder=3)
+    ax2.scatter(x, f5c_model_means, c="#ff7f0e", alpha=0.6, s=15, label="f5c Model Mean", zorder=2)
+    ax2.scatter(x, ge_means_matched, c="#2ca02c", alpha=0.6, s=15, label="getevents Mean", zorder=3)
 
     # Connect with lines to show differences
     for i in range(0, n_compare, max(1, n_compare // 200)):
@@ -276,11 +289,13 @@ def plot_comparison(
 
     # Calculate differences for matched pairs
     f5c_arr = np.array(f5c_means)
+    f5c_model_arr = np.array(f5c_model_means)
     ge_arr = np.array(ge_means_matched)
     differences = f5c_arr - ge_arr
 
     # Plot differences
-    ax3.plot(x, differences, "o-", color="#d62728", markersize=3, linewidth=0.8, alpha=0.7)
+    ax3.plot(x, differences, "o-", color="#d62728", markersize=3, linewidth=0.8, alpha=0.7, label="f5c Event - getevents")
+    ax3.plot(x, f5c_model_arr - ge_arr, "o-", color="#ff7f0e", markersize=3, linewidth=0.8, alpha=0.5, label="f5c Model - getevents")
     ax3.axhline(0, color="black", linestyle="-", alpha=0.5, linewidth=1)
 
     # Color outliers
@@ -294,16 +309,16 @@ def plot_comparison(
             c="red",
             s=30,
             alpha=0.8,
-            zorder=3,
+            zorder=4,
             label=f"Large diff (>10 pA): {np.sum(outlier_mask)}",
         )
 
     ax3.set_xlabel("Matched Event Pair Index", fontsize=11)
-    ax3.set_ylabel("Difference (f5c - getevents) [pA]", fontsize=11)
+    ax3.set_ylabel("Difference [pA]", fontsize=11)
     ax3.set_title(
         "Event Mean Differences (Matched by Signal Position)", fontsize=12, fontweight="bold"
     )
-    ax3.legend(loc="upper right", fontsize=9)
+    ax3.legend(loc="upper right", fontsize=8)
 
     # =========================================================================
     # Add statistics box
@@ -313,22 +328,34 @@ def plot_comparison(
     rmsd = np.sqrt(np.mean(differences**2))
     corr = np.corrcoef(f5c_arr, ge_arr)[0, 1] if len(f5c_arr) > 1 else 0.0
 
+    # Model vs getevents statistics
+    mean_diff_model = np.mean(f5c_model_arr - ge_arr)
+    std_diff_model = np.std(f5c_model_arr - ge_arr)
+    rmsd_model = np.sqrt(np.mean((f5c_model_arr - ge_arr) ** 2))
+    corr_model = np.corrcoef(f5c_model_arr, ge_arr)[0, 1] if len(f5c_model_arr) > 1 else 0.0
+
     stats_text = (
         f"Statistics:\n"
         f"f5c events: {len(f5c_events)}\n"
         f"getevents: {getevents_result['n_events']}\n"
         f"Matched pairs: {n_compare}\n\n"
-        f"Mean diff: {mean_diff:.2f} pA\n"
-        f"Std diff: {std_diff:.2f} pA\n"
-        f"RMSD: {rmsd:.2f} pA\n"
-        f"Correlation: {corr:.4f}\n"
+        f"f5c Event vs getevents:\n"
+        f"  Mean diff: {mean_diff:.2f} pA\n"
+        f"  Std diff: {std_diff:.2f} pA\n"
+        f"  RMSD: {rmsd:.2f} pA\n"
+        f"  Correlation: {corr:.4f}\n\n"
+        f"f5c Model vs getevents:\n"
+        f"  Mean diff: {mean_diff_model:.2f} pA\n"
+        f"  Std diff: {std_diff_model:.2f} pA\n"
+        f"  RMSD: {rmsd_model:.2f} pA\n"
+        f"  Correlation: {corr_model:.4f}\n\n"
         f"Large diffs (>10pA): {np.sum(outlier_mask)}"
     )
     fig.text(
         0.02,
         0.5,
         stats_text,
-        fontsize=9,
+        fontsize=8,
         verticalalignment="center",
         bbox=dict(boxstyle="round", facecolor="lightblue", alpha=0.5),
     )
