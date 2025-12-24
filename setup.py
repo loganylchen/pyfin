@@ -497,7 +497,7 @@ eventalign_api_extension = Extension(
     name="fin._eventalign._eventalign",
     sources=[
         os.path.join(EVENTALIGN_DIR, "event_api_wrapper.cpp"),
-        os.path.join(EVENTALIGN_DIR, "common.c"),
+        os.path.join(EVENTALIGN_DIR, "common.cpp"),
         os.path.join(EVENTALIGN_DIR, "events.cpp"),
         os.path.join(EVENTALIGN_DIR, "model.cpp"),
     ],
