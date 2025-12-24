@@ -500,6 +500,7 @@ eventalign_api_extension = Extension(
         os.path.join(EVENTALIGN_DIR, "common.cpp"),
         os.path.join(EVENTALIGN_DIR, "events.cpp"),
         os.path.join(EVENTALIGN_DIR, "model.cpp"),
+        os.path.join(EVENTALIGN_DIR, "align.cpp"),
     ],
     depends=[
         os.path.join(EVENTALIGN_DIR, "common.h"),
