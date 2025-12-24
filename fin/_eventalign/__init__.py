@@ -22,8 +22,14 @@ Example usage:
 """
 
 import sys
+import os
+import traceback
 
 # Try to import the C extension
+_eventalign_import_error = None
+_eventalign_diagnostics = None
+_EVENTALIGN_AVAILABLE = False
+
 try:
     from ._eventalign import getevents as _getevents_c
     from ._eventalign import set_model as _set_model_c
@@ -32,6 +38,40 @@ try:
 except ImportError as e:
     _EVENTALIGN_AVAILABLE = False
     _eventalign_import_error = str(e)
+
+    # Collect diagnostic information
+    import sysconfig
+    diagnostics = []
+
+    # Python version info
+    diagnostics.append(f"Python version: {sys.version}")
+    diagnostics.append(f"Platform: {sys.platform}")
+
+    # Check if extension file exists
+    ext_path = os.path.join(os.path.dirname(__file__), "_eventalign.so")
+    if os.path.exists(ext_path):
+        diagnostics.append(f"Extension file exists: {ext_path}")
+        diagnostics.append(f"Extension file size: {os.path.getsize(ext_path)} bytes")
+    else:
+        diagnostics.append(f"Extension file NOT found: {ext_path}")
+
+    # Check for common missing dependencies
+    try:
+        import numpy
+        diagnostics.append(f"NumPy available: {numpy.__version__}")
+    except ImportError:
+        diagnostics.append("NumPy: NOT INSTALLED")
+
+    # Compiler info
+    diagnostics.append(f"ABI flags: {sysconfig.get_config_var('ABI')}")
+    diagnostics.append(f"SOABI: {sysconfig.get_config_var('SOABI')}")
+
+    # Full traceback
+    diagnostics.append("\n--- Full traceback ---")
+    diagnostics.append(traceback.format_exc())
+
+    _eventalign_diagnostics = "\n  ".join(diagnostics)
+
     # Define constants for when module is not available
     MODEL_RNA002 = 1
     MODEL_RNA004 = 2
@@ -54,7 +94,11 @@ def _check_available():
         raise ImportError(
             f"Eventalign C extension not available.\n"
             f"Error: {_eventalign_import_error}\n"
-            "Please rebuild the package with: pip install -e ."
+            f"\nDiagnostics:\n  {_eventalign_diagnostics}\n"
+            "\nTo fix this issue, try rebuilding the package:\n"
+            "  pip install -e .\n"
+            "Or clean build and reinstall:\n"
+            "  pip uninstall -y py-fin && rm -rf build/fin/_eventalign && pip install -e ."
         )
 
 
@@ -136,7 +180,19 @@ def _print_status():
     if _EVENTALIGN_AVAILABLE:
         print("[fin._eventalign] Event detection and model API loaded successfully")
     else:
-        print(f"[fin._eventalign] Warning: C extension not available - {_eventalign_import_error}")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"f5c extension not available - event detection disabled\n"
+            f"Error: {_eventalign_import_error}\n"
+            f"Diagnostics:\n  {_eventalign_diagnostics}"
+        )
+        print(
+            f"[fin._eventalign] WARNING: C extension not available - event detection disabled\n"
+            f"  Error: {_eventalign_import_error}\n"
+            f"  Diagnostics:\n    {_eventalign_diagnostics}\n"
+            f"  To fix: pip install -e ."
+        )
 
 
 _print_status()

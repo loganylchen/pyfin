@@ -85,7 +85,7 @@ def read_eventalign_tsv(tsv_path: str, max_events: int = None) -> list[dict]:
                 "model_stdv": float(parts[11]),
                 "standardized_mean": float(parts[12]) if parts[12] != "inf" else 0.0,
                 "start_idx": int(parts[13]),  # Signal start position
-                "end_idx": int(parts[14]),    # Signal end position
+                "end_idx": int(parts[14]),  # Signal end position
             }
             events.append(event)
 
@@ -172,7 +172,9 @@ def plot_comparison(
     # Find matching events based on signal position overlap
     matches = find_matching_events(f5c_events, ge_starts, ge_ends)
 
-    print(f"  Matched {len(matches)} pairs out of {len(f5c_events)} f5c events and {len(ge_means)} getevents")
+    print(
+        f"  Matched {len(matches)} pairs out of {len(f5c_events)} f5c events and {len(ge_means)} getevents"
+    )
 
     # Create figure
     fig = plt.figure(figsize=(18, 10))
@@ -260,7 +262,11 @@ def plot_comparison(
         )
 
     ax2.set_ylabel("Current (pA)", fontsize=11)
-    ax2.set_title(f"Matched Event Means Comparison ({n_compare} matched pairs)", fontsize=12, fontweight="bold")
+    ax2.set_title(
+        f"Matched Event Means Comparison ({n_compare} matched pairs)",
+        fontsize=12,
+        fontweight="bold",
+    )
     ax2.legend(loc="upper right", fontsize=9)
 
     # =========================================================================
@@ -294,7 +300,9 @@ def plot_comparison(
 
     ax3.set_xlabel("Matched Event Pair Index", fontsize=11)
     ax3.set_ylabel("Difference (f5c - getevents) [pA]", fontsize=11)
-    ax3.set_title("Event Mean Differences (Matched by Signal Position)", fontsize=12, fontweight="bold")
+    ax3.set_title(
+        "Event Mean Differences (Matched by Signal Position)", fontsize=12, fontweight="bold"
+    )
     ax3.legend(loc="upper right", fontsize=9)
 
     # =========================================================================
@@ -328,7 +336,7 @@ def plot_comparison(
     plt.tight_layout(rect=[0, 0, 0.96, 1])
 
     if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.savefig(output_path, dpi=600, bbox_inches="tight")
         print(f"Figure saved to {output_path}")
 
     plt.show()
