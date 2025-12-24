@@ -268,12 +268,15 @@ py_init_db_from_python(PyObject *self, PyObject *args, PyObject *kwds)
         signal_shifts = (float *)malloc(sizeof(float) * batch_size);
     }
 
-    // Keep track of Python objects that own the string/signal data
+    // Keep track of Python objects for cleanup (no longer needed after deep copy)
     PyObject **read_id_objs = (PyObject **)malloc(sizeof(PyObject *) * batch_size);
     PyObject **read_seq_objs = (PyObject **)malloc(sizeof(PyObject *) * batch_size);
     PyObject **ref_seq_objs = (PyObject **)malloc(sizeof(PyObject *) * batch_size);
     PyObject **ref_name_objs = (PyObject **)malloc(sizeof(PyObject *) * batch_size);
     PyObject **signal_objs = (PyObject **)malloc(sizeof(PyObject *) * batch_size);
+
+    // Track how many signals were successfully processed for cleanup
+    int32_t num_signals_processed = 0;
 
     // Convert Python inputs to C arrays
     for (int32_t i = 0; i < batch_size; i++) {
@@ -309,12 +312,14 @@ py_init_db_from_python(PyObject *self, PyObject *args, PyObject *kwds)
             NPY_ARRAY_C_CONTIGUOUS, NULL);
         if (signal_array == NULL) {
             PyErr_Format(PyExc_TypeError, "signals[%d] must be a 1D float32 numpy array", i);
+            num_signals_processed = i;
             goto cleanup;
         }
         signals[i] = (float *)PyArray_DATA(signal_array);
         signal_lens[i] = (uint64_t)PyArray_DIM(signal_array, 0);
-        // Store borrowed reference to keep array alive
+        // Store reference for cleanup
         signal_objs[i] = (PyObject *)signal_array;
+        num_signals_processed = i + 1;
 
         // signal_drifts
         if (signal_drifts != NULL) {
@@ -335,7 +340,7 @@ py_init_db_from_python(PyObject *self, PyObject *args, PyObject *kwds)
         }
     }
 
-    // Call init_db_from_python
+    // Call init_db_from_python (data will be deep-copied inside)
     db_t *db = NULL;
     db = init_db_from_python(
         batch_size,
@@ -356,8 +361,12 @@ py_init_db_from_python(PyObject *self, PyObject *args, PyObject *kwds)
         signal_shifts
     );
 
-    // Free temporary arrays
+    // Free temporary arrays and cleanup Python references
 cleanup:
+    // Free numpy array references
+    for (int32_t i = 0; i < num_signals_processed; i++) {
+        Py_XDECREF(signal_objs[i]);
+    }
     free(read_ids);
     free(read_ids_len);
     free(read_seqs);
@@ -376,9 +385,7 @@ cleanup:
     free(read_seq_objs);
     free(ref_seq_objs);
     free(ref_name_objs);
-
-    // Note: we intentionally don't free signal_objs because the numpy arrays
-    // need to stay alive. The db_t structure holds borrowed pointers.
+    free(signal_objs);
 
     if (db == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "init_db_from_python failed");

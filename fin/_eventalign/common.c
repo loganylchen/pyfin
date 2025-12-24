@@ -102,44 +102,121 @@ db_t *init_db(int32_t batch_size)
 /* completely free a data batch */
 void free_db(db_t *db)
 {
-
-    free(db->read_id);
-    free(db->read_len);
-    free(db->read_idx);
-    free(db->ref_n);
-    free(db->ref_sequence);
-    free(db->ref_name);
-    free(db->ref_len);
-    free(db->et);
-    free(db->sig);
-    free(db->scalings);
-    free(db->event_align_pairs);
-    free(db->n_event_align_pairs);
-    free(db->event_alignment);
-    free(db->n_event_alignment);
-    free(db->events_per_base);
-    free(db->base_to_event_map);
-    free(db->read_stat_flag);
-    for (i = 0; i < db->batch_size; ++i)
-    {
-        delete db->site_score_map[i];
+    if (db == NULL) {
+        return;
     }
-    free(db->site_score_map);
+
+    // Free deep-copied strings
+    if (db->read_id) {
+        for (int32_t i = 0; i < db->batch_size; i++) {
+            if (db->read_id[i]) {
+                free(db->read_id[i]);
+            }
+        }
+        free(db->read_id);
+    }
+
+    if (db->read_len) {
+        free(db->read_len);
+    }
+
+    if (db->ref_sequence) {
+        for (int32_t i = 0; i < db->batch_size; i++) {
+            if (db->ref_sequence[i]) {
+                free(db->ref_sequence[i]);
+            }
+        }
+        free(db->ref_sequence);
+    }
+
+    if (db->ref_name) {
+        for (int32_t i = 0; i < db->batch_size; i++) {
+            if (db->ref_name[i]) {
+                free(db->ref_name[i]);
+            }
+        }
+        free(db->ref_name);
+    }
+
+    if (db->ref_len) {
+        free(db->ref_len);
+    }
+
+    if (db->et) {
+        // Free event data in each event_table
+        for (int32_t i = 0; i < db->batch_size; i++) {
+            if (db->et[i].event) {
+                free(db->et[i].event);
+            }
+        }
+        free(db->et);
+    }
+
+    // Free signal data
+    if (db->sig) {
+        for (int32_t i = 0; i < db->batch_size; i++) {
+            if (db->sig[i]) {
+                if (db->sig[i]->rawptr) {
+                    free(db->sig[i]->rawptr);
+                }
+                free(db->sig[i]);
+            }
+        }
+        free(db->sig);
+    }
+
+    if (db->scalings) {
+        free(db->scalings);
+    }
+
+    if (db->event_align_pairs) {
+        free(db->event_align_pairs);
+    }
+
+    if (db->n_event_align_pairs) {
+        free(db->n_event_align_pairs);
+    }
+
+    if (db->event_alignment) {
+        free(db->event_alignment);
+    }
+
+    if (db->n_event_alignment) {
+        free(db->n_event_alignment);
+    }
+
+    if (db->events_per_base) {
+        free(db->events_per_base);
+    }
+
+    if (db->base_to_event_map) {
+        free(db->base_to_event_map);
+    }
+
+    if (db->read_stat_flag) {
+        free(db->read_stat_flag);
+    }
+
+    if (db->site_score_map) {
+        for (int32_t i = 0; i < db->batch_size; ++i) {
+            delete db->site_score_map[i];
+        }
+        free(db->site_score_map);
+    }
+
     // eventalign related
-    if (db->eventalign_summary)
-    {
+    if (db->eventalign_summary) {
         free(db->eventalign_summary);
     }
-    if (db->event_alignment_result)
-    {
-        for (i = 0; i < db->batch_size; ++i)
-        {
+
+    if (db->event_alignment_result) {
+        for (int32_t i = 0; i < db->batch_size; ++i) {
             delete db->event_alignment_result[i];
         }
         free(db->event_alignment_result);
     }
-    if (db->event_alignment_result_str)
-    {
+
+    if (db->event_alignment_result_str) {
         free(db->event_alignment_result_str);
     }
 
@@ -207,11 +284,12 @@ db_t *init_db_from_python(
     db->read_idx = 0;  // Starting index for this batch
     db->ref_n = ref_n;  // Number of reference sequences
 
-    // Allocate and assign read_id array (borrowed pointers from Python)
+    // Allocate and assign read_id array (deep copy strings from Python)
     db->read_id = (char **)(malloc(sizeof(char *) * batch_size));
     MALLOC_CHK(db->read_id);
     for (int32_t i = 0; i < batch_size; i++) {
-        db->read_id[i] = read_ids[i];
+        db->read_id[i] = strdup(read_ids[i]);  // Deep copy
+        MALLOC_CHK(db->read_id[i]);
     }
 
     // Allocate and assign read_len array (copied values)
@@ -219,18 +297,20 @@ db_t *init_db_from_python(
     MALLOC_CHK(db->read_len);
     memcpy(db->read_len, read_lens, sizeof(int32_t) * batch_size);
 
-    // Allocate and assign ref_sequence array (borrowed pointers from Python)
+    // Allocate and assign ref_sequence array (deep copy strings from Python)
     db->ref_sequence = (char **)(malloc(sizeof(char *) * batch_size));
     MALLOC_CHK(db->ref_sequence);
     for (int32_t i = 0; i < batch_size; i++) {
-        db->ref_sequence[i] = ref_seqs[i];
+        db->ref_sequence[i] = strdup(ref_seqs[i]);  // Deep copy
+        MALLOC_CHK(db->ref_sequence[i]);
     }
 
-    // Allocate and assign ref_name array (borrowed pointers from Python)
+    // Allocate and assign ref_name array (deep copy strings from Python)
     db->ref_name = (char **)(malloc(sizeof(char *) * batch_size));
     MALLOC_CHK(db->ref_name);
     for (int32_t i = 0; i < batch_size; i++) {
-        db->ref_name[i] = ref_names[i];
+        db->ref_name[i] = strdup(ref_names[i]);  // Deep copy
+        MALLOC_CHK(db->ref_name[i]);
     }
 
     // Allocate and assign ref_len array (copied values)
@@ -238,14 +318,17 @@ db_t *init_db_from_python(
     MALLOC_CHK(db->ref_len);
     memcpy(db->ref_len, ref_lens, sizeof(int32_t) * batch_size);
 
-    // Allocate and initialize signal_t structures
+    // Allocate and initialize signal_t structures (deep copy signal data)
     db->sig = (signal_t **)malloc(sizeof(signal_t *) * batch_size);
     MALLOC_CHK(db->sig);
     for (int32_t i = 0; i < batch_size; i++) {
         db->sig[i] = (signal_t *)malloc(sizeof(signal_t));
         MALLOC_CHK(db->sig[i]);
 
-        db->sig[i]->rawptr = signals[i];           // Borrowed pointer
+        // Deep copy the signal data
+        db->sig[i]->rawptr = (float *)malloc(signal_lens[i] * sizeof(float));
+        MALLOC_CHK(db->sig[i]->rawptr);
+        memcpy(db->sig[i]->rawptr, signals[i], signal_lens[i] * sizeof(float));
         db->sig[i]->nsample = signal_lens[i];      // Copied value
         db->sig[i]->digitisation = 8192.0f;
         db->sig[i]->offset = 0.0f;
