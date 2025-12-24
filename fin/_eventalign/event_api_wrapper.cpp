@@ -336,7 +336,8 @@ py_init_db_from_python(PyObject *self, PyObject *args, PyObject *kwds)
     }
 
     // Call init_db_from_python
-    db_t *db = init_db_from_python(
+    db_t *db = NULL;
+    db = init_db_from_python(
         batch_size,
         read_ids,
         read_ids_len,
