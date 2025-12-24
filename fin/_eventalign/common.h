@@ -276,9 +276,6 @@ typedef struct
     char **ref_name;     // read sequences
     int32_t *ref_len;    // reference sequence lengths
 
-    int32_t sum_bases;
-    int32_t total_reads;
-
     // fast5 file //should flatten this to reduce mallocs
     signal_t **sig;
     // event table
