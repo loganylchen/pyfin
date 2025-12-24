@@ -728,6 +728,7 @@ py_run_eventalign(PyObject *self, PyObject *args, PyObject *kwds)
             AlignedPair *event_align_pairs = (AlignedPair *)malloc(sizeof(AlignedPair) * max_pairs);
             index_pair_t *base_to_event_map = (index_pair_t *)malloc(sizeof(index_pair_t) * n_kmers);
             event_alignment_t *event_alignment = (event_alignment_t *)malloc(sizeof(event_alignment_t) * max_pairs);
+            double events_per_base = 0.0;  // For postalign output
 
             if (!event_align_pairs || !base_to_event_map || !event_alignment) {
                 if (event_align_pairs) free(event_align_pairs);
@@ -745,7 +746,7 @@ py_run_eventalign(PyObject *self, PyObject *args, PyObject *kwds)
             if (n_aligned_pairs > 0) {
                 // Call postalign function
                 int32_t n_event_alignment = postalign(event_alignment, base_to_event_map,
-                                                       &sample_rates[i], ref_sequences[j],
+                                                       &events_per_base, ref_sequences[j],
                                                        n_kmers, event_align_pairs,
                                                        n_aligned_pairs, kmer_size);
 
@@ -787,7 +788,7 @@ py_run_eventalign(PyObject *self, PyObject *args, PyObject *kwds)
                         PyDict_SetItemString(mapping_dict, "start", start_list);
                         PyDict_SetItemString(mapping_dict, "stop", stop_list);
                         PyDict_SetItemString(mapping_dict, "events_per_base",
-                            PyFloat_FromDouble(sample_rates[i]));
+                            PyFloat_FromDouble(events_per_base));
 
                         Py_DECREF(start_list);
                         Py_DECREF(stop_list);
@@ -820,15 +821,25 @@ cleanup_full_results:
     // Step 3: Build output dictionary
     // =============================================================================
 
+    // Declare all output variables at the beginning to avoid jump-crosses-init issues
+    PyObject *scalings_list = NULL;
+    PyObject *events_list = NULL;
+    PyObject *full_results_list = NULL;
+    PyObject *mapping_results_list = NULL;
+    PyObject *summary_dict = NULL;
+    PyObject *result = NULL;
+    int success = 1;
+
     // Create scalings list
-    PyObject *scalings_list = PyList_New(batch_size);
+    scalings_list = PyList_New(batch_size);
     // Create events list
-    PyObject *events_list = PyList_New(batch_size);
+    events_list = PyList_New(batch_size);
 
     if (!scalings_list || !events_list) {
         Py_XDECREF(scalings_list);
         Py_XDECREF(events_list);
-        goto cleanup_and_return;
+        success = 0;
+        goto build_output;
     }
 
     for (Py_ssize_t i = 0; i < batch_size; i++) {
@@ -880,15 +891,16 @@ cleanup_full_results:
     }
 
     // Create full results nested list
-    PyObject *full_results_list = PyList_New(batch_size);
-    PyObject *mapping_results_list = PyList_New(batch_size);
+    full_results_list = PyList_New(batch_size);
+    mapping_results_list = PyList_New(batch_size);
 
     if (!full_results_list || !mapping_results_list) {
         Py_XDECREF(full_results_list);
         Py_XDECREF(mapping_results_list);
         Py_DECREF(scalings_list);
         Py_DECREF(events_list);
-        goto cleanup_and_return;
+        success = 0;
+        goto build_output;
     }
 
     for (Py_ssize_t i = 0; i < batch_size; i++) {
@@ -909,33 +921,45 @@ cleanup_full_results:
             Py_DECREF(mapping_results_list);
             Py_DECREF(scalings_list);
             Py_DECREF(events_list);
-            goto cleanup_and_return;
+            success = 0;
+            goto build_output;
         }
     }
 
-    // Create summary dict
-    PyObject *summary_dict = PyDict_New();
-    if (summary_dict) {
-        PyDict_SetItemString(summary_dict, "num_reads", PyLong_FromSsize_t(batch_size));
-        PyDict_SetItemString(summary_dict, "num_refs", PyLong_FromSsize_t(n_ref));
-    }
+build_output:
+    if (success) {
+        // Create summary dict
+        summary_dict = PyDict_New();
+        if (summary_dict) {
+            PyDict_SetItemString(summary_dict, "num_reads", PyLong_FromSsize_t(batch_size));
+            PyDict_SetItemString(summary_dict, "num_refs", PyLong_FromSsize_t(n_ref));
+        }
 
-    // Create final result dict
-    PyObject *result = PyDict_New();
-    if (result) {
-        PyDict_SetItemString(result, "full", full_results_list);
-        PyDict_SetItemString(result, "mapping", mapping_results_list);
-        PyDict_SetItemString(result, "scalings", scalings_list);
-        PyDict_SetItemString(result, "events", events_list);
-        PyDict_SetItemString(result, "summary", summary_dict ? summary_dict : PyDict_New());
-    }
+        // Create final result dict
+        result = PyDict_New();
+        if (result) {
+            PyDict_SetItemString(result, "full", full_results_list);
+            PyDict_SetItemString(result, "mapping", mapping_results_list);
+            PyDict_SetItemString(result, "scalings", scalings_list);
+            PyDict_SetItemString(result, "events", events_list);
+            PyDict_SetItemString(result, "summary", summary_dict ? summary_dict : PyDict_New());
+        }
 
-    // Cleanup temporary arrays
-    Py_DECREF(full_results_list);
-    Py_DECREF(mapping_results_list);
-    Py_DECREF(scalings_list);
-    Py_DECREF(events_list);
-    Py_XDECREF(summary_dict);
+        // Cleanup temporary arrays
+        Py_XDECREF(full_results_list);
+        Py_XDECREF(mapping_results_list);
+        Py_XDECREF(scalings_list);
+        Py_XDECREF(events_list);
+        Py_XDECREF(summary_dict);
+    } else {
+        // On failure, clean up any partial results
+        Py_XDECREF(full_results_list);
+        Py_XDECREF(mapping_results_list);
+        Py_XDECREF(scalings_list);
+        Py_XDECREF(events_list);
+        Py_XDECREF(summary_dict);
+        Py_XDECREF(result);
+    }
 
 cleanup_and_return:
     // ============================================================================
