@@ -106,6 +106,29 @@ def run_getevents(signal: np.ndarray):
     return getevents(signal)
 
 
+def load_rna002_model():
+    """Load the RNA002 pore model."""
+    try:
+        from fin._eventalign import set_model, MODEL_RNA002
+    except ImportError:
+        raise ImportError("fin._eventalign module not available. Please build the package first.")
+
+    return set_model(MODEL_RNA002)
+
+
+def kmer_to_index(kmer: str, kmer_size: int = 5) -> int:
+    """
+    Convert k-mer string to model index.
+    RNA002 uses k=5, bases are A=0, C=1, G=2, T=3
+    Index = sum(base * 4^(k-1-position)) for position in 0..k-1
+    """
+    base_to_val = {"A": 0, "C": 1, "G": 2, "T": 3, "U": 0}
+    index = 0
+    for base in kmer:
+        index = index * 4 + base_to_val[base.upper()]
+    return index
+
+
 def find_matching_events(f5c_events: list[dict], ge_starts: np.ndarray, ge_ends: np.ndarray):
     """
     Find matching events between f5c and getevents based on signal position overlap.
@@ -158,6 +181,7 @@ def plot_comparison(
     signal: np.ndarray,
     f5c_events: list[dict],
     getevents_result: dict,
+    rna002_model: dict = None,
     output_path: str = None,
 ):
     """
@@ -176,9 +200,11 @@ def plot_comparison(
         f"  Matched {len(matches)} pairs out of {len(f5c_events)} f5c events and {len(ge_means)} getevents"
     )
 
-    # Create figure
-    fig = plt.figure(figsize=(18, 10))
-    gs = fig.add_gridspec(3, 1, height_ratios=[1.2, 1, 1], hspace=0.35)
+    # Create figure with 4 panels if model is provided, 3 otherwise
+    n_panels = 4 if rna002_model is not None else 3
+    height_ratios = [1.2, 1, 1] if rna002_model is None else [1.2, 1, 1, 1]
+    fig = plt.figure(figsize=(18, 12 if rna002_model else 10))
+    gs = fig.add_gridspec(n_panels, 1, height_ratios=height_ratios, hspace=0.35)
 
     # Downsample signal for plotting
     x_signal = np.arange(len(signal))
@@ -321,41 +347,106 @@ def plot_comparison(
     ax3.legend(loc="upper right", fontsize=8)
 
     # =========================================================================
-    # Add statistics box
+    # Panel 4: K-mer model comparison (f5c model_mean vs raw pore model)
     # =========================================================================
-    mean_diff = np.mean(differences)
-    std_diff = np.std(differences)
-    rmsd = np.sqrt(np.mean(differences**2))
-    corr = np.corrcoef(f5c_arr, ge_arr)[0, 1] if len(f5c_arr) > 1 else 0.0
+    if rna002_model is not None:
+        ax4 = fig.add_subplot(gs[3])
 
-    # Model vs getevents statistics
-    mean_diff_model = np.mean(f5c_model_arr - ge_arr)
-    std_diff_model = np.std(f5c_model_arr - ge_arr)
-    rmsd_model = np.sqrt(np.mean((f5c_model_arr - ge_arr) ** 2))
-    corr_model = np.corrcoef(f5c_model_arr, ge_arr)[0, 1] if len(f5c_model_arr) > 1 else 0.0
+        # Get unique kmers and their model means
+        unique_kmers = {}
+        for ev in f5c_events:
+            kmer = ev["ref_kmer"]
+            if kmer not in unique_kmers:
+                unique_kmers[kmer] = ev["model_mean"]
 
-    stats_text = (
-        f"Statistics:\n"
-        f"f5c events: {len(f5c_events)}\n"
-        f"getevents: {getevents_result['n_events']}\n"
-        f"Matched pairs: {n_compare}\n\n"
-        f"f5c Event vs getevents:\n"
-        f"  Mean diff: {mean_diff:.2f} pA\n"
-        f"  Std diff: {std_diff:.2f} pA\n"
-        f"  RMSD: {rmsd:.2f} pA\n"
-        f"  Correlation: {corr:.4f}\n\n"
-        f"f5c Model vs getevents:\n"
-        f"  Mean diff: {mean_diff_model:.2f} pA\n"
-        f"  Std diff: {std_diff_model:.2f} pA\n"
-        f"  RMSD: {rmsd_model:.2f} pA\n"
-        f"  Correlation: {corr_model:.4f}\n\n"
-        f"Large diffs (>10pA): {np.sum(outlier_mask)}"
-    )
+        # Get raw model values for each kmer
+        kmer_list = list(unique_kmers.keys())
+        f5c_model_values = [unique_kmers[k] for k in kmer_list]
+        raw_model_values = []
+        raw_model_indices = []
+        for kmer in kmer_list:
+            idx = kmer_to_index(kmer, rna002_model["kmer_size"])
+            raw_model_values.append(rna002_model["level_means"][idx])
+            raw_model_indices.append(idx)
+
+        f5c_model_arr = np.array(f5c_model_values)
+        raw_model_arr = np.array(raw_model_values)
+
+        # Scatter plot comparison
+        ax4.scatter(raw_model_arr, f5c_model_arr, c="#9467bd", alpha=0.6, s=20, edgecolors="black", linewidth=0.5)
+
+        # Add diagonal line for perfect match
+        min_val = min(f5c_model_arr.min(), raw_model_arr.min())
+        max_val = max(f5c_model_arr.max(), raw_model_arr.max())
+        ax4.plot([min_val, max_val], [min_val, max_val], "k--", alpha=0.3, linewidth=1, label="Perfect match")
+
+        # Calculate statistics
+        model_diff = f5c_model_arr - raw_model_arr
+        mean_model_diff = np.mean(model_diff)
+        std_model_diff = np.std(model_diff)
+        rmsd_model = np.sqrt(np.mean(model_diff**2))
+        corr_model = np.corrcoef(f5c_model_arr, raw_model_arr)[0, 1] if len(f5c_model_arr) > 1 else 0.0
+
+        ax4.set_xlabel("Raw Pore Model Mean (pA)", fontsize=11)
+        ax4.set_ylabel("f5c Model Mean (pA)", fontsize=11)
+        ax4.set_title(
+            f"K-mer Model Comparison ({len(kmer_list)} unique kmers)\n"
+            f"Mean diff: {mean_model_diff:.2f} pA, RMSD: {rmsd_model:.2f} pA, Corr: {corr_model:.4f}",
+            fontsize=12,
+            fontweight="bold",
+        )
+        ax4.legend(loc="upper left", fontsize=8)
+        ax4.grid(True, alpha=0.3)
+
+        # Update statistics text box to include k-mer model comparison
+        stats_text = (
+            f"Statistics:\n"
+            f"f5c events: {len(f5c_events)}\n"
+            f"getevents: {getevents_result['n_events']}\n"
+            f"Matched pairs: {n_compare}\n\n"
+            f"f5c Event vs getevents:\n"
+            f"  Mean diff: {mean_diff:.2f} pA\n"
+            f"  Std diff: {std_diff:.2f} pA\n"
+            f"  RMSD: {rmsd:.2f} pA\n"
+            f"  Correlation: {corr:.4f}\n\n"
+            f"f5c Model vs getevents:\n"
+            f"  Mean diff: {mean_diff_model:.2f} pA\n"
+            f"  Std diff: {std_diff_model:.2f} pA\n"
+            f"  RMSD: {rmsd_model:.2f} pA\n"
+            f"  Correlation: {corr_model:.4f}\n\n"
+            f"K-mer Model (f5c vs raw):\n"
+            f"  Mean diff: {mean_model_diff:.2f} pA\n"
+            f"  RMSD: {rmsd_model:.2f} pA\n"
+            f"  Correlation: {corr_model:.4f}\n\n"
+            f"Large diffs (>10pA): {np.sum(outlier_mask)}"
+        )
+    else:
+        # =========================================================================
+        # Add statistics box (no k-mer model comparison)
+        # =========================================================================
+        stats_text = (
+            f"Statistics:\n"
+            f"f5c events: {len(f5c_events)}\n"
+            f"getevents: {getevents_result['n_events']}\n"
+            f"Matched pairs: {n_compare}\n\n"
+            f"f5c Event vs getevents:\n"
+            f"  Mean diff: {mean_diff:.2f} pA\n"
+            f"  Std diff: {std_diff:.2f} pA\n"
+            f"  RMSD: {rmsd:.2f} pA\n"
+            f"  Correlation: {corr:.4f}\n\n"
+            f"f5c Model vs getevents:\n"
+            f"  Mean diff: {mean_diff_model:.2f} pA\n"
+            f"  Std diff: {std_diff_model:.2f} pA\n"
+            f"  RMSD: {rmsd_model:.2f} pA\n"
+            f"  Correlation: {corr_model:.4f}\n\n"
+            f"Large diffs (>10pA): {np.sum(outlier_mask)}"
+        )
+
     fig.text(
         0.02,
         0.5,
         stats_text,
-        fontsize=8,
+        fontsize=7 if rna002_model else 8,
         verticalalignment="center",
         bbox=dict(boxstyle="round", facecolor="lightblue", alpha=0.5),
     )
@@ -416,12 +507,19 @@ def main():
     f5c_events = read_eventalign_tsv(args.eventalign)
     print(f"  Total events: {len(f5c_events)}")
 
+    # Load RNA002 model for k-mer comparison
+    print(f"\nLoading RNA002 pore model...")
+    rna002_model = load_rna002_model()
+    print(f"  K-mer size: {rna002_model['kmer_size']}")
+    print(f"  Number of k-mers: {rna002_model['num_kmer']}")
+
     # Create visualization
     print(f"\nCreating comparison visualization...")
     plot_comparison(
         signal=signal,
         f5c_events=f5c_events,
         getevents_result=getevents_result,
+        rna002_model=rna002_model,
         output_path=args.output,
     )
 
