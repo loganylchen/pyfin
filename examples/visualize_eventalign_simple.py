@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """
-Simple visualization of eventalign results from f5c.
+Visualization of eventalign results from f5c.
 
 This script uses only the eventalign TSV file (which contains embedded raw samples)
 to visualize:
 - Raw signal with detected events
-- Event mean levels colored by k-mer
-- Model vs observed comparison
+- Event mean levels vs model mean levels (different colors)
+- Model comparison with z-scores
 """
 
 import argparse
@@ -88,13 +88,13 @@ def kmer_to_color(kmer: str) -> tuple[float, float, float]:
 def plot_eventalign_visualization(
     events: list[dict],
     output_path: str = None,
-    show_n_events: int = 100,
+    show_n_events: int = None,
 ):
     """
-    Create visualization of eventalign results.
+    Create visualization of eventalign results showing all events.
     """
-    # Limit events for display
-    display_events = events[:show_n_events]
+    # Show all events if not specified
+    display_events = events if show_n_events is None else events[:show_n_events]
 
     # Reconstruct signal from embedded raw samples
     all_samples = []
@@ -111,139 +111,170 @@ def plot_eventalign_visualization(
         pos += len(ev["raw_samples"])
 
     # Create figure
-    fig = plt.figure(figsize=(16, 10))
-    gs = fig.add_gridspec(3, 1, height_ratios=[1, 1, 1.2], hspace=0.35)
+    fig = plt.figure(figsize=(18, 12))
+    gs = fig.add_gridspec(4, 1, height_ratios=[1, 1, 1.2, 1], hspace=0.4)
 
     # =========================================================================
-    # Panel 1: Raw signal with event boundaries
+    # Panel 1: Raw signal with ALL events overlaid
     # =========================================================================
     ax1 = fig.add_subplot(gs[0])
 
-    # Plot raw signal
+    # Plot raw signal (downsample if too long for performance)
     x_signal = np.arange(len(signal))
-    ax1.plot(x_signal, signal, "k-", alpha=0.4, linewidth=0.8, label="Raw signal")
+    step = max(1, len(signal) // 50000)  # Downsample to at most 50000 points
+    ax1.plot(x_signal[::step], signal[::step], "k-", alpha=0.5, linewidth=0.5, label="Raw signal")
 
-    # Overlay events with their mean levels and colors
+    # Overlay ALL events with their mean levels (one color for observed, one for model)
     for i, ev in enumerate(display_events):
-        color = kmer_to_color(ev["ref_kmer"])
         start_pos, end_pos = sample_positions[i]
 
-        # Draw event mean as horizontal line
         if end_pos > start_pos:
+            # Event mean (observed) - BLUE
             ax1.hlines(
                 ev["event_mean"],
                 start_pos,
                 end_pos,
-                colors=color,
-                linewidths=2.5,
-                alpha=0.9,
+                colors="#1f77b4",  # Blue for event mean
+                linewidths=2,
+                alpha=0.8,
             )
 
-        # Draw event boundary lines
-        ax1.axvline(start_pos, color=color, linewidth=0.5, alpha=0.3)
-        ax1.axvline(end_pos, color=color, linewidth=0.5, alpha=0.3)
+            # Model mean (expected) - ORANGE
+            ax1.hlines(
+                ev["model_mean"],
+                start_pos,
+                end_pos,
+                colors="#ff7f0e",  # Orange for model mean
+                linewidths=2,
+                alpha=0.6,
+                linestyles="dashed",
+            )
 
     ax1.set_ylabel("Current (pA)", fontsize=11)
-    ax1.set_title("Raw Signal with Detected Events (colored by k-mer)", fontsize=12, fontweight="bold")
+    ax1.set_title(f"Raw Signal with All {len(display_events)} Events (Blue=Observed, Orange=Model)",
+                 fontsize=12, fontweight="bold")
     ax1.set_xlim(0, len(signal))
-    ax1.legend(loc="upper right")
+
+    # Custom legend
+    legend_elements = [
+        mpatches.Patch(color="#1f77b4", label="Event Mean (Observed)"),
+        mpatches.Patch(color="#ff7f0e", label="Model Mean (Expected)"),
+    ]
+    ax1.legend(handles=legend_elements, loc="upper right", fontsize=9)
 
     # =========================================================================
-    # Panel 2: Event mean levels colored by k-mer
+    # Panel 2: Side-by-side comparison of Event Mean vs Model Mean
     # =========================================================================
     ax2 = fig.add_subplot(gs[1])
 
-    # Plot event means as colored bars
+    # Create bar positions
     x_centers = []
     bar_widths = []
     for i, (start_pos, end_pos) in enumerate(sample_positions):
         x_centers.append((start_pos + end_pos) / 2)
-        bar_widths.append(end_pos - start_pos)
+        bar_widths.append(max(1, end_pos - start_pos))
 
+    # Plot event means in BLUE
     for i, ev in enumerate(display_events):
-        color = kmer_to_color(ev["ref_kmer"])
         ax2.bar(
             x_centers[i],
             ev["event_mean"],
             width=bar_widths[i],
-            color=color,
-            alpha=0.85,
+            color="#1f77b4",  # Blue
+            alpha=0.7,
+            edgecolor="none",
+            linewidth=0,
+        )
+
+    # Overlay model means in ORANGE (narrower bars on top)
+    for i, ev in enumerate(display_events):
+        ax2.bar(
+            x_centers[i],
+            ev["model_mean"],
+            width=bar_widths[i] * 0.5,  # Narrower for visibility
+            color="#ff7f0e",  # Orange
+            alpha=0.9,
             edgecolor="white",
             linewidth=0.5,
         )
 
-    ax2.set_ylabel("Event Mean (pA)", fontsize=11)
-    ax2.set_title("Event Mean Levels by K-mer", fontsize=12, fontweight="bold")
+    ax2.set_ylabel("Current (pA)", fontsize=11)
+    ax2.set_title("Event Mean Levels: Blue=Observed, Orange=Model (narrower bars)",
+                 fontsize=12, fontweight="bold")
     ax2.set_xlim(0, len(signal))
 
     # =========================================================================
-    # Panel 3: Event alignment with model comparison
+    # Panel 3: Event alignment by reference position (all events)
     # =========================================================================
     ax3 = fig.add_subplot(gs[2])
 
-    # Get data
+    # Get data for ALL events
     ref_positions = [ev["ref_pos"] for ev in display_events]
     event_means = [ev["event_mean"] for ev in display_events]
     model_means = [ev["model_mean"] for ev in display_events]
-    z_scores = [ev["standardized_mean"] for ev in display_events]
 
     x = np.arange(len(display_events))
-    width = 0.35
 
-    # Color by k-mer
-    colors = [kmer_to_color(ev["ref_kmer"]) for ev in display_events]
+    # Scatter plot for better visualization of all events
+    # Event means (BLUE scatter)
+    ax3.scatter(x, event_means, c="#1f77b4", alpha=0.6, s=10,
+               label="Event Mean (Observed)", zorder=2)
 
-    # Create twin axis for z-scores
-    ax3_twin = ax3.twinx()
+    # Model means (ORANGE scatter)
+    ax3.scatter(x, model_means, c="#ff7f0e", alpha=0.6, s=10,
+               label="Model Mean (Expected)", zorder=2)
 
-    # Plot event means (bars)
-    bars1 = ax3.bar(x - width/2, event_means, width, label="Observed Event Mean",
-                   color=colors, alpha=0.8, edgecolor="black", linewidth=0.5)
-
-    # Plot model means (gray bars for comparison)
-    bars2 = ax3.bar(x + width/2, model_means, width, label="Model Expected Mean",
-                   color="lightgray", alpha=0.7, edgecolor="black", linewidth=0.5)
-
-    # Plot z-scores as line on twin axis
-    line = ax3_twin.plot(x, z_scores, "o-", color="darkred", markersize=4,
-                        linewidth=1.5, label="Z-Score", alpha=0.8)
-    ax3_twin.axhline(0, color="black", linestyle="--", alpha=0.3)
-    ax3_twin.axhline(2, color="red", linestyle="--", alpha=0.3)
-    ax3_twin.axhline(-2, color="red", linestyle="--", alpha=0.3)
-
-    # Add reference k-mers as text labels (sparse)
-    for i, ev in enumerate(display_events):
-        if i % 10 == 0:  # Label every 10th event
-            ax3.text(i, ax3.get_ylim()[0] + 5, ev["ref_kmer"],
-                    ha="center", va="bottom", fontsize=7, rotation=45,
-                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7))
+    # Connect with lines to show the relationship
+    for i in range(0, len(display_events), max(1, len(display_events) // 500)):
+        ax3.plot([i, i], [event_means[i], model_means[i]], "gray",
+                alpha=0.2, linewidth=0.5, zorder=1)
 
     ax3.set_xlabel("Event Index", fontsize=11)
     ax3.set_ylabel("Current (pA)", fontsize=11)
-    ax3_twin.set_ylabel("Z-Score", fontsize=11, color="darkred")
-    ax3_twin.tick_params(axis="y", labelcolor="darkred")
-    ax3.set_title("Event Alignment: Observed vs Model (with Z-Scores)", fontsize=12, fontweight="bold")
-
-    # Combine legends
-    bars = [bars1, bars2] + line
-    labels = [b.get_label() for b in bars]
-    ax3.legend(bars, labels, loc="upper right")
+    ax3.set_title(f"All {len(display_events)} Events: Observed vs Model (scatter plot)",
+                 fontsize=12, fontweight="bold")
+    ax3.legend(loc="upper right", fontsize=9)
 
     # =========================================================================
-    # Add k-mer color legend
+    # Panel 4: Z-scores showing deviation from model
     # =========================================================================
-    unique_kmers = sorted(set(ev["ref_kmer"] for ev in display_events))
-    # Limit to top 20 most common for readability
-    from collections import Counter
-    kmer_counts = Counter(ev["ref_kmer"] for ev in display_events)
-    top_kmers = [k for k, _ in kmer_counts.most_common(20)]
+    ax4 = fig.add_subplot(gs[3])
 
-    legend_elements = [mpatches.Patch(color=kmer_to_color(k), label=f"{k} ({kmer_counts[k]})")
-                      for k in top_kmers]
-    fig.legend(handles=legend_elements, loc="center left", bbox_to_anchor=(0.92, 0.5),
-              title="K-mer (count)", fontsize=9)
+    z_scores = [ev["standardized_mean"] for ev in display_events]
 
-    plt.tight_layout(rect=[0, 0, 0.88, 1])
+    ax4.plot(x, z_scores, "o-", color="#d62728", markersize=2, linewidth=0.8, alpha=0.7)
+    ax4.axhline(0, color="black", linestyle="-", alpha=0.5, linewidth=1)
+    ax4.axhline(2, color="red", linestyle="--", alpha=0.5, linewidth=1, label="+2σ")
+    ax4.axhline(-2, color="red", linestyle="--", alpha=0.5, linewidth=1, label="-2σ")
+
+    ax4.set_xlabel("Event Index", fontsize=11)
+    ax4.set_ylabel("Z-Score", fontsize=11)
+    ax4.set_title("Standardized Event Levels (deviation from model)",
+                 fontsize=12, fontweight="bold")
+    ax4.legend(loc="upper right", fontsize=9)
+
+    # Color outliers
+    outlier_mask = np.abs(z_scores) > 2
+    if np.any(outlier_mask):
+        outlier_x = np.array(x)[outlier_mask]
+        outlier_y = np.array(z_scores)[outlier_mask]
+        ax4.scatter(outlier_x, outlier_y, c="red", s=20, alpha=0.8, zorder=3)
+
+    # =========================================================================
+    # Add statistics text
+    # =========================================================================
+    stats_text = (
+        f"Total events: {len(display_events)}\n"
+        f"Signal samples: {len(signal)}\n"
+        f"Mean event mean: {np.mean(event_means):.2f} pA\n"
+        f"Mean model mean: {np.mean(model_means):.2f} pA\n"
+        f"RMSD: {np.sqrt(np.mean((np.array(event_means) - np.array(model_means))**2)):.2f} pA\n"
+        f"Outliers (|z|>2): {np.sum(outlier_mask)}/{len(z_scores)}"
+    )
+    fig.text(0.02, 0.5, stats_text, fontsize=9, verticalalignment="center",
+            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.3))
+
+    plt.tight_layout(rect=[0, 0, 0.98, 1])
 
     if output_path:
         plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -254,7 +285,7 @@ def plot_eventalign_visualization(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize f5c eventalign results"
+        description="Visualize f5c eventalign results - showing all events"
     )
     parser.add_argument(
         "eventalign",
@@ -272,8 +303,8 @@ def main():
     parser.add_argument(
         "--n-events", "-n",
         type=int,
-        default=100,
-        help="Number of events to display (default: 100)",
+        default=None,
+        help="Number of events to display (default: all)",
     )
     parser.add_argument(
         "--max-events",
@@ -285,7 +316,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("F5C EventAlign Visualization")
+    print("F5C EventAlign Visualization (All Events)")
     print("=" * 60)
 
     # Read eventalign results
@@ -308,12 +339,15 @@ def main():
     n_with_samples = sum(1 for ev in events if len(ev["raw_samples"]) > 0)
     print(f"  Events with raw samples: {n_with_samples}/{len(events)}")
 
+    # Determine number of events to show
+    n_show = args.n_events if args.n_events else len(events)
+
     # Create visualization
-    print(f"\nCreating visualization (showing first {args.n_events} events)...")
+    print(f"\nCreating visualization (showing {n_show} events)...")
     plot_eventalign_visualization(
         events=events,
         output_path=args.output,
-        show_n_events=args.n_events,
+        show_n_events=n_show,
     )
 
     print("\n" + "=" * 60)
