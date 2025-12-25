@@ -115,12 +115,12 @@ def main():
     # Events
     print(f"\nEvents:")
     events = result["events"][0]
-    n_ev = events['n_events']
+    starts = events['starts']
+    n_ev = len(starts)
     print(f"  Total events: {n_ev}")
     print(f"  Events/kmer ratio: {n_ev / (ref_len - 5 + 1):.2f}")
 
     # Event statistics
-    starts = events['starts']
     lengths = events['lengths']
     means = events['means']
     stdvs = events['stdvs']
