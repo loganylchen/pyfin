@@ -390,7 +390,18 @@ int32_t align(AlignedPair* out_2, const char* sequence, int32_t sequence_len,
     double avg_log_emission = sum_emission / n_aligned_events;
     bool spanned = out_2[0].ref_pos == 0 && out_2[outIndex - 1].ref_pos == (int)(n_kmers - 1);
 
+    // Debug output for alignment QC failure
     if (avg_log_emission < min_average_log_emission || !spanned || max_gap > max_gap_threshold) {
+        fprintf(stderr, "[align] Alignment QC failed:\n");
+        fprintf(stderr, "  avg_log_emission: %.4f (threshold: %.4f) %s\n",
+                avg_log_emission, min_average_log_emission,
+                avg_log_emission < min_average_log_emission ? "FAIL" : "OK");
+        fprintf(stderr, "  spanned: %s (first_ref_pos: %d, last_ref_pos: %d, n_kmers-1: %d) %s\n",
+                spanned ? "true" : "false", out_2[0].ref_pos, out_2[outIndex - 1].ref_pos, (int)(n_kmers - 1),
+                !spanned ? "FAIL" : "OK");
+        fprintf(stderr, "  max_gap: %d (threshold: %d) %s\n",
+                max_gap, max_gap_threshold,
+                max_gap > max_gap_threshold ? "FAIL" : "OK");
         outIndex = 0;
     }
 
