@@ -355,7 +355,6 @@ def run_pyfin_and_compare(f5c_alignments: List[Dict], ref_seq: str,
             print(f"  Events per base: {comparison['pyfin_events_per_base']:.2f}")
 
             # Export pyfin results in f5c TSV format
-            from pathlib import Path
             output_dir = Path(__file__).parent
             tsv_output = output_dir / "pyfin_eventalign.tsv.gz"
             print(f"\n  Exporting PyFin results in f5c TSV format...")
