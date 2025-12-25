@@ -96,6 +96,91 @@ def load_signal_from_pod5(pod5_path: str) -> Tuple[str, np.ndarray, float]:
         return "synthetic_read", signal, sample_rate
 
 
+def export_pyfin_to_f5c_tsv(pyfin_result: Dict, ref_name: str, ref_seq: str,
+                            output_path: str, signal: Optional[np.ndarray] = None,
+                            include_raw_samples: bool = False):
+    """
+    Export pyfin eventalign results in f5c TSV format.
+
+    Args:
+        pyfin_result: Result dictionary from run_eventalign
+        ref_name: Reference sequence name
+        ref_seq: Reference sequence (for k-mer lookup)
+        output_path: Output TSV file path (.gz for compressed)
+        signal: Raw signal array (optional, for raw_samples column)
+        include_raw_samples: Whether to include raw samples column (large files!)
+    """
+    # Extract data from pyfin result
+    pyfin_align = pyfin_result["full"][0][0]
+    pyfin_events = pyfin_result["events"][0]
+    scalings = pyfin_result["scalings"][0]
+    read_id = pyfin_result.get("read_ids", ["unknown"])[0]
+
+    # Get pore model means/stdvs for k-mers
+    # We'll need to look these up from the model or compute them
+    # For now, we'll use the event means as model means (scaled)
+
+    with (gzip.open if output_path.endswith('.gz') else open)(output_path, 'wt') as f:
+        for aln in pyfin_align:
+            ref_pos = aln['ref_position']
+            event_idx = aln['event_idx']
+            ref_kmer = aln['ref_kmer']
+            model_kmer = aln['model_kmer']
+            hmm_state = aln['hmm_state']
+
+            # Get event statistics
+            event_mean = float(pyfin_events['means'][event_idx])
+            event_stdv = float(pyfin_events['stdvs'][event_idx])
+            event_length = float(pyfin_events['lengths'][event_idx])
+            event_start = int(pyfin_events['starts'][event_idx])
+            event_end = event_start + int(event_length)
+
+            # Calculate model mean from scaling (reverse the scaling)
+            # The model_mean is what the event was compared to
+            model_mean = event_mean  # Placeholder - should come from pore model
+            model_stdv = event_stdv  # Placeholder
+
+            # Apply scaling to get scaled mean
+            scale = scalings['scale']
+            shift = scalings['shift']
+            scaled_mean = (event_mean - shift) / scale
+
+            # Strand (for RNA, this is typically '-' for complement)
+            strand = '+'
+
+            # Build TSV line (f5c format has 16 columns)
+            # Format: ref_name pos ref_kmer read_id strand event_idx event_mean
+            #         event_stdv duration model_kmer model_mean model_stdv
+            #         scaled_mean start_idx end_idx [raw_samples]
+            parts = [
+                ref_name,
+                str(ref_pos),
+                ref_kmer,
+                read_id,
+                strand,
+                str(event_idx),
+                f"{event_mean:.4f}",
+                f"{event_stdv:.4f}",
+                f"{event_length:.4f}",
+                model_kmer,
+                f"{model_mean:.4f}",
+                f"{model_stdv:.4f}",
+                f"{scaled_mean:.4f}",
+                str(event_start),
+                str(event_end),
+            ]
+
+            # Add raw samples if requested and signal is available
+            if include_raw_samples and signal is not None:
+                raw_samples = signal[event_start:event_end]
+                raw_samples_str = ','.join(f"{x:.2f}" for x in raw_samples)
+                parts.append(raw_samples_str)
+
+            f.write('\t'.join(parts) + '\n')
+
+    print(f"  Exported {len(pyfin_align)} event alignments to: {output_path}")
+
+
 def index_f5c_by_position(alignments: List[Dict]) -> Dict[int, List[Dict]]:
     """Index f5c alignments by reference position."""
     pos_map = {}
@@ -247,8 +332,8 @@ def print_detailed_comparison(f5c_alignments: List[Dict], comparison: Dict):
                       if d['position'] in comparison['matched_positions']]
 
     for i, detail in enumerate(matched_details[:50]):
-        f5c_mean = np.mean(detail['f5c_means']) if detail['f5c_means'] else 0
-        pyfin_mean = np.mean(detail['pyfin_means']) if detail['pyfin_means'] else 0
+        f5c_mean = np.mean(detail['f5c_means']) if len(detail['f5c_means']) > 0 else 0
+        pyfin_mean = np.mean(detail['pyfin_means']) if len(detail['pyfin_means']) > 0 else 0
         diff = f5c_mean - pyfin_mean
 
         print(f"{detail['position']:6d} {detail['ref_kmer']:>10} "
@@ -527,6 +612,15 @@ def main():
             return
 
         print(f"  PyFin alignment SUCCESS: {len(pyfin_align)} alignments")
+
+        # Export pyfin results in f5c TSV format
+        output_dir = Path(__file__).parent
+        tsv_output = output_dir / "pyfin_eventalign.tsv.gz"
+        print(f"\nExporting PyFin results in f5c TSV format...")
+        # Add read_id to result for export
+        result['read_ids'] = [read_id]
+        export_pyfin_to_f5c_tsv(result, ref_name, ref_seq, str(tsv_output),
+                                 signal=signal, include_raw_samples=False)
 
         # Perform detailed comparison
         comparison = compare_event_by_event(f5c_alignments, result, ref_seq)

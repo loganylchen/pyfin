@@ -99,6 +99,86 @@ def load_signal_from_pod5(pod5_path: str) -> Tuple[str, np.ndarray, float]:
         return "synthetic_read", signal, sample_rate
 
 
+def export_pyfin_to_f5c_tsv(pyfin_result: Dict, ref_name: str, ref_seq: str,
+                            output_path: str, signal: np.ndarray = None,
+                            include_raw_samples: bool = False):
+    """
+    Export pyfin eventalign results in f5c TSV format.
+
+    Args:
+        pyfin_result: Result dictionary from run_eventalign
+        ref_name: Reference sequence name
+        ref_seq: Reference sequence (for k-mer lookup)
+        output_path: Output TSV file path (.gz for compressed)
+        signal: Raw signal array (optional, for raw_samples column)
+        include_raw_samples: Whether to include raw samples column (large files!)
+    """
+    import gzip
+
+    # Extract data from pyfin result
+    pyfin_align = pyfin_result["full"][0][0]
+    pyfin_events = pyfin_result["events"][0]
+    scalings = pyfin_result["scalings"][0]
+    read_id = pyfin_result.get("read_ids", ["unknown"])[0]
+
+    opener = gzip.open if output_path.endswith('.gz') else open
+
+    with opener(output_path, 'wt') as f:
+        for aln in pyfin_align:
+            ref_pos = aln['ref_position']
+            event_idx = aln['event_idx']
+            ref_kmer = aln['ref_kmer']
+            model_kmer = aln['model_kmer']
+
+            # Get event statistics
+            event_mean = float(pyfin_events['means'][event_idx])
+            event_stdv = float(pyfin_events['stdvs'][event_idx])
+            event_length = float(pyfin_events['lengths'][event_idx])
+            event_start = int(pyfin_events['starts'][event_idx])
+            event_end = event_start + int(event_length)
+
+            # Model mean/stdv (placeholders - should come from pore model)
+            model_mean = event_mean
+            model_stdv = event_stdv
+
+            # Apply scaling to get scaled mean
+            scale = scalings['scale']
+            shift = scalings['shift']
+            scaled_mean = (event_mean - shift) / scale
+
+            # Strand
+            strand = '+'
+
+            # Build TSV line (f5c format)
+            parts = [
+                ref_name,
+                str(ref_pos),
+                ref_kmer,
+                read_id,
+                strand,
+                str(event_idx),
+                f"{event_mean:.4f}",
+                f"{event_stdv:.4f}",
+                f"{event_length:.4f}",
+                model_kmer,
+                f"{model_mean:.4f}",
+                f"{model_stdv:.4f}",
+                f"{scaled_mean:.4f}",
+                str(event_start),
+                str(event_end),
+            ]
+
+            # Add raw samples if requested
+            if include_raw_samples and signal is not None:
+                raw_samples = signal[event_start:event_end]
+                raw_samples_str = ','.join(f"{x:.2f}" for x in raw_samples)
+                parts.append(raw_samples_str)
+
+            f.write('\t'.join(parts) + '\n')
+
+    print(f"  Exported {len(pyfin_align)} event alignments to: {output_path}")
+
+
 def create_text_visualization(f5c_alignments: List[Dict], ref_seq: str,
                               output_path: str):
     """Create a text-based visualization of f5c results."""
@@ -212,6 +292,15 @@ def run_pyfin_and_compare(f5c_alignments: List[Dict], ref_seq: str,
         if len(pyfin_align) > 0:
             print(f"\n  PyFin alignment SUCCESS: {len(pyfin_align)} alignments")
             print(f"  Events per base: {comparison['pyfin_events_per_base']:.2f}")
+
+            # Export pyfin results in f5c TSV format
+            from pathlib import Path
+            output_dir = Path(__file__).parent
+            tsv_output = output_dir / "pyfin_eventalign.tsv.gz"
+            print(f"\n  Exporting PyFin results in f5c TSV format...")
+            result['read_ids'] = [read_id]
+            export_pyfin_to_f5c_tsv(result, "SIRV101", ref_seq, str(tsv_output),
+                                     signal=signal, include_raw_samples=False)
 
             # Show first few pyfin alignments
             print(f"\n  First 10 PyFin alignments:")
