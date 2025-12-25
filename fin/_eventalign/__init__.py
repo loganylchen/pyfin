@@ -6,6 +6,8 @@ This module provides Python bindings for the f5c event detection and model loadi
 The module supports:
 - Event detection from raw nanopore signal
 - Loading pore models (RNA002 and RNA004)
+- CPU-based event alignment
+- GPU-accelerated event alignment (CUDA, if available)
 
 Example usage:
     >>> from fin._eventalign import getevents, set_model, MODEL_RNA002
@@ -25,7 +27,7 @@ import sys
 import os
 import traceback
 
-# Try to import the C extension
+# Try to import the C extension (CPU version)
 _eventalign_import_error = None
 _eventalign_diagnostics = None
 _EVENTALIGN_AVAILABLE = False
@@ -81,16 +83,62 @@ except ImportError as e:
     MAX_KMER_SIZE = 9
     MAX_NUM_KMER = 262144
 
+# Try to import the CUDA extension (GPU version)
+_eventalign_cuda_import_error = None
+_eventalign_cuda_diagnostics = None
+_EVENTALIGN_CUDA_AVAILABLE = False
+
+try:
+    from ._eventalign_cuda import run_eventalign as _run_eventalign_cuda_c
+    _EVENTALIGN_CUDA_AVAILABLE = True
+except ImportError as e:
+    _EVENTALIGN_CUDA_AVAILABLE = False
+    _eventalign_cuda_import_error = str(e)
+
+    # Collect diagnostic information
+    import sysconfig
+    diagnostics = []
+
+    diagnostics.append(f"Python version: {sys.version}")
+    diagnostics.append(f"Platform: {sys.platform}")
+
+    # Check if extension file exists
+    ext_path = os.path.join(os.path.dirname(__file__), "_eventalign_cuda.so")
+    if os.path.exists(ext_path):
+        diagnostics.append(f"CUDA extension file exists: {ext_path}")
+        diagnostics.append(f"CUDA extension file size: {os.path.getsize(ext_path)} bytes")
+    else:
+        diagnostics.append(f"CUDA extension file NOT found: {ext_path}")
+
+    # Check for CUDA
+    import shutil
+    nvcc_path = shutil.which("nvcc")
+    if nvcc_path:
+        diagnostics.append(f"nvcc found: {nvcc_path}")
+    else:
+        diagnostics.append("nvcc: NOT FOUND in PATH")
+
+    # Full traceback
+    diagnostics.append("\n--- Full traceback ---")
+    diagnostics.append(traceback.format_exc())
+
+    _eventalign_cuda_diagnostics = "\n  ".join(diagnostics)
+
+# Export CUDA availability flag
+CUDA_AVAILABLE = _EVENTALIGN_CUDA_AVAILABLE
+
 __all__ = [
     "getevents",
     "set_model",
     "init_db_from_python",
     "free_db",
     "run_eventalign",
+    "run_eventalign_cuda",
     "MODEL_RNA002",
     "MODEL_RNA004",
     "MAX_KMER_SIZE",
     "MAX_NUM_KMER",
+    "CUDA_AVAILABLE",
 ]
 
 
@@ -105,6 +153,21 @@ def _check_available():
             "  pip install -e .\n"
             "Or clean build and reinstall:\n"
             "  pip uninstall -y py-fin && rm -rf build/fin/_eventalign && pip install -e ."
+        )
+
+
+def _check_cuda_available():
+    """Check if the CUDA eventalign extension is available."""
+    if not _EVENTALIGN_CUDA_AVAILABLE:
+        raise ImportError(
+            f"CUDA eventalign extension not available.\n"
+            f"Error: {_eventalign_cuda_import_error}\n"
+            f"\nDiagnostics:\n  {_eventalign_cuda_diagnostics}\n"
+            "\nTo fix this issue, ensure:\n"
+            "  1. CUDA Toolkit is installed (nvcc in PATH)\n"
+            "  2. Rebuild the package: pip install -e .\n"
+            "Or clean build and reinstall:\n"
+            "  pip uninstall -y py-fin && rm -rf build/ && pip install -e ."
         )
 
 
@@ -343,11 +406,90 @@ def run_eventalign(
     )
 
 
+def run_eventalign_cuda(
+    read_ids,
+    read_seqs,
+    ref_seqs,
+    ref_names,
+    ref_lens,
+    signals,
+    sample_rates,
+    model_id=MODEL_RNA002,
+):
+    """
+    Run the full f5c eventalign pipeline using GPU acceleration (CUDA).
+
+    This function performs the same complete event alignment workflow as run_eventalign(),
+    but uses GPU acceleration for the alignment step, which can provide significant
+    speedup for large batches of reads.
+
+    Requirements:
+    - CUDA-capable GPU
+    - CUDA Toolkit installed (nvcc in PATH)
+    - Package built with CUDA support
+
+    The workflow is:
+    1. Event detection from raw signal (CPU)
+    2. Scaling estimation using read sequences (CPU)
+    3. Pair-wise alignment of each read to all references (GPU)
+    4. Post-alignment to generate base-to-event mappings (CPU)
+
+    Args:
+        read_ids: list of read identifier strings
+        read_seqs: list of read sequence strings (for scaling estimation)
+        ref_seqs: list of reference sequence strings (multiple references supported)
+        ref_names: list of reference name strings
+        ref_lens: list of reference sequence lengths (int)
+        signals: list of 1D float32 numpy arrays (raw signal data)
+        sample_rates: list of float sample rates for each read (Hz)
+        model_id: Model type - 1 for RNA002 (k=5), 2 for RNA004 (k=9). Default: MODEL_RNA002
+
+    Returns:
+        dict with same format as run_eventalign():
+            - full: pair-wise event alignment results [read][ref] = list of dicts
+            - mapping: pair-wise base-to-event mapping [read][ref] = dict
+            - scalings: list of scaling dicts (one per read)
+            - events: list of detected event dicts (one per read)
+            - summary: dict with num_reads and num_refs
+
+    Raises:
+        ImportError: If CUDA extension is not available
+
+    Example:
+        >>> from fin._eventalign import run_eventalign_cuda, MODEL_RNA002, CUDA_AVAILABLE
+        >>> import numpy as np
+        >>>
+        >>> if CUDA_AVAILABLE:
+        ...     # Single read, single reference
+        ...     result = run_eventalign_cuda(
+        ...         read_ids=['read1'],
+        ...         read_seqs=['ACGTACGTACGT'],
+        ...         ref_seqs=['ACGTACGTACGT'],
+        ...         ref_names=['ref1'],
+        ...         ref_lens=[12],
+        ...         signals=[np.random.randn(10000).astype(np.float32)],
+        ...         sample_rates=[4000.0],
+        ...         model_id=MODEL_RNA002,
+        ...     )
+        ... else:
+        ...     print("CUDA not available, use run_eventalign() instead")
+    """
+    _check_cuda_available()
+    return _run_eventalign_cuda_c(
+        read_ids, read_seqs, ref_seqs, ref_names, ref_lens,
+        signals, sample_rates, model_id
+    )
+
+
 # Print availability status on import
 def _print_status():
     """Print the status of the eventalign extension."""
     if _EVENTALIGN_AVAILABLE:
         print("[fin._eventalign] Event detection and model API loaded successfully")
+        if _EVENTALIGN_CUDA_AVAILABLE:
+            print("[fin._eventalign] CUDA-accelerated event alignment is available (run_eventalign_cuda)")
+        else:
+            print("[fin._eventalign] CUDA-accelerated event alignment is NOT available")
     else:
         import logging
         logger = logging.getLogger(__name__)

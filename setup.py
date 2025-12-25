@@ -222,18 +222,18 @@ class MultiExt(build_ext):
         ext.include_dirs.append(os.path.join(cuda_home, "include"))
         ext.include_dirs.append(python_include)
         ext.include_dirs.append(numpy_include)
-        ext.include_dirs.append("fin/_align")
+        ext.include_dirs.append("fin/_eventalign")
 
         ext.library_dirs = [os.path.join(cuda_home, "lib64")]
         ext.libraries = ["cudart"]
 
-        # Compiler flags for nvcc with CUDA_ENABLED defined
+        # Compiler flags for nvcc
         ext.extra_compile_args = [
             "--compiler-options",
             "-fPIC",
             "-std=c++14",
             "-O3",
-            "-DCUDA_ENABLED",  # Enable CUDA code paths in eventalign.c
+            "-DHAVE_CUDA=1",
             "--generate-code=arch=compute_80,code=sm_80",  # Ampere
         ]
 
@@ -492,7 +492,7 @@ cuda_dtw_extension = Extension(
 )
 cuda_dtw_extension.ext_type = "dtw"
 
-# Eventalign API wrapper - simplified interface for getevents and set_model
+# Eventalign API wrapper - simplified interface for getevents and set_model (CPU version)
 eventalign_api_extension = Extension(
     name="fin._eventalign._eventalign",
     sources=[
@@ -512,6 +512,28 @@ eventalign_api_extension = Extension(
     language="c++",
 )
 eventalign_api_extension.ext_type = "align"
+
+# Eventalign CUDA wrapper - GPU-accelerated event alignment
+eventalign_cuda_extension = Extension(
+    name="fin._eventalign._eventalign_cuda",
+    sources=[
+        os.path.join(EVENTALIGN_DIR, "cuda_wrapper.cpp"),
+        os.path.join(EVENTALIGN_DIR, "cuda_framework.cu"),
+        os.path.join(EVENTALIGN_DIR, "align_cuda.cu"),
+        os.path.join(EVENTALIGN_DIR, "common.cpp"),
+        os.path.join(EVENTALIGN_DIR, "events.cpp"),
+        os.path.join(EVENTALIGN_DIR, "model.cpp"),
+    ],
+    depends=[
+        os.path.join(EVENTALIGN_DIR, "common.h"),
+        os.path.join(EVENTALIGN_DIR, "align_cuda.h"),
+        os.path.join(EVENTALIGN_DIR, "model.h"),
+        os.path.join(EVENTALIGN_DIR, "error.h"),
+        os.path.join(EVENTALIGN_DIR, "ksort.h"),
+    ],
+    include_dirs=[EVENTALIGN_DIR],
+)
+eventalign_cuda_extension.ext_type = "align_cuda"
 
 
 # Main setup configuration
@@ -545,6 +567,7 @@ def main():
         ext_modules=[
             cuda_dtw_extension,
             eventalign_api_extension,
+            eventalign_cuda_extension,
         ],
         cmdclass={"build_ext": MultiExt},
         python_requires=">=3.8",
