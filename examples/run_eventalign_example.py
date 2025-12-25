@@ -115,8 +115,15 @@ def example_single_read_single_ref():
     print(f"  Signal length: {len(signal)} samples")
     print(f"  Sample rate: {sample_rate} Hz")
 
-    # Create a synthetic read sequence (same as reference for simplicity)
-    # In practice, this would be the actual read sequence
+    # IMPORTANT: We need the basecalled read sequence that corresponds to this signal!
+    # POD5 files only contain raw signal, not sequences.
+    #
+    # For this example, we're using the reference as a placeholder, but in practice:
+    # 1. Basecall the POD5 with Guppy/Dorado to get FASTQ
+    # 2. Or use a BAM file with aligned reads
+    # See: load_from_fastq_pod5.py or load_from_bam_pod5.py for proper workflow
+    print(f"\n  WARNING: Using reference sequence as placeholder")
+    print(f"  For production use, provide actual basecalled read sequence!")
     read_seq = ref_seq  # Use first 500bp as read sequence
 
     print(f"\nRunning eventalign...")

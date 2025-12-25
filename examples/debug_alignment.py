@@ -74,7 +74,27 @@ def main():
     print(f"  Sample rate: {sample_rate} Hz")
     print(f"  Signal stats: mean={signal.mean():.2f}, std={signal.std():.2f}, min={signal.min():.2f}, max={signal.max():.2f}")
 
-    # Use reference as read sequence (for testing)
+    # IMPORTANT: The read sequence MUST match the signal!
+    # Using the reference sequence as a substitute will NOT work because
+    # the signal was generated from a different molecule/sequence.
+    #
+    # For real data, you need to provide the basecalled read sequence
+    # that corresponds to this specific signal. Load it from:
+    # - BAM file (see load_from_bam_pod5.py)
+    # - FASTQ file (see load_from_fastq_pod5.py)
+    #
+    # For this debug script, we'll use the reference as a placeholder
+    # but alignment will likely fail since it doesn't match the signal.
+    print(f"\n" + "!" * 70)
+    print("WARNING: Using reference sequence as read sequence!")
+    print("This will likely cause alignment failure because the read_seq")
+    print("must match the actual basecalled sequence from the signal.")
+    print("!")
+    print("For proper workflow, see:")
+    print("  - load_from_fastq_pod5.py (use FASTQ from basecaller)")
+    print("  - load_from_bam_pod5.py (use BAM with aligned reads)")
+    print("!" * 70)
+
     read_seq = ref_seq
 
     print(f"\nRunning eventalign...")
@@ -200,8 +220,12 @@ def main():
         print(f"       Signal drift: first_mean={signal[:1000].mean():.2f}, last_mean={signal[-1000:].mean():.2f}")
 
         print(f"\n  Common Issues:")
+        print(f"    - MISSING READ SEQUENCE: POD5 files don't contain basecalled sequences!")
+        print(f"      Solution: Use FASTQ (from Guppy/Dorado) or BAM files")
+        print(f"      See: load_from_fastq_pod5.py or load_from_bam_pod5.py")
+        print(f"    - Wrong read sequence: read_seq must match the actual signal")
+        print(f"      The reference sequence is NOT the same as the read sequence!")
         print(f"    - Synthetic/random signal: Will NOT produce good alignment")
-        print(f"    - Wrong read sequence: Must match the signal, not just reference")
         print(f"    - Poor signal quality: Low variance or extreme drift")
         print(f"    - Wrong pore model: RNA002 vs RNA004")
 
