@@ -96,9 +96,31 @@ def load_signal_from_pod5(pod5_path: str) -> Tuple[str, np.ndarray, float]:
         return "synthetic_read", signal, sample_rate
 
 
+def get_kmer_rank(kmer: str) -> int:
+    """
+    Calculate lexicographic rank of a k-mer.
+
+    Rank is computed from last base to first: A=0, C=1, G=2, T=3
+    This matches the f5c/nanopolish k-mer ranking scheme.
+
+    Example:
+        AAAAA -> 0
+        AAAAC -> 1
+        AAAAT -> 3
+        TTTTT -> 1023 (for k=5)
+    """
+    base_rank = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
+    r = 0
+    # From last base to first (same as get_kmer_rank in align.cpp)
+    for i, base in enumerate(reversed(kmer)):
+        r += base_rank.get(base, 0) << (i << 1)
+    return r
+
+
 def export_pyfin_to_f5c_tsv(pyfin_result: Dict, ref_name: str, ref_seq: str,
                             output_path: str, signal: Optional[np.ndarray] = None,
-                            include_raw_samples: bool = False):
+                            include_raw_samples: bool = False,
+                            pore_model: Optional[Dict] = None):
     """
     Export pyfin eventalign results in f5c TSV format.
 
@@ -109,16 +131,22 @@ def export_pyfin_to_f5c_tsv(pyfin_result: Dict, ref_name: str, ref_seq: str,
         output_path: Output TSV file path (.gz for compressed)
         signal: Raw signal array (optional, for raw_samples column)
         include_raw_samples: Whether to include raw samples column (large files!)
+        pore_model: Pore model dict from set_model() with level_means/stdvs arrays
     """
+    from fin._eventalign import set_model, MODEL_RNA002
+
     # Extract data from pyfin result
     pyfin_align = pyfin_result["full"][0][0]
     pyfin_events = pyfin_result["events"][0]
     scalings = pyfin_result["scalings"][0]
     read_id = pyfin_result.get("read_ids", ["unknown"])[0]
 
-    # Get pore model means/stdvs for k-mers
-    # We'll need to look these up from the model or compute them
-    # For now, we'll use the event means as model means (scaled)
+    # Load pore model if not provided
+    if pore_model is None:
+        pore_model = set_model(MODEL_RNA002)
+
+    level_means = pore_model['level_means']
+    level_stdvs = pore_model['level_stdvs']
 
     with (gzip.open if output_path.endswith('.gz') else open)(output_path, 'wt') as f:
         for aln in pyfin_align:
@@ -135,10 +163,10 @@ def export_pyfin_to_f5c_tsv(pyfin_result: Dict, ref_name: str, ref_seq: str,
             event_start = int(pyfin_events['starts'][event_idx])
             event_end = event_start + int(event_length)
 
-            # Calculate model mean from scaling (reverse the scaling)
-            # The model_mean is what the event was compared to
-            model_mean = event_mean  # Placeholder - should come from pore model
-            model_stdv = event_stdv  # Placeholder
+            # Get model mean/stdv from pore model using k-mer rank
+            kmer_rank = get_kmer_rank(model_kmer)
+            model_mean = float(level_means[kmer_rank])
+            model_stdv = float(level_stdvs[kmer_rank])
 
             # Apply scaling to get scaled mean
             scale = scalings['scale']
