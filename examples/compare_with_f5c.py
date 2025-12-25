@@ -1,328 +1,396 @@
 #!/usr/bin/env python3
 """
-Compare PyFin eventalign results with f5c reference implementation
+Compare pyfin eventalign results with f5c reference output.
 
-This script helps debug alignment issues by:
-1. Running both PyFin and f5c on the same data
-2. Comparing the results in detail
-3. Identifying specific differences
+This script:
+1. Loads f5c eventalign TSV output (reference)
+2. Runs pyfin eventalign on the same data
+3. Compares and visualizes the results
 
 Usage:
-    python compare_with_f5c.py --fast5 <file> --fastq <file> --reference <file>
-
-Or for synthetic data:
-    python compare_with_f5c.py --synthetic
+    python compare_with_f5c.py
 """
 
 import numpy as np
-import argparse
-import subprocess
-import tempfile
-import os
+import gzip
 from pathlib import Path
-
-try:
-    from fin._f5c._event import detect_events
-    from fin._f5c._eventalign import eventalign
-except ImportError:
-    print("Error: f5c extensions not available")
-    print("Build with: python setup.py build_ext --inplace")
-    import sys
-
-    sys.exit(1)
+from typing import Dict, List, Tuple
 
 
-def generate_simple_test_sequence():
-    """Generate a simple test sequence for debugging"""
-    # Use a sequence with clear patterns
-    return "AAAACCCGGGTTT" * 10  # Repetitive pattern for easy debugging
-
-
-def generate_test_signal(sequence, events_per_base=10):
+def load_f5c_eventalign_tsv(tsv_path: str) -> List[Dict]:
     """
-    Generate very simple synthetic signal for testing
-    Each base has a distinct level, minimal noise
+    Load f5c eventalign TSV output.
+
+    Format (tab-separated):
+    1. reference_name
+    2. reference_position (0-based)
+    3. reference_kmer
+    4. read_id
+    5. strand (t/f)
+    6. event_idx
+    7. event_mean
+    8. event_stdv
+    9. duration (sum of weights)
+    10. model_kmer
+    11. model_mean
+    12. model_stdv
+    13. scaled_mean
+    14. start_idx (in raw signal)
+    15. end_idx (in raw signal)
+    16. raw_samples (comma-separated)
     """
-    base_levels = {"A": 100.0, "C": 95.0, "G": 105.0, "T": 90.0}
+    alignments = []
 
-    signal = []
-    # Small adapter
-    signal.extend(np.random.normal(80, 5, 100))
+    # Handle .gz files
+    opener = gzip.open if tsv_path.endswith('.gz') else open
 
-    # Clear signal for each base
-    for base in sequence:
-        level = base_levels.get(base, 100.0)
-        # Fixed number of samples per base for predictability
-        base_signal = np.random.normal(level, 1.0, events_per_base)
-        signal.extend(base_signal)
+    with opener(tsv_path, 'rt') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
 
-    # Small tail
-    signal.extend(np.random.normal(85, 5, 100))
+            parts = line.split('\t')
+            if len(parts) < 16:
+                continue
 
-    return np.array(signal, dtype=np.float32)
+            aln = {
+                'reference_name': parts[0],
+                'reference_position': int(parts[1]),
+                'reference_kmer': parts[2],
+                'read_id': parts[3],
+                'strand': parts[4],
+                'event_idx': int(parts[5]),
+                'event_mean': float(parts[6]),
+                'event_stdv': float(parts[7]),
+                'duration': float(parts[8]),
+                'model_kmer': parts[9],
+                'model_mean': float(parts[10]),
+                'model_stdv': float(parts[11]),
+                'scaled_mean': float(parts[12]),
+                'start_idx': int(parts[13]),
+                'end_idx': int(parts[14]),
+            }
+
+            # Parse raw samples (comma-separated)
+            if len(parts) > 15:
+                aln['raw_samples'] = np.array([float(x) for x in parts[15].split(',')])
+
+            alignments.append(aln)
+
+    return alignments
 
 
-def analyze_pyfin_alignment(raw_signal, sequence, kmer_size=5):
-    """Run PyFin eventalign and analyze results (RNA-only mode)"""
-    print("\n" + "=" * 80)
-    print("PYFIN ALIGNMENT ANALYSIS (RNA-only mode)")
-    print("=" * 80)
+def load_reference_from_fasta(fasta_path: str) -> Tuple[str, str, int]:
+    """Load reference sequence from FASTA file."""
+    with open(fasta_path, "r") as f:
+        lines = f.readlines()
 
-    # Detect events first to see what we're working with
-    print("\n[1] Event Detection:")
-    events = detect_events(raw_signal)  # RNA-only mode
-    print(f"    Total events detected: {len(events)}")
-    print(f"    Signal length: {len(raw_signal)} samples")
-    print(f"    Events per sample: {len(events) / len(raw_signal):.4f}")
-
-    # Show first few events
-    print(f"\n    First 5 events:")
-    for i, e in enumerate(events[:5]):
-        print(
-            f"      Event {i}: mean={e['mean']:.2f}, stdv={e['stdv']:.2f}, "
-            f"start={e['start']}, length={e['length']}"
-        )
-
-    # Run alignment
-    print(f"\n[2] Event Alignment:")
-    print(f"    Sequence length: {len(sequence)} bases")
-    print(f"    K-mer size: {kmer_size}")
-    print(f"    Expected k-mers: {len(sequence) - kmer_size + 1}")
-
-    result = eventalign(raw_signal, sequence, kmer_size=kmer_size)  # RNA-only
-
-    print(f"\n    Results:")
-    print(f"      Total events: {result['n_events']}")
-    print(f"      Aligned pairs: {result['n_aligned_pairs']}")
-    print(f"      Alignment rate: {result['n_aligned_pairs']/result['n_events']*100:.1f}%")
-    print(f"      Scale: {result['scaling']['scale']:.4f}")
-    print(f"      Shift: {result['scaling']['shift']:.2f}")
-
-    # Analyze base-to-event mapping
-    print(f"\n[3] Base-to-Event Mapping Analysis:")
-    base_to_event_map = result["base_to_event_map"]
-
-    # Check how many k-mers have events
-    kmers_with_events = sum(1 for mapping in base_to_event_map if mapping["start"] != -1)
-    print(f"    K-mers with events: {kmers_with_events}/{len(base_to_event_map)}")
-    print(f"    K-mers without events: {len(base_to_event_map) - kmers_with_events}")
-
-    # Count events per k-mer
-    events_per_kmer = []
-    for mapping in base_to_event_map:
-        if mapping["start"] != -1 and mapping["stop"] != -1:
-            n = mapping["stop"] - mapping["start"] + 1
-            events_per_kmer.append(n)
-
-    if events_per_kmer:
-        print(
-            f"    Events per k-mer (aligned): {np.mean(events_per_kmer):.2f} ± {np.std(events_per_kmer):.2f}"
-        )
-        print(f"    Min: {np.min(events_per_kmer)}, Max: {np.max(events_per_kmer)}")
-
-    # Show detailed mapping for first 10 k-mers
-    print(f"\n[4] Detailed Mapping (first 10 k-mers):")
-    print(
-        f"    {'Pos':<5} {'K-mer':<10} {'Start':<8} {'Stop':<8} {'N Events':<10} {'Expected':<10}"
-    )
-    print(f"    {'-'*60}")
-
-    expected_events_per_kmer = len(events) / len(base_to_event_map)
-
-    for i in range(min(10, len(base_to_event_map))):
-        mapping = base_to_event_map[i]
-        kmer = mapping["kmer"]
-        start = mapping["start"]
-        stop = mapping["stop"]
-
-        if start != -1 and stop != -1:
-            n_events = stop - start + 1
-            status = (
-                "✓" if abs(n_events - expected_events_per_kmer) < expected_events_per_kmer else "⚠"
-            )
+    ref_name = None
+    ref_sequence = []
+    for line in lines:
+        line = line.strip()
+        if line.startswith(">"):
+            ref_name = line[1:].split()[0]
         else:
-            n_events = 0
-            status = "✗"
+            ref_sequence.append(line)
 
-        print(
-            f"    {i:<5} {kmer:<10} {start:<8} {stop:<8} {n_events:<10} "
-            f"{expected_events_per_kmer:.1f} {status}"
+    ref_sequence = "".join(ref_sequence).upper()
+    ref_length = len(ref_sequence)
+
+    return ref_name, ref_sequence, ref_length
+
+
+def analyze_f5c_output(alignments: List[Dict]) -> Dict:
+    """Analyze f5c eventalign output and extract statistics."""
+    if not alignments:
+        return {}
+
+    # Group by reference position
+    pos_to_events: Dict[int, List[Dict]] = {}
+    for aln in alignments:
+        pos = aln['reference_position']
+        if pos not in pos_to_events:
+            pos_to_events[pos] = []
+        pos_to_events[pos].append(aln)
+
+    # Calculate statistics
+    means = [a['event_mean'] for a in alignments]
+    stdvs = [a['event_stdv'] for a in alignments]
+    events_per_pos = [len(events) for events in pos_to_events.values()]
+
+    stats = {
+        'total_alignments': len(alignments),
+        'unique_positions': len(pos_to_events),
+        'reference_name': alignments[0]['reference_name'],
+        'read_id': alignments[0]['read_id'],
+        'events_per_position_mean': np.mean(events_per_pos),
+        'events_per_position_std': np.std(events_per_pos),
+        'event_mean_mean': np.mean(means),
+        'event_mean_std': np.std(means),
+        'event_mean_min': np.min(means),
+        'event_mean_max': np.max(means),
+        'event_stdv_mean': np.mean(stdvs),
+        'event_stdv_std': np.std(stdvs),
+        'position_range': (
+            min(a['reference_position'] for a in alignments),
+            max(a['reference_position'] for a in alignments)
+        ),
+        'positions': set(pos_to_events.keys()),
+    }
+
+    return stats
+
+
+def print_f5c_summary(stats: Dict):
+    """Print summary of f5c eventalign output."""
+    print("=" * 70)
+    print("F5C Eventalign Output Summary")
+    print("=" * 70)
+
+    print(f"\nReference: {stats['reference_name']}")
+    print(f"Read ID: {stats['read_id']}")
+    print(f"\nTotal alignments: {stats['total_alignments']}")
+    print(f"Unique reference positions: {stats['unique_positions']}")
+    print(f"Position range: {stats['position_range'][0]} - {stats['position_range'][1]}")
+
+    print(f"\nEvent Statistics:")
+    print(f"  Mean level: {stats['event_mean_mean']:.2f} +/- {stats['event_mean_std']:.2f}")
+    print(f"    Range: [{stats['event_mean_min']:.2f}, {stats['event_mean_max']:.2f}]")
+    print(f"  Stdv level: {stats['event_stdv_mean']:.4f} +/- {stats['event_stdv_std']:.4f}")
+
+    print(f"\nEvents per position:")
+    print(f"  Mean: {stats['events_per_position_mean']:.2f}")
+    print(f"  Std: {stats['events_per_position_std']:.2f}")
+
+
+def load_signal_from_pod5(pod5_path: str) -> Tuple[str, np.ndarray, float]:
+    """Load signal data from POD5 file."""
+    try:
+        from fin.io.io_pod5 import Pod5Reader
+        with Pod5Reader(pod5_path) as reader:
+            read_id = reader.read_ids[0]
+            read = reader.get_read(read_id)
+            signal = read.signal_pa.astype(np.float32)
+            sample_rate = float(read.run_info.sample_rate)
+            return str(read.read_id), signal, sample_rate
+    except Exception as e:
+        print(f"POD5 load failed: {e}")
+        # Generate synthetic signal for testing
+        print("Generating synthetic signal...")
+        np.random.seed(42)
+        n_samples = 100000
+        signal = np.random.randn(n_samples).astype(np.float32) * 10 + 120
+        sample_rate = 4000.0
+        return "synthetic_read", signal, sample_rate
+
+
+def run_pyfin_and_compare(f5c_stats: Dict, ref_seq: str, pod5_path: str) -> Dict:
+    """Run pyfin eventalign and compare with f5c results."""
+    print("\n" + "=" * 70)
+    print("Running PyFin Eventalign")
+    print("=" * 70)
+
+    try:
+        from fin._eventalign import run_eventalign, MODEL_RNA002
+
+        # Load signal from POD5
+        read_id, signal, sample_rate = load_signal_from_pod5(pod5_path)
+        print(f"  Read ID: {read_id}")
+        print(f"  Signal length: {len(signal)} samples")
+        print(f"  Sample rate: {sample_rate} Hz")
+
+        # IMPORTANT: For proper comparison, we need the basecalled read sequence
+        # that matches the signal. The reference sequence is NOT the same as the read.
+        # For this comparison, we'll use the reference as read_seq, but alignment may fail.
+
+        print(f"\n  WARNING: Using reference sequence as placeholder")
+        print(f"  For proper comparison, use actual basecalled read sequence from FASTQ/BAM")
+        print(f"  See: load_from_fastq_pod5.py or load_from_bam_pod5.py")
+
+        # Run eventalign
+        result = run_eventalign(
+            read_ids=[read_id],
+            read_seqs=[ref_seq],  # Using reference as placeholder
+            ref_seqs=[ref_seq],
+            ref_names=["SIRV101"],
+            ref_lens=[len(ref_seq)],
+            signals=[signal],
+            sample_rates=[sample_rate],
+            model_id=MODEL_RNA002,
         )
 
-    # Check for issues
-    print(f"\n[5] Issue Detection:")
-    issues = []
+        # Extract pyfin results
+        pyfin_align = result["full"][0][0]
+        pyfin_mapping = result["mapping"][0][0]
+        pyfin_events = result["events"][0]
 
-    if result["n_aligned_pairs"] < result["n_events"] * 0.5:
-        issues.append("⚠ Less than 50% of events aligned - possible alignment failure")
+        comparison = {
+            'pyfin_success': len(pyfin_align) > 0,
+            'pyfin_n_alignments': len(pyfin_align),
+            'pyfin_events_per_base': pyfin_mapping.get('events_per_base', 0),
+            'pyfin_n_events': pyfin_events['starts'].shape[0],
+            'f5c_n_alignments': f5c_stats['total_alignments'],
+            'f5c_unique_positions': f5c_stats['unique_positions'],
+            'status': pyfin_mapping.get('status', 'unknown'),
+        }
 
-    if kmers_with_events < len(base_to_event_map) * 0.8:
-        issues.append(
-            f"⚠ Only {kmers_with_events}/{len(base_to_event_map)} k-mers have events - possible gaps"
-        )
+        if len(pyfin_align) > 0:
+            print(f"\n  PyFin alignment SUCCESS: {len(pyfin_align)} alignments")
+            print(f"  Events per base: {comparison['pyfin_events_per_base']:.2f}")
 
-    if events_per_kmer and np.std(events_per_kmer) > np.mean(events_per_kmer):
-        issues.append("⚠ High variance in events per k-mer - uneven alignment")
+            # Show first few pyfin alignments
+            print(f"\n  First 10 PyFin alignments:")
+            print(f"    {'RefPos':>8} {'EventIdx':>10} {'RefKmer':>10} {'State':>6}")
+            print(f"    {'-'*8} {'-'*10} {'-'*10} {'-'*6}")
+            for i in range(min(10, len(pyfin_align))):
+                ea = pyfin_align[i]
+                print(f"    {ea['ref_position']:8d} {ea['event_idx']:10d} "
+                      f"{ea['ref_kmer']:>10} {ea['hmm_state']:>6}")
 
-    # Check for consecutive k-mers without events
-    no_event_runs = []
-    current_run = 0
-    for mapping in base_to_event_map:
-        if mapping["start"] == -1:
-            current_run += 1
+            # Compare position coverage
+            pyfin_positions = set(a['ref_position'] for a in pyfin_align)
+
+            comparison['pyfin_unique_positions'] = len(pyfin_positions)
+            comparison['position_overlap'] = len(f5c_stats['positions'] & pyfin_positions)
+
+            print(f"\n  Position Coverage Comparison:")
+            print(f"    F5C unique positions: {comparison['f5c_unique_positions']}")
+            print(f"    PyFin unique positions: {comparison['pyfin_unique_positions']}")
+            print(f"    Overlap: {comparison['position_overlap']} "
+                  f"({100*comparison['position_overlap']/max(comparison['f5c_unique_positions'], 1):.1f}%)")
+
+            # Event statistics comparison
+            pyfin_means = pyfin_events['means']
+            print(f"\n  Event Statistics Comparison:")
+            print(f"    F5C event mean: {f5c_stats['event_mean_mean']:.2f} +/- {f5c_stats['event_mean_std']:.2f}")
+            print(f"    PyFin event mean: {np.mean(pyfin_means):.2f} +/- {np.std(pyfin_means):.2f}")
+
         else:
-            if current_run > 0:
-                no_event_runs.append(current_run)
-            current_run = 0
+            print(f"\n  PyFin alignment FAILED")
+            print(f"  Status: {comparison['status']}")
+            print(f"  Events detected: {comparison['pyfin_n_events']}")
 
-    if no_event_runs and max(no_event_runs) > 5:
-        issues.append(
-            f"⚠ Long gaps detected: max {max(no_event_runs)} consecutive k-mers without events"
-        )
+            # Show diagnostic info
+            print(f"\n  Diagnostics:")
+            print(f"    F5C alignments: {comparison['f5c_n_alignments']}")
+            print(f"    F5C unique positions: {comparison['f5c_unique_positions']}")
+            print(f"    PyFin events detected: {comparison['pyfin_n_events']}")
 
-    if not issues:
-        print("    ✓ No major issues detected")
-    else:
-        for issue in issues:
-            print(f"    {issue}")
+            # Calculate expected events per kmer
+            n_kmers = len(ref_seq) - 5 + 1
+            expected_epk = comparison['pyfin_n_events'] / n_kmers
+            print(f"    Events/k-mer ratio: {expected_epk:.2f} (typical: 2-4 for RNA)")
 
-    return result
+        return comparison
 
-
-def compare_alignments_detailed(pyfin_result, sequence, kmer_size):
-    """
-    Detailed analysis of alignment quality
-    """
-    print("\n" + "=" * 80)
-    print("ALIGNMENT QUALITY ANALYSIS")
-    print("=" * 80)
-
-    base_to_event_map = pyfin_result["base_to_event_map"]
-    n_kmers = len(sequence) - kmer_size + 1
-
-    print(f"\n[1] Coverage Statistics:")
-    print(f"    Expected k-mers: {n_kmers}")
-    print(f"    K-mers in result: {len(base_to_event_map)}")
-
-    if len(base_to_event_map) != n_kmers:
-        print(f"    ⚠ WARNING: K-mer count mismatch!")
-        print(f"      This suggests the alignment may be truncated or incorrect")
-
-    # Check if k-mers match sequence
-    print(f"\n[2] K-mer Sequence Validation:")
-    mismatches = 0
-    for i in range(min(len(base_to_event_map), n_kmers)):
-        expected_kmer = sequence[i : i + kmer_size]
-        actual_kmer = base_to_event_map[i]["kmer"]
-        if expected_kmer != actual_kmer:
-            if mismatches < 5:  # Show first 5 mismatches
-                print(f"    ✗ Position {i}: expected '{expected_kmer}', got '{actual_kmer}'")
-            mismatches += 1
-
-    if mismatches == 0:
-        print(f"    ✓ All k-mers match sequence")
-    else:
-        print(f"    ✗ {mismatches} k-mer mismatches found!")
-
-    # Check event index ordering
-    print(f"\n[3] Event Index Ordering:")
-    prev_stop = -1
-    ordering_issues = 0
-    for i, mapping in enumerate(base_to_event_map):
-        if mapping["start"] != -1:
-            if prev_stop != -1 and mapping["start"] <= prev_stop:
-                if ordering_issues < 3:
-                    print(f"    ✗ Position {i}: start={mapping['start']} <= prev_stop={prev_stop}")
-                ordering_issues += 1
-            prev_stop = mapping["stop"]
-
-    if ordering_issues == 0:
-        print(f"    ✓ Event indices are monotonically increasing")
-    else:
-        print(f"    ✗ {ordering_issues} event index ordering violations!")
-
-    # Distribution analysis
-    print(f"\n[4] Distribution Analysis:")
-    event_counts = []
-    for mapping in base_to_event_map:
-        if mapping["start"] != -1 and mapping["stop"] != -1:
-            event_counts.append(mapping["stop"] - mapping["start"] + 1)
-
-    if event_counts:
-        import matplotlib.pyplot as plt
-
-        plt.figure(figsize=(12, 4))
-
-        plt.subplot(131)
-        plt.hist(event_counts, bins=20, edgecolor="black", alpha=0.7)
-        plt.xlabel("Events per K-mer")
-        plt.ylabel("Count")
-        plt.title("Distribution of Events per K-mer")
-        plt.axvline(
-            np.mean(event_counts),
-            color="red",
-            linestyle="--",
-            label=f"Mean: {np.mean(event_counts):.1f}",
-        )
-        plt.legend()
-
-        plt.subplot(132)
-        plt.plot(event_counts, marker="o", markersize=2, alpha=0.6)
-        plt.xlabel("K-mer Position")
-        plt.ylabel("Number of Events")
-        plt.title("Events per K-mer Across Sequence")
-        plt.axhline(np.mean(event_counts), color="red", linestyle="--", alpha=0.5)
-
-        plt.subplot(133)
-        coverage = [1 if m["start"] != -1 else 0 for m in base_to_event_map]
-        plt.plot(np.cumsum(coverage) / np.arange(1, len(coverage) + 1) * 100, linewidth=2)
-        plt.xlabel("K-mer Position")
-        plt.ylabel("Coverage (%)")
-        plt.title("Cumulative K-mer Coverage")
-        plt.ylim([0, 105])
-        plt.axhline(100, color="green", linestyle="--", alpha=0.3)
-
-        plt.tight_layout()
-        plt.savefig("alignment_analysis.png", dpi=150, bbox_inches="tight")
-        print(f"    ✓ Distribution plots saved to 'alignment_analysis.png'")
-        plt.show()
+    except ImportError as e:
+        print(f"\n  ERROR: fin._eventalign module not available: {e}")
+        return {'error': str(e)}
+    except Exception as e:
+        print(f"\n  ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'error': str(e)}
 
 
-def test_synthetic_alignment():
-    """Test alignment with simple synthetic data"""
-    print("\n" + "=" * 80)
-    print("SYNTHETIC DATA TEST")
-    print("=" * 80)
+def save_comparison_report(f5c_stats: Dict, comparison: Dict, output_path: str):
+    """Save comparison report to file."""
+    with open(output_path, 'w') as f:
+        f.write("# Event Alignment Comparison Report\n\n")
+        f.write("## F5C Reference Results\n\n")
+        f.write(f"- Total alignments: {f5c_stats['total_alignments']}\n")
+        f.write(f"- Unique positions: {f5c_stats['unique_positions']}\n")
+        f.write(f"- Position range: {f5c_stats['position_range'][0]} - {f5c_stats['position_range'][1]}\n\n")
 
-    # Create simple test case
-    sequence = generate_simple_test_sequence()
-    print(f"\nSequence: {sequence[:50]}... (length: {len(sequence)})")
+        f.write("### Event Statistics\n\n")
+        f.write(f"- Event mean: {f5c_stats['event_mean_mean']:.2f} +/- {f5c_stats['event_mean_std']:.2f}\n")
+        f.write(f"- Event stdv: {f5c_stats['event_stdv_mean']:.4f} +/- {f5c_stats['event_stdv_std']:.4f}\n")
+        f.write(f"- Events per position: {f5c_stats['events_per_position_mean']:.2f} +/- {f5c_stats['events_per_position_std']:.2f}\n\n")
 
-    # Generate signal
-    raw_signal = generate_test_signal(sequence, events_per_base=10)
-    print(f"Signal: {len(raw_signal)} samples")
+        f.write("## PyFin Comparison\n\n")
+        if 'error' in comparison:
+            f.write(f"ERROR: {comparison['error']}\n")
+        elif comparison.get('pyfin_success', False):
+            f.write(f"- PyFin alignments: {comparison['pyfin_n_alignments']}\n")
+            f.write(f"- Events per base: {comparison['pyfin_events_per_base']:.2f}\n")
+            f.write(f"- Position overlap: {comparison['position_overlap']}/{comparison['f5c_unique_positions']} "
+                    f"({100*comparison['position_overlap']/comparison['f5c_unique_positions']:.1f}%)\n")
+            f.write(f"- Status: SUCCESS\n")
+        else:
+            f.write(f"- Status: FAILED ({comparison.get('status', 'unknown')})\n")
+            f.write(f"- Events detected: {comparison.get('pyfin_n_events', 'N/A')}\n")
+            f.write(f"\n### Notes\n\n")
+            f.write(f"This is expected when using reference sequence as read_seq.\n")
+            f.write(f"For proper comparison:\n")
+            f.write(f"1. Basecall POD5 with Guppy/Dorado to get FASTQ\n")
+            f.write(f"2. Or use BAM file with aligned reads\n")
+            f.write(f"3. See load_from_fastq_pod5.py or load_from_bam_pod5.py\n")
 
-    # Test with RNA-only mode
-    print(f"\n--- Testing RNA alignment ---")
-    result = analyze_pyfin_alignment(raw_signal, sequence, kmer_size=5)
-
-    # Detailed comparison
-    compare_alignments_detailed(result, sequence, kmer_size=5)
+    print(f"\nComparison report saved to: {output_path}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare PyFin with f5c alignment")
-    parser.add_argument("--synthetic", action="store_true", help="Test with synthetic data")
-    parser.add_argument("--fast5", type=str, help="FAST5 file for real data test")
-    parser.add_argument("--reference", type=str, help="Reference sequence file (FASTA)")
+    """Main comparison function."""
+    test_dir = Path(__file__).parent / "test_data"
+    tsv_path = test_dir / "one_read.eventalign.tsv.gz"
+    fasta_path = test_dir / "one_read.fa"
+    pod5_path = test_dir / "one_read.pod5"
+    output_path = Path(__file__).parent / "comparison_report.txt"
 
-    args = parser.parse_args()
+    print("=" * 70)
+    print("F5C vs PyFin Eventalign Comparison")
+    print("=" * 70)
 
-    if args.synthetic:
-        test_synthetic_alignment()
+    # Load F5C output
+    print(f"\nLoading F5C output from: {tsv_path}")
+    f5c_alignments = load_f5c_eventalign_tsv(str(tsv_path))
+    print(f"  Loaded {len(f5c_alignments)} alignments")
+
+    # Show first few f5c alignments
+    print(f"\n  First 10 F5C alignments:")
+    print(f"    {'Pos':>6} {'EventIdx':>8} {'RefKmer':>10} {'EventMean':>10} {'ModelMean':>10}")
+    print(f"    {'-'*6} {'-'*8} {'-'*10} {'-'*10} {'-'*10}")
+    for i, aln in enumerate(f5c_alignments[:10]):
+        print(f"    {aln['reference_position']:6d} {aln['event_idx']:8d} {aln['reference_kmer']:>10} "
+              f"{aln['event_mean']:10.2f} {aln['model_mean']:10.2f}")
+
+    # Load reference
+    print(f"\nLoading reference from: {fasta_path}")
+    ref_name, ref_seq, ref_len = load_reference_from_fasta(str(fasta_path))
+    print(f"  Reference: {ref_name}")
+    print(f"  Length: {ref_len} bp")
+
+    # Analyze F5C output
+    f5c_stats = analyze_f5c_output(f5c_alignments)
+    print_f5c_summary(f5c_stats)
+
+    # Compare with PyFin
+    comparison = run_pyfin_and_compare(f5c_stats, ref_seq, str(pod5_path))
+
+    # Save report
+    save_comparison_report(f5c_stats, comparison, str(output_path))
+
+    print("\n" + "=" * 70)
+    print("Summary")
+    print("=" * 70)
+    print(f"\nF5C reference output: {len(f5c_alignments)} event alignments")
+    print(f"  Position range: {f5c_stats['position_range'][0]} - {f5c_stats['position_range'][1]}")
+    print(f"  Events per position: {f5c_stats['events_per_position_mean']:.2f} +/- {f5c_stats['events_per_position_std']:.2f}")
+
+    if 'error' in comparison:
+        print(f"\nPyFin: ERROR - {comparison['error']}")
+    elif comparison.get('pyfin_success', False):
+        print(f"\nPyFin: {comparison['pyfin_n_alignments']} event alignments")
+        print(f"  Position overlap: {comparison['position_overlap']}/{comparison['f5c_unique_positions']} "
+              f"({100*comparison['position_overlap']/comparison['f5c_unique_positions']:.1f}%)")
+        print(f"\n  Status: Results comparable!" if comparison['position_overlap'] > 0 else "  Status: No position overlap")
     else:
-        print("Real data comparison not yet implemented.")
-        print("Use --synthetic flag for synthetic data test")
+        print(f"\nPyFin: Alignment failed")
+        print(f"  Status: {comparison['status']}")
+        print(f"  Events detected: {comparison.get('pyfin_n_events', 'N/A')}")
+        print(f"\n  Note: This is expected when using reference sequence as read_seq")
+        print(f"        For proper comparison, use basecalled read sequence from FASTQ/BAM")
 
 
 if __name__ == "__main__":
