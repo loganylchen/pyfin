@@ -80,6 +80,28 @@ def load_reference_from_fasta(fasta_path: str) -> Tuple[str, str, int]:
     return ref_name, ref_sequence, ref_length
 
 
+def load_read_sequence_from_fastq(fastq_path: str) -> Tuple[str, str]:
+    """Load read sequence from FASTQ file."""
+    with open(fastq_path, "r") as f:
+        lines = f.readlines()
+
+    read_id = None
+    read_sequence = None
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if i == 0 and line.startswith("@"):
+            # Parse header: @read_id optional_fields...
+            read_id = line[1:].split()[0]
+        elif i == 1:
+            read_sequence = line.upper()
+            break  # Got what we need
+
+    if read_sequence is None:
+        raise ValueError(f"Could not parse FASTQ file: {fastq_path}")
+
+    return read_id, read_sequence
+
+
 def load_signal_from_pod5(pod5_path: str) -> Tuple[str, np.ndarray, float]:
     """Load signal data from POD5 file."""
     try:
@@ -271,7 +293,7 @@ def create_text_visualization(f5c_alignments: List[Dict], ref_seq: str,
 
 
 def run_pyfin_and_compare(f5c_alignments: List[Dict], ref_seq: str,
-                          pod5_path: str) -> Dict:
+                          pod5_path: str, fastq_path: str = None) -> Dict:
     """Run pyfin eventalign and compare with f5c results."""
     print("\n" + "=" * 70)
     print("Running PyFin Eventalign")
@@ -286,13 +308,27 @@ def run_pyfin_and_compare(f5c_alignments: List[Dict], ref_seq: str,
         print(f"  Signal length: {len(signal)} samples")
         print(f"  Sample rate: {sample_rate} Hz")
 
-        print(f"\n  WARNING: Using reference sequence as placeholder")
-        print(f"  For proper comparison, use basecalled read sequence from FASTQ/BAM")
+        # Load read sequence from FASTQ if available
+        if fastq_path and Path(fastq_path).exists():
+            print(f"\n  Loading basecalled read sequence from: {fastq_path}")
+            fastq_read_id, read_seq = load_read_sequence_from_fastq(fastq_path)
+            print(f"  FASTQ read ID: {fastq_read_id}")
+            print(f"  Read sequence length: {len(read_seq)} bp")
+
+            # Verify read IDs match
+            if fastq_read_id != read_id:
+                print(f"  WARNING: Read ID mismatch!")
+                print(f"    POD5 read_id: {read_id}")
+                print(f"    FASTQ read_id: {fastq_read_id}")
+        else:
+            print(f"\n  WARNING: FASTQ not found, using reference sequence as placeholder")
+            print(f"  For proper comparison, use basecalled read sequence from FASTQ/BAM")
+            read_seq = ref_seq
 
         # Run eventalign
         result = run_eventalign(
             read_ids=[read_id],
-            read_seqs=[ref_seq],
+            read_seqs=[read_seq],
             ref_seqs=[ref_seq],
             ref_names=["SIRV101"],
             ref_lens=[len(ref_seq)],
@@ -415,6 +451,7 @@ def main():
     tsv_path = test_dir / "one_read.eventalign.tsv.gz"
     fasta_path = test_dir / "one_read.fa"
     pod5_path = test_dir / "one_read.pod5"
+    fastq_path = test_dir / "one_read.fq"
     output_dir = Path(__file__).parent
 
     print("=" * 70)
@@ -463,7 +500,7 @@ def main():
     print(f"\nF5C visualization saved to: {viz_path}")
 
     # Compare with PyFin
-    comparison = run_pyfin_and_compare(f5c_alignments, ref_seq, str(pod5_path))
+    comparison = run_pyfin_and_compare(f5c_alignments, ref_seq, str(pod5_path), str(fastq_path))
 
     # Save comparison report
     report_path = output_dir / "comparison_report.txt"

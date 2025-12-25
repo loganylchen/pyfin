@@ -77,6 +77,28 @@ def load_reference_from_fasta(fasta_path: str) -> Tuple[str, str, int]:
     return ref_name, ref_sequence, ref_length
 
 
+def load_read_sequence_from_fastq(fastq_path: str) -> Tuple[str, str]:
+    """Load read sequence from FASTQ file."""
+    with open(fastq_path, "r") as f:
+        lines = f.readlines()
+
+    read_id = None
+    read_sequence = None
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if i == 0 and line.startswith("@"):
+            # Parse header: @read_id optional_fields...
+            read_id = line[1:].split()[0]
+        elif i == 1:
+            read_sequence = line.upper()
+            break  # Got what we need
+
+    if read_sequence is None:
+        raise ValueError(f"Could not parse FASTQ file: {fastq_path}")
+
+    return read_id, read_sequence
+
+
 def load_signal_from_pod5(pod5_path: str) -> Tuple[str, np.ndarray, float]:
     """Load signal data from POD5 file."""
     try:
@@ -588,6 +610,7 @@ def main():
     tsv_path = test_dir / "one_read.eventalign.tsv.gz"
     fasta_path = test_dir / "one_read.fa"
     pod5_path = test_dir / "one_read.pod5"
+    fastq_path = test_dir / "one_read.fq"
 
     print("="*80)
     print("Detailed Event-by-Event Comparison: F5C vs PyFin")
@@ -610,8 +633,22 @@ def main():
     print(f"  Read ID: {read_id}")
     print(f"  Signal length: {len(signal)} samples")
 
-    print(f"\n  WARNING: Using reference sequence as placeholder")
-    print(f"  For proper comparison, use basecalled read sequence from FASTQ/BAM")
+    # Load read sequence from FASTQ if available
+    if fastq_path.exists():
+        print(f"\nLoading basecalled read sequence from: {fastq_path}")
+        fastq_read_id, read_seq = load_read_sequence_from_fastq(str(fastq_path))
+        print(f"  FASTQ read ID: {fastq_read_id}")
+        print(f"  Read sequence length: {len(read_seq)} bp")
+
+        # Verify read IDs match
+        if fastq_read_id != read_id:
+            print(f"  WARNING: Read ID mismatch!")
+            print(f"    POD5 read_id: {read_id}")
+            print(f"    FASTQ read_id: {fastq_read_id}")
+    else:
+        print(f"\n  WARNING: FASTQ not found, using reference sequence as placeholder")
+        print(f"  For proper comparison, use basecalled read sequence from FASTQ/BAM")
+        read_seq = ref_seq
 
     try:
         from fin._eventalign import run_eventalign, MODEL_RNA002
@@ -619,7 +656,7 @@ def main():
         print(f"\nRunning PyFin eventalign...")
         result = run_eventalign(
             read_ids=[read_id],
-            read_seqs=[ref_seq],
+            read_seqs=[read_seq],
             ref_seqs=[ref_seq],
             ref_names=[ref_name],
             ref_lens=[ref_len],
