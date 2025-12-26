@@ -520,6 +520,7 @@ eventalign_cuda_extension = Extension(
         os.path.join(EVENTALIGN_DIR, "cuda_wrapper.cpp"),
         os.path.join(EVENTALIGN_DIR, "cuda_framework.cu"),
         os.path.join(EVENTALIGN_DIR, "align_cuda.cu"),
+        os.path.join(EVENTALIGN_DIR, "align.cpp"),
         os.path.join(EVENTALIGN_DIR, "common.cpp"),
         os.path.join(EVENTALIGN_DIR, "events.cpp"),
         os.path.join(EVENTALIGN_DIR, "model.cpp"),
