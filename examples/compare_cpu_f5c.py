@@ -279,62 +279,44 @@ def plot_alignment_trace(
     output_path: str = None
 ):
     """
-    Plot alignment trace showing reference positions on the signal.
+    Plot alignment trace showing reference positions vs event index.
 
-    Creates a visualization similar to f5c's eventalign output,
-    showing which reference k-mers align to which events.
+    Creates a visualization showing which reference k-mers align to which events,
+    with both CPU and f5c results overlaid in different colors.
     """
     events = cpu_result['events'][0]
     cpu_alignments = cpu_result['full'][0][0]
     f5c_aligns = f5c_alignments_to_dict(f5c_alignments, events)
 
-    fig, axes = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
+    fig, ax = plt.subplots(1, 1, figsize=(16, 10))
 
-    max_samples = min(50000, len(signal))
-    sample_indices = np.arange(max_samples)
-
-    # Plot 1: CPU alignments
-    ax = axes[0]
-    ax.plot(sample_indices, signal[:max_samples], color='lightgray', alpha=0.3, linewidth=0.5)
-
-    # Group alignments by reference position
+    # Plot CPU alignments as blue points
     for align in cpu_alignments:
         event_idx = align['event_idx']
-        if event_idx < len(events['starts']):
-            start = events['starts'][event_idx]
-            end = start + events['lengths'][event_idx]
-            pos = align['ref_position']
+        pos = align['ref_position']
+        ax.scatter(event_idx, pos, c='blue', s=20, alpha=0.6, marker='o', edgecolors='none', label='CPU' if align == cpu_alignments[0] else "")
 
-            if start < max_samples:
-                # Draw line from reference position to event
-                ax.plot([start, end], [pos, pos], 'b-', alpha=0.3, linewidth=1)
-                ax.scatter(start, pos, c='blue', s=10, alpha=0.5)
-
-    ax.set_ylabel('Reference Position', fontsize=11, fontweight='bold')
-    ax.set_title('CPU Eventalign - Reference to Event Mapping', fontsize=12, fontweight='bold')
-    ax.grid(True, alpha=0.3)
-
-    # Plot 2: f5c alignments
-    ax = axes[1]
-    ax.plot(sample_indices, signal[:max_samples], color='lightgray', alpha=0.3, linewidth=0.5)
-
+    # Plot f5c alignments as green points
     for align in f5c_aligns:
         event_idx = align['event_idx']
-        if event_idx < len(events['starts']):
-            start = events['starts'][event_idx]
-            end = start + events['lengths'][event_idx]
-            pos = align['ref_position']
+        pos = align['ref_position']
+        ax.scatter(event_idx, pos, c='green', s=20, alpha=0.6, marker='x', label='F5C' if align == f5c_aligns[0] else "")
 
-            if start < max_samples:
-                ax.plot([start, end], [pos, pos], 'g-', alpha=0.3, linewidth=1)
-                ax.scatter(start, pos, c='green', s=10, alpha=0.5)
+    # Find and highlight matching alignments
+    cpu_positions = {(a['ref_position'], a['event_idx']): a for a in cpu_alignments}
+    f5c_positions = {(a['ref_position'], a['event_idx']): a for a in f5c_aligns}
 
+    for key in cpu_positions:
+        if key in f5c_positions:
+            pos, event_idx = key
+            ax.scatter(event_idx, pos, c='red', s=30, alpha=0.8, marker='o', edgecolors='black', linewidth=1, label='Matching' if key == list(cpu_positions.keys())[0] else "")
+
+    ax.set_xlabel('Event Index', fontsize=11, fontweight='bold')
     ax.set_ylabel('Reference Position', fontsize=11, fontweight='bold')
-    ax.set_xlabel('Sample Index', fontsize=11, fontweight='bold')
-    ax.set_title('F5C Eventalign - Reference to Event Mapping', fontsize=12, fontweight='bold')
+    ax.set_title('Alignment Trace: Reference Position vs Event Index', fontsize=12, fontweight='bold')
+    ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
 
-    plt.suptitle('Alignment Trace: Reference Positions', fontsize=14, fontweight='bold')
     plt.tight_layout()
 
     if output_path is None:
