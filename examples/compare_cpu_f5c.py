@@ -13,6 +13,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
+import gzip
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -76,14 +77,23 @@ def load_signal_from_pod5(pod5_path: str, read_id: str = None) -> tuple:
 
 def load_f5c_eventalign_results(eventalign_path: str) -> dict:
     """
-    Load f5c eventalign results from file.
+    Load f5c eventalign results from gzipped TSV file.
 
     The f5c eventalign output format (tsv):
-    chromosome    position    reference_kmer    read_index    strand    event_idx    event_mean    event_stdv    model_mean    model_stdv    scaled_mean    scaled_stdv    start_idx    end_idx
+    chromosome    position    reference_kmer    read_index    strand    event_idx    event_mean    event_stdv    model_mean    model_stdv    scaled_mean    scaled_stdv    start_idx    end_idx    signal_samples
+
+    Note: The actual f5c TSV has different column ordering than documented.
+    Format: chromosome, position, reference_kmer, read_index, strand, event_idx,
+            event_mean, event_stdv, model_mean, model_stdv, scaled_mean, scaled_stdv,
+            start_idx, end_idx, [signal_samples...]
     """
     alignments = []
 
-    with open(eventalign_path, "r") as f:
+    # Open file (handle both .gz and plain text)
+    open_func = gzip.open if str(eventalign_path).endswith('.gz') else open
+    mode = 'rt' if str(eventalign_path).endswith('.gz') else 'r'
+
+    with open_func(eventalign_path, mode) as f:
         for line in f:
             if line.startswith("chromosome"):
                 continue  # Skip header
@@ -92,16 +102,20 @@ def load_f5c_eventalign_results(eventalign_path: str) -> dict:
             if len(parts) < 14:
                 continue
 
+            # Parse based on actual f5c TSV format
+            # chromosome(0), position(1), reference_kmer(2), read_index(3), strand(4),
+            # event_idx(5), event_mean(6), event_stdv(7), model_mean(8), model_stdv(9),
+            # scaled_mean(10), scaled_stdv(11), start_idx(12), end_idx(13)
             alignment = {
                 "ref_position": int(parts[1]),
                 "ref_kmer": parts[2],
-                "event_idx": int(parts[4]),
-                "event_mean": float(parts[5]),
-                "event_stdv": float(parts[6]),
-                "model_mean": float(parts[7]),
-                "model_stdv": float(parts[8]),
-                "scaled_mean": float(parts[9]),
-                "scaled_stdv": float(parts[10]),
+                "event_idx": int(parts[5]),
+                "event_mean": float(parts[6]),
+                "event_stdv": float(parts[7]),
+                "model_mean": float(parts[8]),
+                "model_stdv": float(parts[9]),
+                "scaled_mean": float(parts[10]),
+                "scaled_stdv": float(parts[11]),
                 "start": int(parts[12]),
                 "end": int(parts[13]),
             }
@@ -394,7 +408,7 @@ def main():
     test_dir = Path(__file__).parent / "test_data"
     fasta_path = test_dir / "one_read.fa"
     pod5_path = test_dir / "one_read.pod5"
-    eventalign_path = test_dir / "one_read.eventalign"
+    eventalign_path = test_dir / "one_read.eventalign.tsv.gz"
 
     # Check if files exist
     if not fasta_path.exists():
