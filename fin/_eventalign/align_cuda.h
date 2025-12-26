@@ -17,6 +17,18 @@
 extern "C" {
 #endif
 
+// CUDA framework function prototypes
+int init_cuda_eventalign(cuda_data_t** cuda_data, int32_t n_bam_rec, model_t* model);
+void free_cuda_eventalign(cuda_data_t* cuda_data);
+int align_cuda(cuda_data_t* cuda_data,
+               char** reads, int32_t* read_lens, ptr_t* read_ptrs,
+               int32_t n_reads,
+               event_t** event_tables, int32_t* n_events, ptr_t* event_ptrs,
+               scalings_t* scalings,
+               uint32_t kmer_size,
+               int32_t* n_event_align_pairs,
+               AlignedPair** event_align_pairs);
+
 // RNA event reversal kernel (RNA is sequenced 3'->5' but alignment expects 5'->3')
 __global__ void reverse_events_kernel(event_t* event_table,
                                        int32_t* n_events,
