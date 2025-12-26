@@ -354,6 +354,11 @@ def print_statistics(cpu_result: dict, f5c_alignments: list, n_matching: int, n_
     cpu_scalings = cpu_result['scalings'][0]
     print(f"\nCPU scalings: scale={cpu_scalings['scale']:.4f}, shift={cpu_scalings['shift']:.4f}, var={cpu_scalings['var']:.4f}")
 
+    # Get f5c scale info
+    if f5c_aligns:
+        f5c_scales = [a.get('scale', 0) for a in f5c_alignments]
+        print(f"F5C scales: mean={np.mean(f5c_scales):.4f}, std={np.std(f5c_scales):.4f}")
+
     # Compare event statistics
     events = cpu_result['events'][0]
     print(f"\nEvents detected: {len(events['starts'])}")
@@ -378,6 +383,196 @@ def print_statistics(cpu_result: dict, f5c_alignments: list, n_matching: int, n_
                 count += 1
                 if count >= 10:
                     break
+
+
+def evaluate_alignment_quality(
+    cpu_result: dict,
+    f5c_alignments: list,
+    signal: np.ndarray,
+) -> dict:
+    """
+    Evaluate which eventalign result is better based on multiple metrics.
+
+    Metrics:
+    1. Coverage: How many reference positions are covered
+    2. Continuity: How continuous the alignment is (fewer gaps)
+    3. Consistency: Log probability scores (higher is better)
+    4. Event utilization: How well events are used
+    """
+    cpu_alignments = cpu_result['full'][0][0]
+    f5c_aligns = f5c_alignments_to_dict(f5c_alignments, cpu_result['events'][0])
+    events = cpu_result['events'][0]
+
+    metrics = {
+        'cpu': {},
+        'f5c': {},
+        'winner': {}
+    }
+
+    # 1. Coverage - number of unique reference positions covered
+    cpu_ref_positions = set(a['ref_position'] for a in cpu_alignments)
+    f5c_ref_positions = set(a['ref_position'] for a in f5c_aligns)
+
+    metrics['cpu']['coverage'] = len(cpu_ref_positions)
+    metrics['f5c']['coverage'] = len(f5c_ref_positions)
+
+    if metrics['cpu']['coverage'] > metrics['f5c']['coverage']:
+        metrics['winner']['coverage'] = 'CPU'
+        metrics['winner']['coverage_margin'] = metrics['cpu']['coverage'] - metrics['f5c']['coverage']
+    elif metrics['f5c']['coverage'] > metrics['cpu']['coverage']:
+        metrics['winner']['coverage'] = 'F5C'
+        metrics['winner']['coverage_margin'] = metrics['f5c']['coverage'] - metrics['cpu']['coverage']
+    else:
+        metrics['winner']['coverage'] = 'TIE'
+
+    # 2. Continuity - measure gaps in alignment
+    if len(cpu_alignments) > 1:
+        cpu_sorted = sorted(cpu_alignments, key=lambda x: x['ref_position'])
+        cpu_gaps = [cpu_sorted[i+1]['ref_position'] - cpu_sorted[i]['ref_position']
+                    for i in range(len(cpu_sorted)-1)]
+        metrics['cpu']['mean_gap'] = np.mean(cpu_gaps)
+        metrics['cpu']['max_gap'] = max(cpu_gaps) if cpu_gaps else 0
+        metrics['cpu']['gap_std'] = np.std(cpu_gaps)
+
+    if len(f5c_aligns) > 1:
+        f5c_sorted = sorted(f5c_aligns, key=lambda x: x['ref_position'])
+        f5c_gaps = [f5c_sorted[i+1]['ref_position'] - f5c_sorted[i]['ref_position']
+                    for i in range(len(f5c_sorted)-1)]
+        metrics['f5c']['mean_gap'] = np.mean(f5c_gaps)
+        metrics['f5c']['max_gap'] = max(f5c_gaps) if f5c_gaps else 0
+        metrics['f5c']['gap_std'] = np.std(f5c_gaps)
+
+    # Lower mean gap is better (more continuous)
+    if 'mean_gap' in metrics['cpu'] and 'mean_gap' in metrics['f5c']:
+        if metrics['cpu']['mean_gap'] < metrics['f5c']['mean_gap']:
+            metrics['winner']['continuity'] = 'CPU'
+        elif metrics['f5c']['mean_gap'] < metrics['cpu']['mean_gap']:
+            metrics['winner']['continuity'] = 'F5C'
+        else:
+            metrics['winner']['continuity'] = 'TIE'
+
+    # 3. Consistency - log probability scores (higher is better)
+    if f5c_aligns and 'log_prob' in f5c_alignments[0]:
+        f5c_log_probs = [a.get('log_prob', -float('inf')) for a in f5c_alignments]
+        metrics['f5c']['mean_log_prob'] = np.mean(f5c_log_probs)
+        metrics['f5c']['min_log_prob'] = min(f5c_log_probs)
+
+    # CPU doesn't output log_prob directly, so we compare event quality
+    # Lower event stdv typically means cleaner events
+    if len(events['stdvs']) > 0:
+        metrics['cpu']['mean_event_stdv'] = np.mean(events['stdvs'])
+        metrics['cpu']['median_event_stdv'] = np.median(events['stdvs'])
+
+    # 4. Event utilization - unique events used / total events
+    cpu_events_used = set(a['event_idx'] for a in cpu_alignments)
+    f5c_events_used = set(a['event_idx'] for a in f5c_aligns)
+    total_events = len(events['starts'])
+
+    metrics['cpu']['event_utilization'] = len(cpu_events_used) / total_events if total_events > 0 else 0
+    metrics['f5c']['event_utilization'] = len(f5c_events_used) / total_events if total_events > 0 else 0
+
+    if metrics['cpu']['event_utilization'] > metrics['f5c']['event_utilization']:
+        metrics['winner']['event_utilization'] = 'CPU'
+    elif metrics['f5c']['event_utilization'] > metrics['cpu']['event_utilization']:
+        metrics['winner']['event_utilization'] = 'F5C'
+    else:
+        metrics['winner']['event_utilization'] = 'TIE'
+
+    # 5. Alignment density - alignments per reference position
+    if cpu_ref_positions:
+        metrics['cpu']['alignments_per_position'] = len(cpu_alignments) / len(cpu_ref_positions)
+    if f5c_ref_positions:
+        metrics['f5c']['alignments_per_position'] = len(f5c_aligns) / len(f5c_ref_positions)
+
+    # 6. K-mer consistency - check if aligned k-mers match reference
+    cpu_kmer_match = sum(1 for a in cpu_alignments if a['ref_kmer'] == a.get('model_kmer', a['ref_kmer']))
+    f5c_kmer_match = sum(1 for a in f5c_aligns if a['ref_kmer'] == a.get('model_kmer', a['ref_kmer']))
+
+    if len(cpu_alignments) > 0:
+        metrics['cpu']['kmer_consistency'] = cpu_kmer_match / len(cpu_alignments) * 100
+    if len(f5c_aligns) > 0:
+        metrics['f5c']['kmer_consistency'] = f5c_kmer_match / len(f5c_aligns) * 100
+
+    return metrics
+
+
+def print_evaluation_report(metrics: dict):
+    """Print a detailed evaluation report."""
+    print("\n" + "=" * 70)
+    print("ALIGNMENT QUALITY EVALUATION")
+    print("=" * 70)
+
+    print("\n1. COVERAGE (Reference positions covered)")
+    print("-" * 70)
+    print(f"  CPU:     {metrics['cpu']['coverage']} positions")
+    print(f"  F5C:     {metrics['f5c']['coverage']} positions")
+    winner = metrics['winner'].get('coverage', 'N/A')
+    if winner != 'TIE':
+        margin = metrics['winner'].get('coverage_margin', 0)
+        print(f"  Winner:  {winner} (by {margin} positions)")
+    else:
+        print(f"  Winner:  TIE")
+
+    print("\n2. CONTINUITY (Gap analysis)")
+    print("-" * 70)
+    if 'mean_gap' in metrics['cpu']:
+        print(f"  CPU:     mean gap = {metrics['cpu']['mean_gap']:.2f}, "
+              f"max gap = {metrics['cpu']['max_gap']}, std = {metrics['cpu']['gap_std']:.2f}")
+    if 'mean_gap' in metrics['f5c']:
+        print(f"  F5C:     mean gap = {metrics['f5c']['mean_gap']:.2f}, "
+              f"max gap = {metrics['f5c']['max_gap']}, std = {metrics['f5c']['gap_std']:.2f}")
+    if 'continuity' in metrics['winner']:
+        print(f"  Winner:  {metrics['winner']['continuity']} (lower gap is better)")
+
+    print("\n3. EVENT UTILIZATION")
+    print("-" * 70)
+    print(f"  CPU:     {metrics['cpu']['event_utilization']*100:.1f}% of events used")
+    print(f"  F5C:     {metrics['f5c']['event_utilization']*100:.1f}% of events used")
+    print(f"  Winner:  {metrics['winner']['event_utilization']}")
+
+    print("\n4. ALIGNMENT DENSITY")
+    print("-" * 70)
+    if 'alignments_per_position' in metrics['cpu']:
+        print(f"  CPU:     {metrics['cpu']['alignments_per_position']:.2f} alignments/position")
+    if 'alignments_per_position' in metrics['f5c']:
+        print(f"  F5C:     {metrics['f5c']['alignments_per_position']:.2f} alignments/position")
+
+    print("\n5. K-MER CONSISTENCY")
+    print("-" * 70)
+    if 'kmer_consistency' in metrics['cpu']:
+        print(f"  CPU:     {metrics['cpu']['kmer_consistency']:.1f}% consistent")
+    if 'kmer_consistency' in metrics['f5c']:
+        print(f"  F5C:     {metrics['f5c']['kmer_consistency']:.1f}% consistent")
+
+    print("\n6. LOG PROBABILITIES (F5C only)")
+    print("-" * 70)
+    if 'mean_log_prob' in metrics['f5c']:
+        print(f"  F5C:     mean = {metrics['f5c']['mean_log_prob']:.4f}, "
+              f"min = {metrics['f5c']['min_log_prob']:.4f}")
+        print("  (Higher log probability indicates better alignment quality)")
+
+    # Overall verdict
+    print("\n" + "=" * 70)
+    print("OVERALL VERDICT")
+    print("=" * 70)
+
+    wins = {'CPU': 0, 'F5C': 0, 'TIE': 0}
+    for key in ['coverage', 'continuity', 'event_utilization']:
+        winner = metrics['winner'].get(key, 'TIE')
+        wins[winner] = wins.get(winner, 0) + 1
+
+    print(f"\nCPU wins:   {wins['CPU']} categories")
+    print(f"F5C wins:   {wins['F5C']} categories")
+    print(f"Ties:       {wins['TIE']} categories")
+
+    if wins['CPU'] > wins['F5C']:
+        print("\n  CPU eventalign appears better overall.")
+    elif wins['F5C'] > wins['CPU']:
+        print("\n  F5C eventalign appears better overall.")
+    else:
+        print("\n  Both methods perform similarly.")
+
+    print("=" * 70)
 
 
 def main():
@@ -452,6 +647,13 @@ def main():
 
     # Print statistics
     print_statistics(cpu_result, f5c_alignments, n_matching, n_cpu_only, n_f5c_only)
+
+    # Evaluate alignment quality
+    print("\n" + "-" * 70)
+    print("EVALUATING ALIGNMENT QUALITY")
+    print("-" * 70)
+    metrics = evaluate_alignment_quality(cpu_result, f5c_alignments, signal)
+    print_evaluation_report(metrics)
 
     print("\n" + "=" * 70)
     print("COMPARISON COMPLETE")
