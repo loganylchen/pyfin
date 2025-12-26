@@ -371,6 +371,8 @@ __global__ void align_kernel_post(AlignedPair* event_align_pairs,
         int32_t n_cols = n_kmers + 1;
         int32_t n_bands = n_rows + n_cols;
 
+        float lp_trim = logf(0.01f);
+
         // Backtrack to compute alignment
         double sum_emission = 0;
         double n_aligned_events = 0;
