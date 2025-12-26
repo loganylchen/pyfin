@@ -847,7 +847,8 @@ py_run_eventalign(PyObject *self, PyObject *args, PyObject *kwds)
                 int32_t n_event_alignment = postalign(event_alignment, base_to_event_map,
                                                       &events_per_base, ref_sequences[j],
                                                       n_kmers, event_align_pairs,
-                                                      n_aligned_pairs, kmer_size);
+                                                      n_aligned_pairs, kmer_size,
+                                                      &events[i], model, &scalings[i]);
 
                 // Create full results list
                 PyObject *full_list = PyList_New(n_event_alignment);
@@ -872,6 +873,8 @@ py_run_eventalign(PyObject *self, PyObject *args, PyObject *kwds)
                                                  PyUnicode_FromString(event_alignment[k].model_kmer));
                             PyDict_SetItemString(ea_dict, "hmm_state",
                                                  PyUnicode_FromStringAndSize(&event_alignment[k].hmm_state, 1));
+                            PyDict_SetItemString(ea_dict, "log_prob",
+                                                 PyFloat_FromDouble(event_alignment[k].log_prob));
 
                             PyList_SetItem(full_list, k, ea_dict);
                         }
@@ -1212,7 +1215,7 @@ static PyMethodDef eventalign_methods[] = {
      "Returns:\n"
      "    dict with keys:\n"
      "        - full: pair-wise event alignment results [read][ref] = list of dicts\n"
-     "                Each dict has: ref_kmer, ref_position, event_idx, rc, model_kmer, hmm_state\n"
+     "                Each dict has: ref_kmer, ref_position, event_idx, rc, model_kmer, hmm_state, log_prob\n"
      "        - mapping: pair-wise base-to-event mapping [read][ref] = dict\n"
      "                  Each dict has: start (list), stop (list), events_per_base (float)\n"
      "        - scalings: list of scaling dicts (one per read)\n"

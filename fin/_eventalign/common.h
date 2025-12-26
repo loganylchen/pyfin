@@ -180,6 +180,9 @@ typedef struct
     // hmm data
     char model_kmer[MAX_KMER_SIZE + 1];
     char hmm_state;
+
+    // alignment quality
+    float log_prob;  // Log probability of the alignment
 } event_alignment_t;
 
 /* from nanopolish */
@@ -424,7 +427,8 @@ int32_t align(AlignedPair* out_2, const char* sequence, int32_t sequence_len,
 
 int32_t postalign(event_alignment_t* alignment, index_pair_t* base_to_event_map,
                   double* events_per_base, const char* sequence, int32_t n_kmers,
-                  const AlignedPair* event_alignment, int32_t n_events, uint32_t kmer_size);
+                  const AlignedPair* event_alignment, int32_t n_events, uint32_t kmer_size,
+                  const event_table* events, const model_t* models, const scalings_t* scaling);
 
 /* initialise a data batch */
 db_t *init_db(int32_t batch_size);

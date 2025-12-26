@@ -464,7 +464,8 @@ extern "C"
 
     int32_t postalign(event_alignment_t *alignment, index_pair_t *base_to_event_map,
                       double *events_per_base, const char *sequence, int32_t n_kmers,
-                      const AlignedPair *event_alignment, int32_t n_events, uint32_t kmer_size)
+                      const AlignedPair *event_alignment, int32_t n_events, uint32_t kmer_size,
+                      const event_table *events, const model_t *models, const scalings_t *scaling)
     {
         // create base-to-event map
         int32_t i = 0;
@@ -529,6 +530,10 @@ extern "C"
                 ea.rc = false;
                 kmer_cpy(ea.model_kmer, &sequence[ki], kmer_size);
                 ea.hmm_state = prev_kmer_rank != kmer_rank ? 'M' : 'E';
+
+                // Compute log probability for this alignment
+                ea.log_prob = log_probability_match_r9(*scaling, models, *events, event_idx,
+                                                          kmer_rank, 0, 4000.0f);
 
                 if (alignment_index > n_events)
                 {

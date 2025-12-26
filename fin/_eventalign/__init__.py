@@ -304,6 +304,7 @@ def run_eventalign(
                     - rc: reverse complement flag (bool)
                     - model_kmer: model k-mer string
                     - hmm_state: HMM state character
+                    - log_prob: log probability of the alignment (float, higher is better)
             - mapping: pair-wise base-to-event mapping [read][ref] = dict
                 Each dict has:
                     - start: list of start event indices for each base

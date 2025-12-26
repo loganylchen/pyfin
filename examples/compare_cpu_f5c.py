@@ -456,6 +456,25 @@ def evaluate_alignment_quality(
         f5c_log_probs = [a.get('log_prob', -float('inf')) for a in f5c_alignments]
         metrics['f5c']['mean_log_prob'] = np.mean(f5c_log_probs)
         metrics['f5c']['min_log_prob'] = min(f5c_log_probs)
+        metrics['f5c']['max_log_prob'] = max(f5c_log_probs)
+
+    # CPU log probabilities from alignment results
+    if cpu_alignments and 'log_prob' in cpu_alignments[0]:
+        cpu_log_probs = [a.get('log_prob', -float('inf')) for a in cpu_alignments]
+        metrics['cpu']['mean_log_prob'] = np.mean(cpu_log_probs)
+        metrics['cpu']['min_log_prob'] = min(cpu_log_probs)
+        metrics['cpu']['max_log_prob'] = max(cpu_log_probs)
+
+        # Compare log probabilities between CPU and F5C
+        if 'mean_log_prob' in metrics['f5c']:
+            if metrics['cpu']['mean_log_prob'] > metrics['f5c']['mean_log_prob']:
+                metrics['winner']['log_prob'] = 'CPU'
+                metrics['winner']['log_prob_margin'] = metrics['cpu']['mean_log_prob'] - metrics['f5c']['mean_log_prob']
+            elif metrics['f5c']['mean_log_prob'] > metrics['cpu']['mean_log_prob']:
+                metrics['winner']['log_prob'] = 'F5C'
+                metrics['winner']['log_prob_margin'] = metrics['f5c']['mean_log_prob'] - metrics['cpu']['mean_log_prob']
+            else:
+                metrics['winner']['log_prob'] = 'TIE'
 
     # CPU doesn't output log_prob directly, so we compare event quality
     # Lower event stdv typically means cleaner events
@@ -544,11 +563,23 @@ def print_evaluation_report(metrics: dict):
     if 'kmer_consistency' in metrics['f5c']:
         print(f"  F5C:     {metrics['f5c']['kmer_consistency']:.1f}% consistent")
 
-    print("\n6. LOG PROBABILITIES (F5C only)")
+    print("\n6. LOG PROBABILITIES")
     print("-" * 70)
+    if 'mean_log_prob' in metrics['cpu']:
+        print(f"  CPU:     mean = {metrics['cpu']['mean_log_prob']:.4f}, "
+              f"min = {metrics['cpu']['min_log_prob']:.4f}, "
+              f"max = {metrics['cpu']['max_log_prob']:.4f}")
     if 'mean_log_prob' in metrics['f5c']:
         print(f"  F5C:     mean = {metrics['f5c']['mean_log_prob']:.4f}, "
-              f"min = {metrics['f5c']['min_log_prob']:.4f}")
+              f"min = {metrics['f5c']['min_log_prob']:.4f}, "
+              f"max = {metrics['f5c']['max_log_prob']:.4f}")
+    if 'log_prob' in metrics['winner']:
+        winner = metrics['winner'].get('log_prob', 'N/A')
+        if winner != 'TIE':
+            margin = metrics['winner'].get('log_prob_margin', 0)
+            print(f"  Winner:  {winner} (by {margin:.4f})")
+        else:
+            print(f"  Winner:  TIE")
         print("  (Higher log probability indicates better alignment quality)")
 
     # Overall verdict
