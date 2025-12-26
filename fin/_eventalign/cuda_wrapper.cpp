@@ -183,6 +183,8 @@ py_run_eventalign_cuda(PyObject *self, PyObject *args, PyObject *kwds)
     PyObject *summary_dict = NULL;
     PyObject *result = NULL;
     int success = 1;
+    PyObject ***full_results = NULL;
+    PyObject ***mapping_results = NULL;
 
     // Get batch size and number of references
     Py_ssize_t batch_size = PyList_Size(read_ids_list);
@@ -365,8 +367,8 @@ py_run_eventalign_cuda(PyObject *self, PyObject *args, PyObject *kwds)
     // ============================================================================
 
     // Output structure: results[read_idx][ref_idx] = list of event_alignment_t
-    PyObject ***full_results = (PyObject ***)malloc(sizeof(PyObject **) * batch_size);
-    PyObject ***mapping_results = (PyObject ***)malloc(sizeof(PyObject **) * batch_size);
+    full_results = (PyObject ***)malloc(sizeof(PyObject **) * batch_size);
+    mapping_results = (PyObject ***)malloc(sizeof(PyObject **) * batch_size);
 
     if (!full_results || !mapping_results)
     {
