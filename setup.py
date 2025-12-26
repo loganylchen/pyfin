@@ -198,7 +198,7 @@ class MultiExt(build_ext):
             "-std=c++14",
             "-O3",
             "-DCUDA_ENABLED",  # Enable CUDA code paths in eventalign.c
-            "--generate-code=arch=compute_80,code=sm_80",  # Ampere
+            "--generate-code=arch=compute_86,code=sm_86",  # Ada (8.6)
         ]
 
         ext.extra_link_args = [
@@ -234,7 +234,7 @@ class MultiExt(build_ext):
             "-std=c++14",
             "-O3",
             "-DHAVE_CUDA=1",
-            "--generate-code=arch=compute_80,code=sm_80",  # Ampere
+            "--generate-code=arch=compute_86,code=sm_86",  # Ada (8.6)
         ]
 
         ext.extra_link_args = [
@@ -272,7 +272,7 @@ class MultiExt(build_ext):
             "-fPIC",
             "-std=c++11",
             "-O3",
-            "--generate-code=arch=compute_80,code=sm_80",  # Ampere architecture
+            "--generate-code=arch=compute_86,code=sm_86",  # Ada (8.6) architecture
         ]
 
         ext.extra_link_args = [
