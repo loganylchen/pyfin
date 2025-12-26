@@ -33,8 +33,10 @@
     }
 
 // Block sizes for CUDA kernels
+// Maximum threads per block is 1024 for most GPUs
+// We use (x=32, y=32) = 1024 threads max
 #define BLOCK_LEN_READS 32
-#define BLOCK_LEN_BANDWIDTH 128
+#define BLOCK_LEN_BANDWIDTH 32
 
 /************************* GPU Memory Allocation *************************/
 
@@ -264,16 +266,17 @@ int align_cuda(cuda_data_t* cuda_data,
 
     // Reverse events for RNA (RNA is sequenced 3'->5' but alignment expects 5'->3')
     dim3 grid_rev((n_reads + BLOCK_LEN_READS - 1) / BLOCK_LEN_READS);
-    dim3 block_rev(1, BLOCK_LEN_READS);
+    dim3 block_rev(BLOCK_LEN_READS);
     reverse_events_kernel<<<grid_rev, block_rev>>>(cuda_data->event_table, cuda_data->n_events,
                                                    cuda_data->event_ptr, n_reads);
     cudaDeviceSynchronize();
     CUDA_CHK();
 
     // Pre-alignment kernel: k-mer rank precomputation and band initialization
-    assert(BLOCK_LEN_BANDWIDTH >= ALN_BANDWIDTH);
-    dim3 grid_pre(1, (n_reads + BLOCK_LEN_READS - 1) / BLOCK_LEN_READS);
-    dim3 block_pre(BLOCK_LEN_BANDWIDTH, BLOCK_LEN_READS);
+    // Process each read with 1D block, multiple blocks for bandwidth if needed
+    int block_size_bw = ALN_BANDWIDTH;  // One thread per bandwidth element
+    dim3 grid_pre(n_reads);
+    dim3 block_pre(block_size_bw);
     align_kernel_pre_2d<<<grid_pre, block_pre>>>(cuda_data->read,
         cuda_data->read_len, cuda_data->read_ptr,
         cuda_data->n_events, cuda_data->event_ptr, cuda_data->model, kmer_size, n_reads,
@@ -282,8 +285,8 @@ int align_cuda(cuda_data_t* cuda_data,
     CUDA_CHK();
 
     // Core alignment kernel: adaptive banded event alignment
-    dim3 grid_core(1, (n_reads + BLOCK_LEN_READS - 1) / BLOCK_LEN_READS);
-    dim3 block_core(BLOCK_LEN_BANDWIDTH, BLOCK_LEN_READS);
+    dim3 grid_core(n_reads);
+    dim3 block_core(block_size_bw);
     align_kernel_core_2d_shm<<<grid_core, block_core>>>(cuda_data->read_len, cuda_data->read_ptr,
         cuda_data->event_table, cuda_data->n_events, cuda_data->event_ptr,
         cuda_data->scalings, n_reads, cuda_data->model_kmer_cache, kmer_size,

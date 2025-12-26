@@ -116,7 +116,7 @@ __global__ void reverse_events_kernel(event_t* event_table,
 {
     // RNA is sequenced 3'->5' but alignment expects 5'->3' order
     // This kernel reverses events in-place for all reads (RNA-only workflow)
-    int i = blockIdx.x * blockDim.x + threadIdx.y;  // One thread block per read
+    int i = blockIdx.x * blockDim.x + threadIdx.x;  // One thread per read
 
     if (i < n_bam_rec) {
         event_t* events = &event_table[event_ptr[i]];
@@ -139,8 +139,9 @@ __global__ void align_kernel_pre_2d(char* read,
     int32_t n_bam_rec, model_t* model_kmer_caches, float *bands1, uint8_t *trace1,
     EventKmerPair* band_lower_left1)
 {
-    int i = blockDim.y * blockIdx.y + threadIdx.y;
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    // 1D block indexing: blockIdx.x = read index, threadIdx.x = bandwidth offset
+    int i = blockIdx.x;
+    int tid = threadIdx.x;
 
     if (i < n_bam_rec) {
         char* sequence = &read[read_ptr[i]];
@@ -202,8 +203,9 @@ __global__ void align_kernel_core_2d_shm(int32_t* read_len, ptr_t* read_ptr,
     scalings_t* scalings, int32_t n_bam_rec, model_t* model_kmer_caches, uint32_t kmer_size,
     float *band, uint8_t *traces, EventKmerPair* band_lower_lefts)
 {
-    int i = blockDim.y * blockIdx.y + threadIdx.y;
-    int offset = blockIdx.x * blockDim.x + threadIdx.x;
+    // 1D block indexing: blockIdx.x = read index, threadIdx.x = bandwidth offset
+    int i = blockIdx.x;
+    int offset = threadIdx.x;
 
     __shared__ float  bands_shm[3][ALN_BANDWIDTH];
     __shared__ EventKmerPair  band_lower_left_shm[3];
