@@ -80,12 +80,15 @@ def load_f5c_eventalign_results(eventalign_path: str) -> dict:
     Load f5c eventalign results from gzipped TSV file.
 
     The f5c eventalign output format (tsv):
-    chromosome    position    reference_kmer    read_index    strand    event_idx    event_mean    event_stdv    model_mean    model_stdv    scaled_mean    scaled_stdv    start_idx    end_idx    signal_samples
+    chromosome    position    reference_kmer    read_index    strand    event_idx
+    event_mean    event_stdv    model_kmer    model_mean    model_stdv
+    scaled_mean    scaled_stdv    start_idx    end_idx    signal_samples
 
-    Note: The actual f5c TSV has different column ordering than documented.
-    Format: chromosome, position, reference_kmer, read_index, strand, event_idx,
-            event_mean, event_stdv, model_mean, model_stdv, scaled_mean, scaled_stdv,
-            start_idx, end_idx, [signal_samples...]
+    Note: The actual f5c TSV has 16+ columns.
+    Format: chromosome(0), position(1), reference_kmer(2), read_index(3), strand(4),
+            event_idx(5), event_mean(6), event_stdv(7), model_kmer(8),
+            model_mean(9), model_stdv(10), scaled_mean(11), scaled_stdv(12),
+            start_idx(13), end_idx(14), signal_samples(15+)
     """
     alignments = []
 
@@ -99,25 +102,23 @@ def load_f5c_eventalign_results(eventalign_path: str) -> dict:
                 continue  # Skip header
 
             parts = line.strip().split("\t")
-            if len(parts) < 14:
+            if len(parts) < 15:
                 continue
 
             # Parse based on actual f5c TSV format
-            # chromosome(0), position(1), reference_kmer(2), read_index(3), strand(4),
-            # event_idx(5), event_mean(6), event_stdv(7), model_mean(8), model_stdv(9),
-            # scaled_mean(10), scaled_stdv(11), start_idx(12), end_idx(13)
             alignment = {
                 "ref_position": int(parts[1]),
                 "ref_kmer": parts[2],
                 "event_idx": int(parts[5]),
                 "event_mean": float(parts[6]),
                 "event_stdv": float(parts[7]),
-                "model_mean": float(parts[8]),
-                "model_stdv": float(parts[9]),
-                "scaled_mean": float(parts[10]),
-                "scaled_stdv": float(parts[11]),
-                "start": int(parts[12]),
-                "end": int(parts[13]),
+                "model_kmer": parts[8],  # String, not float
+                "model_mean": float(parts[9]),
+                "model_stdv": float(parts[10]),
+                "scaled_mean": float(parts[11]),
+                "scaled_stdv": float(parts[12]),
+                "start": int(parts[13]),
+                "end": int(parts[14]),
             }
             alignments.append(alignment)
 
