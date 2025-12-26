@@ -175,6 +175,15 @@ py_run_eventalign_cuda(PyObject *self, PyObject *args, PyObject *kwds)
         kmer_size = g_kmer_size_004;
     }
 
+    // Declare output variables at the beginning to avoid goto-crosses-init issues
+    PyObject *scalings_list = NULL;
+    PyObject *events_list = NULL;
+    PyObject *full_results_list = NULL;
+    PyObject *mapping_results_list = NULL;
+    PyObject *summary_dict = NULL;
+    PyObject *result = NULL;
+    int success = 1;
+
     // Get batch size and number of references
     Py_ssize_t batch_size = PyList_Size(read_ids_list);
     Py_ssize_t n_ref = PyList_Size(ref_seqs_list);
@@ -591,14 +600,6 @@ cleanup_full_results:
     // ============================================================================
     // Step 4: Build output dictionary
     // =============================================================================
-
-    PyObject *scalings_list = NULL;
-    PyObject *events_list = NULL;
-    PyObject *full_results_list = NULL;
-    PyObject *mapping_results_list = NULL;
-    PyObject *summary_dict = NULL;
-    PyObject *result = NULL;
-    int success = 1;
 
     // Create scalings list
     scalings_list = PyList_New(batch_size);
