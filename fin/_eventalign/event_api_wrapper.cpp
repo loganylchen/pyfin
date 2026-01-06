@@ -849,6 +849,54 @@ py_run_eventalign(PyObject *self, PyObject *args, PyObject *kwds)
                                                       n_kmers, event_align_pairs,
                                                       n_aligned_pairs, kmer_size);
 
+                // Recalibrate model to get refined scaling parameters (matching f5c behavior)
+                bool calibrated = recalibrate_model(model, kmer_size, events[i], &scalings[i],
+                                                    event_alignment, n_event_alignment,
+                                                    true, 200); // scale_var=true, min_events=200
+
+                // QC calibration - if failed or variance too high, mark as failed
+                if (!calibrated || scalings[i].var > MIN_CALIBRATION_VAR)
+                {
+                    // Alignment failed calibration QC
+                    full_results[i][j] = PyList_New(0);
+                    mapping_results[i][j] = PyDict_New();
+                    if (mapping_results[i][j])
+                    {
+                        PyDict_SetItemString(mapping_results[i][j], "n_aligned_pairs",
+                                             PyLong_FromLong(n_aligned_pairs));
+                        PyDict_SetItemString(mapping_results[i][j], "n_event_alignment",
+                                             PyLong_FromLong(n_event_alignment));
+                        PyDict_SetItemString(mapping_results[i][j], "status",
+                                             PyUnicode_FromString("failed_calibration"));
+                        PyDict_SetItemString(mapping_results[i][j], "calibrated",
+                                             PyBool_FromLong(calibrated));
+                        PyDict_SetItemString(mapping_results[i][j], "var",
+                                             PyFloat_FromDouble(scalings[i].var));
+                    }
+                    free(event_align_pairs);
+                    free(base_to_event_map);
+                    free(event_alignment);
+                    continue;
+                }
+
+                // Filter poor quality reads that have too many "stays"
+                if (events_per_base > 5.0)
+                {
+                    full_results[i][j] = PyList_New(0);
+                    mapping_results[i][j] = PyDict_New();
+                    if (mapping_results[i][j])
+                    {
+                        PyDict_SetItemString(mapping_results[i][j], "status",
+                                             PyUnicode_FromString("failed_quality_check"));
+                        PyDict_SetItemString(mapping_results[i][j], "events_per_base",
+                                             PyFloat_FromDouble(events_per_base));
+                    }
+                    free(event_align_pairs);
+                    free(base_to_event_map);
+                    free(event_alignment);
+                    continue;
+                }
+
                 // Create full results list
                 PyObject *full_list = PyList_New(n_event_alignment);
                 PyObject *mapping_dict = PyDict_New();

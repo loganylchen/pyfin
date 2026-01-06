@@ -141,12 +141,12 @@ extern "C"
         float scaledLevel = unscaledLevel;
 
         float gp_mean = scaling.scale * models[kmer_rank].level_mean + scaling.shift;
-        float gp_stdv = models[kmer_rank].level_stdv;
+        float gp_stdv = models[kmer_rank].level_stdv * scaling.var;
 
 #ifdef CACHED_LOG
-        float gp_log_stdv = models[kmer_rank].level_log_stdv;
+        float gp_log_stdv = models[kmer_rank].level_log_stdv + scaling.log_var;
 #else
-        float gp_log_stdv = log(models[kmer_rank].level_stdv);
+        float gp_log_stdv = log(models[kmer_rank].level_stdv) + log(scaling.var);
 #endif
 
         float lp = log_normal_pdf(scaledLevel, gp_mean, gp_stdv, gp_log_stdv);
@@ -187,7 +187,7 @@ extern "C"
         const uint8_t FROM_L = 2;
 
         // qc
-        double min_average_log_emission = -20.0;
+        double min_average_log_emission = -5.0;
         int max_gap_threshold = 50;
 
         // banding
@@ -541,6 +541,100 @@ extern "C"
         }
 
         return alignment_index;
+    }
+
+    // recalculate shift, scale, var from an alignment and the read
+    // returns true if the recalibration was performed
+    bool recalibrate_model(model_t *pore_model, uint32_t kmer_size, event_table et,
+                           scalings_t *scallings,
+                           const event_alignment_t *alignment_output,
+                           int32_t num_alignments, bool scale_var, int32_t minNumEventsToRescale)
+    {
+        // extract necessary vectors from the read and the pore model
+        int32_t num_M_state = 0;
+        for (int32_t ei = 0; ei < num_alignments; ++ei)
+        {
+            event_alignment_t ea = alignment_output[ei];
+            if (ea.hmm_state == 'M')
+            {
+                num_M_state++;
+            }
+        }
+
+        bool recalibrated = false;
+        if (num_M_state >= minNumEventsToRescale)
+        {
+            // Assemble linear system corresponding to weighted least squares problem
+            double A00 = 0, A01 = 0, A10 = 0, A11 = 0;
+            double b0 = 0, b1 = 0;
+            double x0 = 0, x1 = 0;
+
+            for (int32_t ei = 0; ei < num_alignments; ++ei)
+            {
+                event_alignment_t ea = alignment_output[ei];
+                if (ea.hmm_state == 'M')
+                {
+                    uint32_t rank = get_kmer_rank(ea.ref_kmer, kmer_size);
+
+                    double raw_event = et.event[ea.event_idx].mean;
+                    double level_mean = pore_model[rank].level_mean;
+                    double level_stdv = pore_model[rank].level_stdv;
+
+                    double inv_var = 1. / (level_stdv * level_stdv);
+                    double mu = level_mean;
+                    double e = raw_event;
+
+                    A00 += inv_var;
+                    A01 += mu * inv_var;
+                    A11 += mu * mu * inv_var;
+
+                    b0 += e * inv_var;
+                    b1 += mu * e * inv_var;
+                }
+            }
+
+            A10 = A01;
+
+            // perform the linear solve
+            double div = A00 * A11 - A01 * A10;
+            x0 = -(A01 * b1 - A11 * b0) / div;
+            x1 = (A00 * b1 - A10 * b0) / div;
+
+            double shift = x0;
+            double scale = x1;
+            double var = 1.0;
+
+            if (scale_var)
+            {
+                var = 0.;
+                for (int32_t ei = 0; ei < num_alignments; ++ei)
+                {
+                    event_alignment_t ea = alignment_output[ei];
+                    if (ea.hmm_state == 'M')
+                    {
+                        uint32_t rank = get_kmer_rank(ea.ref_kmer, kmer_size);
+                        double raw_event = et.event[ea.event_idx].mean;
+                        double level_mean = pore_model[rank].level_mean;
+                        double level_stdv = pore_model[rank].level_stdv;
+                        double yi = (raw_event - shift - scale * level_mean);
+                        var += yi * yi / (level_stdv * level_stdv);
+                    }
+                }
+                var /= num_M_state;
+                var = sqrt(var);
+            }
+
+            scallings->shift = (float)shift;
+            scallings->scale = (float)scale;
+            scallings->var = (float)var;
+#ifdef CACHED_LOG
+            scallings->log_var = log(var);
+#endif
+
+            recalibrated = true;
+        }
+
+        return recalibrated;
     }
 
 } // extern "C"

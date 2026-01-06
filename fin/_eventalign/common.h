@@ -404,31 +404,37 @@ typedef struct
  ******************************************/
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
-/* models */
-uint32_t set_model(model_t *model, uint32_t model_id);
+    /* models */
+    uint32_t set_model(model_t *model, uint32_t model_id);
 
-/* events */
-event_table getevents(size_t nsample, float *rawptr);
+    /* events */
+    event_table getevents(size_t nsample, float *rawptr);
 
-/* alignment functions */
-scalings_t estimate_scalings_using_mom(const char* sequence, int32_t sequence_len,
-                                        const model_t* pore_model, uint32_t kmer_size,
-                                        const event_table& et);
+    /* alignment functions */
+    scalings_t estimate_scalings_using_mom(const char *sequence, int32_t sequence_len,
+                                           const model_t *pore_model, uint32_t kmer_size,
+                                           const event_table &et);
 
-int32_t align(AlignedPair* out_2, const char* sequence, int32_t sequence_len,
-              const event_table& events, const model_t* models, uint32_t kmer_size,
-              scalings_t scaling, float sample_rate);
+    int32_t align(AlignedPair *out_2, const char *sequence, int32_t sequence_len,
+                  const event_table &events, const model_t *models, uint32_t kmer_size,
+                  scalings_t scaling, float sample_rate);
 
-int32_t postalign(event_alignment_t* alignment, index_pair_t* base_to_event_map,
-                  double* events_per_base, const char* sequence, int32_t n_kmers,
-                  const AlignedPair* event_alignment, int32_t n_events, uint32_t kmer_size);
+    int32_t postalign(event_alignment_t *alignment, index_pair_t *base_to_event_map,
+                      double *events_per_base, const char *sequence, int32_t n_kmers,
+                      const AlignedPair *event_alignment, int32_t n_events, uint32_t kmer_size);
 
-/* initialise a data batch */
-db_t *init_db(int32_t batch_size);
-void free_db(db_t *db);
+    /* recalibration */
+    bool recalibrate_model(model_t *pore_model, uint32_t kmer_size, event_table et,
+                           scalings_t *scallings, const event_alignment_t *alignment_output,
+                           int32_t num_alignments, bool scale_var, int32_t minNumEventsToRescale);
+
+    /* initialise a data batch */
+    db_t *init_db(int32_t batch_size);
+    void free_db(db_t *db);
 
 #ifdef __cplusplus
 }
