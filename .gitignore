@@ -127,7 +127,7 @@ cython_debug/
 *.fast5
 # *.pod5
 *.slow5
-*.blow5
+# *.blow5
 *.h5
 *.hdf5
 
@@ -193,7 +193,7 @@ logs/
 
 .claude
 
-
+tests/testdata
 
 fin/_eventalign/_tmp
 fin/_eventalign/tmp
