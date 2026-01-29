@@ -1,0 +1,25 @@
+Starting test...
+F5C exists: True
+POD5 exists: True
+Header: contig	position	reference_kmer	read_name	strand	ev...
+Loaded 2 reads, 10001 events
+
+Read 62b4da9f-c12f-4898-9a65-87b673222d65:
+  Signal length: 130972
+  f5c events: 5287
+[fin._eventalign] Event detection and model API loaded successfully
+[fin._eventalign] CUDA-accelerated event alignment is NOT available
+💻 DTW: CPU implementation (CUDA not available)
+2026-01-29 13:43:54 | INFO     | __init__.py:45 | Package initialized - version 0.1.0
+  PyFIN events: 5932
+  Ratio (PyFIN/f5c): 1.122
+  f5c signal range: [15082, 130809]
+  PyFIN signal range: [0, 130972.0]
+
+  Matched events: 5287/5287 (100.0%)
+  Start diff: 0.0 ± 0.0 samples
+  End diff: 0.0 ± 0.0 samples
+  Mean diff: 9.57 ± 0.31 pA
+  Mean correlation: 1.0000
+
+Done!

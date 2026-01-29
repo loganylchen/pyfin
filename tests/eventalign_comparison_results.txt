@@ -1,0 +1,33 @@
+======================================================================
+EVENTALIGN COMPARISON: PyFIN run_eventalign vs f5c
+======================================================================
+
+[1] Loading f5c eventalign results...
+  Loaded 5 reads with 20,699 events from f5c
+    749c320d-d62...: 4,714 events -> SIRV101
+    62b4da9f-c12...: 5,919 events -> SIRV101
+    aae5e24f-423...: 4,066 events -> SIRV101
+    748fc61e-cff...: 3,011 events -> SIRV101
+    735315dd-b9e...: 2,989 events -> SIRV101
+
+[2] Loading reference sequences...
+  Loaded 69 reference sequences
+
+[3] Loading read sequences from BAM...
+  Loaded 5 read sequences
+
+[4] Loading raw signals from POD5...
+  Loaded 5 signals
+    62b4da9f-c12...: 130,972 samples, 3012.0 Hz
+    aae5e24f-423...: 97,444 samples, 3012.0 Hz
+    748fc61e-cff...: 66,745 samples, 3012.0 Hz
+
+[5] Preparing inputs for PyFIN eventalign...
+  Common reads: 5
+  Prepared 5 reads for eventalign
+
+[6] Running PyFIN eventalign...
+[fin._eventalign] Event detection and model API loaded successfully
+[fin._eventalign] CUDA-accelerated event alignment is NOT available
+💻 DTW: CPU implementation (CUDA not available)
+2026-01-29 14:10:14 | INFO     | __init__.py:45 | Package initialized - version 0.1.0

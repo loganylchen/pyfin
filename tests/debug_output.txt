@@ -1,0 +1,10 @@
+============================================================
+DEBUG: run_eventalign segfault investigation
+============================================================
+
+[1] Loading ONE read from f5c...
+Traceback (most recent call last):
+  File "/home/logan/Projects/pyfin/tests/debug_eventalign_segfault.py", line 25, in <module>
+    with open(F5C_TSV, "r") as f:
+         ~~~~^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/mnt/raid/data/squigualiser/SIRV_DRS/eventalign/SIRV_DRS_RNA004.tsv'
