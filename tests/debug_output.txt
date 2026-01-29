@@ -3,8 +3,55 @@ DEBUG: run_eventalign segfault investigation
 ============================================================
 
 [1] Loading ONE read from f5c...
-Traceback (most recent call last):
-  File "/home/logan/Projects/pyfin/tests/debug_eventalign_segfault.py", line 25, in <module>
-    with open(F5C_TSV, "r") as f:
-         ~~~~^^^^^^^^^^^^^^
-FileNotFoundError: [Errno 2] No such file or directory: '/mnt/raid/data/squigualiser/SIRV_DRS/eventalign/SIRV_DRS_RNA004.tsv'
+  Test read: 749c320d-d623-4bac-9c3d-f6e6cad62f2a
+  Test reference: SIRV101
+
+[2] Loading reference sequence...
+  Reference SIRV101: 1561 bases
+
+[3] Loading read sequence from BAM...
+  Read sequence: 1606 bases
+
+[4] Loading signal from POD5...
+  Signal: 120058 samples
+  Sample rate: 3012.0 Hz
+
+[5] Preparing inputs with type checks...
+  read_ids type: <class 'list'>, element type: <class 'str'>
+  read_seqs type: <class 'list'>, element type: <class 'str'>
+  ref_seqs type: <class 'list'>, element type: <class 'str'>
+  ref_names type: <class 'list'>, element type: <class 'str'>
+  ref_lens type: <class 'list'>, element type: <class 'int'>
+  signals type: <class 'list'>, element type: <class 'numpy.ndarray'>, dtype: float32
+  sample_rates type: <class 'list'>, element type: <class 'float'>
+
+  Checking for None/empty values:
+    read_id: True, len=36
+    read_seq: True, len=1606
+    ref_seq: True, len=1561
+    ref_name: True, len=7
+    ref_len: 1561 (expected: 1561)
+    signal: True, len=120058
+    sample_rate: 3012.0
+
+[6] Testing run_eventalign...
+[fin._eventalign] Event detection and model API loaded successfully
+[fin._eventalign] CUDA-accelerated event alignment is NOT available
+💻 DTW: CPU implementation (CUDA not available)
+2026-01-29 14:16:57 | INFO     | __init__.py:45 | Package initialized - version 0.1.0
+  Importing successful, calling run_eventalign...
+[align] Alignment QC failed:
+  avg_log_emission: -16.6569 (threshold: -5.0000) FAIL
+  spanned: true (first_ref_pos: 0, last_ref_pos: 1552, n_kmers-1: 1552) OK
+  max_gap: 19 (threshold: 50) OK
+  ✓ run_eventalign completed!
+
+  Result keys: ['full', 'mapping', 'scalings', 'events', 'summary']
+  Summary: {'num_reads': 1, 'num_refs': 1}
+
+  Events detected: 5195 events
+  Alignment entries: 0
+
+============================================================
+DEBUG COMPLETE - NO SEGFAULT!
+============================================================
