@@ -1,0 +1,32 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.2, pytest-9.0.2, pluggy-1.6.0 -- /home/logan/Projects/pyfin/.venv/bin/python3.14
+cachedir: .pytest_cache
+rootdir: /home/logan/Projects/pyfin
+configfile: pyproject.toml
+collecting ... collected 23 items
+
+tests/unit/test_log_config.py::TestSetupLogger::test_setup_logger_returns_logger_instance PASSED [  4%]
+tests/unit/test_log_config.py::TestSetupLogger::test_setup_logger_sets_correct_level PASSED [  8%]
+tests/unit/test_log_config.py::TestSetupLogger::test_setup_logger_level_case_insensitive PASSED [ 13%]
+tests/unit/test_log_config.py::TestSetupLogger::test_setup_logger_console_handler PASSED [ 17%]
+tests/unit/test_log_config.py::TestSetupLogger::test_setup_logger_no_console_handler PASSED [ 21%]
+tests/unit/test_log_config.py::TestSetupLogger::test_setup_logger_file_handler PASSED [ 26%]
+tests/unit/test_log_config.py::TestSetupLogger::test_setup_logger_writes_to_file PASSED [ 30%]
+tests/unit/test_log_config.py::TestSetupLogger::test_setup_logger_creates_log_directory PASSED [ 34%]
+tests/unit/test_log_config.py::TestSetupLogger::test_setup_logger_append_mode PASSED [ 39%]
+tests/unit/test_log_config.py::TestSetupLogger::test_setup_logger_overwrite_mode PASSED [ 43%]
+tests/unit/test_log_config.py::TestSetupLogger::test_setup_logger_custom_format PASSED [ 47%]
+tests/unit/test_log_config.py::TestSetupLogger::test_setup_logger_clears_existing_handlers PASSED [ 52%]
+tests/unit/test_log_config.py::TestGetPackageLogger::test_get_package_logger_returns_logger PASSED [ 56%]
+tests/unit/test_log_config.py::TestGetPackageLogger::test_get_package_logger_creates_log_file PASSED [ 60%]
+tests/unit/test_log_config.py::TestGetPackageLogger::test_get_package_logger_accepts_custom_level PASSED [ 65%]
+tests/unit/test_log_config.py::TestGetPackageLogger::test_get_package_logger_accepts_custom_log_file PASSED [ 69%]
+tests/unit/test_log_config.py::TestListLogFiles::test_list_log_files_empty_directory PASSED [ 73%]
+tests/unit/test_log_config.py::TestListLogFiles::test_list_log_files_nonexistent_directory PASSED [ 78%]
+tests/unit/test_log_config.py::TestListLogFiles::test_list_log_files_finds_log_files PASSED [ 82%]
+tests/unit/test_log_config.py::TestListLogFiles::test_list_log_files_returns_sorted_list PASSED [ 86%]
+tests/unit/test_log_config.py::TestLoggerFormat::test_log_message_contains_timestamp PASSED [ 91%]
+tests/unit/test_log_config.py::TestLoggerFormat::test_log_message_contains_level PASSED [ 95%]
+tests/unit/test_log_config.py::TestLoggerFormat::test_log_message_contains_filename PASSED [100%]
+
+============================== 23 passed in 0.18s ==============================

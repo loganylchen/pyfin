@@ -1,0 +1,9 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.2, pytest-9.0.2, pluggy-1.6.0
+rootdir: /home/logan/Projects/pyfin
+configfile: pyproject.toml
+collected 207 items
+
+tests/unit/test_assignments.py ......................                    [ 10%]
+tests/unit/test_dtw.py ..ssssssssssssssssss..ss                          [ 22%]
+tests/unit/test_eventalign.py ........

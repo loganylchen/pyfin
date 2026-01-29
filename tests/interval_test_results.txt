@@ -1,0 +1,47 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.2, pytest-9.0.2, pluggy-1.6.0 -- /home/logan/Projects/pyfin/.venv/bin/python3.14
+cachedir: .pytest_cache
+rootdir: /home/logan/Projects/pyfin
+configfile: pyproject.toml
+collecting ... collected 38 items
+
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_initialization_basic PASSED [  2%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_initialization_with_strand PASSED [  5%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_initialization_with_read_count PASSED [  7%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_initialization_with_id PASSED [ 10%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_default_values PASSED [ 13%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_tuple_property PASSED [ 15%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_region_string_property PASSED [ 18%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_overlaps_true PASSED [ 21%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_overlaps_false_no_overlap PASSED [ 23%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_overlaps_false_different_chrom PASSED [ 26%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_overlaps_adjacent PASSED [ 28%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_overlaps_contained PASSED [ 31%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_merge PASSED [ 34%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_merge_different_strands_raises PASSED [ 36%]
+tests/unit/test_interval_manager.py::TestGenomicInterval::test_interval_merge_preserves_attrs PASSED [ 39%]
+tests/unit/test_interval_manager.py::TestIntervalsToBed::test_intervals_to_bed_empty PASSED [ 42%]
+tests/unit/test_interval_manager.py::TestIntervalsToBed::test_intervals_to_bed_single_interval PASSED [ 44%]
+tests/unit/test_interval_manager.py::TestIntervalsToBed::test_intervals_to_bed_with_strand PASSED [ 47%]
+tests/unit/test_interval_manager.py::TestIntervalsToBed::test_intervals_to_bed_with_read_count PASSED [ 50%]
+tests/unit/test_interval_manager.py::TestIntervalsToBed::test_intervals_to_bed_with_interval_id PASSED [ 52%]
+tests/unit/test_interval_manager.py::TestIntervalsToBed::test_intervals_to_bed_multiple_intervals PASSED [ 55%]
+tests/unit/test_interval_manager.py::TestIntervalsToBed::test_intervals_to_bed_to_file PASSED [ 57%]
+tests/unit/test_interval_manager.py::TestIntervalsToBed::test_intervals_to_bed_to_file_object PASSED [ 60%]
+tests/unit/test_interval_manager.py::TestIntervalsToBed::test_intervals_to_bed_no_strand PASSED [ 63%]
+tests/unit/test_interval_manager.py::TestIsFusionRead::test_is_fusion_read_supplementary PASSED [ 65%]
+tests/unit/test_interval_manager.py::TestIsFusionRead::test_is_fusion_read_not_supplementary PASSED [ 68%]
+tests/unit/test_interval_manager.py::TestIsFusionRead::test_is_fusion_read_long_soft_clip_start PASSED [ 71%]
+tests/unit/test_interval_manager.py::TestIsFusionRead::test_is_fusion_read_long_soft_clip_end PASSED [ 73%]
+tests/unit/test_interval_manager.py::TestIsFusionRead::test_is_fusion_read_short_soft_clip PASSED [ 76%]
+tests/unit/test_interval_manager.py::TestIsFusionRead::test_is_fusion_read_no_cigar PASSED [ 78%]
+tests/unit/test_interval_manager.py::TestIsFusionRead::test_is_fusion_read_empty_cigar PASSED [ 81%]
+tests/unit/test_interval_manager.py::TestExtractStrandFromRead::test_extract_strand_forward PASSED [ 84%]
+tests/unit/test_interval_manager.py::TestExtractStrandFromRead::test_extract_strand_reverse PASSED [ 86%]
+tests/unit/test_interval_manager.py::TestExtractStrandFromRead::test_extract_strand_missing_is_forward PASSED [ 89%]
+tests/unit/test_interval_manager.py::TestExtractThreePrimePos::test_extract_three_prime_forward PASSED [ 92%]
+tests/unit/test_interval_manager.py::TestExtractThreePrimePos::test_extract_three_prime_reverse PASSED [ 94%]
+tests/unit/test_interval_manager.py::TestIntervalManagerIntegration::test_multiple_intervals_to_bed PASSED [ 97%]
+tests/unit/test_interval_manager.py::TestIntervalManagerIntegration::test_find_overlapping_intervals PASSED [100%]
+
+============================== 38 passed in 0.21s ==============================

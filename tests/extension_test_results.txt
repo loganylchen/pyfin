@@ -1,0 +1,41 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.2, pytest-9.0.2, pluggy-1.6.0 -- /home/logan/Projects/pyfin/.venv/bin/python3.14
+cachedir: .pytest_cache
+rootdir: /home/logan/Projects/pyfin
+configfile: pyproject.toml
+collecting ... collected 52 items
+
+tests/unit/test_dtw.py::TestIsAvailable::test_is_available_returns_bool PASSED [  1%]
+tests/unit/test_dtw.py::TestIsAvailable::test_is_available_consistent PASSED [  3%]
+tests/unit/test_dtw.py::TestDtwDistance::test_identical_sequences_zero_distance SKIPPED [  5%]
+tests/unit/test_dtw.py::TestDtwDistance::test_distance_non_negative SKIPPED [  7%]
+tests/unit/test_dtw.py::TestDtwDistance::test_distance_symmetric SKIPPED [  9%]
+tests/unit/test_dtw.py::TestDtwDistance::test_distance_returns_float SKIPPED [ 11%]
+tests/unit/test_dtw.py::TestDtwDistance::test_distance_with_list_input SKIPPED [ 13%]
+tests/unit/test_dtw.py::TestDtwDistance::test_distance_converts_dtype SKIPPED [ 15%]
+tests/unit/test_dtw.py::TestDtwDistance::test_distance_with_open_start SKIPPED [ 17%]
+tests/unit/test_dtw.py::TestDtwDistance::test_distance_with_open_end SKIPPED [ 19%]
+tests/unit/test_dtw.py::TestDtwDistance::test_distance_longer_sequences SKIPPED [ 21%]
+tests/unit/test_dtw.py::TestDtwDistanceValidation::test_empty_sequence_raises SKIPPED [ 23%]
+tests/unit/test_dtw.py::TestDtwDistanceValidation::test_2d_array_raises SKIPPED [ 25%]
+tests/unit/test_dtw.py::TestDtwPairwise::test_pairwise_returns_square_matrix SKIPPED [ 26%]
+tests/unit/test_dtw.py::TestDtwPairwise::test_pairwise_diagonal_near_zero SKIPPED [ 28%]
+tests/unit/test_dtw.py::TestDtwPairwise::test_pairwise_symmetric SKIPPED [ 30%]
+tests/unit/test_dtw.py::TestDtwPairwise::test_pairwise_non_negative SKIPPED [ 32%]
+tests/unit/test_dtw.py::TestDtwPairwise::test_pairwise_with_open_boundaries SKIPPED [ 34%]
+tests/unit/test_dtw.py::TestCleanup::test_cleanup_succeeds SKIPPED (CUDA
+not available)                                                           [ 36%]
+tests/unit/test_dtw.py::TestCleanup::test_cleanup_idempotent SKIPPED     [ 38%]
+tests/unit/test_dtw.py::TestModuleAvailability::test_cuda_available_constant PASSED [ 40%]
+tests/unit/test_dtw.py::TestModuleAvailability::test_functions_exist PASSED [ 42%]
+tests/unit/test_dtw.py::TestDtwIntegration::test_pairwise_matches_individual SKIPPED [ 44%]
+tests/unit/test_dtw.py::TestDtwIntegration::test_typical_nanopore_signal_lengths SKIPPED [ 46%]
+tests/unit/test_eventalign.py::TestModelConstants::test_model_rna002_value PASSED [ 48%]
+tests/unit/test_eventalign.py::TestModelConstants::test_model_rna004_value PASSED [ 50%]
+tests/unit/test_eventalign.py::TestModelConstants::test_max_kmer_size_reasonable PASSED [ 51%]
+tests/unit/test_eventalign.py::TestModelConstants::test_max_num_kmer_value PASSED [ 53%]
+tests/unit/test_eventalign.py::TestGetevents::test_getevents_returns_dict PASSED [ 55%]
+tests/unit/test_eventalign.py::TestGetevents::test_getevents_has_required_keys PASSED [ 57%]
+tests/unit/test_eventalign.py::TestGetevents::test_getevents_n_events_positive PASSED [ 59%]
+tests/unit/test_eventalign.py::TestGetevents::test_getevents_arrays_same_length PASSED [ 61%]
+tests/unit/test_eventalign.py::TestGetevents::test_getevents_starts_increasing 

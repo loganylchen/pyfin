@@ -1,0 +1,31 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.2, pytest-9.0.2, pluggy-1.6.0 -- /home/logan/Projects/pyfin/.venv/bin/python3.14
+cachedir: .pytest_cache
+rootdir: /home/logan/Projects/pyfin
+configfile: pyproject.toml
+collecting ... collected 22 items
+
+tests/unit/test_assignments.py::TestEmWithCoherence::test_returns_correct_types PASSED [  4%]
+tests/unit/test_assignments.py::TestEmWithCoherence::test_responsibility_matrix_shape PASSED [  9%]
+tests/unit/test_assignments.py::TestEmWithCoherence::test_assignments_shape PASSED [ 13%]
+tests/unit/test_assignments.py::TestEmWithCoherence::test_responsibilities_sum_to_one PASSED [ 18%]
+tests/unit/test_assignments.py::TestEmWithCoherence::test_responsibilities_non_negative PASSED [ 22%]
+tests/unit/test_assignments.py::TestEmWithCoherence::test_assignments_valid_range PASSED [ 27%]
+tests/unit/test_assignments.py::TestEmWithCoherence::test_log_likelihoods_non_empty PASSED [ 31%]
+tests/unit/test_assignments.py::TestEmWithCoherenceClustering::test_clear_separation_clustering PASSED [ 36%]
+tests/unit/test_assignments.py::TestEmWithCoherenceClustering::test_beta_zero_ignores_coherence PASSED [ 40%]
+tests/unit/test_assignments.py::TestEmWithCoherenceClustering::test_high_beta_strong_clustering PASSED [ 45%]
+tests/unit/test_assignments.py::TestEmWithCoherenceValidation::test_mismatched_shapes_raises PASSED [ 50%]
+tests/unit/test_assignments.py::TestEmWithCoherenceValidation::test_non_square_read_distance_raises PASSED [ 54%]
+tests/unit/test_assignments.py::TestEmWithCoherenceValidation::test_negative_distances_raises PASSED [ 59%]
+tests/unit/test_assignments.py::TestEmWithCoherenceValidation::test_negative_beta_raises PASSED [ 63%]
+tests/unit/test_assignments.py::TestEmWithCoherenceValidation::test_sigma_below_minimum_raises PASSED [ 68%]
+tests/unit/test_assignments.py::TestEmWithCoherenceConvergence::test_convergence_within_max_iter PASSED [ 72%]
+tests/unit/test_assignments.py::TestEmWithCoherenceConvergence::test_low_tolerance_more_iterations PASSED [ 77%]
+tests/unit/test_assignments.py::TestEmWithCoherenceConvergence::test_log_likelihood_increases PASSED [ 81%]
+tests/unit/test_assignments.py::TestEmWithCoherenceEdgeCases::test_single_read PASSED [ 86%]
+tests/unit/test_assignments.py::TestEmWithCoherenceEdgeCases::test_single_transcript PASSED [ 90%]
+tests/unit/test_assignments.py::TestEmWithCoherenceEdgeCases::test_identical_distances PASSED [ 95%]
+tests/unit/test_assignments.py::TestEmWithCoherenceReproducibility::test_deterministic_output PASSED [100%]
+
+============================== 22 passed in 0.24s ==============================
