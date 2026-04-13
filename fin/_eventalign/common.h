@@ -180,6 +180,9 @@ typedef struct
     // hmm data
     char model_kmer[MAX_KMER_SIZE + 1];
     char hmm_state;
+
+    // alignment quality
+    float log_prob;  // Log probability of the alignment
 } event_alignment_t;
 
 /* from nanopolish */
@@ -425,7 +428,8 @@ extern "C"
 
     int32_t postalign(event_alignment_t *alignment, index_pair_t *base_to_event_map,
                       double *events_per_base, const char *sequence, int32_t n_kmers,
-                      const AlignedPair *event_alignment, int32_t n_events, uint32_t kmer_size);
+                      const AlignedPair *event_alignment, int32_t n_events, uint32_t kmer_size,
+                      const event_table *events, const model_t *models, const scalings_t *scaling);
 
     /* recalibration */
     bool recalibrate_model(model_t *pore_model, uint32_t kmer_size, event_table et,
