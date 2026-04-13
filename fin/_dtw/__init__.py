@@ -182,6 +182,29 @@ def dtw_pairwise(
     if sequences.shape[1] == 0:
         raise ValueError("Sequence length cannot be 0")
 
+    # GPU memory guard: estimate required memory and check availability
+    num_seq, seq_len = sequences.shape
+    # Memory estimate: cost matrix = seq_len * (num_seq-1) * 4 bytes + sequences + distance matrix
+    estimated_bytes = (seq_len * (num_seq - 1) * 4) + (num_seq * seq_len * 4) + (num_seq * num_seq * 4)
+    try:
+        import subprocess as _sp
+        _mem_result = _sp.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if _mem_result.returncode == 0:
+            free_mb = int(_mem_result.stdout.strip().split("\n")[0])
+            free_bytes = free_mb * 1024 * 1024
+            if estimated_bytes > free_bytes * 0.9:  # 90% safety margin
+                raise MemoryError(
+                    f"Insufficient GPU memory for DTW pairwise batch: "
+                    f"estimated {estimated_bytes / 1e9:.1f} GB needed, "
+                    f"{free_bytes / 1e9:.1f} GB available. "
+                    f"Reduce batch size or use dtw_distance() in a loop."
+                )
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass  # Can't check memory, proceed and let CUDA handle it
+
     # Call the CUDA function
     return _dtw_pairwise_cuda(
         sequences, use_open_start=int(use_open_start), use_open_end=int(use_open_end)

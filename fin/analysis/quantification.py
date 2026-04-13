@@ -30,7 +30,7 @@ def quantify_transcripts(
     candidates: List[TranscriptCandidate],
     read_ids: List[str],
 ) -> List[QuantResult]:
-    """Compute probability-weighted transcript abundance.
+    """Compute probability-weighted transcript abundance (vectorized).
 
     Args:
         R: Soft assignment matrix of shape (n_reads, n_candidates).
@@ -44,25 +44,20 @@ def quantify_transcripts(
     """
     n_reads, n_cands = R.shape
 
+    # Vectorized abundance: sum of soft assignments per candidate
+    abundance = R.sum(axis=0)  # shape (n_cands,)
+
+    # Vectorized hard assignment counts and confidence
     results = []
     for j, cand in enumerate(candidates):
-        # Probability-weighted count
-        abundance = float(np.sum(R[:, j]))
-
-        # Hard-assigned reads for this candidate
         assigned_mask = hard_assignments == j
-        num_assigned = int(np.sum(assigned_mask))
-
-        # Mean confidence of assigned reads
-        if num_assigned > 0:
-            confidence = float(np.mean(R[assigned_mask, j]))
-        else:
-            confidence = 0.0
+        num_assigned = int(assigned_mask.sum())
+        confidence = float(R[assigned_mask, j].mean()) if num_assigned > 0 else 0.0
 
         results.append(
             QuantResult(
                 candidate_id=cand.candidate_id,
-                abundance=abundance,
+                abundance=float(abundance[j]),
                 confidence=confidence,
                 num_assigned_reads=num_assigned,
                 source=cand.source,

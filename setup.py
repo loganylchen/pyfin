@@ -12,40 +12,33 @@ import subprocess
 from pathlib import Path
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
-import sysconfig
 
 # f5c source directory (relative to setup.py)
 # Use relative paths for all sources to comply with setuptools requirements
 
 
-def apply_c_compile(ext):
-    import numpy
+def detect_cuda_arch():
+    """Detect GPU compute capability and return nvcc arch flags.
 
-    ext.extra_compile_args += [
-        "-O3",  # Optimize compilation
-        "-std=c99",  # C99 standard (matches your C code)
-        "-Wall",  # Show warnings (debug)
-    ]
-    ext.extra_link_args += ["-lm"]  # Example link flag for Type1
-    ext.include_dirs += [numpy.get_include(), sysconfig.get_path("include")]
-    ext.language = "c"
+    Falls back to PTX compute_70 for forward compatibility if detection fails.
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Take the first GPU's compute capability (e.g., "8.6")
+            cap = result.stdout.strip().split("\n")[0].strip()
+            major, minor = cap.split(".")
+            sm = f"{major}{minor}"
+            print(f"Detected GPU compute capability: {cap} (sm_{sm})")
+            return [f"--generate-code=arch=compute_{sm},code=sm_{sm}"]
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        pass
 
-
-def apply_cpp_compile(ext):
-    import numpy
-
-    # Force C++ compilation for .c files that use C++ headers
-    ext.extra_compile_args += [
-        "-O3",
-        "-std=c++17",
-        "-Wall",
-    ]
-    ext.extra_link_args += ["-lm", "-lstdc++"]
-    ext.include_dirs += [numpy.get_include(), sysconfig.get_path("include")]
-    ext.language = "c++"
-
-    # Override compiler to use g++ instead of gcc
-    ext.define_macros = [("__cplusplus", "1")]
+    print("GPU not detected, using PTX compute_70 for forward compatibility")
+    return ["--generate-code=arch=compute_70,code=compute_70"]
 
 
 def find_cuda_home():
@@ -81,48 +74,6 @@ class CUDAExtension(Extension):
 
 
 class MultiExt(build_ext):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def build_extension(self, ext):
-        # For C++ extensions with .c files, override compiler to g++
-        if hasattr(ext, "language") and ext.language == "c++":
-            # Save original compiler and linker
-            original_compiler_so = self.compiler.compiler_so.copy()
-            original_compiler_cxx = (
-                self.compiler.compiler_cxx.copy()
-                if hasattr(self.compiler, "compiler_cxx")
-                else None
-            )
-            original_linker_so = (
-                self.compiler.linker_so.copy() if hasattr(self.compiler, "linker_so") else None
-            )
-
-            # Replace gcc with g++ in all compiler commands
-            self.compiler.compiler_so = [
-                c.replace("gcc", "g++") if "gcc" in c else c for c in self.compiler.compiler_so
-            ]
-            if hasattr(self.compiler, "compiler_cxx"):
-                self.compiler.compiler_cxx = [
-                    c.replace("gcc", "g++") if "gcc" in c else c for c in self.compiler.compiler_cxx
-                ]
-            if hasattr(self.compiler, "linker_so"):
-                self.compiler.linker_so = [
-                    c.replace("gcc", "g++") if "gcc" in c else c for c in self.compiler.linker_so
-                ]
-
-            try:
-                super().build_extension(ext)
-            finally:
-                # Restore original compilers
-                self.compiler.compiler_so = original_compiler_so
-                if original_compiler_cxx is not None:
-                    self.compiler.compiler_cxx = original_compiler_cxx
-                if original_linker_so is not None:
-                    self.compiler.linker_so = original_linker_so
-        else:
-            super().build_extension(ext)
-
     def build_extensions(self):
         # Filter out CUDA extensions if CUDA is not available
         cuda_available = find_cuda_home() is not None and shutil.which("nvcc") is not None
@@ -131,7 +82,7 @@ class MultiExt(build_ext):
         for ext in self.extensions:
             if not hasattr(ext, "ext_type"):
                 raise ValueError(
-                    f"Extension {ext.name} must have 'ext_type' (f5c/dtw/f5c_cuda/align/align_cuda)!"
+                    f"Extension {ext.name} must have 'ext_type' attribute!"
                 )
 
             if ext.ext_type == "dtw":
@@ -140,107 +91,15 @@ class MultiExt(build_ext):
                     print("Install CUDA Toolkit to enable GPU acceleration features")
                     continue
                 self._configure_dtw_cuda_extension(ext)
-            elif ext.ext_type == "f5c_cuda":
-                if not cuda_available:
-                    print(
-                        f"WARNING: Skipping CUDA eventalign extension {ext.name} - nvcc not found"
-                    )
-                    print("GPU-accelerated eventalign will not be available")
-                    continue
-                self._configure_f5c_cuda_extension(ext)
-            elif ext.ext_type == "f5c":
-                apply_c_compile(ext)
-            elif ext.ext_type == "align":
-                apply_cpp_compile(ext)
-            elif ext.ext_type == "align_cuda":
-                if not cuda_available:
-                    print(
-                        f"WARNING: Skipping CUDA eventalign extension {ext.name} - nvcc not found"
-                    )
-                    print("GPU-accelerated eventalign will not be available")
-                    continue
-                self._configure_align_cuda_extension(ext)
             else:
                 raise ValueError(
-                    f"Unknown ext_type: {ext.ext_type} (must be f5c/align/dtw/f5c_cuda/align_cuda)"
+                    f"Unknown ext_type: {ext.ext_type} (must be dtw)"
                 )
 
             extensions_to_build.append(ext)
 
         self.extensions = extensions_to_build
         super().build_extensions()
-
-    def _configure_f5c_cuda_extension(self, ext):
-        """Configure f5c CUDA extension compilation (eventalign with GPU)"""
-        cuda_home = find_cuda_home()
-        if not cuda_home:
-            raise RuntimeError("CUDA_HOME not found")
-
-        import sysconfig
-        import numpy
-
-        python_include = sysconfig.get_path("include")
-        numpy_include = numpy.get_include()
-
-        # Add CUDA, Python, and NumPy include paths
-        ext.include_dirs.append(os.path.join(cuda_home, "include"))
-        ext.include_dirs.append(python_include)
-        ext.include_dirs.append(numpy_include)
-        ext.include_dirs.append("fin/_f5c")
-
-        ext.library_dirs = [os.path.join(cuda_home, "lib64")]
-        ext.libraries = ["cudart"]
-
-        # Compiler flags for nvcc with CUDA_ENABLED defined
-        ext.extra_compile_args = [
-            "--compiler-options",
-            "-fPIC",
-            "-std=c++14",
-            "-O3",
-            "-DCUDA_ENABLED",  # Enable CUDA code paths in eventalign.c
-            "--generate-code=arch=compute_86,code=sm_86",  # Ada (8.6)
-        ]
-
-        ext.extra_link_args = [
-            f'-L{os.path.join(cuda_home, "lib64")}',
-            "-lcudart",
-        ]
-
-    def _configure_align_cuda_extension(self, ext):
-        """Configure f5c CUDA extension compilation (eventalign with GPU)"""
-        cuda_home = find_cuda_home()
-        if not cuda_home:
-            raise RuntimeError("CUDA_HOME not found")
-
-        import sysconfig
-        import numpy
-
-        python_include = sysconfig.get_path("include")
-        numpy_include = numpy.get_include()
-
-        # Add CUDA, Python, and NumPy include paths
-        ext.include_dirs.append(os.path.join(cuda_home, "include"))
-        ext.include_dirs.append(python_include)
-        ext.include_dirs.append(numpy_include)
-        ext.include_dirs.append("fin/_eventalign")
-
-        ext.library_dirs = [os.path.join(cuda_home, "lib64")]
-        ext.libraries = ["cudart"]
-
-        # Compiler flags for nvcc
-        ext.extra_compile_args = [
-            "--compiler-options",
-            "-fPIC",
-            "-std=c++14",
-            "-O3",
-            "-DHAVE_CUDA=1",
-            "--generate-code=arch=compute_86,code=sm_86",  # Ada (8.6)
-        ]
-
-        ext.extra_link_args = [
-            f'-L{os.path.join(cuda_home, "lib64")}',
-            "-lcudart",
-        ]
 
     def _configure_dtw_cuda_extension(self, ext):
         """Configure CUDA extension compilation"""
@@ -265,6 +124,7 @@ class MultiExt(build_ext):
         ext.libraries = ["cudart"]
 
         # Set compiler flags for nvcc
+        arch_flags = detect_cuda_arch()
         ext.extra_compile_args = [
             "-x",
             "cu",  # Treat input as CUDA
@@ -272,8 +132,7 @@ class MultiExt(build_ext):
             "-fPIC",
             "-std=c++11",
             "-O3",
-            "--generate-code=arch=compute_86,code=sm_86",  # Ada (8.6) architecture
-        ]
+        ] + arch_flags
 
         ext.extra_link_args = [
             f'-L{os.path.join(cuda_home, "lib64")}',
@@ -282,12 +141,9 @@ class MultiExt(build_ext):
 
     def build_extension(self, ext):
         # Use nvcc for CUDA extensions
-        if hasattr(ext, "ext_type") and ext.ext_type in ("dtw", "f5c_cuda", "align_cuda"):
+        if hasattr(ext, "ext_type") and ext.ext_type == "dtw":
             self._compile_cuda_extension(ext)
-        elif hasattr(ext, "ext_type") and ext.ext_type == "align":
-            self._compile_cpp_extension(ext)
         else:
-            # Build non-CUDA extensions normally
             super().build_extension(ext)
 
     def _compile_cuda_extension(self, ext):
@@ -416,57 +272,6 @@ class MultiExt(build_ext):
             print(result.stderr)
             raise RuntimeError(f"nvcc linking failed for {ext.name}")
 
-    def _compile_cpp_extension(self, ext):
-        """Compile C++ extension using g++ directly to ensure C++ mode for .c files with C++ code"""
-        cxx = shutil.which("g++") or shutil.which("clang++") or shutil.which("gcc")
-        if not cxx:
-            raise RuntimeError("C++ compiler (g++/clang++) not found")
-
-        build_temp = Path(self.build_temp)
-        build_lib = Path(self.build_lib)
-        build_temp.mkdir(parents=True, exist_ok=True)
-        ext_path = build_lib / self.get_ext_filename(ext.name)
-        ext_path.parent.mkdir(parents=True, exist_ok=True)
-
-        objects = []
-        for source in ext.sources:
-            source_path = Path(source)
-            obj_name = source_path.stem + source_path.suffix.replace(".", "_") + ".o"
-            obj_path = build_temp / obj_name
-
-            cmd = [cxx, "-c", str(source_path), "-o", str(obj_path), "-fPIC", "-std=c++17", "-O3"]
-            for inc_dir in ext.include_dirs:
-                cmd.extend(["-I", inc_dir])
-            if isinstance(ext.extra_compile_args, list):
-                cmd.extend(ext.extra_compile_args)
-
-            print(f"Compiling {source} with {cxx}...")
-            print(" ".join(cmd))
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(result.stdout)
-                print(result.stderr)
-                raise RuntimeError(f"C++ compilation failed for {source}")
-
-            objects.append(str(obj_path))
-
-        link_cmd = [cxx, "-shared", "-o", str(ext_path)] + objects
-        if hasattr(ext, "library_dirs"):
-            for lib_dir in ext.library_dirs:
-                link_cmd.extend(["-L", lib_dir])
-        if hasattr(ext, "libraries"):
-            for lib in ext.libraries:
-                link_cmd.append(f"-l{lib}")
-        if isinstance(ext.extra_link_args, list):
-            link_cmd.extend(ext.extra_link_args)
-
-        print(f"Linking {ext.name}...")
-        print(" ".join(link_cmd))
-        result = subprocess.run(link_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(result.stdout)
-            print(result.stderr)
-            raise RuntimeError(f"C++ linking failed for {ext.name}")
 
 
 # --------------------------
@@ -474,8 +279,6 @@ class MultiExt(build_ext):
 # --------------------------
 
 OPENDBA_DIR = os.path.join("fin", "_dtw")
-EVENTALIGN_DIR = os.path.join("fin", "_eventalign")
-
 # DTW/CUDA extension with Python bindings
 cuda_dtw_extension = Extension(
     name="fin._dtw._cuda_dtw",
@@ -491,51 +294,6 @@ cuda_dtw_extension = Extension(
     ],
 )
 cuda_dtw_extension.ext_type = "dtw"
-
-# Eventalign API wrapper - simplified interface for getevents and set_model (CPU version)
-eventalign_api_extension = Extension(
-    name="fin._eventalign._eventalign",
-    sources=[
-        os.path.join(EVENTALIGN_DIR, "event_api_wrapper.cpp"),
-        os.path.join(EVENTALIGN_DIR, "common.cpp"),
-        os.path.join(EVENTALIGN_DIR, "events.cpp"),
-        os.path.join(EVENTALIGN_DIR, "model.cpp"),
-        os.path.join(EVENTALIGN_DIR, "align.cpp"),
-    ],
-    depends=[
-        os.path.join(EVENTALIGN_DIR, "common.h"),
-        os.path.join(EVENTALIGN_DIR, "model.h"),
-        os.path.join(EVENTALIGN_DIR, "error.h"),
-        os.path.join(EVENTALIGN_DIR, "ksort.h"),
-    ],
-    include_dirs=[EVENTALIGN_DIR],
-    language="c++",
-)
-eventalign_api_extension.ext_type = "align"
-
-# Eventalign CUDA wrapper - GPU-accelerated event alignment
-eventalign_cuda_extension = Extension(
-    name="fin._eventalign._eventalign_cuda",
-    sources=[
-        os.path.join(EVENTALIGN_DIR, "cuda_wrapper.cpp"),
-        os.path.join(EVENTALIGN_DIR, "cuda_framework.cu"),
-        os.path.join(EVENTALIGN_DIR, "align_cuda.cu"),
-        os.path.join(EVENTALIGN_DIR, "align.cpp"),
-        os.path.join(EVENTALIGN_DIR, "common.cpp"),
-        os.path.join(EVENTALIGN_DIR, "events.cpp"),
-        os.path.join(EVENTALIGN_DIR, "model.cpp"),
-    ],
-    depends=[
-        os.path.join(EVENTALIGN_DIR, "common.h"),
-        os.path.join(EVENTALIGN_DIR, "align_cuda.h"),
-        os.path.join(EVENTALIGN_DIR, "model.h"),
-        os.path.join(EVENTALIGN_DIR, "error.h"),
-        os.path.join(EVENTALIGN_DIR, "ksort.h"),
-    ],
-    include_dirs=[EVENTALIGN_DIR],
-)
-eventalign_cuda_extension.ext_type = "align_cuda"
-
 
 # Main setup configuration
 def main():
@@ -558,7 +316,9 @@ def main():
             "fin.utils",
             "fin.analysis",
             "fin._dtw",
-            "fin._eventalign",
+            "fin.candidates",
+            "fin.scoring",
+            "fin.pipeline",
         ],
         package_dir={"fin": "fin"},
         package_data={
@@ -567,8 +327,6 @@ def main():
         include_package_data=True,
         ext_modules=[
             cuda_dtw_extension,
-            eventalign_api_extension,
-            eventalign_cuda_extension,
         ],
         cmdclass={"build_ext": MultiExt},
         python_requires=">=3.8",
