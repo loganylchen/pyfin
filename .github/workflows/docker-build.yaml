@@ -2,7 +2,7 @@ name: Docker Build & Push
 
 on:
   push:
-    branches: [main]
+    branches: ['*']
   workflow_dispatch:
 
 jobs:
@@ -21,6 +21,16 @@ jobs:
         username: ${{ secrets.DOCKER_HUB_USERNAME }}
         password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
+    - name: Determine tag suffix
+      id: tag
+      run: |
+        BRANCH="${GITHUB_REF##refs/heads/}"
+        if [ "$BRANCH" = "main" ]; then
+          echo "suffix=latest" >> "$GITHUB_OUTPUT"
+        else
+          echo "suffix=$BRANCH" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Extract metadata
       id: meta
       uses: docker/metadata-action@v5
@@ -28,7 +38,7 @@ jobs:
         images: ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin
         tags: |
           type=sha,prefix=gpu-
-          type=raw,value=latest-gpu
+          type=raw,value=gpu-${{ steps.tag.outputs.suffix }}
 
     - name: Build and push GPU image
       uses: docker/build-push-action@v5
@@ -44,7 +54,7 @@ jobs:
 
     - name: Smoke test GPU image
       run: |
-        docker run --rm ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin:latest-gpu \
+        docker run --rm ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin:gpu-${{ steps.tag.outputs.suffix }} \
           python3 -c "from fin._dtw import is_available; print('CUDA:', is_available())"
 
   build-cpu:
@@ -62,6 +72,16 @@ jobs:
         username: ${{ secrets.DOCKER_HUB_USERNAME }}
         password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
+    - name: Determine tag suffix
+      id: tag
+      run: |
+        BRANCH="${GITHUB_REF##refs/heads/}"
+        if [ "$BRANCH" = "main" ]; then
+          echo "suffix=latest" >> "$GITHUB_OUTPUT"
+        else
+          echo "suffix=$BRANCH" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Extract metadata
       id: meta
       uses: docker/metadata-action@v5
@@ -69,7 +89,7 @@ jobs:
         images: ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin
         tags: |
           type=sha,prefix=cpu-
-          type=raw,value=latest
+          type=raw,value=cpu-${{ steps.tag.outputs.suffix }}
 
     - name: Build and push CPU image
       uses: docker/build-push-action@v5
@@ -85,5 +105,5 @@ jobs:
 
     - name: Smoke test CPU image
       run: |
-        docker run --rm ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin:latest \
+        docker run --rm ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin:cpu-${{ steps.tag.outputs.suffix }} \
           python3 -c "from fin._dtw import is_available; print('CUDA:', is_available())"
