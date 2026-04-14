@@ -11,6 +11,8 @@ from typing import Union, Optional
 try:
     from ._cuda_dtw import dtw_distance as _dtw_distance_cuda
     from ._cuda_dtw import dtw_pairwise as _dtw_pairwise_cuda
+    from ._cuda_dtw import dtw_pairwise_varlen as _dtw_pairwise_varlen_cuda
+    from ._cuda_dtw import get_free_gpu_memory as _get_free_gpu_memory_cuda
     from ._cuda_dtw import cleanup as _cuda_cleanup
 
     CUDA_AVAILABLE = True
@@ -242,4 +244,95 @@ def is_available() -> bool:
     return CUDA_AVAILABLE
 
 
-__all__ = ["dtw_distance", "dtw_pairwise", "cleanup", "is_available", "CUDA_AVAILABLE"]
+def dtw_pairwise_varlen(
+    segments,
+    use_open_start: bool = False,
+    use_open_end: bool = False,
+) -> np.ndarray:
+    """Pairwise DTW for variable-length sequences (single GPU batch call).
+
+    Accepts a list of variable-length 1D arrays. Handles padding internally.
+
+    Parameters
+    ----------
+    segments : list of array-like
+        Variable-length 1D sequences.
+    use_open_start : bool, optional
+        Enable open start boundary (default: False).
+    use_open_end : bool, optional
+        Enable open end boundary (default: False).
+
+    Returns
+    -------
+    np.ndarray
+        Distance matrix (num_sequences, num_sequences).
+    """
+    if not CUDA_AVAILABLE:
+        raise RuntimeError(
+            f"CUDA DTW extension is not available.\n"
+            f"Import error: {_import_error}\n"
+            f"Check availability with: fin._dtw.is_available()"
+        )
+
+    lengths = np.array([len(s) for s in segments], dtype=np.int64)
+    max_len = int(lengths.max())
+
+    padded = np.zeros((len(segments), max_len), dtype=np.float32)
+    for i, s in enumerate(segments):
+        s = np.asarray(s, dtype=np.float32)
+        padded[i, : len(s)] = s
+
+    return _dtw_pairwise_varlen_cuda(
+        padded, lengths,
+        use_open_start=int(use_open_start),
+        use_open_end=int(use_open_end),
+    )
+
+
+def estimate_gpu_memory(num_sequences: int, max_length: int) -> int:
+    """Estimate GPU bytes needed for pairwise varlen DTW.
+
+    Parameters
+    ----------
+    num_sequences : int
+        Number of sequences.
+    max_length : int
+        Maximum sequence length (padding width).
+
+    Returns
+    -------
+    int
+        Estimated GPU memory in bytes (with 20% headroom).
+    """
+    input_bytes = num_sequences * max_length * 4
+    lengths_bytes = num_sequences * 8
+    num_pairs = num_sequences * (num_sequences - 1) // 2
+    pairs_bytes = num_pairs * 4
+    max_parallel = num_sequences - 1
+    cost_bytes = max_length * max_parallel * 4 * 2
+    return int((input_bytes + lengths_bytes + pairs_bytes + cost_bytes) * 1.2)
+
+
+def get_free_gpu_memory() -> int:
+    """Query free GPU memory in bytes.
+
+    Returns
+    -------
+    int
+        Free GPU memory in bytes, or 0 if CUDA unavailable.
+    """
+    if not CUDA_AVAILABLE:
+        return 0
+    return _get_free_gpu_memory_cuda()
+
+
+__all__ = [
+    "dtw_distance",
+    "dtw_pairwise",
+    "dtw_pairwise_varlen",
+    "estimate_gpu_memory",
+    "get_free_gpu_memory",
+    "cleanup",
+    "is_available",
+    "CUDA_AVAILABLE",
+]

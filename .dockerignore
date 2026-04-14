@@ -1,46 +1,22 @@
-# Version control
-.git
-.gitignore
-.github
-
-# CI/CD
-.github/workflows
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode
-.idea
-*.swp
-*.swo
-*~
-
-# Python
 __pycache__
 *.pyc
 *.pyo
-*.pyd
-.Python
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Testing
+*.egg-info
+.git
+.github
 .pytest_cache
 .coverage
 coverage.xml
 htmlcov/
-
-# Documentation
+*.so
+build
+dist
+.venv
+.env
+venv/
+env/
+.vscode
+.idea
+.omc
 docs/_build
-*.md
-!README*.md
-
-# Logs
 *.log

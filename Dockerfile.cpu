@@ -1,0 +1,26 @@
+# --- Build stage ---
+FROM python:3.11-slim AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential zlib1g-dev libhdf5-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pyfin (CPU only — no nvcc, so setup.py skips CUDA extension)
+WORKDIR /app
+COPY . .
+RUN pip install --no-cache-dir .
+
+# --- Runtime stage ---
+FROM python:3.11-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends zlib1g \
+    && apt-cache search '^libhdf5-[0-9]' | head -1 | awk '{print $1}' \
+       | xargs apt-get install -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+
+WORKDIR /data
