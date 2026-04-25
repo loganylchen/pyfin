@@ -228,8 +228,7 @@ fin quantify \
     --genome genome.fa \
     --sample "sample1:sample1.bam:sample1.fastq:sample1.blow5" \
     --output-dir ./results \
-    --f5c-path /path/to/f5c \
-    --samtools-path /path/to/samtools
+    --f5c-path /path/to/f5c
 ```
 
 ### 4.6 Verbose output
@@ -488,13 +487,13 @@ docker pull <dockerhub_user>/pyfin:cpu-dev
 Install the required tools:
 
 ```bash
-conda install -c bioconda f5c samtools
+conda install -c bioconda f5c
 ```
 
-Or point to custom paths:
+Or point to a custom path:
 
 ```bash
-fin quantify --f5c-path /custom/path/f5c --samtools-path /custom/path/samtools ...
+fin quantify --f5c-path /custom/path/f5c ...
 ```
 
 ### "Failed to build mappy index"

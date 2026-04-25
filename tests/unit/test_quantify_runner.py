@@ -481,7 +481,6 @@ def test_quantify_runner_config_overrides_ctor_params():
         em_max_iter=42,
         em_tol=1e-3,
         f5c_path="/usr/local/bin/f5c",
-        samtools_path="/usr/local/bin/samtools",
     )
     runner = QuantifyRunner(
         gtf_path="/dev/null",
@@ -496,7 +495,6 @@ def test_quantify_runner_config_overrides_ctor_params():
         em_max_iter=1000,
         em_tol=1e-4,
         f5c_path="f5c",
-        samtools_path="samtools",
         config=cfg,
     )
     assert runner.signal_format == "pod5"
@@ -506,7 +504,6 @@ def test_quantify_runner_config_overrides_ctor_params():
     assert runner.em_max_iter == 42
     assert runner.em_tol == 1e-3
     assert runner.f5c_path == "/usr/local/bin/f5c"
-    assert runner.samtools_path == "/usr/local/bin/samtools"
 
 
 def test_quantify_runner_no_config_uses_ctor_params():

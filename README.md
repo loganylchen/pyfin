@@ -325,7 +325,6 @@ fin/
 | `fusion_max_dist` | int | 500 | Breakpoint clustering distance (bp) |
 | `fusion_flank_bp` | int | 500 | Flank on each side of breakpoint for fusion sequence |
 | `f5c_path` | str | "f5c" | Path to f5c binary |
-| `samtools_path` | str | "samtools" | Path to samtools binary |
 | `max_reads` | int | None | Limit total reads processed |
 
 ## Testing

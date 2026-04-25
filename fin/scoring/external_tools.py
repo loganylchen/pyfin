@@ -20,7 +20,6 @@ class ExternalToolPaths:
     """Paths to required external tools."""
 
     f5c: str = "f5c"
-    samtools: str = "samtools"
 
     def validate(self) -> List[str]:
         """Check that all tools are available on PATH.
@@ -29,7 +28,7 @@ class ExternalToolPaths:
             List of missing tool names (empty if all found).
         """
         missing = []
-        for name in ("f5c", "samtools"):
+        for name in ("f5c",):
             path = getattr(self, name)
             if shutil.which(path) is None:
                 missing.append(name)

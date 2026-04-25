@@ -127,7 +127,6 @@ class QuantifyRunner:
         signal_format: str = "slow5",
         use_gpu: bool = True,
         f5c_path: str = "f5c",
-        samtools_path: str = "samtools",
         em_sigma: float = 1.0,
         em_beta: float = 0.5,
         em_max_iter: int = 1000,
@@ -146,7 +145,6 @@ class QuantifyRunner:
             self.signal_format = config.signal_format
             self.use_gpu = config.use_gpu
             self.f5c_path = config.f5c_path
-            self.samtools_path = config.samtools_path
             self.em_sigma = config.em_sigma
             self.em_beta = config.em_beta
             self.em_max_iter = config.em_max_iter
@@ -155,7 +153,6 @@ class QuantifyRunner:
             self.signal_format = signal_format
             self.use_gpu = use_gpu
             self.f5c_path = f5c_path
-            self.samtools_path = samtools_path
             self.em_sigma = em_sigma
             self.em_beta = em_beta
             self.em_max_iter = em_max_iter
@@ -168,7 +165,7 @@ class QuantifyRunner:
     def setup(self):
         """Load GTF and genome FASTA once, validate tools, generate intervals."""
         # Validate external tools
-        tool_paths = ExternalToolPaths(f5c=self.f5c_path, samtools=self.samtools_path)
+        tool_paths = ExternalToolPaths(f5c=self.f5c_path)
         missing = tool_paths.validate()
         if missing:
             raise RuntimeError(f"Missing external tools: {', '.join(missing)}")
@@ -258,7 +255,7 @@ class QuantifyRunner:
         sample_work_dir.mkdir(parents=True, exist_ok=True)
 
         # Create tool runner and build f5c index for this sample
-        tool_paths = ExternalToolPaths(f5c=self.f5c_path, samtools=self.samtools_path)
+        tool_paths = ExternalToolPaths(f5c=self.f5c_path)
         tool_runner = ExternalToolRunner(
             fastq_path=sample.fastq_path,
             signal_path=sample.signal_path,

@@ -58,7 +58,6 @@ jobs:
         docker run --rm "$IMAGE" \
           python3 -c "from fin._dtw import is_available; print('CUDA:', is_available())"
         docker run --rm "$IMAGE" f5c --version
-        docker run --rm "$IMAGE" samtools --version | head -1
 
   build-cpu:
     name: CPU Image
@@ -112,4 +111,3 @@ jobs:
         docker run --rm "$IMAGE" \
           python3 -c "from fin._dtw import is_available; print('CUDA:', is_available())"
         docker run --rm "$IMAGE" f5c --version
-        docker run --rm "$IMAGE" samtools --version | head -1

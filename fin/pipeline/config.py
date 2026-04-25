@@ -43,7 +43,6 @@ class PipelineConfig:
 
     # External tools
     f5c_path: str = "f5c"
-    samtools_path: str = "samtools"
 
     # Parallelism (future)
     num_workers: int = 1

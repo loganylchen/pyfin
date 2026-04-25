@@ -132,10 +132,9 @@ def main(
     help="Signal file format.",
 )
 @click.option("--f5c-path", default="f5c", show_default=True, help="Path to f5c binary.")
-@click.option("--samtools-path", default="samtools", show_default=True, help="Path to samtools binary.")
 @click.option("--use-prior/--no-prior", default=True, show_default=True, help="Apply combined_score-derived EM prior.")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
-def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, f5c_path, samtools_path, use_prior, verbose):
+def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, f5c_path, use_prior, verbose):
     """Quantify known transcripts across multiple samples."""
     from fin.utils.log_config import setup_logger
 
@@ -172,7 +171,6 @@ def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, f5c_path, 
         signal_format=signal_format,
         use_gpu=use_gpu,
         f5c_path=f5c_path,
-        samtools_path=samtools_path,
         config=quant_config,
     )
 

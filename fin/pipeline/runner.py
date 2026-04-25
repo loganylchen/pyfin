@@ -47,10 +47,7 @@ class PipelineRunner:
     def setup(self):
         """Validate tools, open file handles, load references."""
         # Validate external tools
-        tool_paths = ExternalToolPaths(
-            f5c=self.config.f5c_path,
-            samtools=self.config.samtools_path,
-        )
+        tool_paths = ExternalToolPaths(f5c=self.config.f5c_path)
         missing = tool_paths.validate()
         if missing:
             raise RuntimeError(f"Missing external tools: {', '.join(missing)}")
