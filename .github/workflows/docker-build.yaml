@@ -54,8 +54,11 @@ jobs:
 
     - name: Smoke test GPU image
       run: |
-        docker run --rm ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin:gpu-${{ steps.tag.outputs.suffix }} \
+        IMAGE=${{ secrets.DOCKER_HUB_USERNAME }}/pyfin:gpu-${{ steps.tag.outputs.suffix }}
+        docker run --rm "$IMAGE" \
           python3 -c "from fin._dtw import is_available; print('CUDA:', is_available())"
+        docker run --rm "$IMAGE" f5c --version
+        docker run --rm "$IMAGE" samtools --version | head -1
 
   build-cpu:
     name: CPU Image
@@ -105,5 +108,8 @@ jobs:
 
     - name: Smoke test CPU image
       run: |
-        docker run --rm ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin:cpu-${{ steps.tag.outputs.suffix }} \
+        IMAGE=${{ secrets.DOCKER_HUB_USERNAME }}/pyfin:cpu-${{ steps.tag.outputs.suffix }}
+        docker run --rm "$IMAGE" \
           python3 -c "from fin._dtw import is_available; print('CUDA:', is_available())"
+        docker run --rm "$IMAGE" f5c --version
+        docker run --rm "$IMAGE" samtools --version | head -1

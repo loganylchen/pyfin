@@ -17,18 +17,27 @@ RUN pip3 install --no-cache-dir .
 RUN python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' \
     > /tmp/python_version.txt
 
+# Fetch prebuilt f5c CPU binary (used for both CPU and GPU images)
+ARG F5C_VERSION=1.5
+RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v${F5C_VERSION}/f5c-v${F5C_VERSION}-binaries.tar.gz" \
+        -O /tmp/f5c.tar.gz \
+    && tar -xzf /tmp/f5c.tar.gz -C /tmp \
+    && install -m 0755 "/tmp/f5c-v${F5C_VERSION}/f5c_x86_64_linux" /usr/local/bin/f5c \
+    && rm -rf /tmp/f5c.tar.gz "/tmp/f5c-v${F5C_VERSION}"
+
 # --- Runtime stage ---
 FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-pip zlib1g \
+    && apt-get install -y --no-install-recommends python3 python3-pip zlib1g samtools \
     && apt-cache search '^libhdf5-[0-9]' | head -1 | awk '{print $1}' \
        | xargs apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /tmp/python_version.txt /tmp/python_version.txt
+COPY --from=builder /usr/local/bin/f5c /usr/local/bin/f5c
 
 # Copy installed Python packages (Ubuntu 22.04 ships Python 3.10)
 COPY --from=builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/python3.10/dist-packages
