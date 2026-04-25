@@ -199,10 +199,6 @@ class BamReader:
         if alignment is None:
             return {}
 
-        tags = dict(alignment.tags) if alignment.tags else {}
-        
-        
-        
         return {
             'query_name': alignment.query_name,
             'flag': alignment.flag,

@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Dict, List
 
+from fin.candidates.dataclasses import IntronChain, TranscriptCandidate
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -24,8 +26,6 @@ except ImportError:
         strandB: str
         support_count: int = 1
         supporting_read_ids: Set[str] = field(default_factory=set)
-
-from fin.candidates.dataclasses import IntronChain, TranscriptCandidate
 
 # Complement table for reverse-complement helper
 _COMPLEMENT: Dict[str, str] = {

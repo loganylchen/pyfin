@@ -8,7 +8,7 @@ import logging
 
 try:
     from ont_fast5_api.fast5_interface import get_fast5_file
-    from ont_fast5_api.analysis_tools import basecall_1d
+    from ont_fast5_api.analysis_tools import basecall_1d  # noqa: F401  # availability probe
 except ImportError:
     raise ImportError(
         "ont-fast5-api is required for Fast5 support. "
@@ -134,13 +134,13 @@ class Fast5Reader:
             # Get move table if available
             try:
                 move_table = read.get_analysis_dataset(analysis_group, 'BaseCalled_template/Move')
-            except:
+            except (KeyError, OSError, AttributeError):
                 move_table = None
 
             # Get trace if available
             try:
                 trace = read.get_analysis_dataset(analysis_group, 'BaseCalled_template/Trace')
-            except:
+            except (KeyError, OSError, AttributeError):
                 trace = None
 
             return {

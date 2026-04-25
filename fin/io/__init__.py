@@ -4,7 +4,7 @@ I/O module for handling various data formats in nanopore Direct RNA-seq analysis
 
 # Import core readers that should always be available
 try:
-    from .io_fasta import FASTAReader, FASTARecord
+    from .io_fasta import FASTAReader, FASTARecord  # noqa: F401  # public reexport
     _has_fasta = True
 except ImportError:
     _has_fasta = False

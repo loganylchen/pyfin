@@ -347,16 +347,9 @@ class GTFReader:
 
         self._file.seek(0)
 
-        # Temporary storage for transcript components
-        transcript_parts = {}  # transcript_id -> {'exons': [], 'cds': [], ...}
-
         # Common attribute keys to look for
         gene_id_keys = ['gene_id', 'geneid', 'geneID', 'ID']
         transcript_id_keys = ['transcript_id', 'transcriptid', 'transcriptID', 'Parent']
-
-        # Keep track of current gene/transcript
-        current_gene_id = None
-        current_transcript_id = None
 
         for line_num, line in enumerate(self._file, 1):
             line = line.strip()

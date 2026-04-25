@@ -26,7 +26,7 @@ except ImportError as e:
 
 # Try CuPy for GPU-accelerated EM
 try:
-    import cupy
+    import cupy  # noqa: F401  # availability probe
     _CUPY_AVAILABLE = True
 except ImportError:
     _CUPY_AVAILABLE = False

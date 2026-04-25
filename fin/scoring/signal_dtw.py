@@ -160,7 +160,6 @@ def _pairwise_gpu_chunked(
         for j in range(i + chunk_size, num_seqs, chunk_size):
             chunk_b = list(range(j, min(j + chunk_size, num_seqs)))
             combined_segs = segs_a + [segments[k] for k in chunk_b]
-            combined_idx = idx_a + [indices[k] for k in chunk_b]
             pw = dtw_pairwise_varlen(combined_segs, use_open_end=True)
             _fill_cross(dist, pw, idx_a, [indices[k] for k in chunk_b], len(segs_a))
 
@@ -238,7 +237,7 @@ def _cpu_dtw(seq1: np.ndarray, seq2: np.ndarray) -> float:
     Open-end variant: takes minimum of last row.
     """
     try:
-        from scipy.spatial.distance import cdist
+        import scipy.spatial.distance  # noqa: F401  # availability probe
 
         n, m = len(seq1), len(seq2)
         # Compute pairwise cost matrix

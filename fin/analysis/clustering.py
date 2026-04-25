@@ -48,7 +48,6 @@ class ThreePrimePositionClustering:
     def open(self):
         """Open the alignment file"""
         try:
-            mode = 'rb' if self.bam_path.suffix.lower() == '.bam' else 'r'
             self._alignment_file = BamReader(self.bam_path)
             self._alignment_file.open()
             self._is_open = True
@@ -91,8 +90,6 @@ class ThreePrimePositionClustering:
             ClusteredData object
         """
 
-
-        all_clusters = []
 
         logger.info(f"Processing {len(intervals)} intervals")
 

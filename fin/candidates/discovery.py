@@ -138,7 +138,6 @@ def discover_candidates(
     non_fusion_reads = []
 
     with BamReader(bam_path) as bam:
-        region = interval.region_string
         for alignment in bam.fetch(
             reference=interval.chrom, start=interval.start, end=interval.end
         ):

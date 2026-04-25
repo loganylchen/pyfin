@@ -97,7 +97,7 @@ extend-exclude = '''
 '''
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests/unit", "tests/integration"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
@@ -111,3 +111,19 @@ markers = [
     "gpu: marks tests that require GPU",
     "integration: marks tests as integration tests",
 ]
+
+[tool.ruff]
+# Lint the package, real test suites, and benchmarks.
+# Legacy debug/example scripts in tests/ root are not part of the package.
+include = [
+    "fin/**/*.py",
+    "tests/unit/**/*.py",
+    "tests/integration/**/*.py",
+    "benchmarks/**/*.py",
+]
+extend-exclude = [
+    "tests/*.py",
+    "tests/*.ipynb",
+    "**/__pycache__",
+]
+line-length = 120

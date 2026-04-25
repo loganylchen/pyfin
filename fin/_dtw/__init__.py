@@ -4,8 +4,10 @@ CUDA-accelerated Dynamic Time Warping (DTW) module
 This module provides GPU-accelerated DTW distance calculation.
 """
 
+import subprocess
+from typing import Union
+
 import numpy as np
-from typing import Union, Optional
 
 # Try to import the CUDA extension
 try:
