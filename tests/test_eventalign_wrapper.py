@@ -38,7 +38,7 @@ def example_single_alignment():
     ref_name = "chr1"
     sample_rate = 4000.0  # Hz, typical for ONT data
 
-    print(f"\nInput:")
+    print("\nInput:")
     print(f"  Signal length: {len(signal)} samples")
     print(f"  Signal stats: mean={signal.mean():.2f}, std={signal.std():.2f}")
     print(f"  Read name: {read_name}")
@@ -79,7 +79,7 @@ def example_force_cpu_gpu():
     ref_sequence = "ACGUACGUACGU"
     ref_name = "chr1"
 
-    print(f"\nTrying to force GPU usage...")
+    print("\nTrying to force GPU usage...")
     try:
         aligner_gpu = EventAligner(model=MODEL_RNA002, use_gpu=True)
         print(f"  ✓ GPU backend available: {aligner_gpu.using_gpu}")
@@ -89,7 +89,7 @@ def example_force_cpu_gpu():
     except ImportError as e:
         print(f"  ✗ GPU backend not available: {e}")
 
-    print(f"\nForcing CPU usage...")
+    print("\nForcing CPU usage...")
     try:
         aligner_cpu = EventAligner(model=MODEL_RNA002, use_gpu=False)
         print(f"  ✓ CPU backend available: {not aligner_cpu.using_gpu}")
@@ -115,11 +115,11 @@ def example_single_alignment_rna004():
     ref_sequence = "ACGUACGUACGUACGUACGU"  # 20 bases -> 12 kmers for k=9
     ref_name = "chr2"
 
-    print(f"\nInput:")
+    print("\nInput:")
     print(f"  Signal length: {len(signal)} samples")
     print(f"  Read name: {read_name}")
     print(f"  Reference sequence: {ref_sequence} (length={len(ref_sequence)})")
-    print(f"  Model: RNA004 (k=9)")
+    print("  Model: RNA004 (k=9)")
 
     aligner = EventAligner(model=MODEL_RNA004)
     print(f"  Using GPU: {aligner.using_gpu}")
@@ -150,7 +150,7 @@ def example_batch_alignment():
     ref_names = ["chr1", "chr2"]
     ref_lengths = [len(seq) for seq in ref_sequences]
 
-    print(f"\nInput:")
+    print("\nInput:")
     print(f"  Number of reads: {n_reads}")
     print(f"  Number of references: {n_refs}")
     print(f"  Total alignments: {n_reads * n_refs}")
@@ -162,7 +162,7 @@ def example_batch_alignment():
     results = aligner.align_batch(signals, read_names, ref_sequences,
                                  ref_names, ref_lengths)
 
-    print(f"\nResults:")
+    print("\nResults:")
     for key, result in results.items():
         read_name, ref_name = key
         print(f"  ({read_name}, {ref_name}): "
@@ -173,7 +173,7 @@ def example_batch_alignment():
 
 def print_result(result):
     """Helper function to print alignment result"""
-    print(f"\nResult:")
+    print("\nResult:")
     print(f"  Success: {result['success']}")
     print(f"  Events detected: {result['n_events']}")
     print(f"  Aligned pairs: {result['n_alignments']}")
@@ -182,7 +182,7 @@ def print_result(result):
     if result['n_alignments'] > 0:
         ref_pos = result['ref_positions']
         read_pos = result['read_positions']
-        print(f"  First 5 alignments:")
+        print("  First 5 alignments:")
         for i in range(min(5, len(ref_pos))):
             print(f"    Ref pos {ref_pos[i]:3d} <-> Event {read_pos[i]:3d}")
 

@@ -122,10 +122,10 @@ def visualize_adapter_trimming():
     
     plt.tight_layout()
     plt.savefig('/Users/logan/Projects/pyfin/examples/adapter_trimming_demo.png', dpi=150)
-    print(f"Visualization saved to: /Users/logan/Projects/pyfin/examples/adapter_trimming_demo.png")
+    print("Visualization saved to: /Users/logan/Projects/pyfin/examples/adapter_trimming_demo.png")
     
     # Print statistics
-    print(f"\nAdapter Trimming Statistics:")
+    print("\nAdapter Trimming Statistics:")
     print(f"  Original signal length: {len(signal)} samples")
     print(f"  Trimmed from start: {trim_start} samples")
     print(f"  Trimmed from end: {len(signal) - trim_end} samples")

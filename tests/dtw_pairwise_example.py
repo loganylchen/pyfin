@@ -41,7 +41,7 @@ def main():
     
     print(f"Distance matrix shape: {distance_matrix.shape}")
     print(f"Computation time: {elapsed_ms:.2f} ms")
-    print(f"\nDistance matrix:")
+    print("\nDistance matrix:")
     print(distance_matrix)
     
     # Verify: diagonal should be all zeros
@@ -69,7 +69,7 @@ def main():
     print(f"  Time per pair: {batch_time_ms / num_pairs:.2f} ms ({num_pairs} pairs)")
     
     # Individual computation
-    print(f"\nIndividual computation (for comparison):")
+    print("\nIndividual computation (for comparison):")
     individual_distances = np.zeros((num_sequences, num_sequences), dtype=np.float32)
     
     start = time.perf_counter()

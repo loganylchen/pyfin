@@ -1,15 +1,16 @@
-"""Subprocess wrappers for minimap2, f5c, and samtools."""
+"""Per-candidate scoring pipeline using mappy + f5c eventalign."""
 
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-from fin.candidates.dataclasses import CandidateSet
+from fin.candidates.dataclasses import CandidateSet, TranscriptCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,6 @@ logger = logging.getLogger(__name__)
 class ExternalToolPaths:
     """Paths to required external tools."""
 
-    minimap2: str = "minimap2"
     f5c: str = "f5c"
     samtools: str = "samtools"
 
@@ -29,11 +29,27 @@ class ExternalToolPaths:
             List of missing tool names (empty if all found).
         """
         missing = []
-        for name in ("minimap2", "f5c", "samtools"):
+        for name in ("f5c", "samtools"):
             path = getattr(self, name)
             if shutil.which(path) is None:
                 missing.append(name)
         return missing
+
+
+def _signal_format_args(signal_format: str, signal_path: Path) -> List[str]:
+    """Return f5c CLI args for the given signal format.
+
+    f5c accepts ``--slow5`` for SLOW5/BLOW5 inputs and ``--pod5`` for POD5
+    inputs. Both flags require the path to the signal file.
+    """
+    fmt = (signal_format or "").lower()
+    if fmt in ("slow5", "blow5"):
+        return ["--slow5", str(signal_path)]
+    if fmt == "pod5":
+        return ["--pod5", str(signal_path)]
+    raise ValueError(
+        f"Unsupported signal_format '{fmt}' (expected 'slow5', 'blow5', or 'pod5')"
+    )
 
 
 def _run(cmd: List[str], description: str, **kwargs) -> subprocess.CompletedProcess:
@@ -47,137 +63,182 @@ def _run(cmd: List[str], description: str, **kwargs) -> subprocess.CompletedProc
 
 
 class ExternalToolRunner:
-    """Runs minimap2 + f5c scoring pipeline for a candidate set."""
+    """Runs per-candidate mappy alignment + f5c eventalign scoring."""
 
-    def __init__(self, tools: Optional[ExternalToolPaths] = None):
-        self.tools = tools or ExternalToolPaths()
-
-    def write_candidate_fasta(
-        self, candidate_set: CandidateSet, work_dir: Path
-    ) -> Path:
-        """Write each candidate as a contig in a single FASTA file.
-
-        Args:
-            candidate_set: Candidates to write.
-            work_dir: Working directory.
-
-        Returns:
-            Path to the candidates FASTA file.
-        """
-        fasta_path = work_dir / "candidates.fa"
-        with open(fasta_path, "w") as f:
-            for cand in candidate_set.candidates:
-                if not cand.sequence:
-                    logger.warning(
-                        "Candidate %s has empty sequence, skipping", cand.candidate_id
-                    )
-                    continue
-                f.write(f">{cand.candidate_id}\n")
-                # Write sequence in 80-char lines
-                seq = cand.sequence
-                for i in range(0, len(seq), 80):
-                    f.write(seq[i : i + 80] + "\n")
-        return fasta_path
-
-    def run_scoring_pipeline(
+    def __init__(
         self,
-        candidate_set: CandidateSet,
         fastq_path: str,
         signal_path: str,
+        signal_format: str,
         work_dir: str,
-    ) -> Path:
-        """Run the full minimap2 + f5c eventalign pipeline.
+        tools: Optional[ExternalToolPaths] = None,
+    ):
+        self.fastq_path = Path(fastq_path)
+        self.signal_path = Path(signal_path)
+        self.signal_format = signal_format
+        self.work_dir = Path(work_dir)
+        self.tools = tools or ExternalToolPaths()
+        self._f5c_indexed = False
 
-        Args:
-            candidate_set: Candidates (written as reference contigs).
-            fastq_path: Path to reads FASTQ file.
-            signal_path: Path to signal file (SLOW5/BLOW5).
-            work_dir: Working directory for intermediate files.
+    def build_f5c_index(self):
+        """Build f5c index ONCE with all reads. Called at pipeline setup."""
+        cmd = [self.tools.f5c, "index", str(self.fastq_path)]
+        cmd.extend(_signal_format_args(self.signal_format, self.signal_path))
+        _run(cmd, "f5c index")
+        self._f5c_indexed = True
+        logger.info("f5c index built for %s", self.fastq_path)
 
-        Returns:
-            Path to the eventalign TSV output.
+    def score_candidates(
+        self, candidate_set: CandidateSet, interval_work_dir: Path
+    ) -> List[Path]:
+        """Score all reads against each candidate separately.
+
+        For each candidate:
+        1. Write single-contig FASTA
+        2. mappy alignment -> write BAM via pysam
+        3. f5c eventalign -> TSV
+
+        Returns list of eventalign TSV paths (one per candidate).
         """
-        work = Path(work_dir)
-        work.mkdir(parents=True, exist_ok=True)
+        assert self._f5c_indexed, "Call build_f5c_index() first"
 
-        # 1. Write candidate FASTA
-        candidates_fa = self.write_candidate_fasta(candidate_set, work)
+        interval_work_dir.mkdir(parents=True, exist_ok=True)
+        tsv_paths = []
 
-        # 2. minimap2 align + samtools sort
-        aligned_bam = work / "aligned.bam"
-        minimap2_cmd = [
-            self.tools.minimap2,
-            "-ax",
-            "map-ont",
-            str(candidates_fa),
-            str(fastq_path),
-        ]
-        sort_cmd = [
-            self.tools.samtools,
-            "sort",
-            "-o",
-            str(aligned_bam),
-        ]
-        logger.info("Running minimap2 | samtools sort")
-        minimap2_proc = subprocess.Popen(
-            minimap2_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        for candidate in candidate_set.candidates:
+            if not candidate.sequence:
+                logger.warning(
+                    "Candidate %s has empty sequence, skipping", candidate.candidate_id
+                )
+                continue
+
+            cand_dir = interval_work_dir / candidate.candidate_id
+            cand_dir.mkdir(parents=True, exist_ok=True)
+
+            # 1. Write single-candidate FASTA
+            fasta_path = cand_dir / "candidate.fa"
+            write_single_candidate_fasta(candidate, fasta_path)
+
+            # 2. Align ALL reads to this candidate with mappy
+            bam_path = cand_dir / "aligned.bam"
+            align_reads_with_mappy(candidate, self.fastq_path, bam_path)
+
+            # 3. f5c eventalign
+            tsv_path = cand_dir / "eventalign.tsv"
+            run_f5c_eventalign(
+                reads_fq=self.fastq_path,
+                bam=bam_path,
+                genome_fa=fasta_path,
+                signal=self.signal_path,
+                signal_format=self.signal_format,
+                output=tsv_path,
+                f5c_path=self.tools.f5c,
+            )
+            tsv_paths.append(tsv_path)
+
+        return tsv_paths
+
+
+def write_single_candidate_fasta(
+    candidate: TranscriptCandidate, fasta_path: Path
+) -> None:
+    """Write a single candidate as a FASTA file (one contig)."""
+    with open(fasta_path, "w") as f:
+        seq = candidate.sequence
+        f.write(f">{candidate.candidate_id}\n")
+        for i in range(0, len(seq), 80):
+            f.write(seq[i : i + 80] + "\n")
+
+
+def align_reads_with_mappy(
+    candidate: TranscriptCandidate, fastq_path: Path, bam_path: Path
+) -> None:
+    """Align all reads to a single candidate using mappy, write sorted+indexed BAM."""
+    import mappy
+    import pysam
+
+    # Build mappy index for this candidate's sequence
+    aligner = mappy.Aligner(seq=candidate.sequence, preset="map-ont")
+    if not aligner:
+        raise RuntimeError(
+            f"Failed to build mappy index for {candidate.candidate_id}"
         )
-        sort_proc = subprocess.Popen(
-            sort_cmd,
-            stdin=minimap2_proc.stdout,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        minimap2_proc.stdout.close()
-        sort_stdout, sort_stderr = sort_proc.communicate()
-        minimap2_proc.wait()
 
-        if minimap2_proc.returncode != 0:
-            raise RuntimeError(f"minimap2 failed: {minimap2_proc.stderr.read()}")
-        if sort_proc.returncode != 0:
-            raise RuntimeError(f"samtools sort failed: {sort_stderr.decode()}")
+    # Parse FASTQ, align each read, collect alignments
+    alignments = []
+    for name, seq, qual in mappy.fastx_read(str(fastq_path)):
+        for hit in aligner.map(seq):
+            if hit.is_primary:
+                alignments.append((name, seq, qual, hit))
 
-        # 3. samtools index
-        _run(
-            [self.tools.samtools, "index", str(aligned_bam)],
-            "samtools index",
-        )
+    logger.info(
+        "mappy aligned %d reads to candidate %s",
+        len(alignments),
+        candidate.candidate_id,
+    )
 
-        # 4. f5c index
-        _run(
-            [
-                self.tools.f5c,
-                "index",
-                "--slow5",
-                str(signal_path),
-                str(fastq_path),
+    # Write unsorted BAM first, then sort
+    unsorted_bam = str(bam_path) + ".unsorted.bam"
+    header = pysam.AlignmentHeader.from_dict(
+        {
+            "HD": {"VN": "1.6", "SO": "unsorted"},
+            "SQ": [
+                {"SN": candidate.candidate_id, "LN": len(candidate.sequence)}
             ],
-            "f5c index",
-        )
+        }
+    )
 
-        # 5. f5c eventalign
-        eventalign_tsv = work / "eventalign.tsv"
-        eventalign_cmd = [
-            self.tools.f5c,
-            "eventalign",
-            "--rna",
-            "--reads",
-            str(fastq_path),
-            "--bam",
-            str(aligned_bam),
-            "--genome",
-            str(candidates_fa),
-            "--slow5",
-            str(signal_path),
-            "--signal-index",
-            "--scale-events",
-            "--print-read-names",
-            "--samples",
-        ]
-        result = _run(eventalign_cmd, "f5c eventalign")
+    with pysam.AlignmentFile(unsorted_bam, "wb", header=header) as outf:
+        for name, seq, qual, hit in alignments:
+            a = pysam.AlignedSegment(header)
+            a.query_name = name
+            a.query_sequence = seq
+            a.flag = 0 if hit.strand == 1 else 16
+            a.reference_id = 0  # single contig
+            a.reference_start = hit.r_st
+            a.mapping_quality = hit.mapq
+            # mappy returns cigar as (length, op); pysam wants (op, length)
+            a.cigar = [(op, length) for length, op in hit.cigar]
+            if qual:
+                a.query_qualities = pysam.qualitystring_to_array(qual)
+            outf.write(a)
 
-        with open(eventalign_tsv, "w") as f:
-            f.write(result.stdout)
+    # Sort and index
+    pysam.sort("-o", str(bam_path), unsorted_bam)
+    os.remove(unsorted_bam)
+    pysam.index(str(bam_path))
 
-        logger.info("Eventalign output: %s", eventalign_tsv)
-        return eventalign_tsv
+
+def run_f5c_eventalign(
+    reads_fq: Path,
+    bam: Path,
+    genome_fa: Path,
+    signal: Path,
+    signal_format: str,
+    output: Path,
+    f5c_path: str = "f5c",
+) -> None:
+    """Run f5c eventalign for a single candidate."""
+    cmd = [
+        f5c_path,
+        "eventalign",
+        "--rna",
+        "--reads",
+        str(reads_fq),
+        "--bam",
+        str(bam),
+        "--genome",
+        str(genome_fa),
+        "--signal-index",
+        "--scale-events",
+        "--print-read-names",
+        "--samples",
+    ]
+    cmd.extend(_signal_format_args(signal_format, signal))
+
+    result = _run(cmd, f"f5c eventalign ({genome_fa.parent.name})")
+
+    with open(output, "w") as f:
+        f.write(result.stdout)
+
+    logger.info("Eventalign output: %s", output)

@@ -197,3 +197,6 @@ tests/testdata
 
 fin/_eventalign/_tmp
 fin/_eventalign/tmp
+# OMC orchestration state
+.omc/
+progress.txt

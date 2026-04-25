@@ -50,7 +50,7 @@ def test_fasta_reader():
 
             # Test get_summary
             summary = reader.get_summary()
-            print(f"\n✓ FASTA Summary:")
+            print("\n✓ FASTA Summary:")
             for key, value in summary.items():
                 print(f"  {key}: {value}")
 

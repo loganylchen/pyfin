@@ -42,14 +42,14 @@ def diagnose_event_order(signal: np.ndarray):
     n_events = len(events)
 
     print(f"\nDetected {n_events} events from signal of length {len(signal)}")
-    print(f"\nFirst 3 events (should be at START of raw signal):")
+    print("\nFirst 3 events (should be at START of raw signal):")
     for i in range(min(3, n_events)):
         evt = events[i]
         print(
             f"  Event {i}: start={evt['start']}, length={evt['length']:.1f}, mean={evt['mean']:.2f}"
         )
 
-    print(f"\nLast 3 events (should be at END of raw signal):")
+    print("\nLast 3 events (should be at END of raw signal):")
     for i in range(max(0, n_events - 3), n_events):
         evt = events[i]
         print(
@@ -60,7 +60,7 @@ def diagnose_event_order(signal: np.ndarray):
     first_start = events[0]["start"]
     last_start = events[-1]["start"]
 
-    print(f"\n📊 Event Order Analysis:")
+    print("\n📊 Event Order Analysis:")
     print(f"  First event start: {first_start}")
     print(f"  Last event start:  {last_start}")
     print(f"  Signal length:     {len(signal)}")
@@ -98,11 +98,11 @@ def diagnose_eventalign_mapping(signal: np.ndarray, sequence: str):
     alignment = result.get("alignment", [])
     n_aligned = len([a for a in alignment if a.get("event_idx", -1) >= 0])
 
-    print(f"\nAlignment summary:")
+    print("\nAlignment summary:")
     print(f"  Total events detected: {result.get('n_events', 0)}")
     print(f"  Events aligned: {n_aligned}")
     print(f"  Sequence length: {len(sequence)}")
-    print(f"  K-mer size: 5")
+    print("  K-mer size: 5")
     print(f"  Expected k-mers: {len(sequence) - 4}")
 
     # Get valid alignments
@@ -115,7 +115,7 @@ def diagnose_eventalign_mapping(signal: np.ndarray, sequence: str):
     # Sort by sequence position
     valid_alns.sort(key=lambda x: x.get("ref_position", 0))
 
-    print(f"\n📊 First 5 aligned k-mers:")
+    print("\n📊 First 5 aligned k-mers:")
     for i, aln in enumerate(valid_alns[:5]):
         pos = aln.get("ref_position", -1)
         kmer = aln.get("ref_kmer", "?")
@@ -133,7 +133,7 @@ def diagnose_eventalign_mapping(signal: np.ndarray, sequence: str):
         print(f"  Pos {pos:3d}: {kmer} {match} (expected: {expected_kmer})")
         print(f"           event_idx={event_idx}, signal[{sig_start}:{sig_start+int(sig_len)}]")
 
-    print(f"\n📊 Last 5 aligned k-mers:")
+    print("\n📊 Last 5 aligned k-mers:")
     for i, aln in enumerate(valid_alns[-5:]):
         pos = aln.get("ref_position", -1)
         kmer = aln.get("ref_kmer", "?")
@@ -151,7 +151,7 @@ def diagnose_eventalign_mapping(signal: np.ndarray, sequence: str):
         print(f"           event_idx={event_idx}, signal[{sig_start}:{sig_start+int(sig_len)}]")
 
     # Check signal position ordering
-    print(f"\n📊 Signal Position Ordering:")
+    print("\n📊 Signal Position Ordering:")
     first_sig_start = valid_alns[0].get("signal_start", 0)
     last_sig_start = valid_alns[-1].get("signal_start", 0)
 
@@ -186,7 +186,7 @@ def compare_with_f5c(pyfin_result, f5c_records):
 
     pyfin_alns = [a for a in pyfin_result.get("alignment", []) if a.get("event_idx", -1) >= 0]
 
-    print(f"\nAlignment counts:")
+    print("\nAlignment counts:")
     print(f"  Pyfin: {len(pyfin_alns)} events aligned")
     print(f"  F5C:   {len(f5c_records)} events aligned")
 
@@ -195,7 +195,7 @@ def compare_with_f5c(pyfin_result, f5c_records):
     f5c_sorted = sorted(f5c_records, key=lambda x: x["position"])
 
     # Compare first few k-mers
-    print(f"\n📊 Comparing first 5 k-mers:")
+    print("\n📊 Comparing first 5 k-mers:")
     for i in range(min(5, len(pyfin_alns), len(f5c_sorted))):
         pyfin = pyfin_alns[i]
         f5c = f5c_sorted[i]
@@ -252,7 +252,6 @@ def main():
         try:
             import gzip
             import csv
-            from collections import defaultdict
 
             # Load f5c data
             is_gzipped = args.f5c_table.endswith(".gz")
@@ -285,8 +284,8 @@ def main():
     print("SUMMARY")
     print("=" * 70)
     print(f"\nEvent ordering: {event_order}")
-    print(f"Check the analysis above for specific discrepancies.")
-    print(f"\nSee EVENTALIGN_F5C_DIFF_ANALYSIS.md for detailed explanation.")
+    print("Check the analysis above for specific discrepancies.")
+    print("\nSee EVENTALIGN_F5C_DIFF_ANALYSIS.md for detailed explanation.")
 
     return 0
 

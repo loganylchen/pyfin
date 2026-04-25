@@ -29,7 +29,7 @@ def test_basic_dtw():
         distance = dtw_distance(seq1, seq2)
         print(f"  Sequences: {seq1}")
         print(f"  DTW distance: {distance}")
-        print(f"  Expected: ~0.0")
+        print("  Expected: ~0.0")
         
         # Test 2: Different sequences
         print("\nTest 2: Different sequences")
@@ -46,7 +46,7 @@ def test_basic_dtw():
         seq1 = np.random.randn(100).astype(np.float32)
         seq2 = np.random.randn(100).astype(np.float32)
         distance = dtw_distance(seq1, seq2)
-        print(f"  Random sequences (length 100)")
+        print("  Random sequences (length 100)")
         print(f"  DTW distance: {distance}")
         
         # Test 4: Different lengths

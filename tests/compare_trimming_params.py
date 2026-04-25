@@ -5,9 +5,6 @@ Compare adapter trimming and soft-clipping parameters between pyfin and f5c.
 This helps identify why more events are skipped at different ends.
 """
 
-import numpy as np
-import sys
-from pathlib import Path
 
 print("=" * 70)
 print("ADAPTER TRIMMING & SOFT-CLIPPING COMPARISON")

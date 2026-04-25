@@ -1,9 +1,6 @@
 import os
-import fin
 
-from fin.io.io_read_manager import create_subset_manager,ReadSubsetManager
-from fin.io import generate_isolated_intervals, extract_reads_for_interval
-import logging
+from fin.io import generate_isolated_intervals
 from fin.analysis import ThreePrimePositionClustering
 
 # Set debug level (choose one of these options):

@@ -29,7 +29,7 @@ import gzip
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, NamedTuple
+from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, asdict
 from collections import defaultdict
 import pytest

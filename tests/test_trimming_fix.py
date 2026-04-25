@@ -186,7 +186,7 @@ def test_adapter_trimming():
     plt.tight_layout()
     plt.savefig("adapter_trimming_test.png", dpi=150, bbox_inches="tight")
     print("\n" + "=" * 80)
-    print(f"Figure saved to: adapter_trimming_test.png")
+    print("Figure saved to: adapter_trimming_test.png")
     print("=" * 80)
     print("\nExpected results:")
     print("  ✓ First event should start close to adapter end (within ~100 samples)")

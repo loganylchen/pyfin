@@ -1,11 +1,15 @@
 """
-GTF/GFF file format parser
+GTF/GFF file format parser and writer
 """
 
-from typing import List, Dict, Optional, Iterator, Tuple, Any, Generator
+from __future__ import annotations
+
+from typing import List, Dict, Optional, Any, Generator, TYPE_CHECKING
 from pathlib import Path
 import logging
-import gzip
+
+if TYPE_CHECKING:
+    from fin.analysis.quantification import QuantResult
 
 
 logger = logging.getLogger(__name__)
@@ -548,3 +552,103 @@ class GTFReader:
             'genes_per_chromosome': {chrom: sum(1 for g in self.genes.values() if g.chrom == chrom)
                                     for chrom in chromosomes},
         }
+
+
+def write_gtf(
+    results: Dict[str, "QuantResult"],
+    output_path: str,
+    source: str = "pyfin",
+) -> None:
+    """Write quantification results as a GTF file with gene/transcript/exon hierarchy.
+
+    Args:
+        results: Dict mapping candidate_id -> QuantResult (with genomic fields populated).
+        output_path: Path to write the GTF file.
+        source: Value for the GTF source column.
+    """
+
+    # Group transcripts by gene_id
+    genes: Dict[str, List[QuantResult]] = {}
+    for qr in results.values():
+        gid = qr.gene_id or qr.candidate_id
+        genes.setdefault(gid, []).append(qr)
+
+    # Collect all records, sort by (chrom, start)
+    sorted_genes = sorted(
+        genes.items(),
+        key=lambda item: (item[1][0].chrom, min(qr.start for qr in item[1])),
+    )
+
+    lines: List[str] = []
+    for gene_id, transcripts in sorted_genes:
+        transcripts.sort(key=lambda qr: qr.start)
+        chrom = transcripts[0].chrom
+        strand = transcripts[0].strand
+        gene_start = min(qr.start for qr in transcripts)
+        gene_end = max(qr.end for qr in transcripts)
+
+        # Gene line (0-based internal -> 1-based GTF)
+        lines.append(_gtf_line(
+            chrom, source, "gene", gene_start + 1, gene_end, ".", strand, ".",
+            f'gene_id "{gene_id}";',
+        ))
+
+        for qr in transcripts:
+            tid = qr.candidate_id
+
+            # Fusion chrom splitting: seqname uses chromA; add fusion_partner_chrom attr
+            qr_chrom = qr.chrom
+            fusion_attr = ""
+            if getattr(qr, "source", None) == "fusion" and "::" in qr_chrom:
+                chrom_a, chrom_b = qr_chrom.split("::", 1)
+                qr_chrom = chrom_a
+                fusion_attr = f'fusion_partner_chrom "{chrom_b}"; '
+
+            coherence = getattr(qr, "coherence_score", 0.0)
+            discrimination = getattr(qr, "discrimination_score", 0.0)
+            combined = getattr(qr, "combined_score", 0.0)
+
+            attrs = (
+                f'gene_id "{gene_id}"; '
+                f'transcript_id "{tid}"; '
+                f'abundance "{qr.abundance:.4f}"; '
+                f'confidence "{qr.confidence:.4f}"; '
+                f'num_reads "{qr.num_assigned_reads}"; '
+                f'transcript_source "{qr.source}"; '
+                f'{fusion_attr}'
+                f'coherence_score "{coherence:.4f}"; '
+                f'discrimination_score "{discrimination:.4f}"; '
+                f'combined_score "{combined:.4f}";'
+            )
+            lines.append(_gtf_line(
+                qr_chrom, source, "transcript", qr.start + 1, qr.end,
+                ".", strand, ".", attrs,
+            ))
+
+            for exon_num, (es, ee) in enumerate(qr.exons, 1):
+                exon_attrs = (
+                    f'gene_id "{gene_id}"; '
+                    f'transcript_id "{tid}"; '
+                    f'exon_number "{exon_num}";'
+                )
+                lines.append(_gtf_line(
+                    qr_chrom, source, "exon", es + 1, ee,
+                    ".", strand, ".", exon_attrs,
+                ))
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as fh:
+        for line in lines:
+            fh.write(line)
+            fh.write("\n")
+
+    logger.info("Wrote %d GTF lines to %s", len(lines), output_path)
+
+
+def _gtf_line(
+    seqname: str, source: str, feature: str,
+    start: int, end: int, score: str, strand: str, frame: str,
+    attributes: str,
+) -> str:
+    """Format a single GTF line."""
+    return f"{seqname}\t{source}\t{feature}\t{start}\t{end}\t{score}\t{strand}\t{frame}\t{attributes}"

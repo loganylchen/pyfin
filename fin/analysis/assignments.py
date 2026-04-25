@@ -4,6 +4,7 @@ Supports CuPy GPU acceleration when available, with automatic numpy fallback.
 """
 
 import numpy as np
+from typing import Optional
 
 # Try CuPy for GPU-accelerated matrix ops
 try:
@@ -31,6 +32,7 @@ def em_with_coherence(
     min_sigma=0.01,
     verbose=True,
     use_gpu=True,
+    prior_weights: Optional[np.ndarray] = None,
 ):
     """
     EM algorithm with coherence regularization for clustering reads to transcripts.
@@ -61,6 +63,14 @@ def em_with_coherence(
             Print convergence information
         use_gpu: bool, default=True
             Use CuPy GPU acceleration when available
+        prior_weights: np.ndarray or None, shape (n_tx,), default=None
+            Optional prior weights over transcripts. When provided, the initial
+            responsibility matrix is scaled by the normalized prior before row
+            normalization:  R_init[i,j] = exp(-d_tx[i,j]/sigma) * pi[j], where
+            pi = prior_weights / prior_weights.sum(). Must be non-negative and
+            finite. If all weights are zero, falls back to uniform prior with a
+            warning. When None (default), behavior is identical to the original
+            (uniform) initialization.
 
     Returns:
         tuple: (R, hard_assignments, log_likelihoods)
@@ -98,11 +108,27 @@ def em_with_coherence(
         f"dist_read_to_read must be ({n_reads}, {n_reads}), got {dist_read_to_read.shape}"
     assert sigma >= min_sigma, f"sigma must be >= {min_sigma}"
     assert beta >= 0, "beta must be non-negative"
-    assert max_iter > 0, "max_iter must be positive"
+    assert max_iter >= 0, "max_iter must be non-negative"
 
     # Ensure distance matrices are non-negative
     if dist_read_to_tx.min() < 0 or dist_read_to_read.min() < 0:
         raise ValueError("Distance matrices must be non-negative")
+
+    # Validate and normalize prior_weights
+    pi = None
+    if prior_weights is not None:
+        prior_weights = np.asarray(prior_weights, dtype=float)
+        assert prior_weights.shape == (n_tx,), \
+            f"prior_weights must be ({n_tx},), got {prior_weights.shape}"
+        if np.any(prior_weights < 0) or not np.all(np.isfinite(prior_weights)):
+            raise ValueError("prior_weights must be non-negative and finite")
+        s = prior_weights.sum()
+        if s <= 0:
+            if verbose:
+                print("prior_weights sum to 0; falling back to uniform prior")
+            pi = None
+        else:
+            pi = prior_weights / s
 
     # Select array backend (cupy GPU or numpy CPU)
     xp, to_device, to_host = _get_array_module(use_gpu)
@@ -115,6 +141,9 @@ def em_with_coherence(
 
     # Initialize responsibility matrix: R[i, j] = P(read_i -> transcript_j)
     R = xp.exp(-d_tx / sigma)
+    if pi is not None:
+        pi_dev = to_device(pi.reshape(1, -1))  # shape (1, n_tx) for broadcasting
+        R = R * pi_dev
     row_sums = R.sum(axis=1, keepdims=True)
     row_sums = xp.maximum(row_sums, 1e-10)
     R = R / row_sums
@@ -161,7 +190,7 @@ def em_with_coherence(
 
     if verbose:
         unique_assignments, counts = np.unique(hard_assignments, return_counts=True)
-        print(f"\nCluster statistics:")
+        print("\nCluster statistics:")
         print(f"  Active transcripts: {len(unique_assignments)} / {n_tx}")
         print(f"  Reads per cluster: min={counts.min()}, max={counts.max()}, "
               f"mean={counts.mean():.1f}, median={np.median(counts):.1f}")

@@ -63,15 +63,15 @@ def test_example(example_path, dry_run=False):
 
         # Check output
         if "Error importing" in result.stdout or "ModuleNotFoundError" in result.stderr:
-            print(f"  ✗ Import error")
+            print("  ✗ Import error")
             print(f"  STDOUT: {result.stdout[:200]}")
             print(f"  STDERR: {result.stderr[:200]}")
             return False
         elif "Error:" in result.stdout and "not available" in result.stdout:
-            print(f"  ⚠ Extension not built (expected)")
+            print("  ⚠ Extension not built (expected)")
             return True
         elif result.returncode == 0:
-            print(f"  ✓ Runs successfully")
+            print("  ✓ Runs successfully")
             return True
         else:
             print(f"  ⚠ Exit code {result.returncode} (may be expected)")
@@ -80,7 +80,7 @@ def test_example(example_path, dry_run=False):
             return True
 
     except subprocess.TimeoutExpired:
-        print(f"  ⚠ Timeout (example may wait for input)")
+        print("  ⚠ Timeout (example may wait for input)")
         return True
     except Exception as e:
         print(f"  ✗ Error: {e}")
@@ -142,12 +142,12 @@ def main():
     print(f"⊘ Skipped: {len(results['skip'])}")
 
     if results["fail"]:
-        print(f"\nFailed examples:")
+        print("\nFailed examples:")
         for name in results["fail"]:
             print(f"  - {name}")
         return 1
     else:
-        print(f"\n✓ All testable examples passed!")
+        print("\n✓ All testable examples passed!")
         return 0
 
 

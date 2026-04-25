@@ -32,7 +32,6 @@ Requirements:
 
 import argparse
 import sys
-import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from collections import defaultdict
@@ -68,7 +67,6 @@ if str(parent_dir) not in sys.path:
 # Import fin modules
 from fin.io import (
     generate_isolated_intervals,
-    extract_reads_for_interval,
     FASTAReader,
     BamReader,
     GTFReader,
@@ -191,7 +189,7 @@ class RegionTranscriptAnalyzer:
         self.regions: List[Any] = []
         self.region_results: Dict[str, Dict] = {}
 
-        logger.info(f"Initialized RegionTranscriptAnalyzer")
+        logger.info("Initialized RegionTranscriptAnalyzer")
         logger.info(f"  BAM: {self.bam_path}")
         logger.info(f"  Genome: {self.genome_path}")
         logger.info(f"  Transcriptome: {self.transcriptome_path}")
@@ -2401,7 +2399,7 @@ class RegionTranscriptAnalyzer:
                     if f5c_records:
                         logger.info(f"    Loaded {len(f5c_records)} f5c events for visualization")
                     else:
-                        logger.info(f"    No f5c events found for this read")
+                        logger.info("    No f5c events found for this read")
                 except Exception as e:
                     logger.warning(f"    Failed to load f5c data: {e}")
 
@@ -2431,7 +2429,7 @@ class RegionTranscriptAnalyzer:
                 logger.info(f"  DTW distance matrix computed: {distance_matrix.shape}")
 
                 # Step 6: Perform hierarchical clustering
-                logger.info(f"  Performing hierarchical clustering...")
+                logger.info("  Performing hierarchical clustering...")
                 cluster_result = self.cluster_reads_by_dtw(
                     distance_matrix, read_ids_list, method="average"
                 )
@@ -2490,7 +2488,7 @@ class RegionTranscriptAnalyzer:
         # Step 9: Assign reads to transcripts using EM algorithm (with DTW coherence)
         if result["read_alignments"] and ASSIGNMENT_AVAILABLE:
             region_safe_id = region_id.replace(":", "_").replace("-", "_")
-            logger.info(f"  Running EM read-to-transcript assignment (with DTW coherence)...")
+            logger.info("  Running EM read-to-transcript assignment (with DTW coherence)...")
 
             assignments = self.assign_reads_to_transcripts(
                 result["read_alignments"],
@@ -2534,7 +2532,7 @@ class RegionTranscriptAnalyzer:
         # Step 9b: Assign reads using eventalign quality only (no DTW coherence)
         if result["read_alignments"] and ASSIGNMENT_AVAILABLE:
             region_safe_id = region_id.replace(":", "_").replace("-", "_")
-            logger.info(f"  Running EM assignment based on eventalign quality only (no DTW)...")
+            logger.info("  Running EM assignment based on eventalign quality only (no DTW)...")
 
             assignments_ea = self.assign_reads_to_transcripts(
                 result["read_alignments"],
@@ -3074,7 +3072,7 @@ def print_assessment_report(assessment: Dict[str, Any], verbose: bool = True) ->
 
     # Coverage summary
     cov = assessment["coverage"]
-    print(f"\n📊 COVERAGE:")
+    print("\n📊 COVERAGE:")
     print(
         f"   Events aligned:    {cov['n_aligned']:,} / {cov['n_events']:,} ({cov['event_coverage']:.1%})"
     )
@@ -3086,14 +3084,14 @@ def print_assessment_report(assessment: Dict[str, Any], verbose: bool = True) ->
 
     # HMM states
     hmm = assessment["hmm_states"]
-    print(f"\n🔄 HMM STATES:")
+    print("\n🔄 HMM STATES:")
     print(f"   Match (M):         {hmm['match_fraction']:.1%}")
     print(f"   Bad Event (B):     {hmm['bad_event_fraction']:.1%}")
     print(f"   K-mer Skip (K):    {hmm['kmer_skip_fraction']:.1%}")
 
     # Signal-model fit
     fit = assessment["signal_model_fit"]
-    print(f"\n📈 SIGNAL-MODEL FIT:")
+    print("\n📈 SIGNAL-MODEL FIT:")
     print(f"   Correlation (r):   {fit['correlation']:.4f}")
     print(f"   R-squared:         {fit['r_squared']:.4f}")
     print(f"   MAE:               {fit['mae']:.2f} pA")
@@ -3102,7 +3100,7 @@ def print_assessment_report(assessment: Dict[str, Any], verbose: bool = True) ->
     if verbose:
         # Continuity
         cont = assessment["continuity"]
-        print(f"\n🔗 CONTINUITY:")
+        print("\n🔗 CONTINUITY:")
         print(f"   Event continuity:  {cont['event_continuity_score']:.1%}")
         print(f"   Sequence continuity: {cont['sequence_continuity_score']:.1%}")
         print(f"   Max event gap:     {cont['max_event_gap']}")
@@ -3110,21 +3108,21 @@ def print_assessment_report(assessment: Dict[str, Any], verbose: bool = True) ->
 
         # Event duration
         dur = assessment["event_duration"]
-        print(f"\n⏱️ EVENT DURATION:")
+        print("\n⏱️ EVENT DURATION:")
         print(f"   Mean:              {dur['mean']:.1f} samples")
         print(f"   Std:               {dur['std']:.1f} samples")
         print(f"   Range:             [{dur['min']:.1f}, {dur['max']:.1f}]")
 
         # Scaling
         scl = assessment["scaling"]
-        print(f"\n⚖️ SCALING PARAMETERS:")
+        print("\n⚖️ SCALING PARAMETERS:")
         print(f"   Scale:             {scl['scale']:.4f} {'✓' if scl['scale_in_range'] else '⚠️'}")
         print(f"   Shift:             {scl['shift']:.2f} {'✓' if scl['shift_in_range'] else '⚠️'}")
         print(f"   Var:               {scl['var']:.4f} {'✓' if scl['var_in_range'] else '⚠️'}")
 
         # Soft-clipping
         clip = assessment["soft_clipping"]
-        print(f"\n✂️ SOFT-CLIPPING:")
+        print("\n✂️ SOFT-CLIPPING:")
         print(
             f"   Pre-clip:          {clip['pre_clip_samples']:,} samples ({clip['pre_clip_fraction']:.1%})"
         )
@@ -3136,7 +3134,7 @@ def print_assessment_report(assessment: Dict[str, Any], verbose: bool = True) ->
         )
 
     # Diagnostics
-    print(f"\n💡 DIAGNOSTICS:")
+    print("\n💡 DIAGNOSTICS:")
     for diag in assessment["diagnostics"]:
         print(f"   • {diag}")
 
@@ -3321,17 +3319,17 @@ def main():
     print(f"Regions with clustering: {results['summary']['regions_with_clustering']}")
     print(f"Total clusters identified: {results['summary']['total_clusters']}")
     print(f"\nOutput files saved to: {args.output}/")
-    print(f"  - analysis_results.json                      : Complete analysis data")
+    print("  - analysis_results.json                      : Complete analysis data")
     print(
-        f"  - eventalign_*_first_read.png                : Signal-sequence alignment (multi-transcript)"
+        "  - eventalign_*_first_read.png                : Signal-sequence alignment (multi-transcript)"
     )
-    print(f"  - dtw_heatmap_*.png                          : Read-read DTW distance heatmaps")
-    print(f"  - assessment_heatmap_*.png                   : Eventalign quality heatmaps")
-    print(f"  - assessment_multi_*.png                     : Multi-metric quality assessment")
-    print(f"  - transcript_reads_*.png                     : Read assignments with DTW coherence")
-    print(f"  - assignment_summary_*.png                   : Assignment summary with DTW")
-    print(f"  - transcript_reads_eventalign_*.png          : Read assignments (eventalign only)")
-    print(f"  - assignment_summary_eventalign_*.png        : Assignment summary (eventalign only)")
+    print("  - dtw_heatmap_*.png                          : Read-read DTW distance heatmaps")
+    print("  - assessment_heatmap_*.png                   : Eventalign quality heatmaps")
+    print("  - assessment_multi_*.png                     : Multi-metric quality assessment")
+    print("  - transcript_reads_*.png                     : Read assignments with DTW coherence")
+    print("  - assignment_summary_*.png                   : Assignment summary with DTW")
+    print("  - transcript_reads_eventalign_*.png          : Read assignments (eventalign only)")
+    print("  - assignment_summary_eventalign_*.png        : Assignment summary (eventalign only)")
 
 
 if __name__ == "__main__":

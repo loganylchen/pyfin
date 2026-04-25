@@ -6,9 +6,6 @@ This script checks which events are being soft-clipped (excluded from alignment)
 at each end of the sequence to understand the asymmetry between pyfin and f5c.
 """
 
-import numpy as np
-import sys
-from pathlib import Path
 
 
 def analyze_alignment_coverage(pyfin_alignment, f5c_records, sequence_length):
@@ -42,7 +39,7 @@ def analyze_alignment_coverage(pyfin_alignment, f5c_records, sequence_length):
     print(f"\nSequence length: {sequence_length} bases")
     print(f"Expected k-mers (5-mer): {sequence_length - 4}")
 
-    print(f"\n📊 Pyfin Coverage:")
+    print("\n📊 Pyfin Coverage:")
     print(f"  Aligned positions: {len(pyfin_positions)}")
     if pyfin_positions:
         print(f"  First aligned: position {min(pyfin_positions)} (5' end)")
@@ -52,7 +49,7 @@ def analyze_alignment_coverage(pyfin_alignment, f5c_records, sequence_length):
         print(f"  Unaligned at 5' end: {pyfin_5p_missing} positions")
         print(f"  Unaligned at 3' end: {pyfin_3p_missing} positions")
 
-    print(f"\n📊 F5C Coverage:")
+    print("\n📊 F5C Coverage:")
     print(f"  Aligned positions: {len(f5c_positions)}")
     if f5c_positions:
         print(f"  First aligned: position {min(f5c_positions)} (5' end)")
@@ -63,7 +60,7 @@ def analyze_alignment_coverage(pyfin_alignment, f5c_records, sequence_length):
         print(f"  Unaligned at 3' end: {f5c_3p_missing} positions")
 
     if pyfin_positions and f5c_positions:
-        print(f"\n🔍 Difference:")
+        print("\n🔍 Difference:")
         print(f"  5' end: pyfin missing {pyfin_5p_missing}, f5c missing {f5c_5p_missing}")
         print(f"          Δ = {pyfin_5p_missing - f5c_5p_missing} (positive = pyfin skips more)")
         print(f"  3' end: pyfin missing {pyfin_3p_missing}, f5c missing {f5c_3p_missing}")
@@ -73,8 +70,8 @@ def analyze_alignment_coverage(pyfin_alignment, f5c_records, sequence_length):
             print(
                 f"\n  ⚠️  Pyfin skips {pyfin_5p_missing - f5c_5p_missing} more positions at 5' end"
             )
-            print(f"      This is the END of raw signal (high event indices)")
-            print(f"      Affected by PRE-flanking soft-clipping")
+            print("      This is the END of raw signal (high event indices)")
+            print("      Affected by PRE-flanking soft-clipping")
         elif pyfin_5p_missing < f5c_5p_missing:
             print(f"\n  ⚠️  F5C skips {f5c_5p_missing - pyfin_5p_missing} more positions at 5' end")
 
@@ -82,8 +79,8 @@ def analyze_alignment_coverage(pyfin_alignment, f5c_records, sequence_length):
             print(
                 f"\n  ⚠️  Pyfin skips {pyfin_3p_missing - f5c_3p_missing} more positions at 3' end"
             )
-            print(f"      This is the START of raw signal (low event indices)")
-            print(f"      Affected by POST-flanking soft-clipping")
+            print("      This is the START of raw signal (low event indices)")
+            print("      Affected by POST-flanking soft-clipping")
         elif pyfin_3p_missing < f5c_3p_missing:
             print(f"\n  ⚠️  F5C skips {f5c_3p_missing - pyfin_3p_missing} more positions at 3' end")
 
@@ -112,14 +109,14 @@ def analyze_event_coverage(pyfin_result, f5c_records, n_events_total):
 
     print(f"\nTotal events detected: {n_events_total}")
 
-    print(f"\n📊 Pyfin Event Usage:")
+    print("\n📊 Pyfin Event Usage:")
     print(f"  Events aligned: {len(pyfin_events)}")
     if pyfin_events:
         print(f"  Event index range: {min(pyfin_events)} to {max(pyfin_events)}")
         print(f"  Unused at low indices: {min(pyfin_events)}")
         print(f"  Unused at high indices: {n_events_total - 1 - max(pyfin_events)}")
 
-    print(f"\n📊 F5C Event Usage:")
+    print("\n📊 F5C Event Usage:")
     print(f"  Events aligned: {len(f5c_events)}")
     if f5c_events:
         print(f"  Event index range: {min(f5c_events)} to {max(f5c_events)}")

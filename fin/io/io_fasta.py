@@ -3,7 +3,7 @@ FASTA file format parser
 Supports reading and writing FASTA files with sequence records
 """
 
-from typing import List, Dict, Optional, Iterator, Generator, Union
+from typing import List, Dict, Optional, Generator, Union
 from pathlib import Path
 import logging
 

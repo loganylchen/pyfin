@@ -6,12 +6,10 @@ for efficient processing: transcript-specific reads, fusion candidates, and unan
 Reads are categorized without creating intermediate files until explicitly requested.
 """
 
-from typing import List, Dict, Optional, Iterator, Tuple, Set, Any, Generator
+from typing import List, Dict, Optional, Tuple, Set, Any, Generator
 from pathlib import Path
 from collections import defaultdict
 import pysam
-import tempfile
-import os
 
 from .io_bam import BamReader
 from .io_gtf import GTFReader

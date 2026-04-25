@@ -17,12 +17,19 @@ from fin.analysis.quantification import (
     compute_tpm,
     quantify_transcripts,
 )
-from fin.candidates.dataclasses import CandidateSet
+from fin.candidates.dataclasses import TranscriptCandidate
 from fin.candidates.discovery import discover_gtf_only
 from fin.io.interval_manager import GenomicInterval
+from fin.pipeline.config import PipelineConfig
 from fin.scoring.eventalign_parser import (
     build_distance_matrix,
     parse_eventalign_tsv,
+)
+from fin.scoring.composite import (
+    derive_prior_weights,
+    populate_quant_scores,
+    score_candidates_composite,
+    subsample_reads_for_dtw,
 )
 from fin.scoring.external_tools import ExternalToolPaths, ExternalToolRunner
 from fin.scoring.signal_dtw import compute_read_to_read_dtw, extract_signal_segments
@@ -46,7 +53,7 @@ class IntervalAssignment:
 
     read_ids: List[str]
     hard_assignments: np.ndarray
-    candidates: List["TranscriptCandidate"]
+    candidates: List[TranscriptCandidate]
     work_dir: Path  # interval work dir where per-candidate BAMs live
 
 
@@ -125,19 +132,34 @@ class QuantifyRunner:
         em_beta: float = 0.5,
         em_max_iter: int = 1000,
         em_tol: float = 1e-4,
+        config: Optional[PipelineConfig] = None,
     ):
         self.gtf_path = gtf_path
         self.genome_fasta_path = genome_fasta_path
         self.samples = samples
         self.output_dir = Path(output_dir)
-        self.signal_format = signal_format
-        self.use_gpu = use_gpu
-        self.f5c_path = f5c_path
-        self.samtools_path = samtools_path
-        self.em_sigma = em_sigma
-        self.em_beta = em_beta
-        self.em_max_iter = em_max_iter
-        self.em_tol = em_tol
+        self.config = config
+
+        # When config is provided, config wins for all overlapping fields.
+        # This keeps a single source of truth for scoring/EM/DTW parameters.
+        if config is not None:
+            self.signal_format = config.signal_format
+            self.use_gpu = config.use_gpu
+            self.f5c_path = config.f5c_path
+            self.samtools_path = config.samtools_path
+            self.em_sigma = config.em_sigma
+            self.em_beta = config.em_beta
+            self.em_max_iter = config.em_max_iter
+            self.em_tol = config.em_tol
+        else:
+            self.signal_format = signal_format
+            self.use_gpu = use_gpu
+            self.f5c_path = f5c_path
+            self.samtools_path = samtools_path
+            self.em_sigma = em_sigma
+            self.em_beta = em_beta
+            self.em_max_iter = em_max_iter
+            self.em_tol = em_tol
 
         self._gtf_reader = None
         self._genome_fasta: Dict[str, str] = {}
@@ -317,6 +339,8 @@ class QuantifyRunner:
             return None
 
         read_ids = sorted(candidate_set.read_ids)
+        if not read_ids:
+            return None
         candidate_ids = candidate_set.candidate_ids()
 
         # Per-candidate scoring (mappy + f5c eventalign)
@@ -330,15 +354,75 @@ class QuantifyRunner:
             scores = parse_eventalign_tsv(str(tsv_path), candidate_lengths)
             all_scores.extend(scores)
 
-        dist_read_to_tx = build_distance_matrix(all_scores, read_ids, candidate_ids)
+        # DTW subsampling: cap reads for the O(n^2) read-to-read DTW.
+        max_dtw = (
+            self.config.max_reads_per_interval_for_dtw
+            if self.config is not None
+            else 2000
+        )
+        dtw_read_ids = subsample_reads_for_dtw(read_ids, max_dtw)
+        if len(dtw_read_ids) != len(read_ids):
+            logger.info(
+                "Interval %s: subsampling DTW reads %d -> %d",
+                interval.region_string,
+                len(read_ids),
+                len(dtw_read_ids),
+            )
 
-        # Signal DTW
+        dist_read_to_tx = build_distance_matrix(
+            all_scores, dtw_read_ids, candidate_ids
+        )
+
+        # Signal DTW (read-to-read)
         segments = extract_signal_segments(
             all_scores, signal_reader, signal_format=self.signal_format
         )
         dist_read_to_read = compute_read_to_read_dtw(
-            segments, read_ids, use_gpu=self.use_gpu
+            segments, dtw_read_ids, use_gpu=self.use_gpu
         )
+
+        # Shape assertions: both distance matrices share the same read axis.
+        assert (
+            dist_read_to_tx.shape[0]
+            == dist_read_to_read.shape[0]
+            == len(dtw_read_ids)
+        ), (
+            f"Read axis mismatch: dist_read_to_tx rows={dist_read_to_tx.shape[0]}, "
+            f"dist_read_to_read rows={dist_read_to_read.shape[0]}, "
+            f"dtw_read_ids={len(dtw_read_ids)}"
+        )
+        assert (
+            dist_read_to_read.shape[0] == dist_read_to_read.shape[1]
+        ), "dist_read_to_read must be square"
+
+        n_reads = len(dtw_read_ids)
+        n_tx = len(candidate_ids)
+
+        # --- Composite scoring (uniform R seed) ---
+        score_alpha = self.config.score_alpha if self.config is not None else 0.5
+        R_uniform = np.full((n_reads, n_tx), 1.0 / max(n_tx, 1))
+        composite_scores = score_candidates_composite(
+            candidates=candidate_set.candidates,
+            dist_read_to_tx=dist_read_to_tx,
+            dist_read_to_read=dist_read_to_read,
+            R=R_uniform,
+            alpha=score_alpha,
+            use_gpu=self.use_gpu,
+        )
+        combined_scores_arr = np.array(
+            [s.combined for s in composite_scores], dtype=float
+        )
+
+        # --- Determine prior_weights from composite scores ---
+        use_prior = self.config.use_prior if self.config is not None else True
+        prior_cap = (
+            self.config.prior_weight_cap if self.config is not None else 10.0
+        )
+        prior_weights: Optional[np.ndarray] = None
+        if use_prior:
+            prior_weights = derive_prior_weights(
+                combined_scores_arr, n_tx, prior_cap
+            )
 
         # EM assignment
         R, hard_assignments, _ = em_with_coherence(
@@ -349,13 +433,18 @@ class QuantifyRunner:
             max_iter=self.em_max_iter,
             tol=self.em_tol,
             verbose=False,
+            use_gpu=self.use_gpu,
+            prior_weights=prior_weights,
         )
 
-        # Quantification
-        quant = quantify_transcripts(R, hard_assignments, candidate_set.candidates, read_ids)
+        # Quantification + score field population
+        quant = quantify_transcripts(
+            R, hard_assignments, candidate_set.candidates, dtw_read_ids
+        )
+        populate_quant_scores(quant, composite_scores)
 
         assignment = IntervalAssignment(
-            read_ids=read_ids,
+            read_ids=dtw_read_ids,
             hard_assignments=hard_assignments,
             candidates=list(candidate_set.candidates),
             work_dir=work_dir,

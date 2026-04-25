@@ -3,7 +3,7 @@ BED file format parser
 Supports BED3, BED6, BED12 formats
 """
 
-from typing import List, Dict, Optional, Iterator, Tuple, Any, Generator
+from typing import List, Optional, Tuple, Generator
 from pathlib import Path
 import logging
 

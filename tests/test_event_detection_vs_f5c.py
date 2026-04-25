@@ -32,7 +32,7 @@ import numpy as np
 import gzip
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, NamedTuple
+from typing import Dict, List, Tuple
 from dataclasses import dataclass, field
 from collections import defaultdict
 import pytest
@@ -253,7 +253,7 @@ def load_f5c_events_by_read(tsv_path: Path, max_reads: int = None) -> Dict[str, 
                     reference_kmer=parts[2],
                 )
                 events_by_read[read_id].append(event)
-            except (ValueError, IndexError) as e:
+            except (ValueError, IndexError):
                 continue
     
     # Sort events by start_idx within each read

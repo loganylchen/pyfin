@@ -7,7 +7,6 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pysam
-import pytest
 
 from fin.analysis.quantification import QuantResult, compute_tpm
 from fin.candidates.dataclasses import CandidateSet, IntronChain, TranscriptCandidate

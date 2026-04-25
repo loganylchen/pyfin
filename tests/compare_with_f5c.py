@@ -16,7 +16,6 @@ import numpy as np
 import gzip
 from pathlib import Path
 from typing import Dict, List, Tuple
-import sys
 
 
 def load_f5c_eventalign_tsv(tsv_path: str) -> List[Dict]:
@@ -245,7 +244,7 @@ def create_text_visualization(f5c_alignments: List[Dict], ref_seq: str,
             return
 
         pos_range = (min(all_positions), max(all_positions))
-        f.write(f"## Position Coverage Map\n\n")
+        f.write("## Position Coverage Map\n\n")
         f.write(f"Position range: {pos_range[0]} - {pos_range[1]}\n")
         f.write(f"Total positions with events: {len(all_positions)}\n")
         f.write(f"Total event alignments: {len(f5c_alignments)}\n\n")
@@ -277,8 +276,8 @@ def create_text_visualization(f5c_alignments: List[Dict], ref_seq: str,
 
         # Event statistics per position
         events_per_pos = [len(pos_to_events[p]) for p in all_positions]
-        f.write(f"\n## Event Statistics\n\n")
-        f.write(f"Events per position:\n")
+        f.write("\n## Event Statistics\n\n")
+        f.write("Events per position:\n")
         f.write(f"  Mean: {np.mean(events_per_pos):.2f}\n")
         f.write(f"  Std: {np.std(events_per_pos):.2f}\n")
         f.write(f"  Min: {np.min(events_per_pos)}\n")
@@ -286,7 +285,7 @@ def create_text_visualization(f5c_alignments: List[Dict], ref_seq: str,
 
         # Event mean statistics
         means = [a['event_mean'] for a in f5c_alignments]
-        f.write(f"\nEvent mean levels:\n")
+        f.write("\nEvent mean levels:\n")
         f.write(f"  Mean: {np.mean(means):.2f} pA\n")
         f.write(f"  Std: {np.std(means):.2f} pA\n")
         f.write(f"  Range: [{np.min(means):.2f}, {np.max(means):.2f}] pA\n")
@@ -317,12 +316,12 @@ def run_pyfin_and_compare(f5c_alignments: List[Dict], ref_seq: str,
 
             # Verify read IDs match
             if fastq_read_id != read_id:
-                print(f"  WARNING: Read ID mismatch!")
+                print("  WARNING: Read ID mismatch!")
                 print(f"    POD5 read_id: {read_id}")
                 print(f"    FASTQ read_id: {fastq_read_id}")
         else:
-            print(f"\n  WARNING: FASTQ not found, using reference sequence as placeholder")
-            print(f"  For proper comparison, use basecalled read sequence from FASTQ/BAM")
+            print("\n  WARNING: FASTQ not found, using reference sequence as placeholder")
+            print("  For proper comparison, use basecalled read sequence from FASTQ/BAM")
             read_seq = ref_seq
 
         # Run eventalign
@@ -357,13 +356,13 @@ def run_pyfin_and_compare(f5c_alignments: List[Dict], ref_seq: str,
             # Export pyfin results in f5c TSV format
             output_dir = Path(__file__).parent
             tsv_output = output_dir / "pyfin_eventalign.tsv.gz"
-            print(f"\n  Exporting PyFin results in f5c TSV format...")
+            print("\n  Exporting PyFin results in f5c TSV format...")
             result['read_ids'] = [read_id]
             export_pyfin_to_f5c_tsv(result, "SIRV101", ref_seq, str(tsv_output),
                                      signal=signal, include_raw_samples=False)
 
             # Show first few pyfin alignments
-            print(f"\n  First 10 PyFin alignments:")
+            print("\n  First 10 PyFin alignments:")
             print(f"    {'RefPos':>8} {'EventIdx':>10} {'RefKmer':>10} {'State':>6}")
             print(f"    {'-'*8} {'-'*10} {'-'*10} {'-'*6}")
             for i in range(min(10, len(pyfin_align))):
@@ -372,7 +371,7 @@ def run_pyfin_and_compare(f5c_alignments: List[Dict], ref_seq: str,
                       f"{ea['ref_kmer']:>10} {ea['hmm_state']:>6}")
 
             # Event-by-event comparison with f5c
-            print(f"\n  Comparing with F5C (event-by-event)...")
+            print("\n  Comparing with F5C (event-by-event)...")
 
             # Index f5c by position
             f5c_by_pos = {}
@@ -396,7 +395,7 @@ def run_pyfin_and_compare(f5c_alignments: List[Dict], ref_seq: str,
             f5c_only = 0
             pyfin_only = 0
 
-            print(f"\n  Position-by-position comparison (first 20):")
+            print("\n  Position-by-position comparison (first 20):")
             print(f"    {'Pos':>6} {'F5C_N':>7} {'PyFin_N':>8} {'Status':>10}")
             print(f"    {'-'*6} {'-'*7} {'-'*8} {'-'*10}")
 
@@ -421,14 +420,14 @@ def run_pyfin_and_compare(f5c_alignments: List[Dict], ref_seq: str,
             comparison['pyfin_only'] = pyfin_only
             comparison['total_positions'] = len(all_positions)
 
-            print(f"\n  Summary:")
+            print("\n  Summary:")
             print(f"    Total positions: {comparison['total_positions']}")
             print(f"    Matched positions: {matched_positions} ({100*matched_positions/comparison['total_positions']:.1f}%)")
             print(f"    F5C only: {f5c_only}")
             print(f"    PyFin only: {pyfin_only}")
 
         else:
-            print(f"\n  PyFin alignment FAILED")
+            print("\n  PyFin alignment FAILED")
             print(f"  Status: {comparison['status']}")
             print(f"  Events detected: {comparison['pyfin_n_events']}")
 
@@ -463,7 +462,7 @@ def main():
     print(f"  Loaded {len(f5c_alignments)} alignments")
 
     # Show first few f5c alignments
-    print(f"\n  First 10 F5C alignments:")
+    print("\n  First 10 F5C alignments:")
     print(f"    {'Pos':>6} {'EventIdx':>8} {'RefKmer':>10} {'EventMean':>10} {'ModelMean':>10}")
     print(f"    {'-'*6} {'-'*8} {'-'*10} {'-'*10} {'-'*10}")
     for i, aln in enumerate(f5c_alignments[:10]):
@@ -488,7 +487,7 @@ def main():
     stdvs = [a['event_stdv'] for a in f5c_alignments]
     events_per_pos = [len(events) for events in pos_to_events.values()]
 
-    print(f"\nF5C Statistics:")
+    print("\nF5C Statistics:")
     print(f"  Unique positions: {len(pos_to_events)}")
     print(f"  Events per position: {np.mean(events_per_pos):.2f} +/- {np.std(events_per_pos):.2f}")
     print(f"  Event mean: {np.mean(means):.2f} +/- {np.std(means):.2f} pA")
@@ -517,18 +516,18 @@ def main():
         elif comparison.get('pyfin_success', False):
             f.write(f"- PyFin alignments: {comparison['pyfin_n_alignments']}\n")
             f.write(f"- Events per base: {comparison['pyfin_events_per_base']:.2f}\n")
-            f.write(f"- Position comparison:\n")
+            f.write("- Position comparison:\n")
             f.write(f"  - Total positions: {comparison['total_positions']}\n")
             f.write(f"  - Matched: {comparison['matched_positions']}\n")
             f.write(f"  - F5C only: {comparison['f5c_only']}\n")
             f.write(f"  - PyFin only: {comparison['pyfin_only']}\n")
-            f.write(f"- Status: SUCCESS\n")
+            f.write("- Status: SUCCESS\n")
         else:
             f.write(f"- Status: FAILED ({comparison.get('status', 'unknown')})\n")
             f.write(f"- Events detected: {comparison.get('pyfin_n_events', 'N/A')}\n")
-            f.write(f"\n### Notes\n\n")
-            f.write(f"This is expected when using reference sequence as read_seq.\n")
-            f.write(f"For proper comparison, use basecalled read sequence from FASTQ/BAM.\n")
+            f.write("\n### Notes\n\n")
+            f.write("This is expected when using reference sequence as read_seq.\n")
+            f.write("For proper comparison, use basecalled read sequence from FASTQ/BAM.\n")
 
     print(f"\nComparison report saved to: {report_path}")
 
@@ -546,9 +545,9 @@ def main():
         print(f"  Matched positions: {comparison['matched_positions']}/{comparison['total_positions']} "
               f"({100*comparison['matched_positions']/comparison['total_positions']:.1f}%)")
     else:
-        print(f"\nPyFin: Alignment failed")
-        print(f"  Note: This is expected when using reference sequence as read_seq")
-        print(f"        For proper comparison, use basecalled read sequence from FASTQ/BAM")
+        print("\nPyFin: Alignment failed")
+        print("  Note: This is expected when using reference sequence as read_seq")
+        print("        For proper comparison, use basecalled read sequence from FASTQ/BAM")
 
 
 if __name__ == "__main__":

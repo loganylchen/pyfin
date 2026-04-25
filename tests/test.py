@@ -1,5 +1,5 @@
 from fin.io.io_pod5 import Pod5Reader
-from fin._f5c import detect_events, eventalign, profile_hmm_eventalign, is_available
+from fin._f5c import detect_events, profile_hmm_eventalign
 import pandas as pd
 
 pod5_reader = Pod5Reader("../../testdata/test.pod5")

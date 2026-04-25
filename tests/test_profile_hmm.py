@@ -50,7 +50,7 @@ def test_profile_hmm():
     print("-" * 70)
     try:
         result_abea = eventalign(raw_signal=signal, sequence=sequence, kmer_size=5)
-        print(f"✓ ABEA alignment successful")
+        print("✓ ABEA alignment successful")
         print(f"  Events detected: {result_abea['n_events']}")
         print(f"  Aligned pairs: {result_abea['n_aligned_pairs']}")
         print(
@@ -58,7 +58,7 @@ def test_profile_hmm():
         )
 
         # Show base_to_event_map sample
-        print(f"  Base-to-event map (first 5):")
+        print("  Base-to-event map (first 5):")
         for i, mapping in enumerate(result_abea["base_to_event_map"][:5]):
             print(f"    {i}: kmer={mapping['kmer']}, events={mapping['start']}-{mapping['stop']}")
     except Exception as e:
@@ -76,7 +76,7 @@ def test_profile_hmm():
         result_hmm = profile_hmm_eventalign(
             raw_signal=signal, sequence=sequence, kmer_size=5, events_per_base=3.0
         )
-        print(f"✓ Profile HMM alignment successful")
+        print("✓ Profile HMM alignment successful")
         print(f"  Events detected: {result_hmm['n_events']}")
         print(f"  Aligned records: {result_hmm['n_aligned']}")
         print(f"  Events per base: {result_hmm['events_per_base']:.2f}")
@@ -85,7 +85,7 @@ def test_profile_hmm():
         )
 
         # Show alignment sample
-        print(f"  Alignment records (first 10):")
+        print("  Alignment records (first 10):")
         print(
             f"    {'Pos':<4} {'Kmer':<6} {'Evt':<4} {'State':<5} {'EvtMean':<8} {'ModelMean':<10} {'ScaledMean':<11}"
         )
@@ -103,7 +103,7 @@ def test_profile_hmm():
             state = aln["hmm_state"]
             states[state] = states.get(state, 0) + 1
 
-        print(f"  HMM state distribution:")
+        print("  HMM state distribution:")
         for state, count in sorted(states.items()):
             state_name = {"M": "MATCH", "K": "KMER_SKIP", "B": "BAD_EVENT"}.get(state, state)
             print(f"    {state_name}: {count}")

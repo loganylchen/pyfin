@@ -15,7 +15,7 @@ Requirements:
 
 import numpy as np
 import time
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 import sys
 
 
@@ -257,7 +257,7 @@ def run_benchmark_suite(sequence_lengths: List[int], n_runs: int = 10):
                 }
                 results[impl_name].append((length, avg_time, distance))
             else:
-                print(f"  Benchmark failed")
+                print("  Benchmark failed")
                 results[impl_name].append((length, None, None))
         
         # Print comparison
@@ -272,16 +272,16 @@ def run_benchmark_suite(sequence_lengths: List[int], n_runs: int = 10):
             # Compare distances
             distances = [r['distance'] for r in length_results.values()]
             if len(set([f"{d:.4f}" for d in distances])) == 1:
-                print(f"  Distance agreement: ✓ All implementations agree")
+                print("  Distance agreement: ✓ All implementations agree")
             else:
-                print(f"  Distance agreement: ✗ Implementations differ")
+                print("  Distance agreement: ✗ Implementations differ")
                 for name, res in length_results.items():
                     print(f"    {name}: {res['distance']:.4f}")
             
             # Speedup comparison
             if 'CUDA (GPU)' in length_results and len(length_results) > 1:
                 cuda_time = length_results['CUDA (GPU)']['time']
-                print(f"\n  Speedup vs CUDA:")
+                print("\n  Speedup vs CUDA:")
                 for name, res in length_results.items():
                     if name != 'CUDA (GPU)':
                         speedup = res['time'] / cuda_time

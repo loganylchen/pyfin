@@ -49,7 +49,7 @@ def run_f5c_eventalign(bam_path, reference_path, output_path):
         "--out", output_path
     ]
 
-    print(f"Running f5c eventalign...")
+    print("Running f5c eventalign...")
     print(f"  Command: {' '.join(cmd)}")
 
     start_time = time.time()

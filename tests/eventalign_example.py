@@ -8,7 +8,6 @@ events to reference k-mers.
 
 import sys
 from pathlib import Path
-import logging
 
 # Set debug level (choose one of these options):
 
@@ -45,7 +44,7 @@ def example_usage():
     fasta_path = "path/to/your/reference.fa"
     slow5_path = "path/to/your/signals.blow5"  # Optional but recommended
 
-    print(f"\nInput files:")
+    print("\nInput files:")
     print(f"  BAM: {bam_path}")
     print(f"  FASTA: {fasta_path}")
     print(f"  SLOW5: {slow5_path}")
@@ -108,7 +107,7 @@ def example_usage():
                 break
 
         print("-" * 70)
-        print(f"\nSummary:")
+        print("\nSummary:")
         print(f"  Reads processed: {read_count}")
         print(f"  Total events aligned: {total_events}")
         print(f"  Average events per read: {total_events / read_count:.1f}")

@@ -11,9 +11,6 @@ This script:
 
 import argparse
 import gzip
-import os
-import sys
-from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -598,7 +595,7 @@ def main():
     print(f"  Sample rate: {sample_rate} Hz")
 
     # Run getevents
-    print(f"\nRunning getevents...")
+    print("\nRunning getevents...")
     getevents_result = run_getevents(signal)
     print(f"  Detected {getevents_result['n_events']} events")
 
@@ -613,7 +610,7 @@ def main():
     print(f"  Loaded {len(pore_model['kmer_to_mean'])} k-mers")
 
     # Create visualization
-    print(f"\nCreating comparison visualization...")
+    print("\nCreating comparison visualization...")
     plot_comparison(
         signal=signal,
         f5c_events=f5c_events,

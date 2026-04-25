@@ -91,7 +91,7 @@ def example_rna_alignment():
     result = eventalign(raw_signal, sequence, kmer_size=5)
 
     # Display results
-    print(f"\nAlignment Results:")
+    print("\nAlignment Results:")
     print(f"  Events detected: {result['n_events']}")
     print(f"  Aligned pairs: {result['n_aligned_pairs']}")
     print(
@@ -99,7 +99,7 @@ def example_rna_alignment():
     )
 
     # Show base-to-event mapping for first 10 kmers
-    print(f"\nBase-to-Event Mapping (first 10 kmers):")
+    print("\nBase-to-Event Mapping (first 10 kmers):")
     base_to_event = result["base_to_event_map"]
     for i in range(min(10, len(base_to_event))):
         kmer_pos = i
@@ -130,7 +130,7 @@ def example_rna_shorter():
     result = eventalign(raw_signal, sequence, kmer_size=5)
 
     # Display results
-    print(f"\nAlignment Results:")
+    print("\nAlignment Results:")
     print(f"  Events detected: {result['n_events']}")
     print(f"  Aligned pairs: {result['n_aligned_pairs']}")
     print(
@@ -138,7 +138,7 @@ def example_rna_shorter():
     )
 
     # Show base-to-event mapping
-    print(f"\nBase-to-Event Mapping (first 10 kmers):")
+    print("\nBase-to-Event Mapping (first 10 kmers):")
     base_to_event = result["base_to_event_map"]
     for i in range(min(10, len(base_to_event))):
         kmer_pos = i
@@ -169,7 +169,7 @@ def example_rna004_alignment():
     result = eventalign(raw_signal, sequence, kmer_size=9)
 
     # Display results
-    print(f"\nAlignment Results:")
+    print("\nAlignment Results:")
     print(f"  Events detected: {result['n_events']}")
     print(f"  Aligned pairs: {result['n_aligned_pairs']}")
     print(
@@ -177,7 +177,7 @@ def example_rna004_alignment():
     )
 
     # Show base-to-event mapping
-    print(f"\nBase-to-Event Mapping (first 10 kmers):")
+    print("\nBase-to-Event Mapping (first 10 kmers):")
     base_to_event = result["base_to_event_map"]
     for i in range(min(10, len(base_to_event))):
         kmer_pos = i
@@ -211,14 +211,14 @@ def example_with_adapters():
     # Align - soft-clipping should handle adapters automatically
     result = eventalign(raw_signal, sequence, kmer_size=5)
 
-    print(f"\nAlignment Results:")
+    print("\nAlignment Results:")
     print(f"  Events detected: {result['n_events']}")
     print(f"  Aligned pairs: {result['n_aligned_pairs']}")
     print(
         f"  Scaling: scale={result['scaling']['scale']:.3f}, shift={result['scaling']['shift']:.3f}"
     )
-    print(f"\nNote: Soft-clipping automatically skipped adapter events!")
-    print(f"      (TRANS_START_TO_CLIP=0.5, TRANS_CLIP_SELF=0.9)")
+    print("\nNote: Soft-clipping automatically skipped adapter events!")
+    print("      (TRANS_START_TO_CLIP=0.5, TRANS_CLIP_SELF=0.9)")
 
     return result
 

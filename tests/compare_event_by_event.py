@@ -13,7 +13,6 @@ import numpy as np
 import gzip
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-import sys
 
 
 def load_f5c_eventalign_tsv(tsv_path: str) -> List[Dict]:
@@ -351,7 +350,7 @@ def print_detailed_comparison(f5c_alignments: List[Dict], comparison: Dict):
     """Print detailed comparison results."""
     stats = comparison['statistics']
 
-    print(f"\nOverall Statistics:")
+    print("\nOverall Statistics:")
     print(f"  F5C total alignments: {stats['f5c_total_alignments']}")
     print(f"  PyFin total alignments: {stats['pyfin_total_alignments']}")
     print(f"  F5C unique positions: {stats['f5c_unique_positions']}")
@@ -361,13 +360,13 @@ def print_detailed_comparison(f5c_alignments: List[Dict], comparison: Dict):
     print(f"  PyFin only positions: {stats['pyfin_only_positions']}")
 
     if 'mean_diff_mean' in stats:
-        print(f"\n  Event mean difference (F5C - PyFin):")
+        print("\n  Event mean difference (F5C - PyFin):")
         print(f"    Mean: {stats['mean_diff_mean']:.4f}")
         print(f"    Std: {stats['mean_diff_std']:.4f}")
         print(f"    Abs mean: {stats['mean_diff_abs']:.4f}")
 
     if 'count_diff_mean' in stats:
-        print(f"\n  Event count difference per position (F5C - PyFin):")
+        print("\n  Event count difference per position (F5C - PyFin):")
         print(f"    Mean: {stats['count_diff_mean']:.2f}")
         print(f"    Std: {stats['count_diff_std']:.2f}")
 
@@ -642,18 +641,18 @@ def main():
 
         # Verify read IDs match
         if fastq_read_id != read_id:
-            print(f"  WARNING: Read ID mismatch!")
+            print("  WARNING: Read ID mismatch!")
             print(f"    POD5 read_id: {read_id}")
             print(f"    FASTQ read_id: {fastq_read_id}")
     else:
-        print(f"\n  WARNING: FASTQ not found, using reference sequence as placeholder")
-        print(f"  For proper comparison, use basecalled read sequence from FASTQ/BAM")
+        print("\n  WARNING: FASTQ not found, using reference sequence as placeholder")
+        print("  For proper comparison, use basecalled read sequence from FASTQ/BAM")
         read_seq = ref_seq
 
     try:
         from fin._eventalign import run_eventalign, MODEL_RNA002
 
-        print(f"\nRunning PyFin eventalign...")
+        print("\nRunning PyFin eventalign...")
         result = run_eventalign(
             read_ids=[read_id],
             read_seqs=[read_seq],
@@ -668,12 +667,12 @@ def main():
         pyfin_align = result["full"][0][0]
 
         if len(pyfin_align) == 0:
-            print(f"\nPyFin alignment FAILED")
+            print("\nPyFin alignment FAILED")
             print(f"  Status: {result['mapping'][0][0].get('status', 'unknown')}")
             print(f"  Events detected: {result['events'][0]['starts'].shape[0]}")
-            print(f"\n  Cannot perform event-by-event comparison due to alignment failure.")
-            print(f"  This is expected when using reference sequence as read_seq.")
-            print(f"  For proper comparison, provide basecalled read sequence from FASTQ/BAM.")
+            print("\n  Cannot perform event-by-event comparison due to alignment failure.")
+            print("  This is expected when using reference sequence as read_seq.")
+            print("  For proper comparison, provide basecalled read sequence from FASTQ/BAM.")
             return
 
         print(f"  PyFin alignment SUCCESS: {len(pyfin_align)} alignments")
@@ -681,7 +680,7 @@ def main():
         # Export pyfin results in f5c TSV format
         output_dir = Path(__file__).parent
         tsv_output = output_dir / "pyfin_eventalign.tsv.gz"
-        print(f"\nExporting PyFin results in f5c TSV format...")
+        print("\nExporting PyFin results in f5c TSV format...")
         # Add read_id to result for export
         result['read_ids'] = [read_id]
         export_pyfin_to_f5c_tsv(result, ref_name, ref_seq, str(tsv_output),

@@ -15,14 +15,10 @@ Then creates an interactive visualization showing:
 
 import argparse
 import gzip
-import os
-from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.collections import LineCollection
-from matplotlib.colors import ListedColormap, BoundaryNorm
 import seaborn as sns
 
 # Set style
@@ -378,7 +374,7 @@ def main():
         print(f"  Reconstructed signal length: {len(signal)} samples")
 
     # Create visualization
-    print(f"\nCreating visualization...")
+    print("\nCreating visualization...")
     plot_eventalign_visualization(
         signal=signal,
         events=events,

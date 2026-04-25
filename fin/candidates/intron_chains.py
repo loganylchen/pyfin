@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from fin.candidates.dataclasses import IntronChain
-from fin.io.interval_manager import extract_three_prime_pos, extract_strand_from_read
+from fin.io.interval_manager import extract_three_prime_pos
 
 logger = logging.getLogger(__name__)
 

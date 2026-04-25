@@ -9,15 +9,12 @@ This demonstrates how to:
 4. Strand-separated intervals with read count tracking
 """
 
-import sys
-from pathlib import Path
 
 # Import the package
 from fin.io import (
     generate_isolated_intervals,
     extract_reads_for_interval,
-    extract_annotation_for_interval,
-    GenomicInterval
+    extract_annotation_for_interval
 )
 from fin.utils.log_config import get_package_logger
 

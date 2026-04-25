@@ -20,7 +20,8 @@ except ImportError as e:
     dtw_distance = None
     dtw_pairwise = None
     cleanup = None
-    dtw_is_available = lambda: False
+    def dtw_is_available() -> bool:
+        return False
     _DTW_IMPORT_ERROR = str(e)
 
 # Try CuPy for GPU-accelerated EM

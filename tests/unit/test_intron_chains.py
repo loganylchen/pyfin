@@ -3,12 +3,10 @@
 import sys
 from pathlib import Path
 
-import pytest
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from fin.candidates.dataclasses import IntronChain
 from fin.candidates.intron_chains import (
     extract_intron_chain,
     group_reads_by_three_prime_and_intron_chain,

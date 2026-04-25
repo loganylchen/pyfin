@@ -530,7 +530,7 @@ def print_evaluation_report(metrics: dict):
         margin = metrics['winner'].get('coverage_margin', 0)
         print(f"  Winner:  {winner} (by {margin} positions)")
     else:
-        print(f"  Winner:  TIE")
+        print("  Winner:  TIE")
 
     print("\n2. CONTINUITY (Gap analysis)")
     print("-" * 70)
@@ -579,7 +579,7 @@ def print_evaluation_report(metrics: dict):
             margin = metrics['winner'].get('log_prob_margin', 0)
             print(f"  Winner:  {winner} (by {margin:.4f})")
         else:
-            print(f"  Winner:  TIE")
+            print("  Winner:  TIE")
         print("  (Higher log probability indicates better alignment quality)")
 
     # Overall verdict

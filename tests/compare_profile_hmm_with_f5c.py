@@ -16,7 +16,6 @@ This will:
 """
 
 import sys
-import numpy as np
 from pathlib import Path
 
 # Add parent directory to path for development
@@ -24,7 +23,6 @@ parent_dir = Path(__file__).parent.parent
 if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
 
-from fin._f5c import profile_hmm_eventalign
 
 
 def parse_f5c_eventalign(tsv_file):
@@ -100,7 +98,7 @@ def compare_alignments(f5c_aln, pyfin_aln):
     print(f"Matches: {matches}/{n_compare} ({100*matches/n_compare:.1f}%)")
 
     # Compare event indices
-    print(f"\nEvent index comparison:")
+    print("\nEvent index comparison:")
     f5c_events = [a["event_index"] for a in f5c_aln[:n_compare]]
     pyfin_events = [a["event_idx"] for a in pyfin_aln[:n_compare]]
 
@@ -110,7 +108,7 @@ def compare_alignments(f5c_aln, pyfin_aln):
     )
 
     # Compare model means
-    print(f"\nModel mean comparison (first 5):")
+    print("\nModel mean comparison (first 5):")
     for i in range(min(5, n_compare)):
         f5c = f5c_aln[i]
         pyfin = pyfin_aln[i]

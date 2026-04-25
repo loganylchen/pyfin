@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
-from typing import List, Optional, Set
+from typing import List, Set
 
 from fin.candidates.dataclasses import CandidateSet, IntronChain, TranscriptCandidate
 from fin.candidates.intron_chains import (
-    extract_intron_chain,
     group_reads_by_three_prime_and_intron_chain,
     gtf_transcript_to_intron_chain,
     pick_representative_read,
 )
 from fin.io.interval_manager import (
     GenomicInterval,
-    extract_strand_from_read,
-    extract_three_prime_pos,
     is_fusion_read,
 )
 
@@ -37,6 +33,80 @@ def _intron_chains_match(a: IntronChain, b: IntronChain) -> bool:
 
 def _three_prime_within_threshold(pos_a: int, pos_b: int, threshold: int) -> bool:
     return abs(pos_a - pos_b) <= threshold
+
+
+def discover_gtf_only(
+    interval: GenomicInterval,
+    bam_path: str,
+    gtf_reader,
+    genome_fasta: str,
+) -> CandidateSet:
+    """Discover candidates using only GTF transcripts (no novel discovery).
+
+    Args:
+        interval: Genomic interval to process.
+        bam_path: Path to BAM file.
+        gtf_reader: Opened GTFReader instance (already parsed).
+        genome_fasta: Full chromosome sequence string for the interval's chromosome.
+
+    Returns:
+        CandidateSet with GTF-only candidates and all read IDs from the interval.
+    """
+    from fin.io.io_bam import BamReader
+
+    # Fetch all read IDs from BAM for the interval
+    all_read_ids: Set[str] = set()
+    with BamReader(bam_path) as bam:
+        for alignment in bam.fetch(
+            reference=interval.chrom, start=interval.start, end=interval.end
+        ):
+            rd = bam.alignment_to_dict(alignment)
+            if not rd or not rd.get("is_mapped"):
+                continue
+            read_id = rd.get("query_name")
+            if read_id:
+                all_read_ids.add(read_id)
+
+    # Get GTF transcripts in region
+    gtf_transcripts = []
+    if gtf_reader is not None:
+        gtf_transcripts = gtf_reader.get_transcripts_in_region(
+            interval.chrom, interval.start, interval.end
+        )
+
+    # Build TranscriptCandidate per GTF transcript
+    gtf_candidates = []
+    for tx in gtf_transcripts:
+        chain = gtf_transcript_to_intron_chain(tx)
+        tx.sort_features()
+        three_prime = tx.end if tx.strand == "+" else tx.start
+        seq = tx.get_spliced_sequence(genome_fasta)
+
+        gtf_candidates.append(
+            TranscriptCandidate(
+                candidate_id=tx.transcript_id,
+                intron_chain=chain,
+                three_prime_pos=three_prime,
+                sequence=seq,
+                source="gtf",
+                supporting_read_ids=set(),
+                chrom=interval.chrom,
+                strand=tx.strand,
+                start=tx.start,
+                end=tx.end,
+            )
+        )
+
+    logger.info(
+        "Interval %s: %d GTF candidates, %d reads (gtf-only mode)",
+        interval.region_string,
+        len(gtf_candidates),
+        len(all_read_ids),
+    )
+
+    return CandidateSet(
+        interval=interval, candidates=gtf_candidates, read_ids=all_read_ids
+    )
 
 
 def discover_candidates(
@@ -187,6 +257,31 @@ def discover_candidates(
     )
 
 
+def merge_fusion_candidates(
+    candidate_set: CandidateSet,
+    fusion_candidates: List[TranscriptCandidate],
+) -> CandidateSet:
+    """Append fusion candidates to an existing CandidateSet, deduplicating by ID.
+
+    Args:
+        candidate_set: Existing set of candidates (GTF/novel). Mutated in place.
+        fusion_candidates: Fusion candidates to merge in.
+
+    Returns:
+        The same CandidateSet instance with fusion candidates appended.
+    """
+    existing_ids: Set[str] = {c.candidate_id for c in candidate_set.candidates}
+    for fc in fusion_candidates:
+        if fc.candidate_id not in existing_ids:
+            candidate_set.candidates.append(fc)
+            existing_ids.add(fc.candidate_id)
+
+    all_ids = [c.candidate_id for c in candidate_set.candidates]
+    assert len(all_ids) == len(set(all_ids)), "Duplicate candidate_ids found after merge"
+
+    return candidate_set
+
+
 def _collapse_candidates(
     candidates: List[TranscriptCandidate], threshold: int
 ) -> List[TranscriptCandidate]:
@@ -200,7 +295,13 @@ def _collapse_candidates(
 
     # Group by (intron_chain, approximate 3' position)
     groups: dict = {}
+    fusion_candidates: List[TranscriptCandidate] = []
     for cand in candidates:
+        if cand.source == "fusion":
+            # Fusion candidates are never collapsed — each breakpoint is unique
+            fusion_candidates.append(cand)
+            continue
+
         # Find existing group with matching chain and close 3'
         merged = False
         for key in list(groups.keys()):
@@ -222,4 +323,4 @@ def _collapse_candidates(
         if not merged:
             groups[(cand.three_prime_pos, cand.intron_chain)] = cand
 
-    return list(groups.values())
+    return list(groups.values()) + fusion_candidates

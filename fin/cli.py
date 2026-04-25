@@ -8,10 +8,109 @@ import sys
 import click
 
 
-@click.group()
-def main():
-    """pyfin: nanopore transcript quantification."""
-    pass
+@click.group(invoke_without_command=True)
+@click.option("--bam", default=None, type=click.Path(exists=True), help="Input BAM file.")
+@click.option("--gtf", default=None, type=click.Path(), help="Reference GTF annotation file (optional).")
+@click.option("--genome", default=None, type=click.Path(exists=True), help="Genome FASTA file.")
+@click.option("--fastq", default=None, type=click.Path(exists=True), help="FASTQ reads file.")
+@click.option("--signal", default=None, type=click.Path(exists=True), help="SLOW5/BLOW5/POD5 signal file.")
+@click.option("--output-dir", default=None, help="Output directory.")
+@click.option("--use-prior/--no-prior", default=True, show_default=True, help="Apply combined_score-derived EM prior.")
+@click.option("--no-gpu", "use_gpu", is_flag=True, default=True, flag_value=False, help="Disable GPU acceleration.")
+@click.option(
+    "--signal-format",
+    default="slow5",
+    type=click.Choice(["slow5", "pod5"]),
+    show_default=True,
+    help="Signal file format.",
+)
+@click.option("--alpha", default=0.5, show_default=True, type=float, help="Score alpha (coherence vs discrimination weight).")
+@click.option("--fusion", "fusion_enabled", is_flag=True, default=False, help="Enable fusion detection.")
+@click.option("--min-support", default=2, show_default=True, type=int, help="Minimum read support for fusion breakpoint (only with --fusion).")
+@click.option("--max-dist", default=500, show_default=True, type=int, help="Maximum distance (bp) for breakpoint clustering (only with --fusion).")
+@click.option("--flank-bp", default=500, show_default=True, type=int, help="Flank size (bp) around fusion breakpoint (only with --fusion).")
+@click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
+@click.pass_context
+def main(
+    ctx,
+    bam,
+    gtf,
+    genome,
+    fastq,
+    signal,
+    output_dir,
+    use_prior,
+    use_gpu,
+    signal_format,
+    alpha,
+    fusion_enabled,
+    min_support,
+    max_dist,
+    flank_bp,
+    verbose,
+):
+    """pyfin: nanopore signal-based transcriptome assembly.
+
+    Default command performs reference-based transcriptome assembly. Pass
+    --fusion to additionally detect gene fusions. Use the `quantify`
+    subcommand for multi-sample known-transcript quantification.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    missing = []
+    if not bam:
+        missing.append("--bam")
+    if not genome:
+        missing.append("--genome")
+    if not fastq:
+        missing.append("--fastq")
+    if not signal:
+        missing.append("--signal")
+    if not output_dir:
+        missing.append("--output-dir")
+    if missing:
+        click.echo(f"Error: missing required option(s): {', '.join(missing)}", err=True)
+        click.echo(ctx.get_help(), err=True)
+        sys.exit(2)
+
+    from fin.utils.log_config import setup_logger
+
+    setup_logger("fin", level="DEBUG" if verbose else "INFO")
+
+    from fin.pipeline.config import PipelineConfig
+    from fin.pipeline.runner import PipelineRunner
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    cfg = PipelineConfig(
+        bam_path=bam,
+        gtf_path=gtf,
+        genome_fasta_path=genome,
+        fastq_path=fastq,
+        signal_path=signal,
+        work_dir=output_dir,
+        output_gtf=os.path.join(output_dir, "assembly.gtf"),
+        output_tsv=os.path.join(output_dir, "scores.tsv"),
+        output_bedpe=os.path.join(output_dir, "fusions.bedpe") if fusion_enabled else None,
+        use_gpu=use_gpu,
+        use_prior=use_prior,
+        signal_format=signal_format,
+        score_alpha=alpha,
+        fusion_enabled=fusion_enabled,
+        fusion_min_support=min_support,
+        fusion_max_dist=max_dist,
+        fusion_flank_bp=flank_bp,
+    )
+
+    runner = PipelineRunner(cfg)
+    try:
+        runner.setup()
+        runner.run()
+    finally:
+        runner.cleanup()
+
+    click.echo(f"Assembly output written to {output_dir}/")
 
 
 @main.command()
@@ -38,14 +137,12 @@ def main():
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, f5c_path, samtools_path, use_prior, verbose):
     """Quantify known transcripts across multiple samples."""
-    # Numerical backward-compat verified in tests/integration/test_quantify_backward_compat.py (US-019)
     from fin.utils.log_config import setup_logger
 
     logger = setup_logger("fin", level="DEBUG" if verbose else "INFO")
 
     from fin.pipeline.quantify_runner import QuantifyRunner, SampleInput
 
-    # Parse sample strings
     samples = []
     for s in sample:
         parts = s.split(":")
@@ -62,7 +159,7 @@ def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, f5c_path, 
     from fin.pipeline.config import PipelineConfig
 
     quant_config = PipelineConfig(
-        bam_path="",  # multi-sample: bam per sample, not top-level
+        bam_path="",
         use_gpu=use_gpu,
         use_prior=use_prior,
     )
@@ -86,125 +183,6 @@ def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, f5c_path, 
         runner.cleanup()
 
     click.echo(f"Output written to {output_dir}/")
-
-
-@main.command()
-@click.option("--bam", required=True, help="Input BAM file.")
-@click.option("--gtf", default=None, type=click.Path(), help="Reference GTF annotation file (optional).")
-@click.option("--genome", required=True, type=click.Path(exists=True), help="Genome FASTA file.")
-@click.option("--fastq", required=True, type=click.Path(exists=True), help="FASTQ reads file.")
-@click.option("--signal", required=True, type=click.Path(exists=True), help="SLOW5/BLOW5 signal file.")
-@click.option("--output-dir", required=True, help="Output directory.")
-@click.option("--use-prior/--no-prior", default=True, show_default=True, help="Apply combined_score-derived EM prior.")
-@click.option("--no-gpu", "use_gpu", is_flag=True, default=True, flag_value=False, help="Disable GPU acceleration.")
-@click.option(
-    "--signal-format",
-    default="slow5",
-    type=click.Choice(["slow5", "pod5"]),
-    show_default=True,
-    help="Signal file format.",
-)
-@click.option("--alpha", default=0.5, show_default=True, type=float, help="Score alpha (coherence vs discrimination weight).")
-@click.option("--fusion", "fusion_enabled", is_flag=True, default=False, help="Enable fusion detection.")
-@click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
-def assemble(bam, gtf, genome, fastq, signal, output_dir, use_prior, use_gpu, signal_format, alpha, fusion_enabled, verbose):
-    """Signal-based transcriptome assembly."""
-    from fin.utils.log_config import setup_logger
-
-    logger = setup_logger("fin", level="DEBUG" if verbose else "INFO")
-
-    from fin.pipeline.config import PipelineConfig
-    from fin.pipeline.runner import PipelineRunner
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    cfg = PipelineConfig(
-        bam_path=bam,
-        gtf_path=gtf,
-        genome_fasta_path=genome,
-        fastq_path=fastq,
-        signal_path=signal,
-        work_dir=output_dir,
-        output_gtf=os.path.join(output_dir, "assembly.gtf"),
-        output_tsv=os.path.join(output_dir, "scores.tsv"),
-        output_bedpe=os.path.join(output_dir, "fusions.bedpe") if fusion_enabled else None,
-        use_gpu=use_gpu,
-        use_prior=use_prior,
-        signal_format=signal_format,
-        score_alpha=alpha,
-        fusion_enabled=fusion_enabled,
-    )
-
-    runner = PipelineRunner(cfg)
-    try:
-        runner.setup()
-        runner.run()
-    finally:
-        runner.cleanup()
-
-    click.echo(f"Assembly output written to {output_dir}/")
-
-
-@main.command()
-@click.option("--bam", required=True, help="Input BAM file.")
-@click.option("--gtf", default=None, type=click.Path(), help="Reference GTF annotation file (optional).")
-@click.option("--genome", required=True, type=click.Path(exists=True), help="Genome FASTA file.")
-@click.option("--fastq", required=True, type=click.Path(exists=True), help="FASTQ reads file.")
-@click.option("--signal", required=True, type=click.Path(exists=True), help="SLOW5/BLOW5 signal file.")
-@click.option("--output-dir", required=True, help="Output directory.")
-@click.option("--use-prior/--no-prior", default=True, show_default=True, help="Apply combined_score-derived EM prior.")
-@click.option("--no-gpu", "use_gpu", is_flag=True, default=True, flag_value=False, help="Disable GPU acceleration.")
-@click.option(
-    "--signal-format",
-    default="slow5",
-    type=click.Choice(["slow5", "pod5"]),
-    show_default=True,
-    help="Signal file format.",
-)
-@click.option("--alpha", default=0.5, show_default=True, type=float, help="Score alpha (coherence vs discrimination weight).")
-@click.option("--min-support", default=2, show_default=True, type=int, help="Minimum read support for fusion breakpoint.")
-@click.option("--max-dist", default=500, show_default=True, type=int, help="Maximum distance (bp) for breakpoint clustering.")
-@click.option("--flank-bp", default=500, show_default=True, type=int, help="Flank size (bp) around fusion breakpoint.")
-@click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
-def fusion(bam, gtf, genome, fastq, signal, output_dir, use_prior, use_gpu, signal_format, alpha, min_support, max_dist, flank_bp, verbose):
-    """Detect gene fusions from signal data."""
-    from fin.utils.log_config import setup_logger
-
-    logger = setup_logger("fin", level="DEBUG" if verbose else "INFO")
-
-    from fin.pipeline.config import PipelineConfig
-    from fin.pipeline.runner import PipelineRunner
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    cfg = PipelineConfig(
-        bam_path=bam,
-        gtf_path=gtf,
-        genome_fasta_path=genome,
-        fastq_path=fastq,
-        signal_path=signal,
-        work_dir=output_dir,
-        output_gtf=os.path.join(output_dir, "assembly.gtf"),
-        output_tsv=os.path.join(output_dir, "scores.tsv"),
-        output_bedpe=os.path.join(output_dir, "fusions.bedpe"),
-        use_gpu=use_gpu,
-        use_prior=use_prior,
-        signal_format=signal_format,
-        score_alpha=alpha,
-        fusion_enabled=True,
-        fusion_min_support=min_support,
-        fusion_max_dist=max_dist,
-        fusion_flank_bp=flank_bp,
-    )
-
-    runner = PipelineRunner(cfg)
-    try:
-        runner.setup()
-        runner.run()
-    finally:
-        runner.cleanup()
-
-    click.echo(f"Fusion output written to {output_dir}/")
 
 
 if __name__ == "__main__":

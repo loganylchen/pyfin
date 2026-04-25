@@ -186,7 +186,7 @@ def visualize_eventalign(raw_signal, sequence, result, kmer_size=5):
     ax5.set_ylim(-0.5, 0.5)
     ax5.set_xlabel("Base Position", fontsize=11)
     ax5.set_title(
-        f"Reference Sequence (first 50 bases, k-mer boundaries marked)",
+        "Reference Sequence (first 50 bases, k-mer boundaries marked)",
         fontsize=12,
         fontweight="bold",
     )
@@ -216,7 +216,7 @@ def main():
         raw_signal = pickle.load(f)
     print(f"    ✓ Generated {len(raw_signal)} samples")
     print(f"    ✓ Signal range: {raw_signal.min():.2f} - {raw_signal.max():.2f} pA")
-    print(f"    ✓ Average samples per base: ~50")
+    print("    ✓ Average samples per base: ~50")
 
     # 3. Detect events
     print("\n[3] Detecting events from raw signal...")
@@ -237,7 +237,7 @@ def main():
     try:
         # RNA-only mode: events are reversed internally, use original sequence
         result = eventalign(raw_signal, sequence, kmer_size=kmer_size)
-        print(f"    ✓ Alignment complete!")
+        print("    ✓ Alignment complete!")
         print(f"    ✓ K-mer size: {kmer_size}")
         print(f"    ✓ Number of k-mers: {len(result['base_to_event_map'])}")
         print(f"    ✓ Aligned pairs: {result['n_aligned_pairs']}")

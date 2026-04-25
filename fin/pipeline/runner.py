@@ -15,11 +15,16 @@ from fin.analysis.quantification import (
     quantify_transcripts,
 )
 from fin.candidates.dataclasses import CandidateSet
-from fin.candidates.discovery import discover_candidates
+from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
 from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
 from fin.pipeline.config import PipelineConfig
+from fin.scoring.composite import (
+    derive_prior_weights,
+    populate_quant_scores,
+    score_candidates_composite,
+    subsample_reads_for_dtw,
+)
 from fin.scoring.eventalign_parser import (
-    ReadCandidateScore,
     build_distance_matrix,
     parse_eventalign_tsv,
 )
@@ -43,14 +48,22 @@ class PipelineRunner:
         """Validate tools, open file handles, load references."""
         # Validate external tools
         tool_paths = ExternalToolPaths(
-            minimap2=self.config.minimap2_path,
             f5c=self.config.f5c_path,
             samtools=self.config.samtools_path,
         )
         missing = tool_paths.validate()
         if missing:
             raise RuntimeError(f"Missing external tools: {', '.join(missing)}")
-        self._tool_runner = ExternalToolRunner(tool_paths)
+
+        # Create tool runner and build f5c index ONCE with all reads
+        self._tool_runner = ExternalToolRunner(
+            fastq_path=self.config.fastq_path,
+            signal_path=self.config.signal_path,
+            signal_format=self.config.signal_format,
+            work_dir=self.config.work_dir,
+            tools=tool_paths,
+        )
+        self._tool_runner.build_f5c_index()
 
         # Load GTF
         if self.config.gtf_path:
@@ -100,6 +113,39 @@ class PipelineRunner:
         # Aggregate across intervals
         aggregated = aggregate_across_intervals(all_quant_results)
 
+        # Resolve gene_ids from GTF annotation
+        for cid, qr in aggregated.items():
+            if qr.source == "gtf" and self._gtf_reader:
+                tx = self._gtf_reader.get_transcript(cid)
+                if tx:
+                    qr.gene_id = tx.gene_id
+            if not qr.gene_id:
+                qr.gene_id = qr.candidate_id
+
+        # Write GTF output
+        if self.config.output_gtf:
+            from fin.io.io_gtf import write_gtf
+
+            write_gtf(aggregated, self.config.output_gtf)
+            logger.info("Wrote GTF output: %s", self.config.output_gtf)
+
+        # US-013: Additional output writers
+        if self.config.output_tsv:
+            from fin.io.io_tsv import write_scoring_tsv
+
+            transcript_lengths = {
+                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+                for cid, qr in aggregated.items()
+            }
+            write_scoring_tsv(aggregated, transcript_lengths, self.config.output_tsv)
+            logger.info("Wrote TSV output: %s", self.config.output_tsv)
+
+        if self.config.fusion_enabled and self.config.output_bedpe:
+            from fin.io.io_bedpe import write_fusion_bedpe
+
+            write_fusion_bedpe(aggregated, self.config.output_bedpe)
+            logger.info("Wrote BEDPE output: %s", self.config.output_bedpe)
+
         logger.info(
             "Pipeline complete: %d transcripts quantified", len(aggregated)
         )
@@ -110,11 +156,13 @@ class PipelineRunner:
     ) -> Optional[List[QuantResult]]:
         """Process a single interval through all pipeline phases.
 
-        Phase 1: Candidate discovery
-        Phase 2: minimap2 + f5c scoring
-        Phase 3: Signal DTW (read-to-read)
-        Phase 4: EM assignment
-        Phase 5: Quantification
+        Phase 1   : Candidate discovery (GTF + novel)
+        Phase 1.5 : Fusion candidate augmentation (optional, fusion_enabled)
+        Phase 2   : Per-candidate mappy + f5c eventalign
+        Phase 3   : Signal DTW -> read-to-read + read-to-tx distance matrices
+        Phase 4   : Composite scoring (coherence, discrimination, combined)
+        Phase 5   : EM assignment with optional composite-derived prior
+        Phase 6   : Probability-weighted quantification (scores populated)
         """
         work_dir = Path(self.config.work_dir) / interval.region_string.replace(":", "_").replace("-", "_")
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -124,7 +172,7 @@ class PipelineRunner:
         if self._genome_fasta and interval.chrom in self._genome_fasta:
             chrom_seq = self._genome_fasta[interval.chrom]
 
-        # Phase 1: Candidate discovery
+        # --- Phase 1: Candidate discovery ---
         candidate_set = discover_candidates(
             interval=interval,
             bam_path=self.config.bam_path,
@@ -132,6 +180,12 @@ class PipelineRunner:
             genome_fasta=chrom_seq,
             threshold=self.config.three_prime_threshold,
         )
+
+        # --- Phase 1.5: Fusion candidate augmentation (optional) ---
+        if self.config.fusion_enabled:
+            candidate_set = self._augment_with_fusion_candidates(
+                candidate_set, interval
+            )
 
         if candidate_set.num_candidates == 0:
             logger.info("No candidates for interval %s", interval.region_string)
@@ -141,35 +195,85 @@ class PipelineRunner:
             logger.info("No reads for interval %s", interval.region_string)
             return None
 
+        # Sort once; canonical read axis for every distance matrix.
         read_ids = sorted(candidate_set.read_ids)
         candidate_ids = candidate_set.candidate_ids()
 
-        # Phase 2: External scoring (minimap2 + f5c)
-        eventalign_tsv = self._tool_runner.run_scoring_pipeline(
-            candidate_set=candidate_set,
-            fastq_path=self.config.fastq_path,
-            signal_path=self.config.signal_path,
-            work_dir=str(work_dir),
-        )
+        # --- Phase 2: Per-candidate scoring (mappy + f5c eventalign) ---
+        tsv_paths = self._tool_runner.score_candidates(candidate_set, work_dir)
 
-        # Parse eventalign output
+        # Merge per-candidate eventalign results
         candidate_lengths = {
             c.candidate_id: len(c.sequence) for c in candidate_set.candidates
         }
-        scores = parse_eventalign_tsv(str(eventalign_tsv), candidate_lengths)
+        all_scores = []
+        for tsv_path in tsv_paths:
+            scores = parse_eventalign_tsv(str(tsv_path), candidate_lengths)
+            all_scores.extend(scores)
 
-        # Build distance matrix for EM
-        dist_read_to_tx = build_distance_matrix(scores, read_ids, candidate_ids)
+        # DTW subsampling (m1): uniformly subsample reads when above cap.
+        dtw_read_ids = subsample_reads_for_dtw(
+            read_ids, self.config.max_reads_per_interval_for_dtw
+        )
+        if len(dtw_read_ids) != len(read_ids):
+            logger.info(
+                "Interval %s: subsampling DTW reads %d -> %d",
+                interval.region_string,
+                len(read_ids),
+                len(dtw_read_ids),
+            )
 
-        # Phase 3: Signal DTW (read-to-read)
+        # Read-to-tx distances (aligned with dtw_read_ids for m3 consistency).
+        dist_read_to_tx = build_distance_matrix(
+            all_scores, dtw_read_ids, candidate_ids
+        )
+
+        # --- Phase 3: Signal DTW (read-to-read) ---
         segments = extract_signal_segments(
-            scores, self._signal_reader, signal_format=self.config.signal_format
+            all_scores, self._signal_reader, signal_format=self.config.signal_format
         )
         dist_read_to_read = compute_read_to_read_dtw(
-            segments, read_ids, use_gpu=self.config.use_gpu
+            segments, dtw_read_ids, use_gpu=self.config.use_gpu
         )
 
-        # Phase 4: EM assignment
+        # m3 alignment assertion: both distance matrices share the same read axis.
+        assert (
+            dist_read_to_tx.shape[0]
+            == dist_read_to_read.shape[0]
+            == len(dtw_read_ids)
+        ), (
+            f"Read axis mismatch: dist_read_to_tx rows={dist_read_to_tx.shape[0]}, "
+            f"dist_read_to_read rows={dist_read_to_read.shape[0]}, "
+            f"dtw_read_ids={len(dtw_read_ids)}"
+        )
+        assert (
+            dist_read_to_read.shape[0] == dist_read_to_read.shape[1]
+        ), "dist_read_to_read must be square"
+
+        n_reads = len(dtw_read_ids)
+        n_tx = len(candidate_ids)
+
+        # --- Phase 4: Composite scoring (uniform R seed) ---
+        R_uniform = np.full((n_reads, n_tx), 1.0 / max(n_tx, 1))
+        composite_scores = score_candidates_composite(
+            candidates=candidate_set.candidates,
+            dist_read_to_tx=dist_read_to_tx,
+            dist_read_to_read=dist_read_to_read,
+            R=R_uniform,
+            alpha=self.config.score_alpha,
+            use_gpu=self.config.use_gpu,
+        )
+        combined_scores_arr = np.array(
+            [s.combined for s in composite_scores], dtype=float
+        )
+
+        # --- Phase 5: EM assignment with optional composite prior ---
+        prior_weights: Optional[np.ndarray] = None
+        if self.config.use_prior:
+            prior_weights = derive_prior_weights(
+                combined_scores_arr, n_tx, self.config.prior_weight_cap
+            )
+
         R, hard_assignments, _log_likelihoods = em_with_coherence(
             dist_read_to_tx=dist_read_to_tx,
             dist_read_to_read=dist_read_to_read,
@@ -178,14 +282,48 @@ class PipelineRunner:
             max_iter=self.config.em_max_iter,
             tol=self.config.em_tol,
             verbose=False,
+            use_gpu=self.config.use_gpu,
+            prior_weights=prior_weights,
         )
 
-        # Phase 5: Quantification
+        # --- Phase 6: Quantification + score field population ---
         quant_results = quantify_transcripts(
-            R, hard_assignments, candidate_set.candidates, read_ids
+            R, hard_assignments, candidate_set.candidates, dtw_read_ids
+        )
+        populate_quant_scores(quant_results, composite_scores)
+        return quant_results
+
+    def _augment_with_fusion_candidates(
+        self, candidate_set: CandidateSet, interval: GenomicInterval
+    ) -> CandidateSet:
+        """Detect fusion breakpoints for the interval and merge into candidate_set."""
+        from fin.fusion import (
+            build_fusion_candidates,
+            cluster_breakpoints,
+            parse_sa_tags,
         )
 
-        return quant_results
+        region = interval.region_string
+        raw_bps = parse_sa_tags(
+            self.config.bam_path, region=region, min_mapq=10
+        )
+        clusters = cluster_breakpoints(
+            raw_bps,
+            max_dist=self.config.fusion_max_dist,
+            min_support=self.config.fusion_min_support,
+        )
+        if not clusters or build_fusion_candidates is None:
+            return candidate_set
+
+        fusion_cands = build_fusion_candidates(
+            clusters,
+            self._genome_fasta or {},
+            flank_bp=self.config.fusion_flank_bp,
+        )
+        if not fusion_cands:
+            return candidate_set
+
+        return merge_fusion_candidates(candidate_set, fusion_cands)
 
     def cleanup(self):
         """Close file handles."""

@@ -10,7 +10,7 @@ import numpy as np
 import gzip
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, Tuple, Optional
 import pytest
 
 # Add project root to path
@@ -214,7 +214,7 @@ class TestScalingEstimation:
         if f5c_path and f5c_path.exists():
             cls.f5c_scaling = estimate_f5c_scaling_from_tsv(f5c_path)
             if cls.f5c_scaling:
-                print(f"\nEstimated f5c scaling:")
+                print("\nEstimated f5c scaling:")
                 print(f"  scale: {cls.f5c_scaling['scale']:.4f}")
                 print(f"  shift: {cls.f5c_scaling['shift']:.4f}")
         else:
@@ -241,7 +241,7 @@ class TestScalingEstimation:
         assert 'scale' in scalings
         assert 'shift' in scalings
         
-        print(f"\n  PyFIN scaling:")
+        print("\n  PyFIN scaling:")
         print(f"    scale: {scalings['scale']:.4f}")
         print(f"    shift: {scalings['shift']:.4f}")
         if 'var' in scalings:
@@ -317,7 +317,7 @@ class TestScalingEstimation:
         scale_diff = abs(pyfin_scale - f5c_scale) / f5c_scale
         shift_diff = abs(pyfin_shift - f5c_shift) / max(abs(f5c_shift), 1.0)
         
-        print(f"\n  Scaling comparison:")
+        print("\n  Scaling comparison:")
         print(f"    f5c scale:   {f5c_scale:.4f}")
         print(f"    PyFIN scale: {pyfin_scale:.4f}")
         print(f"    Relative diff: {scale_diff:.1%}")
@@ -351,7 +351,7 @@ class TestModelLoading:
         assert 'level_means' in model
         assert 'level_stdvs' in model
         
-        print(f"\n  RNA002 model:")
+        print("\n  RNA002 model:")
         print(f"    K-mer size: {model['kmer_size']}")
         print(f"    N k-mers:   {model['n_kmers']}")
         print(f"    Level mean range: [{model['level_means'].min():.1f}, {model['level_means'].max():.1f}]")
@@ -367,7 +367,7 @@ class TestModelLoading:
         assert 'level_means' in model
         assert 'level_stdvs' in model
         
-        print(f"\n  RNA004 model:")
+        print("\n  RNA004 model:")
         print(f"    K-mer size: {model['kmer_size']}")
         print(f"    N k-mers:   {model['n_kmers']}")
         print(f"    Level mean range: [{model['level_means'].min():.1f}, {model['level_means'].max():.1f}]")

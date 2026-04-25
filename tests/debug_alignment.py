@@ -85,7 +85,7 @@ def main():
     #
     # For this debug script, we'll use the reference as a placeholder
     # but alignment will likely fail since it doesn't match the signal.
-    print(f"\n" + "!" * 70)
+    print("\n" + "!" * 70)
     print("WARNING: Using reference sequence as read sequence!")
     print("This will likely cause alignment failure because the read_seq")
     print("must match the actual basecalled sequence from the signal.")
@@ -97,8 +97,8 @@ def main():
 
     read_seq = ref_seq
 
-    print(f"\nRunning eventalign...")
-    print(f"  Model: RNA002 (k=5)")
+    print("\nRunning eventalign...")
+    print("  Model: RNA002 (k=5)")
     print(f"  Read length: {len(read_seq)} bp")
 
     # Run eventalign
@@ -120,12 +120,12 @@ def main():
 
     # Summary
     summary = result["summary"]
-    print(f"\nSummary:")
+    print("\nSummary:")
     print(f"  Reads processed: {summary['num_reads']}")
     print(f"  References: {summary['num_refs']}")
 
     # Scalings
-    print(f"\nScalings:")
+    print("\nScalings:")
     for i, sc in enumerate(result["scalings"]):
         print(f"  Read {i}:")
         print(f"    scale:  {sc['scale']:.6f}")
@@ -133,7 +133,7 @@ def main():
         print(f"    var:    {sc['var']:.6f}")
 
     # Events
-    print(f"\nEvents:")
+    print("\nEvents:")
     events = result["events"][0]
     starts = events['starts']
     n_ev = len(starts)
@@ -145,33 +145,33 @@ def main():
     means = events['means']
     stdvs = events['stdvs']
 
-    print(f"\n  Event Statistics:")
+    print("\n  Event Statistics:")
     print(f"    Start positions: min={starts.min()}, max={starts.max()}")
     print(f"    Lengths: mean={lengths.mean():.2f}, std={lengths.std():.2f}, min={lengths.min():.2f}, max={lengths.max():.2f}")
     print(f"    Means:   mean={means.mean():.2f}, std={means.std():.2f}, min={means.min():.2f}, max={means.max():.2f}")
     print(f"    Stdv:    mean={stdvs.mean():.4f}, std={stdvs.std():.4f}, min={stdvs.min():.4f}, max={stdvs.max():.4f}")
 
     # Show first and last 10 events
-    print(f"\n  First 10 events:")
+    print("\n  First 10 events:")
     print(f"    {'Idx':>4} {'Start':>10} {'Length':>8} {'Mean':>8} {'Stdv':>8}")
     print(f"    {'-'*4} {'-'*10} {'-'*8} {'-'*8} {'-'*8}")
     for i in range(min(10, n_ev)):
         print(f"    {i:4d} {starts[i]:10d} {lengths[i]:8.1f} {means[i]:8.2f} {stdvs[i]:8.4f}")
 
-    print(f"\n  Last 10 events:")
+    print("\n  Last 10 events:")
     print(f"    {'Idx':>4} {'Start':>10} {'Length':>8} {'Mean':>8} {'Stdv':>8}")
     print(f"    {'-'*4} {'-'*10} {'-'*8} {'-'*8} {'-'*8}")
     for i in range(max(0, n_ev - 10), n_ev):
         print(f"    {i:4d} {starts[i]:10d} {lengths[i]:8.1f} {means[i]:8.2f} {stdvs[i]:8.4f}")
 
     # Alignment results
-    print(f"\nAlignment Results:")
+    print("\nAlignment Results:")
     full_align = result["full"][0][0]
     mapping = result["mapping"][0][0]
 
     if len(full_align) > 0:
         print(f"  Alignment SUCCESS: {len(full_align)} aligned events")
-        print(f"\n  First 5 aligned events:")
+        print("\n  First 5 aligned events:")
         print(f"    {'RefPos':>8} {'EventIdx':>10} {'RefKmer':>10} {'State':>6}")
         print(f"    {'-'*8} {'-'*10} {'-'*10} {'-'*6}")
         for k in range(min(5, len(full_align))):
@@ -180,12 +180,12 @@ def main():
 
         start = mapping["start"]
         stop = mapping["stop"]
-        print(f"\n  Base-to-Event Mapping:")
+        print("\n  Base-to-Event Mapping:")
         print(f"    Events per base: {mapping['events_per_base']:.2f}")
         print(f"    First 10 bases: start={[int(s) for s in start[:10]]}")
         print(f"    Last 10 bases:  start={[int(s) for s in start[-10:]]}")
     else:
-        print(f"  Alignment FAILED")
+        print("  Alignment FAILED")
         print(f"    Status: {mapping.get('status', 'unknown')}")
         print(f"    Events detected: {mapping.get('n_events', 'N/A')}")
         print(f"    K-mers in reference: {mapping.get('n_kmers', 'N/A')}")
@@ -193,7 +193,7 @@ def main():
         print(f"    Read length: {mapping.get('read_len', 'N/A')} bp")
 
         # Additional debugging
-        print(f"\n  Possible Failure Reasons:")
+        print("\n  Possible Failure Reasons:")
         n_kmers = mapping.get('n_kmers', ref_len - 5 + 1)
 
         # Check events per kmer ratio
@@ -205,7 +205,7 @@ def main():
         # Expected: scale around 1.0, shift around 0 (or adjusted for signal level)
         print(f"    2. Scaling: scale={sc['scale']:.4f} (expected ~1.0)")
         print(f"               shift={sc['shift']:.4f} (adjusts signal level)")
-        print(f"               (After scaling, event means should match model levels)")
+        print("               (After scaling, event means should match model levels)")
 
         # Check if model levels match scaled event means
         from fin._eventalign import set_model
@@ -219,15 +219,15 @@ def main():
         print(f"    4. Signal quality: std={signal.std():.2f} (should be > 5 for good data)")
         print(f"       Signal drift: first_mean={signal[:1000].mean():.2f}, last_mean={signal[-1000:].mean():.2f}")
 
-        print(f"\n  Common Issues:")
-        print(f"    - MISSING READ SEQUENCE: POD5 files don't contain basecalled sequences!")
-        print(f"      Solution: Use FASTQ (from Guppy/Dorado) or BAM files")
-        print(f"      See: load_from_fastq_pod5.py or load_from_bam_pod5.py")
-        print(f"    - Wrong read sequence: read_seq must match the actual signal")
-        print(f"      The reference sequence is NOT the same as the read sequence!")
-        print(f"    - Synthetic/random signal: Will NOT produce good alignment")
-        print(f"    - Poor signal quality: Low variance or extreme drift")
-        print(f"    - Wrong pore model: RNA002 vs RNA004")
+        print("\n  Common Issues:")
+        print("    - MISSING READ SEQUENCE: POD5 files don't contain basecalled sequences!")
+        print("      Solution: Use FASTQ (from Guppy/Dorado) or BAM files")
+        print("      See: load_from_fastq_pod5.py or load_from_bam_pod5.py")
+        print("    - Wrong read sequence: read_seq must match the actual signal")
+        print("      The reference sequence is NOT the same as the read sequence!")
+        print("    - Synthetic/random signal: Will NOT produce good alignment")
+        print("    - Poor signal quality: Low variance or extreme drift")
+        print("    - Wrong pore model: RNA002 vs RNA004")
 
 
 if __name__ == "__main__":

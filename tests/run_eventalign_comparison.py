@@ -233,7 +233,7 @@ pyfin_scalings = result["scalings"]  # [read_idx] = {scale, shift, var}
 pyfin_events = result["events"]  # [read_idx] = {starts, lengths, means, stdvs}
 summary = result["summary"]
 
-print(f"\nPyFIN Summary:")
+print("\nPyFIN Summary:")
 print(f"  Reads processed: {summary['num_reads']}")
 print(f"  References: {summary['num_refs']}")
 
@@ -250,14 +250,14 @@ for read_idx, read_id in enumerate(read_ids_list):
     pyfin_align = pyfin_full[read_idx][0]  # First (only) reference
     pyfin_scale = pyfin_scalings[read_idx]
     
-    print(f"\n  Event Detection:")
+    print("\n  Event Detection:")
     print(f"    f5c events (in alignment): {len(f5c_read_events):,}")
     print(f"    PyFIN events (detected):   {pyfin_ev['n_events']:,}")
     
-    print(f"\n  Scaling Parameters:")
+    print("\n  Scaling Parameters:")
     print(f"    PyFIN: scale={pyfin_scale['scale']:.4f}, shift={pyfin_scale['shift']:.4f}, var={pyfin_scale['var']:.4f}")
     
-    print(f"\n  Alignment Results:")
+    print("\n  Alignment Results:")
     print(f"    PyFIN alignments: {len(pyfin_align):,}")
     
     if pyfin_align:
@@ -290,7 +290,7 @@ for read_idx, read_id in enumerate(read_ids_list):
             print(f"    K-mer match (sample):    {kmer_matches}/100")
     
     # Show first few alignments from each
-    print(f"\n  Sample Alignments (first 5):")
+    print("\n  Sample Alignments (first 5):")
     print(f"    f5c:   {[(e['position'], e['reference_kmer'], e['event_index']) for e in f5c_read_events[:5]]}")
     if pyfin_align:
         print(f"    PyFIN: {[(a['ref_position'], a['ref_kmer'], a['event_idx']) for a in pyfin_align[:5]]}")

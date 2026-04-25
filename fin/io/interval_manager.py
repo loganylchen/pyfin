@@ -12,12 +12,11 @@ Key features:
 - Only essential info: chrom, start, end, strand, read_count
 """
 
-from typing import List, Dict, Tuple, Optional, Iterator, Set, Any, Union
+from typing import List, Dict, Tuple, Optional, Set, Any, Union
 from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass,field
 
-import pysam
 
 from .io_bam import BamReader
 from .io_gtf import GTFReader
@@ -192,7 +191,7 @@ def extract_strand_from_read(read_dict: Dict) -> Optional[str]:
 def extract_three_prime_pos(read_dict: Dict) -> Optional[int]:
     return int(read_dict.get('reference_end')) if read_dict.get('is_forward') else int(read_dict.get('reference_start'))
 
-def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None) -> Tuple[List[Dict], Set[str]]:
+def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None) -> Tuple[List[Dict], Set[str], List[Dict]]:
     """
     Generate intervals from BAM read alignments
 
@@ -201,11 +200,12 @@ def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None
         max_reads: Optional limit on number of reads to process
 
     Returns:
-        Tuple of (read_alignments, fusion_read_ids)
+        Tuple of (read_alignments, fusion_read_ids, fusion_reads)
     """
     logger.info("Processing BAM reads for interval generation...")
 
     fusion_read_ids = set()
+    fusion_reads = []
     read_alignments = []
 
     with BamReader(bam_path) as bam_reader:
@@ -223,6 +223,7 @@ def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None
             if is_fusion_read(read_dict):
                 logger.debug(f'{read_dict["query_name"]} is a fusion-read, skipping')
                 fusion_read_ids.add(read_dict['query_name'])
+                fusion_reads.append(read_dict)
                 read_count += 1
                 if read_count % 10000 == 0:
                     logger.info(f"Processed {read_count} reads...")
@@ -235,8 +236,8 @@ def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None
             if read_count % 10000 == 0:
                 logger.info(f"Processed {read_count} reads...")
 
-    logger.info(f"Collected {len(read_alignments)} read alignments, {len(fusion_read_ids)} fusion reads")
-    return read_alignments, fusion_read_ids
+    logger.info(f"Collected {len(read_alignments)} read alignments, {len(fusion_read_ids)} fusion reads ({len(fusion_reads)} fusion read dicts retained)")
+    return read_alignments, fusion_read_ids, fusion_reads
 
 
 def cluster_intervals(read_alignments: List[Dict], max_gap: int = 0) -> List[GenomicInterval]:
@@ -460,6 +461,7 @@ def generate_isolated_intervals(bam_path: str,
         Dictionary with:
         - 'intervals': List of GenomicInterval objects (strand-separated)
         - 'fusion_read_ids': Set of fusion read IDs
+        - 'fusion_reads': List of full read dicts for fusion reads
         - 'num_reads_processed': Number of reads processed
     """
     logger.info("=" * 60)
@@ -470,7 +472,7 @@ def generate_isolated_intervals(bam_path: str,
     logger.info("=" * 60)
 
     # Process BAM reads
-    read_alignments, fusion_read_ids = generate_intervals_from_reads(bam_path, max_reads)
+    read_alignments, fusion_read_ids, fusion_reads = generate_intervals_from_reads(bam_path, max_reads)
 
     # Cluster read alignments
     read_intervals = cluster_intervals(read_alignments, max_gap)
@@ -533,6 +535,7 @@ def generate_isolated_intervals(bam_path: str,
     return {
         'intervals': final_intervals,
         'fusion_read_ids': fusion_read_ids,
+        'fusion_reads': fusion_reads,
         'num_reads_processed': len(read_alignments) + len(fusion_read_ids)
     }
 
@@ -570,7 +573,7 @@ def extract_reads_for_interval(bam_path: str,
 
             # Skip fusion reads
             if read_id in fusion_read_ids or is_fusion_read(read_dict):
-                logger.debug(f'{read_is} is a fusion-read, skipping')
+                logger.debug("%s is a fusion-read, skipping", read_id)
                 continue
 
             # Check if read actually overlaps

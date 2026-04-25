@@ -122,12 +122,12 @@ def example_single_read_single_ref():
     # 1. Basecall the POD5 with Guppy/Dorado to get FASTQ
     # 2. Or use a BAM file with aligned reads
     # See: load_from_fastq_pod5.py or load_from_bam_pod5.py for proper workflow
-    print(f"\n  WARNING: Using reference sequence as placeholder")
-    print(f"  For production use, provide actual basecalled read sequence!")
+    print("\n  WARNING: Using reference sequence as placeholder")
+    print("  For production use, provide actual basecalled read sequence!")
     read_seq = ref_seq  # Use first 500bp as read sequence
 
-    print(f"\nRunning eventalign...")
-    print(f"  Model: RNA002 (k=5)")
+    print("\nRunning eventalign...")
+    print("  Model: RNA002 (k=5)")
     print(f"  Read length: {len(read_seq)} bp")
 
     # Run eventalign
@@ -147,22 +147,22 @@ def example_single_read_single_ref():
     print("Results:")
     print("=" * 70)
 
-    print(f"\nSummary:")
+    print("\nSummary:")
     summary = result["summary"]
     print(f"  Reads processed: {summary['num_reads']}")
     print(f"  References: {summary['num_refs']}")
 
     # Scalings
-    print(f"\nScalings:")
+    print("\nScalings:")
     for i, sc in enumerate(result["scalings"]):
         print(f"  Read {i}: scale={sc['scale']:.4f}, shift={sc['shift']:.4f}, var={sc['var']:.4f}")
 
     # Events
-    print(f"\nDetected Events:")
+    print("\nDetected Events:")
     events = result["events"][0]
     n_ev = len(events["starts"])
     print(f"  Total events: {n_ev}")
-    print(f"\n  ALL events:")
+    print("\n  ALL events:")
     print(f"    {'Start':>10} {'Length':>10} {'Mean':>10} {'Stdv':>10}")
     print(f"    {'-'*10} {'-'*10} {'-'*10} {'-'*10}")
     for i in range(n_ev):
@@ -174,7 +174,7 @@ def example_single_read_single_ref():
         )
 
     # Full alignment results
-    print(f"\nAlignment Results:")
+    print("\nAlignment Results:")
     for i in range(len(result["full"])):  # For each read
         for j in range(len(result["full"][i])):  # For each reference
             full_align = result["full"][i][j]
@@ -182,7 +182,7 @@ def example_single_read_single_ref():
 
             if len(full_align) > 0:
                 print(f"  Read {i} vs Ref {j}: {len(full_align)} aligned events")
-                print(f"\n  First 5 aligned events:")
+                print("\n  First 5 aligned events:")
                 print(
                     f"    {'RefPos':>8} {'EventIdx':>10} {'RefKmer':>10} {'ModelKmer':>10} "
                     f"{'State':>6}"
@@ -201,13 +201,13 @@ def example_single_read_single_ref():
                 # Mapping info
                 start = mapping["start"]
                 stop = mapping["stop"]
-                print(f"\n  Base-to-Event Mapping:")
+                print("\n  Base-to-Event Mapping:")
                 print(f"    Events per base: {mapping['events_per_base']:.2f}")
                 print(f"    First 10 bases: start=[{', '.join(map(str, start[:10]))}]")
                 print(f"                    stop=[{', '.join(map(str, stop[:10]))}]")
 
                 # Diagnostic info
-                print(f"\n  Alignment Statistics:")
+                print("\n  Alignment Statistics:")
                 print(f"    Status: {mapping.get('status', 'unknown')}")
                 print(f"    Aligned pairs: {mapping.get('n_aligned_pairs', 'N/A')}")
                 print(f"    Event alignments: {mapping.get('n_event_alignment', 'N/A')}")
@@ -254,7 +254,7 @@ def example_single_read_multi_ref():
     ref_names = [f"{ref_name}_region1", f"{ref_name}_region2", f"{ref_name}_region3"]
     ref_lens = [len(r) for r in ref_seqs]
 
-    print(f"\nRunning pair-wise alignment:")
+    print("\nRunning pair-wise alignment:")
     print(f"  1 read vs {len(ref_seqs)} references")
 
     result = run_eventalign(
@@ -268,7 +268,7 @@ def example_single_read_multi_ref():
         model_id=MODEL_RNA002,
     )
 
-    print(f"\nResults:")
+    print("\nResults:")
     for j, ref_name in enumerate(ref_names):
         full_align = result["full"][0][j]
         mapping = result["mapping"][0][j]
@@ -321,7 +321,7 @@ def example_multi_read_multi_ref():
     ref_names = [f"{ref_name}_region1", f"{ref_name}_region2"]
     ref_lens = [len(r) for r in ref_seqs]
 
-    print(f"\nRunning pair-wise alignment:")
+    print("\nRunning pair-wise alignment:")
     print(f"  {len(read_ids)} reads vs {len(ref_seqs)} references")
 
     result = run_eventalign(
@@ -335,7 +335,7 @@ def example_multi_read_multi_ref():
         model_id=MODEL_RNA002,
     )
 
-    print(f"\nPair-wise results:")
+    print("\nPair-wise results:")
     for i, read_id in enumerate(read_ids):
         print(f"\n  {read_id}:")
         for j, ref_name in enumerate(ref_names):

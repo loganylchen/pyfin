@@ -319,6 +319,7 @@ def main():
             "fin.candidates",
             "fin.scoring",
             "fin.pipeline",
+            "fin.fusion",
         ],
         package_dir={"fin": "fin"},
         package_data={
@@ -335,6 +336,7 @@ def main():
             "pandas>=1.3.0",
             "scipy>=1.7.0",
             "pysam>=0.21.0",
+            "mappy>=2.24",
             "ont-fast5-api>=4.0.0",
             "pyslow5>=0.3.0",
             "pod5>=0.2.0",
@@ -370,12 +372,11 @@ def main():
             "Programming Language :: Python :: 3.12",
             "Topic :: Scientific/Engineering :: Bio-Informatics",
         ],
-        # CLI entry point - uncomment when fin.cli module is created
-        # entry_points={
-        #     "console_scripts": [
-        #         "fin=fin.cli:main",
-        #     ],
-        # },
+        entry_points={
+            "console_scripts": [
+                "fin=fin.cli:main",
+            ],
+        },
         zip_safe=False,
     )
 

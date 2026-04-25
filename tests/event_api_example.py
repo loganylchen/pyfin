@@ -30,7 +30,7 @@ def example_getevents():
     events = getevents(signal)
     print(events)
     print(f"\nDetected {events['n_events']} events")
-    print(f"\nFirst 5 events:")
+    print("\nFirst 5 events:")
     print(f"  {'Start':>10} {'Length':>10} {'Mean':>10} {'Stdv':>10}")
     print(f"  {'-'*10} {'-'*10} {'-'*10} {'-'*10}")
     for i in range(min(5, events["n_events"])):
@@ -97,7 +97,7 @@ def example_kmer_lookup():
     # Example kmers
     kmers = ["AAAAA", "CCCCC", "GGGGG", "UUUUU", "ACGUU"]
 
-    print(f"\nRNA002 model values for example k-mers:")
+    print("\nRNA002 model values for example k-mers:")
     print(f"  {'K-mer':>10} {'Index':>10} {'Mean':>10} {'Stdv':>10}")
     print(f"  {'-'*10} {'-'*10} {'-'*10} {'-'*10}")
     for kmer in kmers:

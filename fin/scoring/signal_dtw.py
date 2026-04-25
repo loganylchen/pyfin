@@ -6,7 +6,7 @@ Uses GPU-accelerated DTW when available, with scipy/numpy CPU fallback.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import numpy as np
 

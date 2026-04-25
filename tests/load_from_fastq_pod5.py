@@ -192,7 +192,7 @@ def main():
     print("Results")
     print("=" * 70)
 
-    print(f"\nSummary:")
+    print("\nSummary:")
     summary = result["summary"]
     print(f"  Reads processed: {summary['num_reads']}")
     print(f"  References: {summary['num_refs']}")
@@ -208,14 +208,14 @@ def main():
             print(f"  Events per base: {mapping['events_per_base']:.2f}")
 
             # Show first few aligned events
-            print(f"\n  First 5 aligned events:")
+            print("\n  First 5 aligned events:")
             print(f"    {'RefPos':>8} {'EventIdx':>10} {'RefKmer':>10} {'State':>6}")
             print(f"    {'-'*8} {'-'*10} {'-'*10} {'-'*6}")
             for k in range(min(5, len(full_align))):
                 ea = full_align[k]
                 print(f"    {ea['ref_position']:8d} {ea['event_idx']:10d} {ea['ref_kmer']:>10} {ea['hmm_state']:>6}")
         else:
-            print(f"  Alignment FAILED")
+            print("  Alignment FAILED")
             print(f"  Status: {mapping.get('status', 'unknown')}")
 
 

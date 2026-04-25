@@ -22,7 +22,6 @@ Usage:
 import argparse
 import time
 import sys
-from typing import Optional
 import numpy as np
 
 # Check what's available - CPU eventalign

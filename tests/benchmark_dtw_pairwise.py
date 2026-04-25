@@ -11,7 +11,7 @@ Compares performance of:
 
 import numpy as np
 import time
-from typing import Dict, List, Tuple
+from typing import Tuple
 import sys
 """Numba JIT-compiled pairwise"""
 from numba import jit
@@ -289,9 +289,9 @@ def run_benchmark_suite():
                     max_diff = np.max(np.abs(dist_matrix - reference_matrix))
                     print(f"  Max difference from reference: {max_diff:.6f}")
                     if max_diff < 0.1:
-                        print(f"  ✓ Results match")
+                        print("  ✓ Results match")
                     else:
-                        print(f"  ⚠ Results differ!")
+                        print("  ⚠ Results differ!")
                 
                 config_results[impl_name] = {
                     'time': avg_time,
@@ -299,7 +299,7 @@ def run_benchmark_suite():
                     'throughput': num_pairs / (avg_time / 1000)
                 }
             else:
-                print(f"  Benchmark failed")
+                print("  Benchmark failed")
         
         # Print comparison for this configuration
         if len(config_results) > 1:
@@ -314,14 +314,14 @@ def run_benchmark_suite():
             # Speedup comparison
             if 'CUDA Batch (GPU)' in config_results:
                 cuda_time = config_results['CUDA Batch (GPU)']['time']
-                print(f"\nSpeedup vs CUDA Batch:")
+                print("\nSpeedup vs CUDA Batch:")
                 for name, res in config_results.items():
                     if name != 'CUDA Batch (GPU)':
                         speedup = res['time'] / cuda_time
                         print(f"  {name:<30} {speedup:>6.1f}x slower")
             
             # Show throughput comparison
-            print(f"\nThroughput comparison:")
+            print("\nThroughput comparison:")
             sorted_by_throughput = sorted(config_results.items(), 
                                          key=lambda x: x[1]['throughput'], 
                                          reverse=True)
@@ -431,9 +431,9 @@ def test_accuracy():
             max_dist = np.max(dist_matrix)
             print(f"  {name:<30} max distance: {max_dist:.6f}")
             if max_dist < 0.001:
-                print(f"    ✓ Correct (all zeros)")
+                print("    ✓ Correct (all zeros)")
             else:
-                print(f"    ⚠ Unexpected non-zero distances")
+                print("    ⚠ Unexpected non-zero distances")
         except Exception as e:
             print(f"  {name:<30} error: {e}")
     

@@ -188,7 +188,7 @@ avg_end_diff = np.mean([m.get("mean_end_diff", np.nan) for m in all_metrics if "
 avg_mean_diff = np.mean([m.get("mean_mean_diff", np.nan) for m in all_metrics if "mean_mean_diff" in m])
 avg_correlation = np.nanmean([m.get("mean_correlation", np.nan) for m in all_metrics if "mean_correlation" in m])
 
-print(f"\n  Average boundary alignment:")
+print("\n  Average boundary alignment:")
 print(f"    Start: {avg_start_diff:.2f} samples")
 print(f"    End: {avg_end_diff:.2f} samples")
 print(f"\n  Average event mean difference: {avg_mean_diff:.2f} pA")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
 
 from fin.io.interval_manager import GenomicInterval
@@ -28,18 +28,34 @@ class IntronChain:
 
 @dataclass
 class TranscriptCandidate:
-    """A candidate transcript (from GTF annotation or novel discovery)."""
+    """A candidate transcript (from GTF annotation, novel discovery, or fusion).
+
+    Required fields (positional):
+        candidate_id, intron_chain, three_prime_pos, sequence, source,
+        supporting_read_ids, chrom, strand, start, end.
+
+    Optional fusion fields (populated only when source == "fusion"):
+        fusion_junction: Tuple of (left_genomic_pos, right_genomic_pos) marking
+            where the two parental transcripts are joined.
+        breakpoint_left: (chrom, pos, strand) for the left fusion partner.
+        breakpoint_right: (chrom, pos, strand) for the right fusion partner.
+    """
 
     candidate_id: str
     intron_chain: IntronChain
     three_prime_pos: int
     sequence: str
-    source: str  # "gtf" or "novel"
+    source: str  # "gtf", "novel", or "fusion"
     supporting_read_ids: Set[str]
     chrom: str
     strand: str
     start: int
     end: int
+
+    # Fusion-specific (populated only when source == "fusion")
+    fusion_junction: Optional[Tuple[int, int]] = None
+    breakpoint_left: Optional[Tuple[str, int, str]] = None   # (chrom, pos, strand)
+    breakpoint_right: Optional[Tuple[str, int, str]] = None
 
     @property
     def length(self) -> int:

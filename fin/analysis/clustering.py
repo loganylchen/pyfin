@@ -2,16 +2,12 @@
 BAM Clustering Pipeline - Extract reads and transcripts by intervals and cluster by 3' end positions
 """
 
-from typing import List, Dict, Set, Optional, Tuple, Any, Generator
-from collections import defaultdict
+from typing import List, Dict, Optional, Tuple, Generator
 from dataclasses import dataclass
 from pathlib import Path
-import pickle
 import pysam
 from ..io.io_bam import BamReader
-from ..io.io_fasta import FASTAReader
-from ..io.io_gtf import GTFReader
-from ..io.interval_manager import GenomicInterval, extract_reads_for_interval
+from ..io.interval_manager import GenomicInterval
 from ..utils.log_config import get_package_logger
 
 logger = get_package_logger(__name__)
