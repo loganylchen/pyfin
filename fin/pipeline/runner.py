@@ -331,12 +331,12 @@ class PipelineRunner:
 
     def _load_genome_fasta(self, path: str) -> Dict[str, str]:
         """Load genome FASTA into a dict of chrom -> sequence."""
-        from fin.io.io_fasta import FastaReader
+        from fin.io.io_fasta import FASTAReader
 
         seqs = {}
-        with FastaReader(path) as reader:
+        with FASTAReader(path) as reader:
             for record in reader.iterate_records():
-                seqs[record["header"].split()[0]] = record["sequence"]
+                seqs[record.id] = record.sequence
         return seqs
 
     def _open_signal_reader(self):

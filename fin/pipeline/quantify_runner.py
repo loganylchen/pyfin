@@ -178,11 +178,11 @@ class QuantifyRunner:
         self._gtf_reader.parse()
 
         # Load genome FASTA
-        from fin.io.io_fasta import FastaReader
+        from fin.io.io_fasta import FASTAReader
 
-        with FastaReader(self.genome_fasta_path) as reader:
+        with FASTAReader(self.genome_fasta_path) as reader:
             for record in reader.iterate_records():
-                self._genome_fasta[record["header"].split()[0]] = record["sequence"]
+                self._genome_fasta[record.id] = record.sequence
 
         # Generate intervals from GTF gene boundaries
         self._intervals = intervals_from_gtf(self._gtf_reader)
