@@ -49,7 +49,7 @@ class Slow5Reader:
         """Open the slow5 file"""
         try:
             self._s5_file = pyslow5.Open(str(self.file_path), 'r')
-            self._header = self._s5_file.get_header()
+            self._header = self._s5_file.get_all_headers()
 
             # Count reads
             read_ids = self._s5_file.get_read_ids()
