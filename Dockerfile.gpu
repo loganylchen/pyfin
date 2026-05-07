@@ -44,8 +44,7 @@ COPY --from=builder /usr/local/bin/f5c /usr/local/bin/f5c
 COPY --from=builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/python3.10/dist-packages
 COPY --from=builder /usr/lib/python3/dist-packages /usr/lib/python3/dist-packages
 
-# Console scripts installed by pip (pyfin, fin)
-COPY --from=builder /usr/local/bin/pyfin /usr/local/bin/pyfin
+# Console script installed by pip
 COPY --from=builder /usr/local/bin/fin /usr/local/bin/fin
 
 # Verify Python versions match between builder and runtime
