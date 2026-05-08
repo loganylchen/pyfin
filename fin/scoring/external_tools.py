@@ -99,7 +99,8 @@ class ExternalToolRunner:
 
         Returns list of eventalign TSV paths (one per candidate).
         """
-        assert self._f5c_indexed, "Call build_f5c_index() first"
+        if not self._f5c_indexed:
+            raise RuntimeError("Call build_f5c_index() first")
 
         interval_work_dir.mkdir(parents=True, exist_ok=True)
         tsv_paths = []
@@ -187,19 +188,46 @@ def align_reads_with_mappy(
         }
     )
 
+    _COMPLEMENT = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+
+    def _revcomp(s: str) -> str:
+        return s.translate(_COMPLEMENT)[::-1]
+
     with pysam.AlignmentFile(unsorted_bam, "wb", header=header) as outf:
         for name, seq, qual, hit in alignments:
+            # mappy returns cigar as (length, op); pysam wants (op, length).
+            # The CIGAR only covers the aligned region [hit.q_st, hit.q_en);
+            # we must add soft-clip ops so CIGAR length matches SEQ length.
+            cigar_ops = [(op, length) for length, op in hit.cigar]
+            read_len = len(seq)
+
+            if hit.strand == 1:
+                bam_seq = seq
+                bam_qual = qual
+                left_clip = hit.q_st
+                right_clip = read_len - hit.q_en
+            else:
+                # Reverse strand: BAM stores reverse complement; quals reversed.
+                bam_seq = _revcomp(seq)
+                bam_qual = qual[::-1] if qual else qual
+                left_clip = read_len - hit.q_en
+                right_clip = hit.q_st
+
+            if left_clip > 0:
+                cigar_ops.insert(0, (4, left_clip))
+            if right_clip > 0:
+                cigar_ops.append((4, right_clip))
+
             a = pysam.AlignedSegment(header)
             a.query_name = name
-            a.query_sequence = seq
+            a.query_sequence = bam_seq
             a.flag = 0 if hit.strand == 1 else 16
             a.reference_id = 0  # single contig
             a.reference_start = hit.r_st
             a.mapping_quality = hit.mapq
-            # mappy returns cigar as (length, op); pysam wants (op, length)
-            a.cigar = [(op, length) for length, op in hit.cigar]
-            if qual:
-                a.query_qualities = pysam.qualitystring_to_array(qual)
+            a.cigar = cigar_ops
+            if bam_qual:
+                a.query_qualities = pysam.qualitystring_to_array(bam_qual)
             outf.write(a)
 
     # Sort and index
