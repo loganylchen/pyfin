@@ -212,9 +212,18 @@ def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None
         bam_reader.open()
 
         read_count = 0
+        skipped_unmapped = 0
         for alignment in bam_reader._alignment_file.fetch(until_eof=True):
             if max_reads is not None and read_count >= max_reads:
                 break
+
+            # Skip unmapped / secondary early. Unmapped reads would otherwise hit
+            # get_reference_sequence() -> ValueError on every iteration; in BAMs
+            # dominated by unmapped reads this is the hot path. Supplementary
+            # alignments are kept because is_fusion_read() depends on them.
+            if alignment.is_unmapped or alignment.is_secondary:
+                skipped_unmapped += 1
+                continue
 
             read_dict = bam_reader.alignment_to_dict(alignment)
 
@@ -236,7 +245,11 @@ def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None
             if read_count % 10000 == 0:
                 logger.info(f"Processed {read_count} reads...")
 
-    logger.info(f"Collected {len(read_alignments)} read alignments, {len(fusion_read_ids)} fusion reads ({len(fusion_reads)} fusion read dicts retained)")
+    logger.info(
+        f"Collected {len(read_alignments)} read alignments, "
+        f"{len(fusion_read_ids)} fusion reads ({len(fusion_reads)} fusion read dicts retained), "
+        f"skipped {skipped_unmapped} unmapped/secondary"
+    )
     return read_alignments, fusion_read_ids, fusion_reads
 
 
