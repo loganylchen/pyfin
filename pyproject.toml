@@ -36,6 +36,7 @@ dependencies = [
     "pyslow5>=0.3.0",
     "pod5>=0.2.0",
     "pysam>=0.21.0",
+    "mappy>=2.24",
     "h5py>=3.0.0",
     # CLI and progress
     "click>=8.0.0",
