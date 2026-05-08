@@ -121,7 +121,18 @@ class ExternalToolRunner:
 
             # 2. Align ALL reads to this candidate with mappy
             bam_path = cand_dir / "aligned.bam"
-            align_reads_with_mappy(candidate, self.fastq_path, bam_path)
+            n_aligned = align_reads_with_mappy(
+                candidate, self.fastq_path, bam_path
+            )
+
+            # f5c eventalign cannot iterate an empty BAM (sam_itr_queryi failed).
+            # Skip candidates that mappy didn't align any reads to.
+            if n_aligned == 0:
+                logger.warning(
+                    "Candidate %s: 0 mapped reads, skipping f5c eventalign",
+                    candidate.candidate_id,
+                )
+                continue
 
             # 3. f5c eventalign
             tsv_path = cand_dir / "eventalign.tsv"
@@ -152,8 +163,12 @@ def write_single_candidate_fasta(
 
 def align_reads_with_mappy(
     candidate: TranscriptCandidate, fastq_path: Path, bam_path: Path
-) -> None:
-    """Align all reads to a single candidate using mappy, write sorted+indexed BAM."""
+) -> int:
+    """Align all reads to a single candidate using mappy, write sorted+indexed BAM.
+
+    Returns:
+        Number of primary alignments written.
+    """
     import mappy
     import pysam
 
@@ -234,6 +249,7 @@ def align_reads_with_mappy(
     pysam.sort("-o", str(bam_path), unsorted_bam)
     os.remove(unsorted_bam)
     pysam.index(str(bam_path))
+    return len(alignments)
 
 
 def run_f5c_eventalign(
