@@ -136,7 +136,7 @@ class ExternalToolRunner:
 
             # 3. f5c eventalign
             tsv_path = cand_dir / "eventalign.tsv"
-            run_f5c_eventalign(
+            ok = run_f5c_eventalign(
                 reads_fq=self.fastq_path,
                 bam=bam_path,
                 genome_fa=fasta_path,
@@ -145,7 +145,14 @@ class ExternalToolRunner:
                 output=tsv_path,
                 f5c_path=self.tools.f5c,
             )
-            tsv_paths.append(tsv_path)
+            if ok:
+                tsv_paths.append(tsv_path)
+            else:
+                logger.warning(
+                    "Candidate %s: f5c eventalign produced no output; "
+                    "candidate kept but will receive zero signal evidence",
+                    candidate.candidate_id,
+                )
 
         return tsv_paths
 
@@ -260,8 +267,15 @@ def run_f5c_eventalign(
     signal_format: str,
     output: Path,
     f5c_path: str = "f5c",
-) -> None:
-    """Run f5c eventalign for a single candidate."""
+    min_mapq: int = 0,
+) -> bool:
+    """Run f5c eventalign for a single candidate.
+
+    Returns:
+        True on success (TSV written), False if f5c failed (e.g. all reads
+        below MAPQ threshold, no reads aligned). Failures are non-fatal so
+        the pipeline can continue and treat the candidate as low-evidence.
+    """
     cmd = [
         f5c_path,
         "eventalign",
@@ -272,6 +286,8 @@ def run_f5c_eventalign(
         str(bam),
         "--genome",
         str(genome_fa),
+        "--min-mapq",
+        str(min_mapq),
         "--signal-index",
         "--scale-events",
         "--print-read-names",
@@ -279,9 +295,20 @@ def run_f5c_eventalign(
     ]
     cmd.extend(_signal_format_args(signal_format, signal))
 
-    result = _run(cmd, f"f5c eventalign ({genome_fa.parent.name})")
+    description = f"f5c eventalign ({genome_fa.parent.name})"
+    logger.info("Running %s: %s", description, " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.warning(
+            "%s failed (rc=%d), treating as zero-evidence candidate. stderr: %s",
+            description,
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return False
 
     with open(output, "w") as f:
         f.write(result.stdout)
 
     logger.info("Eventalign output: %s", output)
+    return True
