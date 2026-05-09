@@ -127,11 +127,11 @@ class Slow5Reader:
                 'range': read_data['range'],
                 'channel': read_data.get('channel_number') or read_data.get('channel'),
                 'sampling_rate': read_data['sampling_rate'],
-                'start_time': read_data['start_time'],
-                'read_number': read_data['read_number'],
-                'start_mux': read_data['start_mux'],
-                'median_before': read_data.get('median_before', None),
-                'median_after': read_data.get('median_after', None),
+                'start_time': read_data.get('start_time'),
+                'read_number': read_data.get('read_number'),
+                'start_mux': read_data.get('start_mux'),
+                'median_before': read_data.get('median_before'),
+                'median_after': read_data.get('median_after'),
             }
 
         except Exception as e:
