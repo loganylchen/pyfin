@@ -200,21 +200,34 @@ class Slow5Reader:
             Tuple of (picoamp_array, metadata_dict) or None if read not found
         """
         read_data = self.get_read(read_id)
-        if read_data is None or read_data['picoamp_values'] is None:
+        if read_data is None:
             return None
+
+        # pyslow5 returns raw integer signal; compute picoamp on-the-fly using
+        # the standard nanopore conversion: pA = (raw + offset) * range / digitisation
+        picoamp = read_data.get('picoamp_values')
+        if picoamp is None:
+            raw = read_data.get('signal')
+            if raw is None:
+                return None
+            digitisation = read_data['digitisation']
+            offset = read_data['offset']
+            rng = read_data['range']
+            scale = float(rng) / float(digitisation)
+            picoamp = [(float(s) + float(offset)) * scale for s in raw]
 
         metadata = {
             'read_id': read_id,
-            'duration': len(read_data['picoamp_values']),
+            'duration': len(picoamp),
             'sample_rate': read_data['sampling_rate'],
             'channel_id': read_data['channel'],
-            'start_time': read_data['start_time'],
+            'start_time': read_data.get('start_time'),
             'digitisation': read_data['digitisation'],
             'offset': read_data['offset'],
             'range': read_data['range'],
         }
 
-        return read_data['picoamp_values'], metadata
+        return picoamp, metadata
 
     def iterate_reads(self) -> Generator[Dict[str, Any], None, None]:
         """
