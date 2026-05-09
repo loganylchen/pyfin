@@ -125,7 +125,7 @@ class Slow5Reader:
                 'digitisation': read_data['digitisation'],
                 'offset': read_data['offset'],
                 'range': read_data['range'],
-                'channel': read_data['channel_number'],
+                'channel': read_data.get('channel_number') or read_data.get('channel'),
                 'sampling_rate': read_data['sampling_rate'],
                 'start_time': read_data['start_time'],
                 'read_number': read_data['read_number'],
