@@ -172,7 +172,11 @@ def build_distance_matrix(
         ri = read_idx.get(s.read_name)
         ci = cand_idx.get(s.candidate_id)
         if ri is not None and ci is not None:
-            # Use negative log-likelihood as distance
-            dist[ri, ci] = -s.total_log_likelihood
+            # Use mean negative log-likelihood per event as distance.
+            # Without per-event normalization the distance scales linearly with
+            # read length, which biases long reads toward whichever candidate
+            # they happen to overlap and forces sigma to be tuned per dataset.
+            n_events = max(int(s.num_events), 1)
+            dist[ri, ci] = -s.total_log_likelihood / n_events
 
     return dist

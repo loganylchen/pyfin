@@ -40,6 +40,7 @@ class PipelineConfig:
     # DTW
     use_gpu: bool = True
     max_reads_per_interval_for_dtw: int = 2000
+    signal_normalize: bool = True   # per-read robust z-score before DTW
 
     # External tools
     f5c_path: str = "f5c"

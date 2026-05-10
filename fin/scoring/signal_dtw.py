@@ -19,6 +19,7 @@ def extract_signal_segments(
     scores: List[ReadCandidateScore],
     signal_reader,
     signal_format: str = "pod5",
+    normalize: bool = True,
 ) -> Dict[str, np.ndarray]:
     """Extract raw signal segments for each read using eventalign index bounds.
 
@@ -29,6 +30,9 @@ def extract_signal_segments(
         scores: Parsed ReadCandidateScore list.
         signal_reader: Opened Pod5Reader or Slow5Reader instance.
         signal_format: "pod5" or "slow5" to select the right API.
+        normalize: If True, apply per-read robust z-score normalization
+            ((seg - median) / (MAD + eps)) so DTW distances reflect signal
+            shape rather than per-read offset/scale drift.
 
     Returns:
         Dict mapping read_name -> signal segment (np.ndarray of float).
@@ -67,7 +71,13 @@ def extract_signal_segments(
             )
             continue
 
-        segments[read_name] = signal[start:end]
+        seg = signal[start:end]
+        if normalize:
+            median = np.median(seg)
+            mad = np.median(np.abs(seg - median))
+            scale = float(mad) if mad > 0 else 1.0
+            seg = ((seg - median) / scale).astype(np.float32, copy=False)
+        segments[read_name] = seg
 
     logger.info("Extracted signal segments for %d / %d reads", len(segments), len(best_per_read))
     return segments
@@ -232,31 +242,42 @@ def _pairwise_cpu(
 
 
 def _cpu_dtw(seq1: np.ndarray, seq2: np.ndarray) -> float:
-    """DTW distance using scipy if available, else vectorized numpy.
+    """DTW distance using row-vectorized rolling buffer.
 
     Open-end variant: takes minimum of last row.
+
+    Memory: O(m) instead of O(n*m). For two 50k-sample reads the previous
+    O(n*m) full matrix needed ~20 GB; the rolling buffer needs ~400 KB.
     """
-    try:
-        import scipy.spatial.distance  # noqa: F401  # availability probe
+    n, m = len(seq1), len(seq2)
+    if n == 0 or m == 0:
+        return float("inf")
 
-        n, m = len(seq1), len(seq2)
-        # Compute pairwise cost matrix
-        cost_matrix = (seq1[:, None] - seq2[None, :]) ** 2
+    # Two rolling rows: prev_row[j] = D[i-1, j], curr_row[j] = D[i, j].
+    prev_row = np.full(m + 1, np.inf, dtype=np.float64)
+    prev_row[0] = 0.0
+    curr_row = np.empty(m + 1, dtype=np.float64)
 
-        # Accumulate DTW cost matrix row by row (vectorized per row)
-        dtw_cost = np.full((n + 1, m + 1), np.inf)
-        dtw_cost[0, 0] = 0.0
+    for i in range(1, n + 1):
+        # Per-row cost vector (vectorized).
+        costs = (seq1[i - 1] - seq2) ** 2  # shape (m,)
 
-        for i in range(1, n + 1):
-            prev_min = np.minimum(dtw_cost[i - 1, :-1], dtw_cost[i - 1, 1:])
-            prev_min = np.minimum(prev_min, dtw_cost[i, :-1])
-            dtw_cost[i, 1:] = cost_matrix[i - 1] + prev_min
+        # The recurrence D[i, j] = costs[j-1] + min(D[i-1, j-1], D[i-1, j], D[i, j-1])
+        # has a left-to-right dependency through D[i, j-1] (curr_row), so we
+        # cannot vectorize the inner loop without giving up correctness.
+        # We still keep memory at O(m) — that is the OOM fix.
+        curr_row[0] = np.inf
+        prev_diag = prev_row[:-1]   # D[i-1, j-1]
+        prev_up = prev_row[1:]      # D[i-1, j]
+        partial = costs + np.minimum(prev_diag, prev_up)  # min of the two prev cells
+        for j in range(1, m + 1):
+            curr_row[j] = min(partial[j - 1], costs[j - 1] + curr_row[j - 1])
 
-        # Open-end: minimum of last row
-        return float(np.min(dtw_cost[n, 1:]))
-    except ImportError:
-        # Pure numpy fallback (row-vectorized, not per-cell Python loop)
-        return _numpy_dtw(seq1, seq2)
+        # Swap rolling buffers.
+        prev_row, curr_row = curr_row, prev_row
+
+    # After the swap above, the most recently filled row is `prev_row`.
+    return float(np.min(prev_row[1:]))
 
 
 def _numpy_dtw(seq1: np.ndarray, seq2: np.ndarray) -> float:

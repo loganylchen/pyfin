@@ -26,7 +26,7 @@ def test_em_accepts_prior_weights_param():
 
 def test_em_prior_weights_validation_wrong_shape():
     d_tx, d_rr = _setup()
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         em_with_coherence(
             d_tx, d_rr, sigma=1.0, beta=0.5, max_iter=5,
             verbose=False, use_gpu=False,

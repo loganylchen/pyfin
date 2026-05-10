@@ -131,6 +131,7 @@ class QuantifyRunner:
         em_beta: float = 0.5,
         em_max_iter: int = 1000,
         em_tol: float = 1e-4,
+        signal_normalize: bool = True,
         config: Optional[PipelineConfig] = None,
     ):
         self.gtf_path = gtf_path
@@ -149,6 +150,7 @@ class QuantifyRunner:
             self.em_beta = config.em_beta
             self.em_max_iter = config.em_max_iter
             self.em_tol = config.em_tol
+            self.signal_normalize = config.signal_normalize
         else:
             self.signal_format = signal_format
             self.use_gpu = use_gpu
@@ -157,6 +159,7 @@ class QuantifyRunner:
             self.em_beta = em_beta
             self.em_max_iter = em_max_iter
             self.em_tol = em_tol
+            self.signal_normalize = signal_normalize
 
         self._gtf_reader = None
         self._genome_fasta: Dict[str, str] = {}
@@ -372,25 +375,28 @@ class QuantifyRunner:
 
         # Signal DTW (read-to-read)
         segments = extract_signal_segments(
-            all_scores, signal_reader, signal_format=self.signal_format
+            all_scores,
+            signal_reader,
+            signal_format=self.signal_format,
+            normalize=self.signal_normalize,
         )
         dist_read_to_read = compute_read_to_read_dtw(
             segments, dtw_read_ids, use_gpu=self.use_gpu
         )
 
-        # Shape assertions: both distance matrices share the same read axis.
-        assert (
+        # Shape checks: both distance matrices share the same read axis.
+        if not (
             dist_read_to_tx.shape[0]
             == dist_read_to_read.shape[0]
             == len(dtw_read_ids)
-        ), (
-            f"Read axis mismatch: dist_read_to_tx rows={dist_read_to_tx.shape[0]}, "
-            f"dist_read_to_read rows={dist_read_to_read.shape[0]}, "
-            f"dtw_read_ids={len(dtw_read_ids)}"
-        )
-        assert (
-            dist_read_to_read.shape[0] == dist_read_to_read.shape[1]
-        ), "dist_read_to_read must be square"
+        ):
+            raise ValueError(
+                f"Read axis mismatch: dist_read_to_tx rows={dist_read_to_tx.shape[0]}, "
+                f"dist_read_to_read rows={dist_read_to_read.shape[0]}, "
+                f"dtw_read_ids={len(dtw_read_ids)}"
+            )
+        if dist_read_to_read.shape[0] != dist_read_to_read.shape[1]:
+            raise ValueError("dist_read_to_read must be square")
 
         n_reads = len(dtw_read_ids)
         n_tx = len(candidate_ids)

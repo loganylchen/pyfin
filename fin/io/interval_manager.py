@@ -189,7 +189,20 @@ def extract_strand_from_read(read_dict: Dict) -> Optional[str]:
     return '+' if read_dict.get('is_forward') else '-'
 
 def extract_three_prime_pos(read_dict: Dict) -> Optional[int]:
-    return int(read_dict.get('reference_end')) if read_dict.get('is_forward') else int(read_dict.get('reference_start'))
+    """Return the 3' genomic coordinate for a read, or None if unmapped.
+
+    Forward reads -> reference_end (exclusive); reverse reads -> reference_start.
+    pysam returns reference_end=None for unmapped reads; we must propagate
+    None instead of TypeError'ing inside int().
+    """
+    pos = (
+        read_dict.get('reference_end')
+        if read_dict.get('is_forward')
+        else read_dict.get('reference_start')
+    )
+    if pos is None:
+        return None
+    return int(pos)
 
 def generate_intervals_from_reads(bam_path: str, max_reads: Optional[int] = None) -> Tuple[List[Dict], Set[str], List[Dict]]:
     """

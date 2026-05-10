@@ -94,16 +94,22 @@ class TestParseSaTags:
 
         assert len(result) == 2, f"Expected 2 breakpoints, got {len(result)}"
 
-        # Verify read1 breakpoint
+        # Verify read1 breakpoint.
+        # P1-α: forward-strand reads use reference_end as the breakpoint
+        # coordinate (right edge of the primary alignment). Read1 starts at
+        # 1000 with a 50M cigar -> reference_end = 1050.
         bp1 = next(b for b in result if b.supporting_read_ids == {"read1"})
         assert bp1.chromA == "chr1"
-        assert bp1.posA == 1000
+        assert bp1.posA == 1050
         assert bp1.strandA == "+"
         assert bp1.chromB == "chr2"
         assert bp1.posB == 5000  # SA pos 5001 → 0-based 5000
         assert bp1.strandB == "+"
 
-        # Verify read2 breakpoint
+        # Verify read2 breakpoint.
+        # Reverse-strand reads keep reference_start as the breakpoint coord
+        # (left edge of the primary alignment, which is the 3'->5' boundary
+        # going into the fusion junction).
         bp2 = next(b for b in result if b.supporting_read_ids == {"read2"})
         assert bp2.chromA == "chr1"
         assert bp2.posA == 2000
@@ -244,3 +250,25 @@ class TestClusterBreakpoints:
         assert len(result) == 1
         assert result[0].posA == 1050
         assert result[0].posB == 5050
+
+    def test_cluster_order_independent(self):
+        """P1-β: Clustering result must be independent of input order.
+
+        Construct a "chain" where bp1↔bp2 and bp2↔bp3 are within max_dist but
+        bp1↔bp3 are not. Single-linkage must merge all three regardless of
+        which permutation is fed in.
+        """
+        bp1 = self._bp("chr1", 1000, "+", "chr2", 5000, "+", "r1")
+        bp2 = self._bp("chr1", 1300, "+", "chr2", 5300, "+", "r2")  # bridges 1 and 3
+        bp3 = self._bp("chr1", 1600, "+", "chr2", 5600, "+", "r3")
+        # 1↔3 distance is 600 > max_dist=500, but the chain is connected.
+
+        results = []
+        for perm in [(bp1, bp2, bp3), (bp3, bp2, bp1), (bp2, bp1, bp3), (bp2, bp3, bp1)]:
+            r = cluster_breakpoints(list(perm), max_dist=500, min_support=2)
+            assert len(r) == 1, f"Permutation {perm} produced {len(r)} clusters"
+            assert r[0].support_count == 3
+            assert r[0].supporting_read_ids == {"r1", "r2", "r3"}
+            results.append((r[0].posA, r[0].posB))
+        # All permutations must produce identical merged coordinates.
+        assert len(set(results)) == 1, f"Order-dependent output: {results}"

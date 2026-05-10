@@ -276,7 +276,8 @@ def merge_fusion_candidates(
             existing_ids.add(fc.candidate_id)
 
     all_ids = [c.candidate_id for c in candidate_set.candidates]
-    assert len(all_ids) == len(set(all_ids)), "Duplicate candidate_ids found after merge"
+    if len(all_ids) != len(set(all_ids)):
+        raise ValueError("Duplicate candidate_ids found after merge")
 
     return candidate_set
 

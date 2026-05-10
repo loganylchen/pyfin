@@ -4,10 +4,13 @@ CUDA-accelerated Dynamic Time Warping (DTW) module
 This module provides GPU-accelerated DTW distance calculation.
 """
 
+import logging
 import subprocess
 from typing import Union
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Try to import the CUDA extension
 try:
@@ -24,9 +27,9 @@ except ImportError as e:
 
 # Log backend availability upon module import
 if CUDA_AVAILABLE:
-    print("🚀 DTW: GPU (CUDA) acceleration ENABLED")
+    logger.info("DTW: GPU (CUDA) acceleration ENABLED")
 else:
-    print("💻 DTW: CPU implementation (CUDA not available)")
+    logger.info("DTW: CPU implementation (CUDA not available)")
 
 
 def dtw_distance(

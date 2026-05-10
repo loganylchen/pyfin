@@ -96,12 +96,16 @@ class Slow5Reader:
             raise RuntimeError("Slow5 file not opened. Call open() first.")
         return dict(self._header)
 
-    def get_read(self, read_id: str) -> Optional[Dict[str, Any]]:
+    def get_read(self, read_id: str, pA: bool = False) -> Optional[Dict[str, Any]]:
         """
         Get all data for a specific read
 
         Args:
             read_id: Read ID
+            pA: If True, ask pyslow5 to return calibrated picoamp floats in
+                ``signal`` (fast C-side conversion). If False (default), the
+                ``signal`` field contains raw ADC int16 samples — the original
+                contract callers like ``get_signal()`` rely on.
 
         Returns:
             Dictionary containing read data or None if read not found
@@ -110,8 +114,7 @@ class Slow5Reader:
             raise RuntimeError("Slow5 file not opened. Call open() first.")
 
         try:
-            # Get read data (returns numpy arrays)
-            read_data = self._s5_file.get_read(read_id)
+            read_data = self._s5_file.get_read(read_id, pA=pA)
 
             if read_data is None:
                 logger.warning(f"Read ID {read_id} not found in file")
@@ -119,9 +122,11 @@ class Slow5Reader:
 
             return {
                 'read_id': read_id,
-                'signal': read_data['signal'].tolist(),
-                'raw_signal': read_data['raw_signal'].tolist() if 'raw_signal' in read_data else None,
-                'picoamp_values': read_data['picoamp_values'].tolist() if 'picoamp_values' in read_data else None,
+                # When pA=True 'signal' is float picoamp; when pA=False it is
+                # the raw ADC int16 array. Callers must request the variant
+                # they want via the pA parameter.
+                'signal': read_data['signal'],
+                'raw_signal': read_data['raw_signal'] if 'raw_signal' in read_data else None,
                 'digitisation': read_data['digitisation'],
                 'offset': read_data['offset'],
                 'range': read_data['range'],
@@ -199,22 +204,15 @@ class Slow5Reader:
         Returns:
             Tuple of (picoamp_array, metadata_dict) or None if read not found
         """
-        read_data = self.get_read(read_id)
+        # Request pA=True so pyslow5 does the ADC->pA conversion in C
+        # (much faster than per-sample Python conversion).
+        read_data = self.get_read(read_id, pA=True)
         if read_data is None:
             return None
 
-        # pyslow5 returns raw integer signal; compute picoamp on-the-fly using
-        # the standard nanopore conversion: pA = (raw + offset) * range / digitisation
-        picoamp = read_data.get('picoamp_values')
+        picoamp = read_data.get('signal')
         if picoamp is None:
-            raw = read_data.get('signal')
-            if raw is None:
-                return None
-            digitisation = read_data['digitisation']
-            offset = read_data['offset']
-            rng = read_data['range']
-            scale = float(rng) / float(digitisation)
-            picoamp = [(float(s) + float(offset)) * scale for s in raw]
+            return None
 
         metadata = {
             'read_id': read_id,

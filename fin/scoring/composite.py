@@ -72,8 +72,15 @@ def compute_coherence_score(
     # Weighted mean pairwise distance: w^T D w / (w_sum^2)
     d_mean = float(w_i @ dist_read_to_read @ w_i) / (w_sum * w_sum + 1e-10)
 
-    # Reference scale: median of the full distance matrix
-    d_ref = float(max(np.median(dist_read_to_read), 1e-6))
+    # Reference scale: median of the OFF-DIAGONAL pairwise distances.
+    # Including the all-zero diagonal pulls the median toward 0 once n_reads
+    # is small, which makes coherence collapse to ~0 even for tight clusters.
+    n_reads = dist_read_to_read.shape[0]
+    if n_reads > 1:
+        iu, ju = np.triu_indices(n_reads, k=1)
+        d_ref = float(max(np.median(dist_read_to_read[iu, ju]), 1e-6))
+    else:
+        d_ref = 1e-6
 
     coherence = float(np.exp(-d_mean / d_ref))
     coherence = float(np.clip(coherence, 0.0, 1.0))
@@ -171,13 +178,37 @@ def score_candidates_composite(
     Returns:
         List of CompositeScore, one per candidate, aligned with input order.
     """
-    # use_gpu is accepted as a forward-compatibility hint; numpy impl used
-    # unless cupy ops are explicitly desired in future extension.
-    _ = use_gpu  # acknowledged; numpy fallback always safe
+    # Vectorize the dominant cost (per-candidate w^T D w) so the GPU hint is
+    # actually honored when CuPy is available. Without batching, the for-loop
+    # below issues n_tx tiny matrix-vector products that GPU can't accelerate.
+    xp, to_device, to_host = _get_array_module(use_gpu)
+
+    R_dev = to_device(np.ascontiguousarray(R, dtype=np.float64))
+    Drr_dev = to_device(np.ascontiguousarray(dist_read_to_read, dtype=np.float64))
+
+    # numerator[j] = w_j^T D w_j  ->  diag(R^T D R)
+    DR = Drr_dev @ R_dev                                # (n_reads, n_tx)
+    numerator = (R_dev * DR).sum(axis=0)                # (n_tx,)
+    w_sum = R_dev.sum(axis=0)                           # (n_tx,)
+    denom = w_sum * w_sum + 1e-10
+    d_mean_per_tx = to_host(numerator / denom)          # (n_tx,)
+
+    n_reads = dist_read_to_read.shape[0]
+    if n_reads > 1:
+        iu, ju = np.triu_indices(n_reads, k=1)
+        d_ref = float(max(np.median(dist_read_to_read[iu, ju]), 1e-6))
+    else:
+        d_ref = 1e-6
+
+    coh_per_tx = np.exp(-d_mean_per_tx / d_ref)
+    coh_per_tx = np.clip(coh_per_tx, 0.0, 1.0)
+    # Empty clusters (w_sum ~ 0) should report 0 coherence, not exp(-0)=1.
+    empty_mask = to_host(w_sum) < 1e-10
+    coh_per_tx[empty_mask] = 0.0
 
     scores: List[CompositeScore] = []
     for j, cand in enumerate(candidates):
-        coh = compute_coherence_score(dist_read_to_read, R, j)
+        coh = float(coh_per_tx[j])
         dis = compute_discrimination_score(dist_read_to_tx, j, tau=tau)
         com = compute_combined_score(coh, dis, alpha=alpha)
         scores.append(

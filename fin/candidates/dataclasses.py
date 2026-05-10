@@ -59,6 +59,12 @@ class TranscriptCandidate:
 
     @property
     def length(self) -> int:
+        # Fusion candidates set start=posA on chromA and end=posB on chromB.
+        # Subtracting them is meaningless (and can be negative) so we fall
+        # back to the assembled sequence length, which is the only thing
+        # downstream code actually uses for fusion candidates.
+        if self.source == "fusion":
+            return len(self.sequence) if self.sequence else 0
         return self.end - self.start
 
     @property

@@ -34,6 +34,47 @@ from fin.scoring.signal_dtw import compute_read_to_read_dtw, extract_signal_segm
 logger = logging.getLogger(__name__)
 
 
+def _project_responsibilities_full(
+    R_sub: np.ndarray,
+    sub_read_ids: List[str],
+    full_read_ids: List[str],
+    dist_read_to_tx_full: np.ndarray,
+    sigma: float,
+    prior_weights: Optional[np.ndarray],
+) -> tuple:
+    """Project EM responsibilities from subsampled to full read set.
+
+    Subsampled reads keep their EM responsibilities (which include coherence).
+    Non-subsampled reads get a coherence-free softmax over the full d_tx using
+    the same sigma + (optional) prior. This restores correct quantification
+    when DTW subsampling is in effect.
+    """
+    n_full = len(full_read_ids)
+    n_tx = R_sub.shape[1]
+    sub_index = {rid: i for i, rid in enumerate(sub_read_ids)}
+
+    R_full = np.zeros((n_full, n_tx), dtype=R_sub.dtype)
+
+    # Coherence-free softmax for non-subsampled reads (numerically stable).
+    d_tx = dist_read_to_tx_full
+    d_min = d_tx.min(axis=1, keepdims=True)
+    R_softmax = np.exp(-(d_tx - d_min) / max(sigma, 1e-6))
+    if prior_weights is not None:
+        R_softmax = R_softmax * np.asarray(prior_weights).reshape(1, -1)
+    row_sums = np.maximum(R_softmax.sum(axis=1, keepdims=True), 1e-10)
+    R_softmax = R_softmax / row_sums
+
+    for i, rid in enumerate(full_read_ids):
+        si = sub_index.get(rid)
+        if si is not None:
+            R_full[i, :] = R_sub[si, :]
+        else:
+            R_full[i, :] = R_softmax[i, :]
+
+    hard_full = np.argmax(R_full, axis=1)
+    return R_full, hard_full
+
+
 class PipelineRunner:
     """Orchestrates the full pyfin pipeline."""
 
@@ -224,28 +265,37 @@ class PipelineRunner:
         dist_read_to_tx = build_distance_matrix(
             all_scores, dtw_read_ids, candidate_ids
         )
+        # Also build the full-read d_tx so quantification can include
+        # non-subsampled reads (P0-1: prevent abundance underestimation when
+        # max_reads_per_interval_for_dtw caps the EM input).
+        dist_read_to_tx_full = build_distance_matrix(
+            all_scores, read_ids, candidate_ids
+        )
 
         # --- Phase 3: Signal DTW (read-to-read) ---
         segments = extract_signal_segments(
-            all_scores, self._signal_reader, signal_format=self.config.signal_format
+            all_scores,
+            self._signal_reader,
+            signal_format=self.config.signal_format,
+            normalize=self.config.signal_normalize,
         )
         dist_read_to_read = compute_read_to_read_dtw(
             segments, dtw_read_ids, use_gpu=self.config.use_gpu
         )
 
-        # m3 alignment assertion: both distance matrices share the same read axis.
-        assert (
+        # m3 alignment check: both distance matrices share the same read axis.
+        if not (
             dist_read_to_tx.shape[0]
             == dist_read_to_read.shape[0]
             == len(dtw_read_ids)
-        ), (
-            f"Read axis mismatch: dist_read_to_tx rows={dist_read_to_tx.shape[0]}, "
-            f"dist_read_to_read rows={dist_read_to_read.shape[0]}, "
-            f"dtw_read_ids={len(dtw_read_ids)}"
-        )
-        assert (
-            dist_read_to_read.shape[0] == dist_read_to_read.shape[1]
-        ), "dist_read_to_read must be square"
+        ):
+            raise ValueError(
+                f"Read axis mismatch: dist_read_to_tx rows={dist_read_to_tx.shape[0]}, "
+                f"dist_read_to_read rows={dist_read_to_read.shape[0]}, "
+                f"dtw_read_ids={len(dtw_read_ids)}"
+            )
+        if dist_read_to_read.shape[0] != dist_read_to_read.shape[1]:
+            raise ValueError("dist_read_to_read must be square")
 
         n_reads = len(dtw_read_ids)
         n_tx = len(candidate_ids)
@@ -271,10 +321,26 @@ class PipelineRunner:
                 combined_scores_arr, n_tx, self.config.prior_weight_cap
             )
 
+        # Data-adaptive sigma (P0-α): with per-event normalized d_tx the
+        # absolute scale is dataset-dependent (~0.5-5 nats). A fixed sigma=1.0
+        # often collapses R to one-hot, defeating EM. Use the median per-read
+        # range as a robust scale; clip into [min_sigma, em_sigma_max].
+        if n_tx >= 2 and n_reads > 0:
+            d_max = dist_read_to_tx.max(axis=1)
+            d_min = dist_read_to_tx.min(axis=1)
+            adaptive = float(np.median(d_max - d_min))
+            sigma_use = float(np.clip(
+                adaptive if adaptive > 0 else self.config.em_sigma,
+                getattr(self.config, "em_sigma_min", 0.05),
+                getattr(self.config, "em_sigma_max", 50.0),
+            ))
+        else:
+            sigma_use = self.config.em_sigma
+
         R, hard_assignments, _log_likelihoods = em_with_coherence(
             dist_read_to_tx=dist_read_to_tx,
             dist_read_to_read=dist_read_to_read,
-            sigma=self.config.em_sigma,
+            sigma=sigma_use,
             beta=self.config.em_beta,
             max_iter=self.config.em_max_iter,
             tol=self.config.em_tol,
@@ -284,8 +350,29 @@ class PipelineRunner:
         )
 
         # --- Phase 6: Quantification + score field population ---
+        # P0-1: when DTW subsampled, project EM responsibilities back to the
+        # full read set. Subsampled reads keep their EM responsibilities;
+        # non-subsampled reads get a coherence-free softmax over d_tx_full
+        # using the same sigma. This avoids dropping ~maxN reads from the
+        # quantification, which previously caused systematic abundance
+        # under-estimation when an interval had >max_reads_per_interval_for_dtw.
+        if len(dtw_read_ids) == len(read_ids):
+            R_quant = R
+            hard_quant = hard_assignments
+            quant_read_ids = dtw_read_ids
+        else:
+            R_quant, hard_quant = _project_responsibilities_full(
+                R_sub=R,
+                sub_read_ids=dtw_read_ids,
+                full_read_ids=read_ids,
+                dist_read_to_tx_full=dist_read_to_tx_full,
+                sigma=sigma_use,
+                prior_weights=prior_weights,
+            )
+            quant_read_ids = read_ids
+
         quant_results = quantify_transcripts(
-            R, hard_assignments, candidate_set.candidates, dtw_read_ids
+            R_quant, hard_quant, candidate_set.candidates, quant_read_ids
         )
         populate_quant_scores(quant_results, composite_scores)
         return quant_results

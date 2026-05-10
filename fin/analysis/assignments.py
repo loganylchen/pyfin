@@ -3,8 +3,11 @@
 Supports CuPy GPU acceleration when available, with automatic numpy fallback.
 """
 
+import logging
 import numpy as np
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Try CuPy for GPU-accelerated matrix ops
 try:
@@ -104,11 +107,17 @@ def em_with_coherence(
     """
     # Input validation
     n_reads, n_tx = dist_read_to_tx.shape
-    assert dist_read_to_read.shape == (n_reads, n_reads), \
-        f"dist_read_to_read must be ({n_reads}, {n_reads}), got {dist_read_to_read.shape}"
-    assert sigma >= min_sigma, f"sigma must be >= {min_sigma}"
-    assert beta >= 0, "beta must be non-negative"
-    assert max_iter >= 0, "max_iter must be non-negative"
+    if dist_read_to_read.shape != (n_reads, n_reads):
+        raise ValueError(
+            f"dist_read_to_read must be ({n_reads}, {n_reads}), "
+            f"got {dist_read_to_read.shape}"
+        )
+    if sigma < min_sigma:
+        raise ValueError(f"sigma must be >= {min_sigma}, got {sigma}")
+    if beta < 0:
+        raise ValueError(f"beta must be non-negative, got {beta}")
+    if max_iter < 0:
+        raise ValueError(f"max_iter must be non-negative, got {max_iter}")
 
     # Ensure distance matrices are non-negative
     if dist_read_to_tx.min() < 0 or dist_read_to_read.min() < 0:
@@ -118,14 +127,16 @@ def em_with_coherence(
     pi = None
     if prior_weights is not None:
         prior_weights = np.asarray(prior_weights, dtype=float)
-        assert prior_weights.shape == (n_tx,), \
-            f"prior_weights must be ({n_tx},), got {prior_weights.shape}"
+        if prior_weights.shape != (n_tx,):
+            raise ValueError(
+                f"prior_weights must be ({n_tx},), got {prior_weights.shape}"
+            )
         if np.any(prior_weights < 0) or not np.all(np.isfinite(prior_weights)):
             raise ValueError("prior_weights must be non-negative and finite")
         s = prior_weights.sum()
         if s <= 0:
             if verbose:
-                print("prior_weights sum to 0; falling back to uniform prior")
+                logger.warning("prior_weights sum to 0; falling back to uniform prior")
             pi = None
         else:
             pi = prior_weights / s
@@ -133,14 +144,20 @@ def em_with_coherence(
     # Select array backend (cupy GPU or numpy CPU)
     xp, to_device, to_host = _get_array_module(use_gpu)
     if xp is not np and verbose:
-        print("GPU (CuPy) acceleration enabled for EM")
+        logger.info("GPU (CuPy) acceleration enabled for EM")
 
     # Transfer to device
     d_tx = to_device(dist_read_to_tx)
     d_rr = to_device(dist_read_to_read)
 
     # Initialize responsibility matrix: R[i, j] = P(read_i -> transcript_j)
-    R = xp.exp(-d_tx / sigma)
+    # Numerically stable softmax: subtract row-min before exp so the best
+    # distance maps to exp(0)=1. The constant factor cancels in row
+    # normalization, so this is mathematically identical to exp(-d/σ).
+    # Without this shift, eventalign distances of ~10^3 plus 1e6 missing-pair
+    # fallbacks underflow to 0 → R is all zeros → abundance is all zeros.
+    d_tx_min = d_tx.min(axis=1, keepdims=True)
+    R = xp.exp(-(d_tx - d_tx_min) / sigma)
     if pi is not None:
         pi_dev = to_device(pi.reshape(1, -1))  # shape (1, n_tx) for broadcasting
         R = R * pi_dev
@@ -158,8 +175,10 @@ def em_with_coherence(
         coherence_penalty = coherence_numerator / cluster_weights
 
         # M-step: energy = dist + beta * coherence, then softmax
+        # Row-shift for numerical stability (see init step above for rationale).
         energy = d_tx + beta * coherence_penalty
-        R_new = xp.exp(-energy / sigma)
+        energy_min = energy.min(axis=1, keepdims=True)
+        R_new = xp.exp(-(energy - energy_min) / sigma)
         row_sums = R_new.sum(axis=1, keepdims=True)
         row_sums = xp.maximum(row_sums, 1e-10)
         R_new = R_new / row_sums
@@ -167,22 +186,31 @@ def em_with_coherence(
         # Convergence check
         diff = float(xp.abs(R - R_new).max())
 
-        # Log-likelihood
-        ll = float(-xp.sum(R_new * energy))
+        # Free energy / ELBO surrogate: -<E>_R + sigma * H(R).
+        # Without the entropy term the "log-likelihood" trace is just the
+        # expected energy, so it never reflects soft-assignment uncertainty
+        # and convergence diagnostics under-report when EM is doing useful
+        # uncertainty smoothing. Sigma scales the entropy back into the same
+        # units as the energy term (since E/sigma is what is exponentiated).
+        eps = 1e-12
+        entropy = float(-xp.sum(R_new * xp.log(R_new + eps)))
+        ll = float(-xp.sum(R_new * energy)) + sigma * entropy
         log_likelihoods.append(ll)
 
         R = R_new
 
         if verbose and (it % 100 == 0 or diff < tol):
-            print(f"Iter {it:4d}: log-likelihood = {ll:12.4f}, max_diff = {diff:.6f}")
+            logger.debug(
+                "Iter %4d: log-likelihood = %12.4f, max_diff = %.6f", it, ll, diff
+            )
 
         if diff < tol:
             if verbose:
-                print(f"EM converged at iteration {it}")
+                logger.info("EM converged at iteration %d", it)
             break
     else:
         if verbose:
-            print(f"EM reached max iterations ({max_iter}) without converging")
+            logger.info("EM reached max iterations (%d) without converging", max_iter)
 
     # Transfer back to host (numpy)
     R_host = to_host(R)
@@ -190,11 +218,14 @@ def em_with_coherence(
 
     if verbose:
         unique_assignments, counts = np.unique(hard_assignments, return_counts=True)
-        print("\nCluster statistics:")
-        print(f"  Active transcripts: {len(unique_assignments)} / {n_tx}")
-        print(f"  Reads per cluster: min={counts.min()}, max={counts.max()}, "
-              f"mean={counts.mean():.1f}, median={np.median(counts):.1f}")
         avg_confidence = R_host[np.arange(n_reads), hard_assignments].mean()
-        print(f"  Average assignment confidence: {avg_confidence:.3f}")
+        logger.info(
+            "EM cluster stats: active_tx=%d/%d, reads_per_cluster min=%d max=%d "
+            "mean=%.1f median=%.1f, avg_confidence=%.3f",
+            len(unique_assignments), n_tx,
+            counts.min(), counts.max(),
+            counts.mean(), float(np.median(counts)),
+            avg_confidence,
+        )
 
     return R_host, hard_assignments, log_likelihoods

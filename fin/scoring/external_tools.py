@@ -105,6 +105,23 @@ class ExternalToolRunner:
         interval_work_dir.mkdir(parents=True, exist_ok=True)
         tsv_paths = []
 
+        # P0-2: Load the FASTQ ONCE per interval. mappy.fastx_read otherwise
+        # iterates the entire file inside align_reads_with_mappy for every
+        # candidate, giving O(C * N) IO. We cache (name, seq, qual) tuples
+        # and reuse them across candidates.
+        cached_reads = None
+        if candidate_set.candidates:
+            import mappy
+            cached_reads = [
+                (name, seq, qual)
+                for name, seq, qual in mappy.fastx_read(str(self.fastq_path))
+            ]
+            logger.info(
+                "Cached %d FASTQ reads for %d candidates",
+                len(cached_reads),
+                len(candidate_set.candidates),
+            )
+
         for candidate in candidate_set.candidates:
             if not candidate.sequence:
                 logger.warning(
@@ -122,7 +139,8 @@ class ExternalToolRunner:
             # 2. Align ALL reads to this candidate with mappy
             bam_path = cand_dir / "aligned.bam"
             n_aligned = align_reads_with_mappy(
-                candidate, self.fastq_path, bam_path
+                candidate, self.fastq_path, bam_path,
+                cached_reads=cached_reads,
             )
 
             # f5c eventalign cannot iterate an empty BAM (sam_itr_queryi failed).
@@ -169,9 +187,17 @@ def write_single_candidate_fasta(
 
 
 def align_reads_with_mappy(
-    candidate: TranscriptCandidate, fastq_path: Path, bam_path: Path
+    candidate: TranscriptCandidate,
+    fastq_path: Path,
+    bam_path: Path,
+    cached_reads: Optional[List[tuple]] = None,
 ) -> int:
     """Align all reads to a single candidate using mappy, write sorted+indexed BAM.
+
+    Args:
+        cached_reads: Optional pre-loaded list of (name, seq, qual) tuples.
+            When provided, the FASTQ is not re-read from disk (P0-2: avoids
+            O(C * N) IO when scoring many candidates per interval).
 
     Returns:
         Number of primary alignments written.
@@ -187,8 +213,13 @@ def align_reads_with_mappy(
         )
 
     # Parse FASTQ, align each read, collect alignments
+    if cached_reads is not None:
+        read_iter = cached_reads
+    else:
+        read_iter = mappy.fastx_read(str(fastq_path))
+
     alignments = []
-    for name, seq, qual in mappy.fastx_read(str(fastq_path)):
+    for name, seq, qual in read_iter:
         for hit in aligner.map(seq):
             if hit.is_primary:
                 alignments.append((name, seq, qual, hit))

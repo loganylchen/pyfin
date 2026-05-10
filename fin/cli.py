@@ -133,8 +133,9 @@ def main(
 )
 @click.option("--f5c-path", default="f5c", show_default=True, help="Path to f5c binary.")
 @click.option("--use-prior/--no-prior", default=True, show_default=True, help="Apply combined_score-derived EM prior.")
+@click.option("--signal-normalize/--no-signal-normalize", default=True, show_default=True, help="Per-read robust z-score normalization before DTW.")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
-def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, f5c_path, use_prior, verbose):
+def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, f5c_path, use_prior, signal_normalize, verbose):
     """Quantify known transcripts across multiple samples."""
     from fin.utils.log_config import setup_logger
 
@@ -161,6 +162,7 @@ def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, f5c_path, 
         bam_path="",
         use_gpu=use_gpu,
         use_prior=use_prior,
+        signal_normalize=signal_normalize,
     )
 
     runner = QuantifyRunner(

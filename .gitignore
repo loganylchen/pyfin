@@ -194,6 +194,9 @@ logs/
 .claude
 
 tests/testdata
+# Top-level testdata holds large fixture BLOW5 / FASTQ blobs (≥100 MB).
+# Keep them out of the repo; use external storage / LFS for distribution.
+testdata/
 
 fin/_eventalign/_tmp
 fin/_eventalign/tmp

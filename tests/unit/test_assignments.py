@@ -208,16 +208,16 @@ class TestEmWithCoherenceValidation:
         """Test that mismatched shapes raise error."""
         dist_tx = np.random.rand(4, 2)
         dist_rr = np.random.rand(5, 5)  # Wrong shape
-        
-        with pytest.raises(AssertionError):
+
+        with pytest.raises(ValueError):
             em_with_coherence(dist_tx, dist_rr, verbose=False)
 
     def test_non_square_read_distance_raises(self):
         """Test that non-square read distance matrix raises error."""
         dist_tx = np.random.rand(4, 2)
         dist_rr = np.random.rand(4, 3)  # Not square
-        
-        with pytest.raises(AssertionError):
+
+        with pytest.raises(ValueError):
             em_with_coherence(dist_tx, dist_rr, verbose=False)
 
     def test_negative_distances_raises(self):
@@ -233,8 +233,8 @@ class TestEmWithCoherenceValidation:
         dist_tx = np.random.rand(4, 2)
         dist_rr = np.random.rand(4, 4)
         np.fill_diagonal(dist_rr, 0)
-        
-        with pytest.raises(AssertionError):
+
+        with pytest.raises(ValueError):
             em_with_coherence(dist_tx, dist_rr, beta=-0.5, verbose=False)
 
     def test_sigma_below_minimum_raises(self):
@@ -242,8 +242,8 @@ class TestEmWithCoherenceValidation:
         dist_tx = np.random.rand(4, 2)
         dist_rr = np.random.rand(4, 4)
         np.fill_diagonal(dist_rr, 0)
-        
-        with pytest.raises(AssertionError):
+
+        with pytest.raises(ValueError):
             em_with_coherence(dist_tx, dist_rr, sigma=0.001, verbose=False)
 
 

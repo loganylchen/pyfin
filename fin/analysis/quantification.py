@@ -33,6 +33,9 @@ class QuantResult:
     combined_score: float = 0.0
     breakpoint_left: Optional[Tuple[str, int, str]] = None
     breakpoint_right: Optional[Tuple[str, int, str]] = None
+    # P0-6: read IDs hard-assigned to this candidate. Used by
+    # aggregate_across_intervals to dedup reads that span multiple intervals.
+    assigned_read_ids: Tuple[str, ...] = ()
 
 
 def _exons_from_candidate(c: TranscriptCandidate) -> Tuple[Tuple[int, int], ...]:
@@ -71,11 +74,17 @@ def quantify_transcripts(
     abundance = R.sum(axis=0)  # shape (n_cands,)
 
     # Vectorized hard assignment counts and confidence
+    read_ids_arr = np.asarray(read_ids)
     results = []
     for j, cand in enumerate(candidates):
         assigned_mask = hard_assignments == j
         num_assigned = int(assigned_mask.sum())
         confidence = float(R[assigned_mask, j].mean()) if num_assigned > 0 else 0.0
+        assigned_ids = (
+            tuple(read_ids_arr[assigned_mask].tolist())
+            if num_assigned > 0
+            else ()
+        )
 
         results.append(
             QuantResult(
@@ -89,6 +98,7 @@ def quantify_transcripts(
                 start=cand.start,
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
+                assigned_read_ids=assigned_ids,
             )
         )
 
@@ -148,10 +158,12 @@ def aggregate_across_intervals(
         for qr in results:
             if qr.candidate_id not in agg:
                 agg[qr.candidate_id] = {
-                    "abundance": 0.0,
+                    "abundance_sum": 0.0,
+                    "abundance_weight": 0.0,  # for dedup-weighted average
+                    "num_assigned_total": 0,  # legacy fallback when no read IDs
                     "confidence_sum": 0.0,
                     "confidence_count": 0,
-                    "num_assigned_reads": 0,
+                    "assigned_read_ids": set(),  # P0-6: union across intervals
                     "source": qr.source,
                     "chrom": qr.chrom,
                     "strand": qr.strand,
@@ -167,8 +179,14 @@ def aggregate_across_intervals(
                     "breakpoint_right": qr.breakpoint_right,
                 }
             a = agg[qr.candidate_id]
-            a["abundance"] += qr.abundance
-            a["num_assigned_reads"] += qr.num_assigned_reads
+            # P0-6: track per-interval abundance and dedup read IDs across
+            # intervals. Naive sum double-counts reads that overlap interval
+            # boundaries; we instead average per-read abundance across the
+            # intervals that observe each read.
+            a["abundance_sum"] += qr.abundance
+            a["abundance_weight"] += max(qr.num_assigned_reads, 1)
+            a["num_assigned_total"] += qr.num_assigned_reads
+            a["assigned_read_ids"].update(qr.assigned_read_ids)
             if qr.num_assigned_reads > 0:
                 a["confidence_sum"] += qr.confidence * qr.num_assigned_reads
                 a["confidence_count"] += qr.num_assigned_reads
@@ -200,11 +218,32 @@ def aggregate_across_intervals(
             coherence = 0.0
             discrimination = 0.0
             combined = 0.0
+        # P0-6: dedup read counts and rescale abundance by the dedup ratio.
+        # If the same read is hard-assigned to this candidate in two
+        # intervals, naive sum reports 2x the abundance. We rescale by
+        # n_unique / n_observations so abundance per unique read stays
+        # consistent. When callers don't populate `assigned_read_ids`
+        # (legacy fixtures, intervals with no hard assignments), fall
+        # back to the legacy sum-based behavior.
+        unique_ids = a["assigned_read_ids"]
+        num_assigned_unique = len(unique_ids)
+        num_assigned_total = a["num_assigned_total"]
+        ab_weight = a["abundance_weight"]
+        if num_assigned_unique > 0 and ab_weight > 0:
+            # avg abundance per assigned-read observation, then scale by
+            # unique read count so candidates only seen in one interval are
+            # unaffected.
+            abundance = a["abundance_sum"] * (num_assigned_unique / ab_weight)
+            num_assigned_out = num_assigned_unique
+        else:
+            # Legacy / no-read-id fallback: keep naive sum.
+            abundance = a["abundance_sum"]
+            num_assigned_out = num_assigned_total
         result[cid] = QuantResult(
             candidate_id=cid,
-            abundance=a["abundance"],
+            abundance=abundance,
             confidence=confidence,
-            num_assigned_reads=a["num_assigned_reads"],
+            num_assigned_reads=num_assigned_out,
             source=a["source"],
             chrom=a["chrom"],
             strand=a["strand"],
@@ -217,6 +256,7 @@ def aggregate_across_intervals(
             combined_score=combined,
             breakpoint_left=a["breakpoint_left"],
             breakpoint_right=a["breakpoint_right"],
+            assigned_read_ids=tuple(sorted(unique_ids)),
         )
 
     return result

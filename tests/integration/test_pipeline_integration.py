@@ -360,7 +360,7 @@ def test_process_interval_read_ids_aligned_assertion(tmp_path):
          patches["compute_read_to_read_dtw"], \
          patches["score_candidates_composite"], \
          patches["em_with_coherence"], patches["quantify_transcripts"]:
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             runner.process_interval(_make_interval())
 
 
@@ -380,12 +380,19 @@ def test_process_interval_dtw_subsampling_triggered(tmp_path):
         read_ids=read_ids,
     )
 
-    # Distance matrices sized to subsampled read count = 5.
-    dist_tx = np.zeros((5, 2)) + 0.1
+    # P0-1: build_distance_matrix is now called twice — once with the
+    # subsampled read list (5) for EM, once with the full list (20) so
+    # quantification can project EM responsibilities back to the full set.
+    dist_tx_sub = np.zeros((5, 2)) + 0.1
+    dist_tx_full = np.zeros((20, 2)) + 0.1
     dist_rr = np.zeros((5, 5)) + 0.1
     np.fill_diagonal(dist_rr, 0.0)
     R = np.full((5, 2), 0.5)
     hard = np.zeros(5, dtype=int)
+
+    def _bd_side_effect(scores, rids, cids):
+        # First call comes with subsampled IDs; second with full set.
+        return dist_tx_sub if len(rids) <= 5 else dist_tx_full
 
     from fin.analysis.quantification import QuantResult
     from fin.scoring.composite import CompositeScore
@@ -407,7 +414,7 @@ def test_process_interval_dtw_subsampling_triggered(tmp_path):
     with patch("fin.pipeline.runner.discover_candidates", return_value=cs), \
          patch("fin.pipeline.runner.parse_eventalign_tsv", return_value=[]), \
          patch("fin.pipeline.runner.build_distance_matrix",
-               return_value=dist_tx) as bd_m, \
+               side_effect=_bd_side_effect) as bd_m, \
          patch("fin.pipeline.runner.extract_signal_segments", return_value={}), \
          patch("fin.pipeline.runner.compute_read_to_read_dtw",
                return_value=dist_rr) as dtw_m, \
@@ -417,10 +424,13 @@ def test_process_interval_dtw_subsampling_triggered(tmp_path):
          patch("fin.pipeline.runner.quantify_transcripts", return_value=qr):
         runner.process_interval(_make_interval())
 
-    # build_distance_matrix and DTW both receive the subsampled read list.
-    bd_args, _ = bd_m.call_args
-    dtw_args, dtw_kwargs = dtw_m.call_args
-    # build_distance_matrix(scores, read_ids, candidate_ids)
-    assert len(bd_args[1]) <= 5
-    # compute_read_to_read_dtw(segments, read_ids, use_gpu=...)
+    # build_distance_matrix is called twice (subsampled, then full set).
+    # The first call must use the subsampled list of <=5 reads for EM.
+    first_bd_args, _ = bd_m.call_args_list[0]
+    assert len(first_bd_args[1]) <= 5
+    # And the second call uses the full 20-read list for projection.
+    second_bd_args, _ = bd_m.call_args_list[1]
+    assert len(second_bd_args[1]) == 20
+    # DTW always receives the subsampled list.
+    dtw_args, _ = dtw_m.call_args
     assert len(dtw_args[1]) <= 5

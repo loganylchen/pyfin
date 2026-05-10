@@ -57,4 +57,12 @@ RUN BUILD_VER=$(cat /tmp/python_version.txt) \
        fi \
     && rm /tmp/python_version.txt
 
+# CuPy NVRTC kernel cache. Default location is $HOME/.cupy, but containers
+# launched with `--user $(id -u)` map to a UID whose HOME is "/" (unwritable),
+# so the first cupy ufunc (e.g. EM step) crashes with PermissionError on
+# "/.cupy". Point cache at a world-writable path so any UID can populate it.
+# First run JIT-compiles ~5 small kernels (~10–25s); subsequent runs hit cache.
+ENV CUPY_CACHE_DIR=/tmp/cupy-cache
+RUN mkdir -p /tmp/cupy-cache && chmod 1777 /tmp/cupy-cache
+
 WORKDIR /data

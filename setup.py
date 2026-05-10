@@ -37,8 +37,25 @@ def detect_cuda_arch():
     except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
         pass
 
-    print("GPU not detected, using PTX compute_70 for forward compatibility")
-    return ["--generate-code=arch=compute_70,code=compute_70"]
+    print(
+        "GPU not detected, building fat binary for Pascal/Volta/Turing/Ampere/Ada/Hopper "
+        "(sm_61, sm_70, sm_75, sm_80, sm_86, sm_89, sm_90) + PTX forward-compat"
+    )
+    # NOTE on PTX JIT compatibility: a PTX module compiled for virtual arch
+    # compute_X.Y can JIT-target any device with sm >= X.Y, but never downward.
+    # So compute_89 PTX cannot run on sm_80 (A100). We therefore ship cubins
+    # for every common deployed architecture (incl. sm_80 for A100, sm_90 for
+    # H100) and add compute_90 PTX as forward-compat for sm_100+ (Blackwell).
+    return [
+        "--generate-code=arch=compute_61,code=sm_61",   # Pascal: GTX 1050/1060/1070/1080, Tesla P100
+        "--generate-code=arch=compute_70,code=sm_70",   # Volta: V100, Titan V
+        "--generate-code=arch=compute_75,code=sm_75",   # Turing: RTX 2060-2080, T4
+        "--generate-code=arch=compute_80,code=sm_80",   # Ampere data-center: A100, A30
+        "--generate-code=arch=compute_86,code=sm_86",   # Ampere consumer: RTX 3060-3090, A40
+        "--generate-code=arch=compute_89,code=sm_89",   # Ada Lovelace: RTX 4060-4090, L40
+        "--generate-code=arch=compute_90,code=sm_90",   # Hopper: H100, H200
+        "--generate-code=arch=compute_90,code=compute_90",  # PTX forward-compat for Blackwell (sm_100+)
+    ]
 
 
 def find_cuda_home():
@@ -338,7 +355,11 @@ def main():
             "pysam>=0.21.0",
             "mappy>=2.24",
             "ont-fast5-api>=4.0.0",
-            "pyslow5>=0.3.0",
+            # >=1.0.0 required for the C-side pA=True conversion in
+            # Slow5Reader.get_picoamp_signal(); older versions do not
+            # accept the pA keyword and would fall through the try/except
+            # silently, dropping every read.
+            "pyslow5>=1.0.0",
             "pod5>=0.2.0",
             "h5py>=3.0.0",
             "click>=8.0.0",
@@ -374,6 +395,7 @@ def main():
         ],
         entry_points={
             "console_scripts": [
+                "pyfin=fin.cli:main",
                 "fin=fin.cli:main",
             ],
         },
