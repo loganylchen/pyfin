@@ -29,6 +29,7 @@ import click
 @click.option("--min-support", default=2, show_default=True, type=int, help="Minimum read support for fusion breakpoint (only with --fusion).")
 @click.option("--max-dist", default=500, show_default=True, type=int, help="Maximum distance (bp) for breakpoint clustering (only with --fusion).")
 @click.option("--flank-bp", default=500, show_default=True, type=int, help="Flank size (bp) around fusion breakpoint (only with --fusion).")
+@click.option("--max-reads-per-interval-for-dtw", "max_reads_for_dtw", default=2000, show_default=True, type=int, help="Cap reads per interval for read-to-read DTW (subsample beyond this).")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 @click.pass_context
 def main(
@@ -47,6 +48,7 @@ def main(
     min_support,
     max_dist,
     flank_bp,
+    max_reads_for_dtw,
     verbose,
 ):
     """pyfin: nanopore signal-based transcriptome assembly.
@@ -101,6 +103,7 @@ def main(
         fusion_min_support=min_support,
         fusion_max_dist=max_dist,
         fusion_flank_bp=flank_bp,
+        max_reads_per_interval_for_dtw=max_reads_for_dtw,
     )
 
     runner = PipelineRunner(cfg)

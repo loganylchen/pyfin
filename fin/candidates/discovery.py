@@ -31,6 +31,65 @@ def _intron_chains_match(a: IntronChain, b: IntronChain) -> bool:
     return a.introns == b.introns
 
 
+_COMPLEMENT = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+
+
+def _reverse_complement(seq: str) -> str:
+    return seq.translate(_COMPLEMENT)[::-1]
+
+
+def _exons_from_chain(start: int, end: int, chain: IntronChain) -> List[tuple]:
+    """Derive exon (start, end) blocks from an intron chain spanning [start, end)."""
+    introns = chain.introns
+    if not introns:
+        return [(start, end)]
+    exons = [(start, introns[0][0])]
+    for i in range(len(introns) - 1):
+        exons.append((introns[i][1], introns[i + 1][0]))
+    exons.append((introns[-1][1], end))
+    # Drop any zero-length blocks defensively
+    return [(s, e) for s, e in exons if e > s]
+
+
+def _build_spliced_sequence(
+    genome_fasta: str,
+    start: int,
+    end: int,
+    chain: IntronChain,
+    strand: str,
+) -> str:
+    """Stitch a spliced transcript sequence from a genome chromosome string.
+
+    Args:
+        genome_fasta: Full chromosome sequence string.
+        start: 0-based transcript start (left edge of first exon).
+        end: 0-based exclusive transcript end (right edge of last exon).
+        chain: Intron chain in genomic coordinates.
+        strand: '+' or '-'. Reverse complement is applied for '-'.
+
+    Returns:
+        Spliced cDNA sequence, or empty string when bounds are unusable.
+    """
+    if not genome_fasta or end <= start:
+        return ""
+    chrom_len = len(genome_fasta)
+    # Clip to chromosome bounds.
+    s = max(0, min(start, chrom_len))
+    e = max(0, min(end, chrom_len))
+    if e <= s:
+        return ""
+    parts = []
+    for ex_s, ex_e in _exons_from_chain(s, e, chain):
+        ex_s_c = max(s, min(ex_s, chrom_len))
+        ex_e_c = max(s, min(ex_e, chrom_len))
+        if ex_e_c > ex_s_c:
+            parts.append(genome_fasta[ex_s_c:ex_e_c])
+    seq = "".join(parts)
+    if strand == "-":
+        seq = _reverse_complement(seq)
+    return seq
+
+
 def _three_prime_within_threshold(pos_a: int, pos_b: int, threshold: int) -> bool:
     return abs(pos_a - pos_b) <= threshold
 
@@ -217,19 +276,33 @@ def discover_candidates(
                 break
 
         if not matched:
-            # Novel candidate
+            # Novel candidate: 5' takes longest read in the group; the spliced
+            # cDNA sequence is stitched from genome FASTA + the intron chain.
             rep = pick_representative_read(reads)
-            ref_seq = rep.get("reference_sequence", "")
             ref_start = rep.get("reference_start", interval.start)
             ref_end = rep.get("reference_end", interval.end)
 
-            # 5' takes longest: use representative's span
+            spliced_seq = _build_spliced_sequence(
+                genome_fasta, ref_start, ref_end, chain, strand
+            )
+            if not spliced_seq:
+                logger.warning(
+                    "Skipping novel candidate at %s:%d-%d (%s): empty spliced "
+                    "sequence from genome FASTA (chrom_len=%d).",
+                    interval.chrom,
+                    ref_start,
+                    ref_end,
+                    strand,
+                    len(genome_fasta) if genome_fasta else 0,
+                )
+                continue
+
             candidates.append(
                 TranscriptCandidate(
                     candidate_id=_generate_novel_id(),
                     intron_chain=chain,
                     three_prime_pos=consensus_3prime,
-                    sequence=ref_seq if ref_seq else "",
+                    sequence=spliced_seq,
                     source="novel",
                     supporting_read_ids=read_ids_in_group,
                     chrom=interval.chrom,
