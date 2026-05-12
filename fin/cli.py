@@ -16,7 +16,7 @@ import click
 @click.option("--signal", default=None, type=click.Path(exists=True), help="SLOW5/BLOW5/POD5 signal file.")
 @click.option("--output-dir", default=None, help="Output directory.")
 @click.option("--use-prior/--no-prior", default=True, show_default=True, help="Apply combined_score-derived EM prior.")
-@click.option("--no-gpu", "use_gpu", is_flag=True, default=True, flag_value=False, help="Disable GPU acceleration.")
+@click.option("--gpu/--no-gpu", "use_gpu", default=True, show_default=True, help="Enable/disable GPU acceleration.")
 @click.option(
     "--signal-format",
     default="slow5",
@@ -30,6 +30,11 @@ import click
 @click.option("--max-dist", default=500, show_default=True, type=int, help="Maximum distance (bp) for breakpoint clustering (only with --fusion).")
 @click.option("--flank-bp", default=500, show_default=True, type=int, help="Flank size (bp) around fusion breakpoint (only with --fusion).")
 @click.option("--max-reads-per-interval-for-dtw", "max_reads_for_dtw", default=2000, show_default=True, type=int, help="Cap reads per interval for read-to-read DTW (subsample beyond this).")
+@click.option("--min-novel-reads", default=1, show_default=True, type=int, help="Drop novel candidates with fewer supporting reads (after collapsing).")
+@click.option("--min-abundance", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose EM-estimated abundance is below this threshold (GTF candidates are exempt).")
+@click.option("--min-max-r", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose max EM responsibility is below this (try 0.2 for ~+20pp precision; GTF candidates are exempt).")
+@click.option("--min-novel-combined-score", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose combined_score is below this (F1-optimal: 0.288 with-GTF, 0.428 no-GTF; GTF candidates are exempt).")
+@click.option("--persist-R/--no-persist-R", "persist_R_matrix", default=True, show_default=True, help="Enable/disable R-matrix (R.npy) persistence per interval.")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 @click.pass_context
 def main(
@@ -49,6 +54,11 @@ def main(
     max_dist,
     flank_bp,
     max_reads_for_dtw,
+    min_novel_reads,
+    min_abundance,
+    min_max_r,
+    min_novel_combined_score,
+    persist_R_matrix,
     verbose,
 ):
     """pyfin: nanopore signal-based transcriptome assembly.
@@ -104,6 +114,11 @@ def main(
         fusion_max_dist=max_dist,
         fusion_flank_bp=flank_bp,
         max_reads_per_interval_for_dtw=max_reads_for_dtw,
+        min_novel_reads=min_novel_reads,
+        min_abundance=min_abundance,
+        min_max_r=min_max_r,
+        min_novel_combined_score=min_novel_combined_score,
+        persist_R_matrix=persist_R_matrix,
     )
 
     runner = PipelineRunner(cfg)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -151,6 +152,67 @@ class PipelineRunner:
         # Aggregate across intervals
         aggregated = aggregate_across_intervals(all_quant_results)
 
+        # A4: post-EM abundance filter. GTF-sourced and fusion transcripts are
+        # exempt so users can still see zero-abundance annotated entries
+        # (useful for debugging coverage gaps) and fusion calls are not
+        # silently dropped by NOVEL-targeted filters. Only NOVEL candidates
+        # are dropped here.
+        if self.config.min_abundance > 0.0:
+            before = len(aggregated)
+            aggregated = {
+                cid: qr
+                for cid, qr in aggregated.items()
+                if qr.source in ("gtf", "fusion")
+                or qr.abundance >= self.config.min_abundance
+            }
+            dropped = before - len(aggregated)
+            if dropped:
+                logger.info(
+                    "Dropped %d novel transcripts with abundance < %.3f",
+                    dropped,
+                    self.config.min_abundance,
+                )
+
+        # Phase A Tier-2: max_R filter (FP-by-EM). EM responsibility is a
+        # strong FP discriminator (Cohen's d=1.34 vs combined_score's 0.70).
+        # GTF-sourced and fusion transcripts are exempt to preserve annotation
+        # visibility and avoid silently dropping fusion calls.
+        if self.config.min_max_r > 0.0:
+            before = len(aggregated)
+            aggregated = {
+                cid: qr
+                for cid, qr in aggregated.items()
+                if qr.source in ("gtf", "fusion")
+                or qr.max_R >= self.config.min_max_r
+            }
+            dropped = before - len(aggregated)
+            if dropped:
+                logger.info(
+                    "Dropped %d novel transcripts with max_R < %.3f",
+                    dropped,
+                    self.config.min_max_r,
+                )
+
+        # Step 3: novel combined_score filter (FP-by-scoring). combined_score is
+        # the geometric mean of coherence and discrimination (Cohen's d=0.70).
+        # The F1-optimal threshold from profile_fp.md is 0.288 for with-GTF and
+        # 0.428 for no-GTF runs. GTF-sourced and fusion transcripts are exempt.
+        if self.config.min_novel_combined_score > 0.0:
+            before = len(aggregated)
+            aggregated = {
+                cid: qr
+                for cid, qr in aggregated.items()
+                if qr.source in ("gtf", "fusion")
+                or qr.combined_score >= self.config.min_novel_combined_score
+            }
+            dropped = before - len(aggregated)
+            if dropped:
+                logger.info(
+                    "Dropped %d novel transcripts with combined_score < %.3f",
+                    dropped,
+                    self.config.min_novel_combined_score,
+                )
+
         # Resolve gene_ids from GTF annotation
         for cid, qr in aggregated.items():
             if qr.source == "gtf" and self._gtf_reader:
@@ -217,6 +279,7 @@ class PipelineRunner:
             gtf_reader=self._gtf_reader,
             genome_fasta=chrom_seq,
             threshold=self.config.three_prime_threshold,
+            min_novel_reads=self.config.min_novel_reads,
         )
 
         # --- Phase 1.5: Fusion candidate augmentation (optional) ---
@@ -375,6 +438,26 @@ class PipelineRunner:
             R_quant, hard_quant, candidate_set.candidates, quant_read_ids
         )
         populate_quant_scores(quant_results, composite_scores)
+
+        # T8: populate max_R per transcript (max responsibility across all reads)
+        for j, qr in enumerate(quant_results):
+            qr.max_R = float(R_quant[:, j].max()) if R_quant.shape[0] > 0 else 0.0
+
+        # T8: persist R-matrix to disk for FP-by-EM analysis
+        if self.config.persist_R_matrix:
+            np.save(str(work_dir / "R.npy"), R_quant.astype(np.float32))
+            meta = {
+                "read_ids": list(quant_read_ids),
+                "candidate_ids": list(candidate_ids),
+                "interval_region": interval.region_string,
+                "sigma_used": sigma_use,
+                "was_subsampled": len(dtw_read_ids) != len(read_ids),
+                "n_reads_subsampled": len(dtw_read_ids),
+                "n_reads_full": len(read_ids),
+            }
+            with open(work_dir / "R_meta.json", "w") as _f:
+                json.dump(meta, _f)
+
         return quant_results
 
     def _augment_with_fusion_candidates(

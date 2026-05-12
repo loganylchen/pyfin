@@ -174,6 +174,7 @@ def discover_candidates(
     gtf_reader,
     genome_fasta: str,
     threshold: int = 24,
+    min_novel_reads: int = 1,
 ) -> CandidateSet:
     """Discover transcript candidates for a genomic interval.
 
@@ -312,8 +313,26 @@ def discover_candidates(
                 )
             )
 
-    # 6. Collapse: same 3' consensus + same intron chain → one candidate, 5' takes longest
+    # 6. Collapse: novel candidates with same intron chain + nearby 3' end
     collapsed = _collapse_candidates(candidates, threshold)
+
+    # 7. (A2) Drop novel candidates below min_novel_reads threshold. GTF and
+    # fusion candidates are not affected by this filter.
+    if min_novel_reads > 1:
+        before = len(collapsed)
+        collapsed = [
+            c
+            for c in collapsed
+            if c.source != "novel" or len(c.supporting_read_ids) >= min_novel_reads
+        ]
+        dropped = before - len(collapsed)
+        if dropped:
+            logger.info(
+                "Interval %s: dropped %d novel candidates with <%d supporting reads",
+                interval.region_string,
+                dropped,
+                min_novel_reads,
+            )
 
     logger.info(
         "Interval %s: %d candidates (%d GTF, %d novel) from %d reads",
@@ -358,42 +377,57 @@ def merge_fusion_candidates(
 def _collapse_candidates(
     candidates: List[TranscriptCandidate], threshold: int
 ) -> List[TranscriptCandidate]:
-    """Collapse candidates with same 3' consensus and intron chain.
+    """Collapse novel candidates with same intron chain and nearby 3' end.
 
-    When duplicates are found, keep the one with the longest span (5' extension).
-    Merge supporting read IDs.
+    Two-pass algorithm (A1):
+      Pass 1: bucket NOVEL candidates by exact intron chain.
+      Pass 2: within each chain-bucket, greedily merge candidates whose 3'
+              ends fall within ``threshold`` of an existing representative.
+    The representative is always the longest-span candidate (5' extension);
+    supporting read IDs are unioned.
+
+    GTF candidates are passed through unchanged (annotation-level duplicates
+    are preserved so ground-truth recall metrics stay interpretable).
+    Fusion candidates are also passed through unchanged.
     """
     if not candidates:
         return []
 
-    # Group by (intron_chain, approximate 3' position)
-    groups: dict = {}
+    gtf_passthrough: List[TranscriptCandidate] = []
     fusion_candidates: List[TranscriptCandidate] = []
+    novel_by_chain: dict = {}
+
     for cand in candidates:
         if cand.source == "fusion":
-            # Fusion candidates are never collapsed — each breakpoint is unique
             fusion_candidates.append(cand)
             continue
+        if cand.source == "gtf":
+            gtf_passthrough.append(cand)
+            continue
+        # novel: bucket by intron chain
+        novel_by_chain.setdefault(cand.intron_chain, []).append(cand)
 
-        # Find existing group with matching chain and close 3'
-        merged = False
-        for key in list(groups.keys()):
-            existing_3prime, existing_chain = key
-            if (
-                existing_chain == cand.intron_chain
-                and abs(existing_3prime - cand.three_prime_pos) <= threshold
-            ):
-                existing = groups[key]
-                # Keep the longer one (larger span)
-                if cand.length > existing.length:
-                    cand.supporting_read_ids.update(existing.supporting_read_ids)
-                    groups[key] = cand
-                else:
-                    existing.supporting_read_ids.update(cand.supporting_read_ids)
-                merged = True
-                break
+    collapsed_novel: List[TranscriptCandidate] = []
+    for chain, bucket in novel_by_chain.items():
+        # Within a chain bucket: greedy 3'-window merge. Sort by length desc
+        # so the longest-span candidate naturally becomes the representative
+        # of its 3' cluster (avoiding "first-wins" arbitrariness).
+        bucket.sort(key=lambda c: c.length, reverse=True)
+        reps: List[TranscriptCandidate] = []
+        for cand in bucket:
+            merged = False
+            for rep in reps:
+                if abs(rep.three_prime_pos - cand.three_prime_pos) <= threshold:
+                    # rep is already at least as long (sort order). Only union
+                    # the supporting reads; do NOT extend rep.start/rep.end to
+                    # the union, because rep.sequence was built from rep's
+                    # original genomic span and downstream scoring/output
+                    # require coords and sequence to stay consistent (#P2-3).
+                    rep.supporting_read_ids.update(cand.supporting_read_ids)
+                    merged = True
+                    break
+            if not merged:
+                reps.append(cand)
+        collapsed_novel.extend(reps)
 
-        if not merged:
-            groups[(cand.three_prime_pos, cand.intron_chain)] = cand
-
-    return list(groups.values()) + fusion_candidates
+    return gtf_passthrough + collapsed_novel + fusion_candidates
