@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -445,6 +446,28 @@ class QuantifyRunner:
             R, hard_assignments, candidate_set.candidates, dtw_read_ids
         )
         populate_quant_scores(quant, composite_scores)
+
+        # T8: populate max_R per transcript
+        for j, qr in enumerate(quant):
+            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
+
+        # T8: persist R-matrix to disk for FP-by-EM analysis
+        persist = (
+            self.config.persist_R_matrix if self.config is not None else True
+        )
+        if persist:
+            np.save(str(work_dir / "R.npy"), R.astype(np.float32))
+            meta = {
+                "read_ids": list(dtw_read_ids),
+                "candidate_ids": list(candidate_ids),
+                "interval_region": interval.region_string,
+                "sigma_used": self.em_sigma,
+                "was_subsampled": len(dtw_read_ids) != len(read_ids),
+                "n_reads_subsampled": len(dtw_read_ids),
+                "n_reads_full": len(read_ids),
+            }
+            with open(work_dir / "R_meta.json", "w") as _f:
+                json.dump(meta, _f)
 
         assignment = IntervalAssignment(
             read_ids=dtw_read_ids,

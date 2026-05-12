@@ -36,6 +36,9 @@ class QuantResult:
     # P0-6: read IDs hard-assigned to this candidate. Used by
     # aggregate_across_intervals to dedup reads that span multiple intervals.
     assigned_read_ids: Tuple[str, ...] = ()
+    # T8: maximum EM responsibility any single read assigned to this transcript.
+    # max_R = R[:, j].max() after EM. Used for FP-by-EM analysis.
+    max_R: float = 0.0
 
 
 def _exons_from_candidate(c: TranscriptCandidate) -> Tuple[Tuple[int, int], ...]:
@@ -177,8 +180,13 @@ def aggregate_across_intervals(
                     "score_weight": 0.0,
                     "breakpoint_left": qr.breakpoint_left,
                     "breakpoint_right": qr.breakpoint_right,
+                    "max_R": 0.0,
                 }
             a = agg[qr.candidate_id]
+            # Preserve max EM responsibility across intervals (a candidate's
+            # max_R is the highest single-read responsibility it ever sees).
+            if qr.max_R > a["max_R"]:
+                a["max_R"] = qr.max_R
             # P0-6: track per-interval abundance and dedup read IDs across
             # intervals. Naive sum double-counts reads that overlap interval
             # boundaries; we instead average per-read abundance across the
@@ -257,6 +265,7 @@ def aggregate_across_intervals(
             breakpoint_left=a["breakpoint_left"],
             breakpoint_right=a["breakpoint_right"],
             assigned_read_ids=tuple(sorted(unique_ids)),
+            max_R=a["max_R"],
         )
 
     return result

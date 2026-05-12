@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 _HEADER = (
     "candidate_id\tgene_id\tchrom\tstrand\tstart\tend\tsource\t"
     "abundance\tconfidence\tcoherence_score\tdiscrimination_score\t"
-    "combined_score\tnum_reads\ttpm\n"
+    "combined_score\tnum_reads\ttpm\tmax_R\n"
 )
 
 
@@ -35,6 +35,7 @@ def write_scoring_tsv(
         for cid in sorted(results):
             qr = results[cid]
             tpm = tpm_values.get(cid, 0.0)
+            max_r_val = getattr(qr, "max_R", 0.0)
             row = "\t".join([
                 qr.candidate_id,
                 qr.gene_id,
@@ -50,6 +51,7 @@ def write_scoring_tsv(
                 f"{qr.combined_score:.4f}",
                 str(qr.num_assigned_reads),
                 f"{tpm:.4f}",
+                f"{max_r_val:.4f}",
             ]) + "\n"
             f.write(row)
 

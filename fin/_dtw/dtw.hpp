@@ -185,10 +185,11 @@ __global__ void DTWDistance(const T *first_seq_input, const size_t first_seq_inp
             threadIdx.x < i &&                                            // The diff still corresponds to a spot in the cost matrix?
             i - threadIdx.x < first_seq_length)
         {
-            volatile T up_cost = numeric_limits<T>::max();
-            volatile T diag_cost = numeric_limits<T>::max();
-            volatile T right_cost = numeric_limits<T>::max();
-            volatile T diff = first_seq[i - threadIdx.x] - second_seq_thread_val;
+            T up_cost = numeric_limits<T>::max();
+            T diag_cost = numeric_limits<T>::max();
+            T right_cost = numeric_limits<T>::max();
+            T diff = first_seq[i - threadIdx.x] - second_seq_thread_val;
+            T diff_sq = diff * diff;
 
             // The left edge of cost matrix vertical swath is a special case as we need to
             // access previously global mem stored intermediate costs.
@@ -196,7 +197,7 @@ __global__ void DTWDistance(const T *first_seq_input, const size_t first_seq_inp
             if (threadIdx.x == 0)
             {
                 // Straight up is always an option
-                up_cost = costs[blockDim.x * ((i - 1) % 3)] + diff * diff;
+                up_cost = costs[blockDim.x * ((i - 1) % 3)] + diff_sq;
                 if (offset_within_second_seq != 0)
                 {
                     // All three steps are possible, two drawn from previous intermediate results
@@ -204,8 +205,8 @@ __global__ void DTWDistance(const T *first_seq_input, const size_t first_seq_inp
                     diag_cost = dtwCostSoFar[i - 1];
                     if (i - threadIdx.x < first_seq_length - 1 || !use_open_end)
                     {
-                        right_cost += diff * diff;
-                        diag_cost += diff * diff;
+                        right_cost += diff_sq;
+                        diag_cost += diff_sq;
                     }
                     else
                     {
@@ -216,9 +217,9 @@ __global__ void DTWDistance(const T *first_seq_input, const size_t first_seq_inp
             // For all other threads all the input data is stored locally in costs[].
             else
             {
-                up_cost = costs[threadIdx.x + blockDim.x * ((i - 1) % 3)] + diff * diff;
-                right_cost = costs[(threadIdx.x - 1) + blockDim.x * ((i - 1) % 3)] + diff * diff;
-                diag_cost = costs[(threadIdx.x - 1) + blockDim.x * ((i - 2) % 3)] + diff * diff;
+                up_cost = costs[threadIdx.x + blockDim.x * ((i - 1) % 3)] + diff_sq;
+                right_cost = costs[(threadIdx.x - 1) + blockDim.x * ((i - 1) % 3)] + diff_sq;
+                diag_cost = costs[(threadIdx.x - 1) + blockDim.x * ((i - 2) % 3)] + diff_sq;
             }
 
             // Use the White-Neely step pattern (a diagonal move is preferred to right-up or up-right if costs are equivalent).

@@ -124,3 +124,24 @@ def test_aggregate_preserves_breakpoints():
     r = agg["fusion_1"]
     assert r.breakpoint_left == ("chrA", 100, "+")
     assert r.breakpoint_right == ("chrB", 500, "-")
+
+
+def test_aggregate_preserves_max_r():
+    """Regression: max_R was being dropped during aggregation (all 0.0 in
+    scores.tsv). Aggregation must keep the highest max_R across intervals."""
+    qr1 = QuantResult(
+        candidate_id="tx1",
+        abundance=1.0, confidence=0.9, num_assigned_reads=2, source="gtf",
+        max_R=0.42,
+    )
+    qr2 = QuantResult(
+        candidate_id="tx1",
+        abundance=2.0, confidence=0.8, num_assigned_reads=4, source="gtf",
+        max_R=0.75,
+    )
+    agg = aggregate_across_intervals([[qr1], [qr2]])
+    assert agg["tx1"].max_R == pytest.approx(0.75)
+
+    # Single interval round-trip
+    agg2 = aggregate_across_intervals([[qr1]])
+    assert agg2["tx1"].max_R == pytest.approx(0.42)

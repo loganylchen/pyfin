@@ -86,7 +86,7 @@ def test_quantify_runner_forwards_use_gpu(
 
     for gpu_val in (True, False):
         mock_em.reset_mock()
-        cfg = PipelineConfig(bam_path="/dev/null", use_gpu=gpu_val, use_prior=False)
+        cfg = PipelineConfig(bam_path="/dev/null", use_gpu=gpu_val, use_prior=False, persist_R_matrix=False)
         runner = _make_runner(cfg)
         runner._genome_fasta = {"chr1": "ACGT" * 250}
 
@@ -159,7 +159,7 @@ def test_quantify_runner_use_prior_false_passes_none(
     mock_discover.return_value = candidate_set
     mock_parse.return_value = []
 
-    cfg = PipelineConfig(bam_path="/dev/null", use_prior=False)
+    cfg = PipelineConfig(bam_path="/dev/null", use_prior=False, persist_R_matrix=False)
     runner = _make_runner(cfg)
     runner._genome_fasta = {"chr1": "ACGT" * 250}
 
@@ -230,7 +230,7 @@ def test_quantify_runner_backward_compat_no_prior(
     mock_discover.return_value = candidate_set
     mock_parse.return_value = []
 
-    cfg = PipelineConfig(bam_path="/dev/null", use_prior=False, use_gpu=False)
+    cfg = PipelineConfig(bam_path="/dev/null", use_prior=False, use_gpu=False, persist_R_matrix=False)
     runner = _make_runner(cfg)
     runner._genome_fasta = {"chr1": "ACGT" * 250}
 
@@ -296,6 +296,7 @@ def test_quantify_runner_use_prior_true_yields_valid_weights(
         use_prior=True,
         prior_weight_cap=10.0,
         use_gpu=False,
+        persist_R_matrix=False,
     )
     runner = _make_runner(cfg)
     runner._genome_fasta = {"chr1": "ACGT" * 250}
@@ -373,7 +374,7 @@ def test_quantify_runner_populates_quant_score_fields(
     mock_discover.return_value = candidate_set
     mock_parse.return_value = []
 
-    cfg = PipelineConfig(bam_path="/dev/null", use_prior=False, use_gpu=False)
+    cfg = PipelineConfig(bam_path="/dev/null", use_prior=False, use_gpu=False, persist_R_matrix=False)
     runner = _make_runner(cfg)
     runner._genome_fasta = {"chr1": "ACGT" * 250}
 
@@ -442,6 +443,7 @@ def test_quantify_runner_dtw_subsampling(
         use_prior=False,
         use_gpu=False,
         max_reads_per_interval_for_dtw=cap,
+        persist_R_matrix=False,
     )
     runner = _make_runner(cfg)
     runner._genome_fasta = {"chr1": "ACGT" * 250}

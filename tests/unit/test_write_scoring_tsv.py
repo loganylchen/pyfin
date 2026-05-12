@@ -13,7 +13,7 @@ from fin.io.io_tsv import write_scoring_tsv
 _HEADER = (
     "candidate_id\tgene_id\tchrom\tstrand\tstart\tend\tsource\t"
     "abundance\tconfidence\tcoherence_score\tdiscrimination_score\t"
-    "combined_score\tnum_reads\ttpm"
+    "combined_score\tnum_reads\ttpm\tmax_R"
 )
 
 
@@ -85,7 +85,7 @@ def test_write_scoring_tsv_basic():
     # Float columns use 4-decimal format
     for line in data_lines:
         fields = line.split("\t")
-        for col_idx in (7, 8, 9, 10, 11, 13):  # abundance..tpm
+        for col_idx in (7, 8, 9, 10, 11, 13, 14):  # abundance..tpm, max_R
             val = fields[col_idx]
             assert "." in val
             assert len(val.split(".")[1]) == 4, f"Expected 4 decimals in '{val}'"
@@ -127,7 +127,7 @@ def test_write_scoring_tsv_column_order():
     expected = [
         "candidate_id", "gene_id", "chrom", "strand", "start", "end",
         "source", "abundance", "confidence", "coherence_score",
-        "discrimination_score", "combined_score", "num_reads", "tpm",
+        "discrimination_score", "combined_score", "num_reads", "tpm", "max_R",
     ]
     assert cols == expected
 
