@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass
@@ -40,6 +40,20 @@ class PipelineConfig:
     em_beta: float = 0.5
     em_max_iter: int = 1000
     em_tol: float = 1e-4
+
+    # Ablation toggles (AC1) — defaults preserve production behavior.
+    # R1 only: skip signal/EM and fall back to mappy-AS argmax assignment.
+    enable_signal: bool = True
+    # R2 uses em_max_iter_override=1 for single-step EM; None = use em_max_iter.
+    em_max_iter_override: Optional[int] = None
+    # R5 only: when False, min_abundance / min_max_r / min_novel_combined_score
+    # are treated as 0 (single-switch filter, AC7).
+    enable_score_filter: bool = True
+    # m4 (read-to-read distance) source. "whole_read" preserves legacy
+    # production behavior. "diff_region" uses the new intron-chain-derived
+    # diff-region DTW (R4/R5 of the ablation). "none" forces a zero matrix
+    # (no coherence contribution) regardless of em_beta.
+    m4_source: Literal["whole_read", "diff_region", "none"] = "whole_read"
 
     # EM prior / scoring
     score_alpha: float = 0.5          # weight for coherence vs discrimination in combined_score

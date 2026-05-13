@@ -27,6 +27,11 @@ class ReadCandidateScore:
     num_events: int = 0
     candidate_length: int = 0
 
+    # AC7-pre: per-event records — (cDNA reference_position, signal_start_idx,
+    # signal_end_idx). Opt-in via parse_eventalign_tsv(collect_events=True)
+    # to protect real-data runs from a 2-3 GB memory regression.
+    events: List[Tuple[int, int, int]] = field(default_factory=list)
+
     # Internal accumulators
     _positions: Set[int] = field(default_factory=set, repr=False)
     _squared_errors: List[float] = field(default_factory=list, repr=False)
@@ -45,6 +50,7 @@ class ReadCandidateScore:
 def parse_eventalign_tsv(
     tsv_path: str,
     candidate_lengths: Optional[Dict[str, int]] = None,
+    collect_events: bool = False,
 ) -> List[ReadCandidateScore]:
     """Parse f5c eventalign 16-column TSV into per-(read, candidate) scores.
 
@@ -57,6 +63,10 @@ def parse_eventalign_tsv(
         tsv_path: Path to eventalign TSV file.
         candidate_lengths: Optional dict of candidate_id -> sequence length
             for computing coverage.
+        collect_events: When True, append per-event (position, signal_start_idx,
+            signal_end_idx) tuples to ReadCandidateScore.events. Off by default
+            for memory safety (real-data runs can produce 5-20k events/read).
+            Only the diff-region DTW m4 path requires this.
 
     Returns:
         List of ReadCandidateScore, one per (read, candidate) pair.
@@ -74,12 +84,12 @@ def parse_eventalign_tsv(
         else:
             # No header, process first line
             if header:
-                _process_row(header, accum)
+                _process_row(header, accum, collect_events=collect_events)
 
         for row in reader:
             if not row or len(row) < 15:
                 continue
-            _process_row(row, accum)
+            _process_row(row, accum, collect_events=collect_events)
 
     # Finalize scores
     results = []
@@ -99,6 +109,7 @@ def parse_eventalign_tsv(
 def _process_row(
     row: List[str],
     accum: Dict[Tuple[str, str], ReadCandidateScore],
+    collect_events: bool = False,
 ):
     """Process a single eventalign TSV row."""
     try:
@@ -138,6 +149,10 @@ def _process_row(
     # Update signal index bounds
     score.signal_start_idx = min(score.signal_start_idx, start_idx)
     score.signal_end_idx = max(score.signal_end_idx, end_idx)
+
+    # AC7-pre: opt-in per-event record collection for diff-region DTW.
+    if collect_events:
+        score.events.append((position, start_idx, end_idx))
 
 
 def build_distance_matrix(

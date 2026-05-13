@@ -25,6 +25,7 @@ from fin.scoring.composite import (
     score_candidates_composite,
     subsample_reads_for_dtw,
 )
+from fin.scoring.diff_region_dtw import compute_diff_region_m4
 from fin.scoring.eventalign_parser import (
     build_distance_matrix,
     parse_eventalign_tsv,
@@ -152,12 +153,16 @@ class PipelineRunner:
         # Aggregate across intervals
         aggregated = aggregate_across_intervals(all_quant_results)
 
+        # R5 ablation: enable_score_filter=False disables all post-EM filters so
+        # the ablation row sees unfiltered EM output (AC7).
+        _score_filter_on = getattr(self.config, "enable_score_filter", True)
+
         # A4: post-EM abundance filter. GTF-sourced and fusion transcripts are
         # exempt so users can still see zero-abundance annotated entries
         # (useful for debugging coverage gaps) and fusion calls are not
         # silently dropped by NOVEL-targeted filters. Only NOVEL candidates
         # are dropped here.
-        if self.config.min_abundance > 0.0:
+        if _score_filter_on and self.config.min_abundance > 0.0:
             before = len(aggregated)
             aggregated = {
                 cid: qr
@@ -177,7 +182,7 @@ class PipelineRunner:
         # strong FP discriminator (Cohen's d=1.34 vs combined_score's 0.70).
         # GTF-sourced and fusion transcripts are exempt to preserve annotation
         # visibility and avoid silently dropping fusion calls.
-        if self.config.min_max_r > 0.0:
+        if _score_filter_on and self.config.min_max_r > 0.0:
             before = len(aggregated)
             aggregated = {
                 cid: qr
@@ -197,7 +202,7 @@ class PipelineRunner:
         # the geometric mean of coherence and discrimination (Cohen's d=0.70).
         # The F1-optimal threshold from profile_fp.md is 0.288 for with-GTF and
         # 0.428 for no-GTF runs. GTF-sourced and fusion transcripts are exempt.
-        if self.config.min_novel_combined_score > 0.0:
+        if _score_filter_on and self.config.min_novel_combined_score > 0.0:
             before = len(aggregated)
             aggregated = {
                 cid: qr
@@ -302,6 +307,12 @@ class PipelineRunner:
         read_ids = sorted(candidate_set.read_ids)
         candidate_ids = candidate_set.candidate_ids()
 
+        # R1 ablation: enable_signal=False → skip signal/EM, use mappy argmax.
+        if not getattr(self.config, "enable_signal", True):
+            return self._process_interval_mappy_argmax(
+                candidate_set, read_ids, interval
+            )
+
         # --- Phase 2: Per-candidate scoring (mappy + f5c eventalign) ---
         tsv_paths = self._tool_runner.score_candidates(candidate_set, work_dir)
 
@@ -338,15 +349,53 @@ class PipelineRunner:
         )
 
         # --- Phase 3: Signal DTW (read-to-read) ---
-        segments = extract_signal_segments(
-            all_scores,
-            self._signal_reader,
-            signal_format=self.config.signal_format,
-            normalize=self.config.signal_normalize,
-        )
-        dist_read_to_read = compute_read_to_read_dtw(
-            segments, dtw_read_ids, use_gpu=self.config.use_gpu
-        )
+        # m4_source controls which read-to-read matrix is used (AC1).
+        m4_src = getattr(self.config, "m4_source", "whole_read")
+        if m4_src == "none":
+            # AC5: zero matrix (no coherence); not None so EM shape checks pass.
+            dist_read_to_read = np.zeros(
+                (len(dtw_read_ids), len(dtw_read_ids)), dtype=np.float32
+            )
+        elif m4_src == "diff_region":
+            # Collect per-event records needed by diff-region DTW (AC7-pre).
+            scores_with_events = []
+            cand_lengths_map = {
+                c.candidate_id: len(c.sequence) for c in candidate_set.candidates
+            }
+            for tsv_path in tsv_paths:
+                ev_scores = parse_eventalign_tsv(
+                    str(tsv_path), cand_lengths_map, collect_events=True
+                )
+                scores_with_events.extend(ev_scores)
+            scores_by_pair = {
+                (s.read_name, s.candidate_id): s for s in scores_with_events
+            }
+            from fin.ablation.runner import _nan_to_row_mean
+
+            m4_raw = compute_diff_region_m4(
+                read_ids=dtw_read_ids,
+                candidates=candidate_set.candidates,
+                scores_by_pair=scores_by_pair,
+                signal_reader=self._signal_reader,
+                interval_start=interval.start,
+                interval_end=interval.end,
+                signal_format=self.config.signal_format,
+                use_gpu=self.config.use_gpu,
+                normalize=self.config.signal_normalize,
+            )
+            # AC8: sanitize NaN rows before EM.
+            dist_read_to_read = _nan_to_row_mean(m4_raw)
+        else:
+            # Default: whole-read signal DTW.
+            segments = extract_signal_segments(
+                all_scores,
+                self._signal_reader,
+                signal_format=self.config.signal_format,
+                normalize=self.config.signal_normalize,
+            )
+            dist_read_to_read = compute_read_to_read_dtw(
+                segments, dtw_read_ids, use_gpu=self.config.use_gpu
+            )
 
         # m3 alignment check: both distance matrices share the same read axis.
         if not (
@@ -402,12 +451,19 @@ class PipelineRunner:
         else:
             sigma_use = self.config.em_sigma
 
+        # R2 ablation: em_max_iter_override=1 forces single-step EM.
+        em_max_iter_use = (
+            self.config.em_max_iter_override
+            if getattr(self.config, "em_max_iter_override", None) is not None
+            else self.config.em_max_iter
+        )
+
         R, hard_assignments, _log_likelihoods = em_with_coherence(
             dist_read_to_tx=dist_read_to_tx,
             dist_read_to_read=dist_read_to_read,
             sigma=sigma_use,
             beta=self.config.em_beta,
-            max_iter=self.config.em_max_iter,
+            max_iter=em_max_iter_use,
             tol=self.config.em_tol,
             verbose=False,
             use_gpu=self.config.use_gpu,
@@ -460,6 +516,61 @@ class PipelineRunner:
             with open(work_dir / "R_meta.json", "w") as _f:
                 json.dump(meta, _f)
 
+        return quant_results
+
+    def _process_interval_mappy_argmax(
+        self,
+        candidate_set: CandidateSet,
+        read_ids: List[str],
+        interval: GenomicInterval,
+    ) -> Optional[List[QuantResult]]:
+        """R1 ablation: assign reads via mappy argmax (no signal, no EM).
+
+        Returns a list of QuantResult with abundance = read count, or None if
+        no candidates have sequences.
+        """
+        from fin.ablation.mappy_argmax import (
+            mappy_argmax_assignment,
+            per_tx_counts_from_argmax,
+        )
+
+        candidates = candidate_set.candidates
+        read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
+        reads_iter = [
+            (rid, read_sequences.get(rid, "")) for rid in read_ids
+        ]
+        reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
+
+        assignment = mappy_argmax_assignment(reads_iter, list(candidates))
+        counts = per_tx_counts_from_argmax(assignment, list(candidates))
+
+        quant_results: List[QuantResult] = []
+        for cand in candidates:
+            cnt = counts.get(cand.candidate_id, 0.0)
+            assigned = [
+                rid for rid, cid in assignment.items()
+                if cid == cand.candidate_id
+            ]
+            qr = QuantResult(
+                candidate_id=cand.candidate_id,
+                abundance=cnt,
+                confidence=1.0 if cnt > 0 else 0.0,
+                num_assigned_reads=len(assigned),
+                source=cand.source,
+                chrom=cand.chrom,
+                strand=cand.strand,
+                start=cand.start,
+                end=cand.end,
+                assigned_read_ids=tuple(assigned),
+            )
+            quant_results.append(qr)
+
+        logger.info(
+            "R1 mappy argmax interval %s: %d reads -> %d candidates",
+            interval.region_string,
+            len(read_ids),
+            len(candidates),
+        )
         return quant_results
 
     def _augment_with_fusion_candidates(
