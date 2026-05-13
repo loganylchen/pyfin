@@ -280,6 +280,11 @@ class PipelineRunner:
             genome_fasta=chrom_seq,
             threshold=self.config.three_prime_threshold,
             min_novel_reads=self.config.min_novel_reads,
+            junction_snap_bp=self.config.junction_snap_bp,
+            min_junction_support=self.config.min_junction_support,
+            junction_snap_keep_original=self.config.junction_snap_keep_original,
+            canonical_search_bp=self.config.canonical_search_bp,
+            max_chains_per_read=self.config.max_chains_per_read,
         )
 
         # --- Phase 1.5: Fusion candidate augmentation (optional) ---
