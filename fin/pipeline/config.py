@@ -30,15 +30,9 @@ class PipelineConfig:
     min_max_r: float = 0.0            # Phase A T2: drop NOVEL transcripts whose max EM responsibility < this (Cohen's d=1.34)
     min_novel_combined_score: float = 0.0  # Step 3: drop NOVEL transcripts whose combined_score < this (F1-optimal: 0.288 with-GTF, 0.428 no-GTF; Cohen's d=0.70)
 
-    # Junction snap (no-GTF discovery): cluster donor/acceptor positions and
-    # rewrite each read's chain to per-cluster consensus before grouping.
-    junction_snap_bp: int = 0          # 0 disables; recommended 6 for ONT
-    min_junction_support: int = 2      # min reads per junction cluster to snap
-    junction_snap_keep_original: bool = False  # also emit original chains alongside snapped
-
     # Canonical-motif alternative expansion: scan ±N bp around each read's
     # CIGAR-derived junction for GT-AG and emit additional chains.
-    canonical_search_bp: int = 0           # 0 disables; 4 is a good default
+    canonical_search_bp: int = 0           # 0 disables; 2 is the SIRV sweet spot
     max_chains_per_read: int = 16          # cap per-read alternative count (16 is SIRV sweet spot)
 
     # EM parameters

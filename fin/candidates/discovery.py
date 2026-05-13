@@ -12,7 +12,6 @@ from fin.candidates.intron_chains import (
     group_reads_by_three_prime_and_intron_chain,
     gtf_transcript_to_intron_chain,
     pick_representative_read,
-    snap_junctions,
 )
 from fin.io.interval_manager import (
     GenomicInterval,
@@ -178,9 +177,6 @@ def discover_candidates(
     genome_fasta: str,
     threshold: int = 24,
     min_novel_reads: int = 1,
-    junction_snap_bp: int = 0,
-    min_junction_support: int = 2,
-    junction_snap_keep_original: bool = False,
     canonical_search_bp: int = 0,
     max_chains_per_read: int = 16,
 ) -> CandidateSet:
@@ -195,16 +191,6 @@ def discover_candidates(
         gtf_reader: Opened GTFReader instance (already parsed).
         genome_fasta: Full chromosome sequence string for the interval's chromosome.
         threshold: 3' end clustering distance in bp.
-        junction_snap_bp: If > 0, cluster donor/acceptor positions within this
-            distance and snap each read's splice sites to the per-cluster
-            consensus before grouping. 0 disables (backward compatible).
-        min_junction_support: Minimum reads in a junction cluster before its
-            consensus is used; clusters below this keep original positions.
-        junction_snap_keep_original: When True (and snap is enabled), the
-            original CIGAR-derived chain is also emitted alongside the snapped
-            chain. This preserves strict matches at positions where the genome
-            has multiple equally-valid splice sites and the snap consensus
-            picks a different one. Costs a modest candidate-count increase.
         canonical_search_bp: If > 0, for every read scan ±N bp around each
             junction's CIGAR position for canonical GT-AG (donor/acceptor)
             motifs and emit the resulting chain alternatives in addition to
@@ -243,17 +229,14 @@ def discover_candidates(
     strand = interval.strand or "+"
 
     # 2. Group reads by 3' + intron chain → novel candidate groups.
-    # Two optional pre-processing modes (composable):
-    #   - junction_snap_bp>0: cluster donor/acceptor positions across reads
-    #     and rewrite each read's chain to per-cluster consensus.
+    # Optional pre-processing:
     #   - canonical_search_bp>0: for each junction, scan the genome ±N bp for
     #     canonical GT-AG motifs and emit the resulting chain alternatives
     #     alongside the original (recovering ambiguous-GT-AG strict misses
     #     where multiple valid splice sites exist within a few bp).
-    chain_override = None
     multi_chain_override = None
 
-    if junction_snap_bp > 0 or canonical_search_bp > 0:
+    if canonical_search_bp > 0:
         # Pre-extract CIGAR-derived chains once.
         read_chains = []
         for rd in non_fusion_reads:
@@ -263,64 +246,16 @@ def discover_candidates(
                 continue
             read_chains.append((rd, extract_intron_chain(cigar, ref_start)))
 
-        # Optional snap: replaces chains with cluster consensus.
-        if junction_snap_bp > 0:
-            snapped = snap_junctions(
-                read_chains, genome_fasta, strand,
-                snap_bp=junction_snap_bp,
-                min_support=min_junction_support,
-            )
-            chain_override = {
-                rd["query_name"]: chain for rd, chain in snapped
-                if "query_name" in rd
-            }
-            # Feed snapped chains into canonical search (if also enabled) so
-            # the alternative-expansion uses the cleaner consensus positions.
-            read_chains = list(snapped)
-
-        # Optional canonical search: expand each junction onto nearby GT-AG.
-        if canonical_search_bp > 0:
-            multi_chain_override = expand_canonical_chain_alternatives(
-                read_chains, genome_fasta, strand,
-                search_bp=canonical_search_bp,
-                max_chains_per_read=max_chains_per_read,
-            )
-            # If both snap and canonical search are on, also retain the
-            # original CIGAR chain alongside the alternatives so reads that
-            # happened to align exactly on the truth do not lose strict
-            # matches. (junction_snap_keep_original implies the same thing
-            # for the snap-only path.)
-            if junction_snap_bp > 0:
-                for qname, alts in multi_chain_override.items():
-                    snapped_chain = chain_override.get(qname)
-                    if snapped_chain is not None and snapped_chain not in alts:
-                        alts.append(snapped_chain)
-
-        groups = group_reads_by_three_prime_and_intron_chain(
-            non_fusion_reads, strand, threshold=threshold,
-            chain_override=chain_override,
-            multi_chain_override=multi_chain_override,
+        multi_chain_override = expand_canonical_chain_alternatives(
+            read_chains, genome_fasta, strand,
+            search_bp=canonical_search_bp,
+            max_chains_per_read=max_chains_per_read,
         )
-        # Optional second pass for snap-only mode: also emit original
-        # (un-snapped) chains so strict matches at ambiguous GT-AG sites
-        # survive when snap consensus moves to a neighbouring valid site.
-        if junction_snap_bp > 0 and canonical_search_bp == 0 \
-                and junction_snap_keep_original:
-            groups_orig = group_reads_by_three_prime_and_intron_chain(
-                non_fusion_reads, strand, threshold=threshold,
-            )
-            for key, reads in groups_orig.items():
-                if key in groups:
-                    existing_ids = {rd.get("query_name") for rd in groups[key]}
-                    for rd in reads:
-                        if rd.get("query_name") not in existing_ids:
-                            groups[key].append(rd)
-                else:
-                    groups[key] = list(reads)
-    else:
-        groups = group_reads_by_three_prime_and_intron_chain(
-            non_fusion_reads, strand, threshold=threshold,
-        )
+
+    groups = group_reads_by_three_prime_and_intron_chain(
+        non_fusion_reads, strand, threshold=threshold,
+        multi_chain_override=multi_chain_override,
+    )
 
     # 3. Get GTF transcripts in region
     gtf_transcripts = []

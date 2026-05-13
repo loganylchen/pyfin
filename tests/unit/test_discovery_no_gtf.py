@@ -173,63 +173,6 @@ class TestDiscoverCandidatesNoGTF:
             assert len(c.sequence) == 160
             assert c.sequence == "A" * 80 + "G" * 80
 
-    def test_junction_snap_consensus(self, tmp_path):
-        """With junction_snap_bp=6, noisy donor/acceptor positions across reads
-        should collapse to a single consensus chain instead of splitting into
-        multiple near-identical novel candidates.
-        """
-        # Genome: 400 bases of N so no canonical motifs interfere; snap
-        # falls back to mode/median consensus.
-        genome = "N" * 400
-
-        # Three reads with slightly different intron coordinates (within 6 bp):
-        # r1: CIGAR 80M 100N 80M -> intron [100, 200)
-        # r2: shifted by +3      -> intron [103, 200)  (5' shift of 3)
-        # r3: shifted by +6      -> intron [106, 200)
-        reads = [
-            {"name": "r1", "pos": 20, "reverse": False,
-             "cigar": [(0, 80), (3, 100), (0, 80)]},
-            {"name": "r2", "pos": 20, "reverse": False,
-             "cigar": [(0, 83), (3, 97), (0, 80)]},
-            {"name": "r3", "pos": 20, "reverse": False,
-             "cigar": [(0, 86), (3, 94), (0, 80)]},
-        ]
-        bam_path = _write_bam_with_spliced_reads(
-            str(tmp_path), "chr1", chrom_len=400, reads=reads
-        )
-
-        interval = GenomicInterval(chrom="chr1", start=0, end=400, strand="+")
-
-        # Without snap, three reads with three different chains -> 3 candidates.
-        no_snap = discover_candidates(
-            interval=interval,
-            bam_path=bam_path,
-            gtf_reader=None,
-            genome_fasta=genome,
-            junction_snap_bp=0,
-        )
-        novel_no_snap = [c for c in no_snap.candidates if c.source == "novel"]
-        assert len(novel_no_snap) == 3
-
-        # With snap_bp=6, all three should collapse to one consensus chain.
-        snapped = discover_candidates(
-            interval=interval,
-            bam_path=bam_path,
-            gtf_reader=None,
-            genome_fasta=genome,
-            junction_snap_bp=6,
-            min_junction_support=2,
-        )
-        novel_snapped = [c for c in snapped.candidates if c.source == "novel"]
-        assert len(novel_snapped) == 1
-        cand = novel_snapped[0]
-        # Donor consensus: cluster {100, 103, 106}; mode tie -> n//2 = index 1
-        # of sorted unique [100, 103, 106] = 103.
-        # Acceptor cluster {200, 200, 200} -> 200.
-        assert cand.intron_chain.introns == ((103, 200),)
-        # All three reads should support the snapped candidate.
-        assert len(cand.supporting_read_ids) == 3
-
     def test_novel_candidate_negative_strand_rc(self, tmp_path):
         """Reverse-strand reads must yield reverse-complemented spliced cDNA."""
         genome = "A" * 100 + "C" * 100 + "G" * 100 + "T" * 100

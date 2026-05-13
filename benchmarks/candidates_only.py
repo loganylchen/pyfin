@@ -26,15 +26,6 @@ def main():
     ap.add_argument("--gtf", default=None)
     ap.add_argument("--out", required=True)
     ap.add_argument("--threshold", type=int, default=24)
-    ap.add_argument("--junction-snap-bp", type=int, default=0,
-                    help="Cluster donor/acceptor positions within this bp and "
-                         "snap each read's chain to consensus. 0 disables.")
-    ap.add_argument("--min-junction-support", type=int, default=2,
-                    help="Min reads per junction cluster to apply snap.")
-    ap.add_argument("--junction-snap-keep-original", action="store_true",
-                    help="When snap is enabled, also emit each read's original "
-                         "CIGAR-derived chain as an additional candidate. "
-                         "Preserves strict recall at ambiguous GT-AG sites.")
     ap.add_argument("--canonical-search-bp", type=int, default=0,
                     help="Scan +/- N bp around each junction for canonical "
                          "GT-AG and emit chain alternatives. 0 disables.")
@@ -70,9 +61,6 @@ def main():
             genome_fasta=chrom_seq,
             threshold=args.threshold,
             min_novel_reads=1,
-            junction_snap_bp=args.junction_snap_bp,
-            min_junction_support=args.min_junction_support,
-            junction_snap_keep_original=args.junction_snap_keep_original,
             canonical_search_bp=args.canonical_search_bp,
             max_chains_per_read=args.max_chains_per_read,
         )
