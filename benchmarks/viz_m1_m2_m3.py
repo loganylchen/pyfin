@@ -141,10 +141,24 @@ def _robust_vrange(M: np.ndarray):
     return float(lo), float(hi)
 
 
-def _plot_rc(ax, M, cand_ids, sources, title, ylabel="read", cmap="viridis_r"):
+def _row_zscore(M: np.ndarray) -> np.ndarray:
+    """Per-row z-score; rows that are all-missing or constant become 0."""
+    out = np.where(M >= 1e5, np.nan, M).astype(np.float32)
+    mu = np.nanmean(out, axis=1, keepdims=True)
+    sd = np.nanstd(out, axis=1, keepdims=True)
+    sd = np.where(sd > 0, sd, 1.0)
+    z = (out - mu) / sd
+    return np.where(np.isnan(z), 0.0, z)
+
+
+def _plot_rc(ax, M, cand_ids, sources, title, ylabel="read",
+             cmap="viridis_r", vrange=None):
     """Plot a read x candidate heatmap with GTF column markers."""
-    lo, hi = _robust_vrange(M)
-    M_disp = np.where(M >= 1e5, np.nan, M)
+    if vrange is None:
+        lo, hi = _robust_vrange(M)
+    else:
+        lo, hi = vrange
+    M_disp = np.where(M >= 1e5, np.nan, M) if vrange is None else M
     im = ax.imshow(M_disp, aspect="auto", cmap=cmap, vmin=lo, vmax=hi,
                    interpolation="nearest")
     ax.set_title(title)
@@ -152,16 +166,70 @@ def _plot_rc(ax, M, cand_ids, sources, title, ylabel="read", cmap="viridis_r"):
     ax.set_ylabel(ylabel)
     ax.set_xticks(range(len(cand_ids)))
     labels = [
-        f"{'★ ' if s == 'gtf' else ''}{cid}"
+        f"{'★ ' if s == 'gtf' else ''}{cid[:12]}"
         for cid, s in zip(cand_ids, sources)
     ]
-    ax.set_xticklabels(labels, rotation=60, ha="right", fontsize=8)
+    ax.set_xticklabels(labels, rotation=60, ha="right", fontsize=7)
     for j, s in enumerate(sources):
         if s == "gtf":
             ax.axvline(j, color="cyan", lw=0.6, alpha=0.6)
-            ax.text(j, -0.6, "GTF", color="cyan", ha="center",
-                    fontsize=7, fontweight="bold")
     plt.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
+
+
+def _plot_structures(ax, candidates, sources, interval, diff_regions=None):
+    """Draw transcript structures: exon boxes + intron lines, one track per candidate.
+
+    If ``diff_regions`` is provided, highlight each diff region as a vertical
+    yellow band spanning all tracks.
+    """
+    n = len(candidates)
+    x_lo = min(c.start for c in candidates)
+    x_hi = max(c.end for c in candidates)
+    # Highlight diff regions first (so transcript boxes draw on top of bands).
+    # Each region is padded by ±5bp on both sides for visual context.
+    PAD_BP = 5
+    if diff_regions:
+        for k, (g_lo, g_hi) in enumerate(diff_regions):
+            g_lo_v, g_hi_v = g_lo - PAD_BP, g_hi + PAD_BP
+            ax.axvspan(g_lo_v, g_hi_v, color="gold", alpha=0.30, zorder=0)
+            ax.text((g_lo + g_hi) / 2, n - 0.4,
+                    f"D{k}\n{g_hi - g_lo}bp(+{PAD_BP}bp)",
+                    ha="center", va="bottom",
+                    fontsize=7, color="darkgoldenrod", fontweight="bold")
+    for j, c in enumerate(candidates):
+        y = n - 1 - j  # plot top-down to match heatmap col order
+        color = "tab:cyan" if c.source == "gtf" else "tab:orange"
+        introns = c.intron_chain.introns
+        if not introns:
+            exons = [(c.start, c.end)]
+        else:
+            exons = [(c.start, introns[0][0])]
+            for k in range(len(introns) - 1):
+                exons.append((introns[k][1], introns[k + 1][0]))
+            exons.append((introns[-1][1], c.end))
+        # Thin spine across full transcript span
+        ax.hlines(y, c.start, c.end, color=color, lw=0.8, alpha=0.5)
+        # Thick exon boxes
+        for ex_s, ex_e in exons:
+            if ex_e > ex_s:
+                ax.add_patch(plt.Rectangle(
+                    (ex_s, y - 0.35), ex_e - ex_s, 0.7,
+                    facecolor=color, edgecolor="black", lw=0.3,
+                ))
+        # Intron chevrons (just thin lines; exons already drawn)
+        ax.text(x_hi + (x_hi - x_lo) * 0.01, y,
+                f"{'★ ' if c.source == 'gtf' else ''}{c.candidate_id[:14]} ({c.strand})",
+                va="center", fontsize=7, color=color)
+    ax.set_xlim(x_lo - (x_hi - x_lo) * 0.02, x_hi + (x_hi - x_lo) * 0.20)
+    ax.set_ylim(-0.8, n - 0.2)
+    ax.set_yticks([])
+    ax.set_xlabel(f"genomic position on {interval.chrom}")
+    ax.set_title(
+        f"transcript structures  {interval.region_string}  "
+        f"(cyan=GTF, orange=novel)",
+        fontsize=10,
+    )
+    ax.grid(axis="x", alpha=0.3, ls=":")
 
 
 def _plot_rr(ax, M, n_reads, title, cmap="viridis_r"):
@@ -281,6 +349,19 @@ def main():
     log.info("M2 shape=%s, scored pairs=%d", M2.shape, len(scores_by_pair))
 
     log.info("Computing M3 (diff-region DTW) ...")
+    # Diagnostic: report how many diff regions and how many reads have a host
+    from fin.scoring.diff_region_dtw import (
+        extract_diff_regions, _best_candidate_per_read,
+    )
+    diff_regs = extract_diff_regions(cands)
+    n_hosts = sum(
+        1 for rid in read_ids
+        if _best_candidate_per_read(rid, cands, scores_by_pair) is not None
+    )
+    log.info("M3 diag: %d diff regions, %d/%d reads have a host candidate",
+             len(diff_regs), n_hosts, len(read_ids))
+    for i, (g_lo, g_hi) in enumerate(diff_regs[:10]):
+        log.info("  diff region %d: %d-%d (%d bp)", i, g_lo, g_hi, g_hi - g_lo)
     with Slow5Reader(args.signal) as sr:
         M3 = compute_m3(read_ids, cands, scores_by_pair, sr,
                         target.start, target.end)
@@ -294,20 +375,39 @@ def main():
              sources=np.array(sources))
 
     log.info("Plotting ...")
-    fig, axes = plt.subplots(1, 3, figsize=(22, 7))
-    _plot_rc(axes[0], M1, cand_ids, sources,
-             f"M1 mappy −score  ({target.region_string})")
-    _plot_rc(axes[1], M2, cand_ids, sources,
-             f"M2 eventalign mean −LL/event")
-    _plot_rr(axes[2], M3, len(read_ids),
-             f"M3 diff-region DTW (read×read)")
+    M1z = _row_zscore(M1)
+    M2z = _row_zscore(M2)
+    nan_frac = float(np.isnan(M3[~np.eye(len(read_ids), dtype=bool)]).mean())
+    log.info("M3 off-diagonal NaN fraction = %.2f", nan_frac)
+
+    fig = plt.figure(figsize=(22, 12))
+    gs = fig.add_gridspec(
+        nrows=2, ncols=3,
+        height_ratios=[0.5 + 0.18 * len(cands), 2.0],
+        hspace=0.35, wspace=0.30,
+    )
+    ax_struct = fig.add_subplot(gs[0, :])
+    _plot_structures(ax_struct, cands, sources, target,
+                     diff_regions=diff_regs)
+
+    ax_m1 = fig.add_subplot(gs[1, 0])
+    _plot_rc(ax_m1, M1z, cand_ids, sources,
+             "M1 mappy  (row-z, lower=preferred)",
+             cmap="RdBu_r", vrange=(-2, 2))
+    ax_m2 = fig.add_subplot(gs[1, 1])
+    _plot_rc(ax_m2, M2z, cand_ids, sources,
+             "M2 eventalign  (row-z, lower=preferred)",
+             cmap="RdBu_r", vrange=(-2, 2))
+    ax_m3 = fig.add_subplot(gs[1, 2])
+    _plot_rr(ax_m3, M3, len(read_ids),
+             f"M3 diff-region DTW  (off-diag NaN={nan_frac:.0%})")
+
     fig.suptitle(
         f"{target.region_string}  |  reads={len(read_ids)}  cands={len(cands)} "
-        f"(★ = GTF transcript)",
+        f"(★/cyan = GTF transcript, orange = novel)",
         fontsize=12,
     )
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(out_path, dpi=150)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     log.info("Wrote %s and %s", out_path, out_path.with_suffix(".npz"))
 
 
