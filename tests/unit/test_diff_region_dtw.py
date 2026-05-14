@@ -84,24 +84,43 @@ class TestExtractDiffRegions:
         c2 = _make_candidate("c2", "chr1", 100, 300)
         assert extract_diff_regions([c1, c2]) == []
 
-    def test_one_has_intron_other_does_not(self):
-        """c1: exon 100-300 (no intron); c2: exon 100-150, intron 150-250, exon 250-300.
-        Bases 150-250 are exon in c1 and intron in c2 → diff region [150, 250)."""
+    def test_large_intron_dropped_by_kmax(self):
+        """100bp intron diff exceeds default k_max=15 → no region kept."""
         c1 = _make_candidate("c1", "chr1", 100, 300)
         c2 = _make_candidate("c2", "chr1", 100, 300, introns=((150, 250),))
-        regions = extract_diff_regions([c1, c2])
-        assert len(regions) == 1
-        assert regions[0] == (150, 250)
+        assert extract_diff_regions([c1, c2]) == []
 
-    def test_multiple_diff_regions(self):
-        """Two diff introns → two separate diff regions."""
-        c1 = _make_candidate("c1", "chr1", 0, 600)
-        # c2 has two introns: [100,200) and [400,500)
-        c2 = _make_candidate("c2", "chr1", 0, 600, introns=((100, 200), (400, 500)))
+    def test_small_wobble_with_shared_flanks_kept(self):
+        """Donor wobble: c1 intron 150-250, c2 intron 153-250 → 3bp diff
+        at 150-153 with shared exon flank at 149 and shared intron flank
+        at 253 (W=1)."""
+        c1 = _make_candidate("c1", "chr1", 100, 300, introns=((150, 250),))
+        c2 = _make_candidate("c2", "chr1", 100, 300, introns=((153, 250),))
         regions = extract_diff_regions([c1, c2])
-        assert len(regions) == 2
-        assert regions[0] == (100, 200)
-        assert regions[1] == (400, 500)
+        assert regions == [(150, 153)]
+
+    def test_custom_kmax_threshold(self):
+        """20bp diff dropped at default k_max=15, kept at k_max=20."""
+        c1 = _make_candidate("c1", "chr1", 100, 300, introns=((150, 170),))
+        c2 = _make_candidate("c2", "chr1", 100, 300)
+        assert extract_diff_regions([c1, c2]) == []
+        assert extract_diff_regions([c1, c2], k_max=20) == [(150, 170)]
+
+    def test_flank_not_shared_dropped(self):
+        """Diff exists but only one candidate spans both flanks → dropped.
+        c1 ends before the diff; c2 starts at the diff. Only c3 covers the
+        left and right flank, so spanning count < 2."""
+        c1 = _make_candidate("c1", "chr1", 100, 150)
+        c2 = _make_candidate("c2", "chr1", 145, 300, introns=((145, 155),))
+        c3 = _make_candidate("c3", "chr1", 100, 300)
+        assert extract_diff_regions([c1, c2, c3]) == []
+
+    def test_multiple_small_wobbles(self):
+        """Two independent donor wobbles, both ≤ k_max, both shared-flank."""
+        c1 = _make_candidate("c1", "chr1", 0, 600, introns=((100, 200), (400, 500)))
+        c2 = _make_candidate("c2", "chr1", 0, 600, introns=((104, 200), (400, 506)))
+        regions = extract_diff_regions([c1, c2])
+        assert regions == [(100, 104), (500, 506)]
 
     def test_no_diff_if_all_candidates_have_same_intron(self):
         """Both candidates have the same intron → no exon/intron split."""

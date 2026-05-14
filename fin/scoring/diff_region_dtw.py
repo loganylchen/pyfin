@@ -27,71 +27,143 @@ logger = logging.getLogger(__name__)
 
 def extract_diff_regions(
     candidates: List[TranscriptCandidate],
+    k_max: int = 15,
+    flank_w: int = 1,
 ) -> List[Tuple[int, int]]:
-    """Return genomic intervals where at least one candidate has exon and at
-    least one has intron at that base.
+    """Return junction-anchored diff regions with shared flanking context.
 
-    Uses base-level labeling over the union span of all candidates. A base is
-    "diff" iff some candidate calls it exon AND some other candidate calls it
-    intron at that base. Bases outside a candidate's [start, end) do not
-    count as either exon or intron for that candidate (i.e., candidates that
-    don't cover the base do not contribute to the exon/intron split).
+    A diff region is a maximal contiguous run of bases where at least one
+    candidate calls exon AND at least one calls intron, subject to:
+
+    - **Width filter** (``k_max``): region length must be ≤ ``k_max`` bp.
+      This focuses on nanopore-noise-scale junction wobble and excludes
+      large structural differences (cassette exons, alt 5'/3' UTRs).
+    - **Shared-flank filter** (``flank_w``): for the ``flank_w`` bases
+      immediately on each side of the region, every candidate that covers
+      those flanking bases must (a) be covered at every flank base and
+      (b) agree on the same exon/intron label. At least two such "spanning"
+      candidates must exist, and the disagreement inside the region must
+      come from those spanning candidates. This guarantees the candidates
+      being compared share identical context on both sides of the wobble.
+
+    Per-base labels:
+        0 = not covered by the candidate
+        1 = exon
+        2 = intron
 
     Args:
         candidates: List of TranscriptCandidate (must have intron_chain).
+        k_max: Maximum allowed width of a diff region (bp). Default 15.
+        flank_w: Width of the shared-context flank required on each side
+            (bp). Default 1.
 
     Returns:
-        Sorted, merged list of (g_start, g_end) tuples (half-open). Empty if
-        fewer than 2 candidates or no diff bases exist.
+        Sorted list of (g_start, g_end) tuples (half-open) in genomic
+        coordinates. Empty if fewer than 2 candidates or no diff regions
+        survive filtering.
     """
     if len(candidates) < 2:
         return []
 
-    # Union span
     g_lo = min(c.start for c in candidates)
     g_hi = max(c.end for c in candidates)
     if g_hi <= g_lo:
         return []
 
     span = g_hi - g_lo
-    # Per-base counts: how many candidates call this base exon vs intron.
-    exon_count = np.zeros(span, dtype=np.int32)
-    intron_count = np.zeros(span, dtype=np.int32)
+    n = len(candidates)
 
-    for cand in candidates:
+    # Per-candidate per-base label array.
+    labels = np.zeros((n, span), dtype=np.int8)
+    for i, cand in enumerate(candidates):
         c_lo = max(cand.start, g_lo) - g_lo
         c_hi = min(cand.end, g_hi) - g_lo
         if c_hi <= c_lo:
             continue
-        # Start by marking the whole candidate span as exon, then subtract introns.
-        exon_count[c_lo:c_hi] += 1
+        labels[i, c_lo:c_hi] = 1  # exon
         for i_start, i_end in cand.intron_chain.introns:
             i_lo = max(i_start, g_lo) - g_lo
             i_hi = min(i_end, g_hi) - g_lo
             if i_hi <= i_lo:
                 continue
-            exon_count[i_lo:i_hi] -= 1
-            intron_count[i_lo:i_hi] += 1
+            labels[i, i_lo:i_hi] = 2  # intron
 
-    diff_mask = (exon_count > 0) & (intron_count > 0)
+    exon_any = (labels == 1).any(axis=0)
+    intron_any = (labels == 2).any(axis=0)
+    diff_mask = exon_any & intron_any
     if not diff_mask.any():
         return []
 
-    # Merge contiguous True bases into (start, end) intervals.
-    regions: List[Tuple[int, int]] = []
+    # Raw diff runs (maximal contiguous diff bases).
+    raw: List[Tuple[int, int]] = []
     in_region = False
     seg_start = 0
-    for i, is_diff in enumerate(diff_mask):
-        if is_diff and not in_region:
+    for i in range(span):
+        if diff_mask[i] and not in_region:
             seg_start = i
             in_region = True
-        elif not is_diff and in_region:
-            regions.append((seg_start + g_lo, i + g_lo))
+        elif not diff_mask[i] and in_region:
+            raw.append((seg_start, i))
             in_region = False
     if in_region:
-        regions.append((seg_start + g_lo, span + g_lo))
+        raw.append((seg_start, span))
 
-    return regions
+    # Apply k_max width and shared-flank filters.
+    filtered: List[Tuple[int, int]] = []
+    for lo, hi in raw:
+        if hi - lo > k_max:
+            continue
+        l_lo, l_hi = lo - flank_w, lo
+        r_lo, r_hi = hi, hi + flank_w
+        if l_lo < 0 or r_hi > span:
+            continue
+
+        spanning_indices: List[int] = []
+        l_label_ref: Optional[int] = None
+        r_label_ref: Optional[int] = None
+        ok = True
+        for ci in range(n):
+            l_seg = labels[ci, l_lo:l_hi]
+            r_seg = labels[ci, r_lo:r_hi]
+            # Skip candidates that don't fully cover both flanks.
+            if (l_seg == 0).any() or (r_seg == 0).any():
+                continue
+            # Within this candidate, each flank must be a single label
+            # (no exon/intron transition inside the flank itself).
+            l_set = set(l_seg.tolist())
+            r_set = set(r_seg.tolist())
+            if len(l_set) != 1 or len(r_set) != 1:
+                ok = False
+                break
+            l_v = int(l_seg[0])
+            r_v = int(r_seg[0])
+            if l_label_ref is None:
+                l_label_ref, r_label_ref = l_v, r_v
+            elif l_v != l_label_ref or r_v != r_label_ref:
+                ok = False
+                break
+            spanning_indices.append(ci)
+        if not ok or len(spanning_indices) < 2:
+            continue
+
+        # The exon/intron disagreement inside the region must come from
+        # the spanning (shared-flank) candidates.
+        inner_exon = False
+        inner_intron = False
+        for ci in spanning_indices:
+            inner = labels[ci, lo:hi]
+            if not inner_exon and (inner == 1).any():
+                inner_exon = True
+            if not inner_intron and (inner == 2).any():
+                inner_intron = True
+            if inner_exon and inner_intron:
+                break
+        if not (inner_exon and inner_intron):
+            continue
+
+        filtered.append((lo + g_lo, hi + g_lo))
+
+    return filtered
 
 
 def genomic_region_to_cdna(
