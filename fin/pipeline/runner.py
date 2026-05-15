@@ -26,11 +26,13 @@ from fin.scoring.composite import (
     subsample_reads_for_dtw,
 )
 from fin.scoring.diff_region_dtw import compute_diff_region_m4
+from fin.scoring.em_inputs import build_em_matrices
 from fin.scoring.eventalign_parser import (
     build_distance_matrix,
     parse_eventalign_tsv,
 )
 from fin.scoring.external_tools import ExternalToolPaths, ExternalToolRunner
+from fin.scoring.mappy_distance import compute_mappy_distance
 from fin.scoring.signal_dtw import compute_read_to_read_dtw, extract_signal_segments
 
 logger = logging.getLogger(__name__)
@@ -458,11 +460,31 @@ class PipelineRunner:
             else self.config.em_max_iter
         )
 
+        # M-subset selector: assemble (d_tx, d_rr, beta_use) per em_matrix_subset.
+        # M2 = current eventalign d_tx (already aligned with dtw_read_ids).
+        # M1 = mappy-AS distance (computed lazily; only needed when subset uses m1).
+        # M3 = dist_read_to_read (current read×read matrix).
+        subset = getattr(self.config, "em_matrix_subset", "m2+m3")
+        if "m1" in subset:
+            read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
+            m1 = compute_mappy_distance(
+                read_sequences, candidate_set.candidates, dtw_read_ids
+            )
+        else:
+            m1 = np.zeros_like(dist_read_to_tx)
+        d_tx_em, d_rr_em, beta_use = build_em_matrices(
+            subset=subset,
+            m1=m1,
+            m2=dist_read_to_tx,
+            m3=dist_read_to_read,
+            em_beta=self.config.em_beta,
+        )
+
         R, hard_assignments, _log_likelihoods = em_with_coherence(
-            dist_read_to_tx=dist_read_to_tx,
-            dist_read_to_read=dist_read_to_read,
+            dist_read_to_tx=d_tx_em,
+            dist_read_to_read=d_rr_em,
             sigma=sigma_use,
-            beta=self.config.em_beta,
+            beta=beta_use,
             max_iter=em_max_iter_use,
             tol=self.config.em_tol,
             verbose=False,
@@ -524,37 +546,47 @@ class PipelineRunner:
         read_ids: List[str],
         interval: GenomicInterval,
     ) -> Optional[List[QuantResult]]:
-        """R1 ablation: assign reads via mappy argmax (no signal, no EM).
+        """R1 ablation: AS-weighted multi-mapping baseline (no signal, no EM).
 
-        Returns a list of QuantResult with abundance = read count, or None if
-        no candidates have sequences.
+        Each read distributes responsibility proportional to mappy alignment
+        score across all hit candidates (salmon/NanoCount-style). Returns a
+        list of QuantResult with abundance = fractional column-sum.
         """
         from fin.ablation.mappy_argmax import (
-            mappy_argmax_assignment,
-            per_tx_counts_from_argmax,
+            mappy_multimap_responsibilities,
+            per_tx_counts_from_responsibilities,
         )
 
         candidates = candidate_set.candidates
+        cand_list = list(candidates)
         read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
         reads_iter = [
             (rid, read_sequences.get(rid, "")) for rid in read_ids
         ]
         reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
 
-        assignment = mappy_argmax_assignment(reads_iter, list(candidates))
-        counts = per_tx_counts_from_argmax(assignment, list(candidates))
+        R_mm, kept_read_ids = mappy_multimap_responsibilities(reads_iter, cand_list)
+        counts = per_tx_counts_from_responsibilities(R_mm, cand_list)
+
+        # Hard argmax per read for reporting `assigned_read_ids`.
+        argmax_by_read: Dict[str, str] = {}
+        if R_mm.size > 0:
+            arg = np.argmax(R_mm, axis=1)
+            for i, rid in enumerate(kept_read_ids):
+                argmax_by_read[rid] = cand_list[int(arg[i])].candidate_id
 
         quant_results: List[QuantResult] = []
-        for cand in candidates:
+        for j, cand in enumerate(cand_list):
             cnt = counts.get(cand.candidate_id, 0.0)
             assigned = [
-                rid for rid, cid in assignment.items()
+                rid for rid, cid in argmax_by_read.items()
                 if cid == cand.candidate_id
             ]
+            col_max = float(R_mm[:, j].max()) if R_mm.size > 0 else 0.0
             qr = QuantResult(
                 candidate_id=cand.candidate_id,
                 abundance=cnt,
-                confidence=1.0 if cnt > 0 else 0.0,
+                confidence=col_max,
                 num_assigned_reads=len(assigned),
                 source=cand.source,
                 chrom=cand.chrom,
@@ -563,10 +595,11 @@ class PipelineRunner:
                 end=cand.end,
                 assigned_read_ids=tuple(assigned),
             )
+            qr.max_R = col_max
             quant_results.append(qr)
 
         logger.info(
-            "R1 mappy argmax interval %s: %d reads -> %d candidates",
+            "R1 mappy multimap interval %s: %d reads -> %d candidates",
             interval.region_string,
             len(read_ids),
             len(candidates),

@@ -78,7 +78,7 @@ ABLATION_ROWS: List[AblationRowConfig] = [
         label="single_step_em",
         enable_signal=True,
         em_max_iter_override=1,
-        m4_source="whole_read",
+        m4_source="none",
         enable_score_filter=False,
     ),
     AblationRowConfig(
@@ -259,28 +259,43 @@ def _process_interval_for_row(
     candidates = candidate_set.candidates
     n_tx = len(candidate_ids)
 
-    # R1: skip signal entirely — use mappy argmax assignment (AC1)
+    # R1: skip signal entirely — AS-weighted multi-mapping baseline (AC1).
+    # Each read distributes responsibility proportional to mappy AS across all
+    # hit candidates (salmon/NanoCount-style alignment-only baseline). This
+    # preserves alignment uncertainty unlike hard argmax.
     if not row_cfg.enable_signal:
         from fin.ablation.mappy_argmax import (
-            mappy_argmax_assignment,
-            per_tx_counts_from_argmax,
+            mappy_multimap_responsibilities,
+            per_tx_counts_from_responsibilities,
         )
 
         reads_iter = [
             (rid, _seq_for_read(rid, candidate_set)) for rid in read_ids
         ]
         reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
-        assignment = mappy_argmax_assignment(reads_iter, list(candidates))
-        counts = per_tx_counts_from_argmax(assignment, list(candidates))
+        cand_list = list(candidates)
+        R_mm, kept_read_ids = mappy_multimap_responsibilities(reads_iter, cand_list)
+        counts = per_tx_counts_from_responsibilities(R_mm, cand_list)
+
+        # Hard argmax (per row) for assigned_read_ids / num_assigned_reads
+        # so downstream reporting still has a "primary candidate per read".
+        argmax_by_read: Dict[str, str] = {}
+        if R_mm.size > 0:
+            arg = np.argmax(R_mm, axis=1)
+            for i, rid in enumerate(kept_read_ids):
+                argmax_by_read[rid] = cand_list[int(arg[i])].candidate_id
 
         quant_results = []
-        for cand in candidates:
+        for j, cand in enumerate(cand_list):
             cnt = counts.get(cand.candidate_id, 0.0)
-            assigned = [rid for rid, cid in assignment.items() if cid == cand.candidate_id]
+            assigned = [rid for rid, cid in argmax_by_read.items() if cid == cand.candidate_id]
+            # Confidence = max responsibility this candidate received from any
+            # read (analogous to max_R in the EM path). 0.0 when no reads hit.
+            col_max = float(R_mm[:, j].max()) if R_mm.size > 0 else 0.0
             qr = QuantResult(
                 candidate_id=cand.candidate_id,
                 abundance=cnt,
-                confidence=1.0 if cnt > 0 else 0.0,
+                confidence=col_max,
                 num_assigned_reads=len(assigned),
                 source=cand.source,
                 chrom=cand.chrom,
@@ -289,6 +304,9 @@ def _process_interval_for_row(
                 end=cand.end,
                 assigned_read_ids=tuple(assigned),
             )
+            # Populate max_R so downstream filters (R5 enable_score_filter) can
+            # treat R1 output uniformly with the EM rows.
+            qr.max_R = col_max
             quant_results.append(qr)
 
         return AblationIntervalResult(

@@ -55,6 +55,18 @@ class PipelineConfig:
     # (no coherence contribution) regardless of em_beta.
     m4_source: Literal["whole_read", "diff_region", "none"] = "whole_read"
 
+    # EM matrix subset selector. Controls which distance matrices feed EM.
+    #   "m1"     : mappy distance only (read×tx); zeros for read×read; β=0
+    #   "m2"     : eventalign distance only; zeros for read×read; β=0
+    #   "m3"     : zeros for read×tx (uniform); m3 for coherence; β=em_beta
+    #   "m1+m2"  : per-row z-score mean of M1/M2 → read×tx; zeros r×r; β=0
+    #   "m1+m3"  : M1 → read×tx; M3 → read×read; β=em_beta
+    #   "m2+m3"  : M2 → read×tx; M3 → read×read; β=em_beta  (DEFAULT, legacy)
+    #   "all"    : zscore_mean(M1,M2) → read×tx; M3 → read×read; β=em_beta
+    em_matrix_subset: Literal[
+        "m1", "m2", "m3", "m1+m2", "m1+m3", "m2+m3", "all"
+    ] = "m2+m3"
+
     # EM prior / scoring
     score_alpha: float = 0.5          # weight for coherence vs discrimination in combined_score
     prior_weight_cap: float = 10.0    # max multiplicative boost from prior

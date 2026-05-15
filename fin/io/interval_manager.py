@@ -462,6 +462,13 @@ def merge_gtf_and_read_intervals(gtf_intervals: List[GenomicInterval],
         merged_chrom.append(current)
         merged.extend(merged_chrom)
 
+    # Drop intervals with no reads (GTF-only intervals that no BAM read covers).
+    before = len(merged)
+    merged = [iv for iv in merged if iv.read_count > 0]
+    dropped = before - len(merged)
+    if dropped:
+        logger.info(f"Dropped {dropped} intervals with read_count==0 (no BAM coverage)")
+
     logger.info(f"Generated {len(merged)} final intervals (strand-separated)")
     return merged
 

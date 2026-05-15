@@ -117,6 +117,7 @@ def discover_gtf_only(
 
     # Fetch all read IDs from BAM for the interval
     all_read_ids: Set[str] = set()
+    read_sequences: dict = {}
     with BamReader(bam_path) as bam:
         for alignment in bam.fetch(
             reference=interval.chrom, start=interval.start, end=interval.end
@@ -127,6 +128,12 @@ def discover_gtf_only(
             read_id = rd.get("query_name")
             if read_id:
                 all_read_ids.add(read_id)
+                # Capture primary-alignment sequence only (skip secondary /
+                # supplementary; their query_sequence is often None anyway).
+                if not rd.get("is_secondary") and not rd.get("is_supplementary"):
+                    seq = rd.get("query_sequence")
+                    if seq:
+                        read_sequences.setdefault(read_id, seq)
 
     # Get GTF transcripts in region
     gtf_transcripts = []
@@ -166,7 +173,10 @@ def discover_gtf_only(
     )
 
     return CandidateSet(
-        interval=interval, candidates=gtf_candidates, read_ids=all_read_ids
+        interval=interval,
+        candidates=gtf_candidates,
+        read_ids=all_read_ids,
+        read_sequences=read_sequences,
     )
 
 
@@ -207,6 +217,7 @@ def discover_candidates(
     # 1. Fetch reads for interval, skip fusion reads
     all_read_ids: Set[str] = set()
     non_fusion_reads = []
+    read_sequences: dict = {}
 
     with BamReader(bam_path) as bam:
         for alignment in bam.fetch(
@@ -218,12 +229,24 @@ def discover_candidates(
             read_id = rd.get("query_name")
             if read_id:
                 all_read_ids.add(read_id)
+                # Capture primary-alignment sequence only — scope is this
+                # interval's fetch, satisfying the per-interval read-set
+                # constraint. Used by R1 mappy-argmax bypass.
+                if not rd.get("is_secondary") and not rd.get("is_supplementary"):
+                    seq = rd.get("query_sequence")
+                    if seq:
+                        read_sequences.setdefault(read_id, seq)
             if is_fusion_read(rd):
                 continue
             non_fusion_reads.append(rd)
 
     if not non_fusion_reads:
-        return CandidateSet(interval=interval, candidates=[], read_ids=all_read_ids)
+        return CandidateSet(
+            interval=interval,
+            candidates=[],
+            read_ids=all_read_ids,
+            read_sequences=read_sequences,
+        )
 
     # Determine strand from reads
     strand = interval.strand or "+"
@@ -379,7 +402,10 @@ def discover_candidates(
     )
 
     return CandidateSet(
-        interval=interval, candidates=collapsed, read_ids=all_read_ids
+        interval=interval,
+        candidates=collapsed,
+        read_ids=all_read_ids,
+        read_sequences=read_sequences,
     )
 
 

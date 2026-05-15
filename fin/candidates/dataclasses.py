@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional, Set, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set, Tuple
 
 from fin.io.interval_manager import GenomicInterval
 
@@ -79,6 +79,10 @@ class CandidateSet:
     interval: GenomicInterval
     candidates: List[TranscriptCandidate]
     read_ids: Set[str]
+    # read_id -> primary-alignment query_sequence, scoped to reads fetched
+    # within this interval. Populated by discover_candidates(); used by R1
+    # ablation (mappy argmax bypass) and any path that needs read FASTA.
+    read_sequences: Dict[str, str] = field(default_factory=dict)
 
     @property
     def num_candidates(self) -> int:

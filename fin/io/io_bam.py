@@ -227,6 +227,7 @@ class BamReader:
             'is_forward': alignment.is_forward,
             'is_mapped': not alignment.is_unmapped,
             'query_length': alignment.query_length,
+            'query_sequence': alignment.query_sequence,
         }
 
     def get_reads_in_region(self, region: str, max_reads: Optional[int] = None) -> List[Dict[str, Any]]:
