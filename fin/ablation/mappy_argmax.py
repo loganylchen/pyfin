@@ -16,6 +16,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 
 from fin.candidates.dataclasses import TranscriptCandidate
+from fin.scoring.mappy_preset import get_m1_preset
+from fin.scoring.mappy_score import score_hit
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +46,7 @@ def mappy_argmax_assignment(
                 cand.candidate_id,
             )
             continue
-        aln = mappy.Aligner(seq=cand.sequence, preset="map-ont")
+        aln = mappy.Aligner(seq=cand.sequence, preset=get_m1_preset())
         if not aln:
             logger.warning(
                 "mappy_argmax_assignment: failed to build aligner for %s",
@@ -66,13 +68,11 @@ def mappy_argmax_assignment(
         best_score: float = float("-inf")
         for cid, aln in aligners:
             for hit in aln.map(seq):
-                # mappy hit has integer alignment score `.mlen` and `.NM`; the
-                # AS-equivalent is `hit.mlen - hit.NM` weighted by primary,
-                # but mappy exposes a direct alignment score via `.score` in
-                # newer versions. Fall back to mlen on older versions.
-                hit_score = getattr(hit, "score", None)
+                # Reconstructed map-ont AS; None when a single indel exceeds the
+                # cap (structural exon difference → treated as not mapped).
+                hit_score = score_hit(hit)
                 if hit_score is None:
-                    hit_score = hit.mlen
+                    continue
                 if hit_score > best_score:
                     best_score = hit_score
                     best_cid = cid
@@ -138,7 +138,7 @@ def mappy_multimap_responsibilities(
         if not cand.sequence:
             aligners.append(None)
             continue
-        aln = mappy.Aligner(seq=cand.sequence, preset="map-ont")
+        aln = mappy.Aligner(seq=cand.sequence, preset=get_m1_preset())
         if not aln:
             logger.warning(
                 "mappy_multimap_responsibilities: failed to build aligner for %s",
@@ -171,9 +171,9 @@ def mappy_multimap_responsibilities(
                 continue
             best = 0.0
             for hit in aln.map(seq):
-                s = getattr(hit, "score", None)
+                s = score_hit(hit)
                 if s is None:
-                    s = hit.mlen
+                    continue
                 if s > best:
                     best = float(s)
             if best >= _MIN_AS:

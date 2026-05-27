@@ -26,6 +26,8 @@ from typing import Dict, List
 import numpy as np
 
 from fin.candidates.dataclasses import TranscriptCandidate
+from fin.scoring.mappy_preset import get_m1_preset
+from fin.scoring.mappy_score import score_hit
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +62,7 @@ def compute_mappy_distance(
         if not c.sequence:
             aligners.append(None)
             continue
-        a = mappy.Aligner(seq=c.sequence, preset="map-ont")
+        a = mappy.Aligner(seq=c.sequence, preset=get_m1_preset())
         aligners.append(a if a else None)
 
     # Raw AS matrix; missing entries get -inf so we can compute per-row max.
@@ -74,9 +76,9 @@ def compute_mappy_distance(
                 continue
             best = None
             for hit in aln.map(seq):
-                s = getattr(hit, "score", None)
+                s = score_hit(hit)
                 if s is None:
-                    s = hit.mlen
+                    continue
                 if best is None or s > best:
                     best = s
             if best is not None:
