@@ -588,6 +588,10 @@ def write_gtf(
 
         for qr in transcripts:
             tid = qr.candidate_id
+            # Per-transcript strand: a gene may carry mixed-strand isoforms
+            # (e.g. SIRV antisense transcripts share a gene_id). Using the
+            # gene-level strand here would flip the minority-strand transcripts.
+            tx_strand = qr.strand
 
             # Fusion chrom splitting: seqname uses chromA; add fusion_partner_chrom attr
             qr_chrom = qr.chrom
@@ -615,7 +619,7 @@ def write_gtf(
             )
             lines.append(_gtf_line(
                 qr_chrom, source, "transcript", qr.start + 1, qr.end,
-                ".", strand, ".", attrs,
+                ".", tx_strand, ".", attrs,
             ))
 
             for exon_num, (es, ee) in enumerate(qr.exons, 1):
@@ -626,7 +630,7 @@ def write_gtf(
                 )
                 lines.append(_gtf_line(
                     qr_chrom, source, "exon", es + 1, ee,
-                    ".", strand, ".", exon_attrs,
+                    ".", tx_strand, ".", exon_attrs,
                 ))
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)

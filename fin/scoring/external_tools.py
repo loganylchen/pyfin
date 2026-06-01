@@ -326,6 +326,11 @@ def run_f5c_eventalign(
     ]
     cmd.extend(_signal_format_args(signal_format, signal))
 
+    # Cache: skip f5c if output already exists and is non-empty.
+    if output.exists() and output.stat().st_size > 0:
+        logger.info("Reusing cached eventalign: %s", output)
+        return True
+
     description = f"f5c eventalign ({genome_fa.parent.name})"
     logger.info("Running %s: %s", description, " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)

@@ -214,6 +214,7 @@ class TestRMatrixPersistence:
             bam_path="/fake/reads.bam",
             work_dir=str(tmp_path),
             persist_R_matrix=persist_R_matrix,
+            enable_signal=True,  # R.npy persistence is an EM-path feature
         )
         runner = PipelineRunner(cfg)
 

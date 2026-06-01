@@ -35,6 +35,12 @@ import click
 @click.option("--min-max-r", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose max EM responsibility is below this (try 0.2 for ~+20pp precision; GTF candidates are exempt).")
 @click.option("--min-novel-combined-score", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose combined_score is below this (F1-optimal: 0.288 with-GTF, 0.428 no-GTF; GTF candidates are exempt).")
 @click.option("--persist-R/--no-persist-R", "persist_R_matrix", default=True, show_default=True, help="Enable/disable R-matrix (R.npy) persistence per interval.")
+@click.option("--canonical-gate/--no-canonical-gate", "canonical_gate", default=True, show_default=True, help="Drop NOVEL multi-exon candidates whose junctions aren't all canonical (GTF/fusion/mono exempt). SIRV-tuned default ON.")
+@click.option("--canonical-motifs", default="GT-AG,GC-AG,AT-AC", show_default=True, help="Comma-separated donor-acceptor motifs accepted by the canonical gate AND search.")
+@click.option("--canonical-search-bp", default=4, show_default=True, type=int, help="ea extended search: scan ±N bp around each read-derived NOVEL junction for canonical motifs and emit paired alternatives (GTF transcripts not extended). 0 disables. SIRV-tuned default 4.")
+@click.option("--m2-tiebreak/--no-m2-tiebreak", "m2_tiebreak", default=True, show_default=True, help="Resolve argmax_keep ties with the junction-window mean-NLL signal metric: give a read's full mass to the M2-best tied candidate when the NLL margin >= --m2-tiebreak-margin, else keep the 1/K split. Needs --signal (auto-skips if absent). Default ON + aggressive (margin 1e-9): SIRV gffcompare Tx-F1 45.4 vs OFF 44.7, beats all tools + ablation champion 45.2.")
+@click.option("--m2-tiebreak-margin", default=1e-9, show_default=True, type=float, help="Minimum M2 NLL margin (runner-up - best) required to override the 1/K split with the M2 single winner. Default 1e-9 (aggressive: take M2's pick whenever it can discriminate at all).")
+@click.option("--m2-tiebreak-junction-k", default=10, show_default=True, type=int, help="Transcript-frame bp on each side of the wobbling junction for the M2 discrimination window (SIRV sweet spot 10).")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 @click.pass_context
 def main(
@@ -59,6 +65,12 @@ def main(
     min_max_r,
     min_novel_combined_score,
     persist_R_matrix,
+    canonical_gate,
+    canonical_motifs,
+    canonical_search_bp,
+    m2_tiebreak,
+    m2_tiebreak_margin,
+    m2_tiebreak_junction_k,
     verbose,
 ):
     """pyfin: nanopore signal-based transcriptome assembly.
@@ -119,6 +131,14 @@ def main(
         min_max_r=min_max_r,
         min_novel_combined_score=min_novel_combined_score,
         persist_R_matrix=persist_R_matrix,
+        canonical_gate=canonical_gate,
+        canonical_motifs=tuple(
+            m.strip() for m in canonical_motifs.split(",") if m.strip()
+        ),
+        canonical_search_bp=canonical_search_bp,
+        m2_tiebreak=m2_tiebreak,
+        m2_tiebreak_margin=m2_tiebreak_margin,
+        m2_tiebreak_junction_k=m2_tiebreak_junction_k,
     )
 
     runner = PipelineRunner(cfg)

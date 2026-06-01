@@ -23,9 +23,10 @@ from fin.pipeline.config import PipelineConfig
 class TestEmIterToggleConfig:
     """PipelineConfig ablation field defaults and overrides."""
 
-    def test_enable_signal_default_true(self):
+    def test_enable_signal_default_false(self):
+        # Aggressive production default: M1-first argmax path (enable_signal=False).
         c = PipelineConfig(bam_path="/tmp/x.bam")
-        assert c.enable_signal is True
+        assert c.enable_signal is False
 
     def test_em_max_iter_override_default_none(self):
         c = PipelineConfig(bam_path="/tmp/x.bam")

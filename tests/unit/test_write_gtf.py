@@ -246,3 +246,41 @@ class TestWriteGtfScoresAndFusion:
         assert 'coherence_score "0.0000"' in attrs
         assert 'discrimination_score "0.0000"' in attrs
         assert 'combined_score "0.0000"' in attrs
+
+
+class TestWriteGtfMixedStrandGene:
+    """Mixed-strand isoforms sharing a gene_id must keep their own strand.
+
+    A gene (e.g. SIRV antisense designs) may carry transcripts on both strands
+    under one gene_id. The writer must emit each transcript/exon with its own
+    ``qr.strand``, NOT a single gene-level strand from the first transcript.
+    """
+
+    def test_mixed_strand_transcripts_keep_own_strand(self, tmp_path):
+        results = {
+            # Lower start, '+' strand -> would be transcripts[0] under the bug.
+            "plus": _make_result(
+                "plus", "geneM", "chr1", "+", 100, 500,
+                exons=((100, 200), (300, 500)),
+            ),
+            # Higher start, '-' strand -> previously flipped to '+'.
+            "minus": _make_result(
+                "minus", "geneM", "chr1", "-", 200, 600,
+                exons=((200, 300), (400, 600)),
+            ),
+        }
+        out = str(tmp_path / "out.gtf")
+        write_gtf(results, out)
+        strands = {}
+        with open(out) as f:
+            for line in f:
+                fields = line.strip().split("\t")
+                if fields[2] in ("transcript", "exon"):
+                    tid = next(
+                        p.strip().split('"')[1]
+                        for p in fields[8].split(";")
+                        if p.strip().startswith("transcript_id")
+                    )
+                    strands.setdefault(tid, set()).add(fields[6])
+        assert strands["plus"] == {"+"}
+        assert strands["minus"] == {"-"}

@@ -32,11 +32,20 @@ class ReadCandidateScore:
     # to protect real-data runs from a 2-3 GB memory regression.
     events: List[Tuple[int, int, int]] = field(default_factory=list)
 
+    # Gap-based distance: weighted gap runs with context quality.
+    gap_distance: float = 0.0
+    # Outlier-based distance: outlier_fraction + max_bad_run_normalized.
+    outlier_distance: float = 0.0
+
     # Internal accumulators
     _positions: Set[int] = field(default_factory=set, repr=False)
     _squared_errors: List[float] = field(default_factory=list, repr=False)
+    _position_ll: Dict[int, float] = field(default_factory=dict, repr=False)
+    _outlier_count: int = field(default=0, repr=False)
+    _cur_bad_run: int = field(default=0, repr=False)
+    _max_bad_run: int = field(default=0, repr=False)
 
-    def finalize(self, candidate_length: int):
+    def finalize(self, candidate_length: int, gap_context_n: int = 5):
         """Compute final metrics from accumulated events."""
         self.candidate_length = candidate_length
         if candidate_length > 0:
@@ -45,6 +54,77 @@ class ReadCandidateScore:
             self.event_rmse = math.sqrt(
                 sum(self._squared_errors) / len(self._squared_errors)
             )
+        self.gap_distance = self._compute_gap_distance(gap_context_n)
+        # Outlier distance: fraction + normalized max run.
+        if self.num_events > 0:
+            frac = self._outlier_count / self.num_events
+            run_norm = self._max_bad_run / self.num_events
+            self.outlier_distance = frac + run_norm
+        else:
+            self.outlier_distance = 0.0
+
+    def _compute_gap_distance(self, context_n: int = 5) -> float:
+        """Weighted gap-run distance with flanking-context confidence.
+
+        For each run of consecutive unaligned positions within the mapped span:
+          weight = gap_length * context_confidence
+        where context_confidence = exp(mean_LL of flanking events), clamped.
+
+        Returns sum of weights / mapped_span. Higher = more structural gaps.
+        """
+        if len(self._positions) < 2:
+            return 0.0
+
+        sorted_pos = sorted(self._positions)
+        min_pos, max_pos = sorted_pos[0], sorted_pos[-1]
+        mapped_span = max_pos - min_pos + 1
+        if mapped_span <= 1:
+            return 0.0
+
+        # Find gap runs (consecutive positions without events)
+        covered = self._positions
+        gap_runs: List[Tuple[int, int]] = []  # (start, end_exclusive)
+        i = min_pos
+        while i <= max_pos:
+            if i not in covered:
+                gap_start = i
+                while i <= max_pos and i not in covered:
+                    i += 1
+                gap_runs.append((gap_start, i))
+            else:
+                i += 1
+
+        if not gap_runs:
+            return 0.0
+
+        total_score = 0.0
+        for gap_start, gap_end in gap_runs:
+            gap_len = gap_end - gap_start
+
+            # Flanking context: LL of N events before and after gap
+            left_lls = [
+                self._position_ll[p]
+                for p in range(gap_start - context_n, gap_start)
+                if p in self._position_ll
+            ]
+            right_lls = [
+                self._position_ll[p]
+                for p in range(gap_end, gap_end + context_n)
+                if p in self._position_ll
+            ]
+            flanking = left_lls + right_lls
+
+            if flanking:
+                mean_ll = sum(flanking) / len(flanking)
+                # exp(mean_ll) ∈ (0,1): good fit → high confidence gap is real
+                ctx_conf = math.exp(max(mean_ll, -10.0))
+            else:
+                # Terminal gap — low confidence
+                ctx_conf = 0.01
+
+            total_score += gap_len * ctx_conf
+
+        return total_score / mapped_span
 
 
 def parse_eventalign_tsv(
@@ -142,6 +222,16 @@ def _process_row(
         z = (event_level_mean - model_mean) / model_stdv
         ll = -0.5 * (z * z + math.log(2 * math.pi) + 2 * math.log(model_stdv))
         score.total_log_likelihood += ll
+        # Track per-position LL for gap context computation
+        score._position_ll[position] = ll
+        # Outlier tracking (|z| > 2.0)
+        if abs(z) > 2.0:
+            score._outlier_count += 1
+            score._cur_bad_run += 1
+            if score._cur_bad_run > score._max_bad_run:
+                score._max_bad_run = score._cur_bad_run
+        else:
+            score._cur_bad_run = 0
 
     # Squared error for RMSE
     score._squared_errors.append((event_level_mean - model_mean) ** 2)
@@ -159,16 +249,20 @@ def build_distance_matrix(
     scores: List[ReadCandidateScore],
     read_ids: List[str],
     candidate_ids: List[str],
+    metric: str = "nll",
 ) -> np.ndarray:
     """Build a distance matrix from eventalign scores.
 
     The matrix is compatible with em_with_coherence() input format.
-    Distance = -total_log_likelihood (lower is better for EM).
 
     Args:
         scores: Parsed ReadCandidateScore list.
         read_ids: Ordered list of read IDs (rows).
         candidate_ids: Ordered list of candidate IDs (columns).
+        metric: Distance metric. ``"nll"`` = mean negative log-likelihood
+            per event (default, legacy). ``"gap"`` = weighted gap-run
+            distance with flanking-context confidence. ``"outlier"`` =
+            z-score outlier fraction + max consecutive bad run (normalized).
 
     Returns:
         np.ndarray of shape (n_reads, n_candidates).
@@ -187,11 +281,13 @@ def build_distance_matrix(
         ri = read_idx.get(s.read_name)
         ci = cand_idx.get(s.candidate_id)
         if ri is not None and ci is not None:
-            # Use mean negative log-likelihood per event as distance.
-            # Without per-event normalization the distance scales linearly with
-            # read length, which biases long reads toward whichever candidate
-            # they happen to overlap and forces sigma to be tuned per dataset.
-            n_events = max(int(s.num_events), 1)
-            dist[ri, ci] = -s.total_log_likelihood / n_events
+            if metric == "gap":
+                dist[ri, ci] = s.gap_distance
+            elif metric == "outlier":
+                dist[ri, ci] = s.outlier_distance
+            else:
+                # Mean negative log-likelihood per event (legacy).
+                n_events = max(int(s.num_events), 1)
+                dist[ri, ci] = -s.total_log_likelihood / n_events
 
     return dist

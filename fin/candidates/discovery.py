@@ -6,8 +6,9 @@ import logging
 from typing import List, Set
 
 from fin.candidates.dataclasses import CandidateSet, IntronChain, TranscriptCandidate
+from fin.candidates.canonical import parse_motifs
 from fin.candidates.intron_chains import (
-    expand_canonical_chain_alternatives,
+    expand_canonical_chain_alternatives_v2,
     extract_intron_chain,
     group_reads_by_three_prime_and_intron_chain,
     gtf_transcript_to_intron_chain,
@@ -189,6 +190,7 @@ def discover_candidates(
     min_novel_reads: int = 1,
     canonical_search_bp: int = 0,
     max_chains_per_read: int = 16,
+    canonical_motifs: tuple = ("GT-AG", "GC-AG", "AT-AC"),
 ) -> CandidateSet:
     """Discover transcript candidates for a genomic interval.
 
@@ -269,8 +271,9 @@ def discover_candidates(
                 continue
             read_chains.append((rd, extract_intron_chain(cigar, ref_start)))
 
-        multi_chain_override = expand_canonical_chain_alternatives(
+        multi_chain_override = expand_canonical_chain_alternatives_v2(
             read_chains, genome_fasta, strand,
+            motif_set=parse_motifs(canonical_motifs),
             search_bp=canonical_search_bp,
             max_chains_per_read=max_chains_per_read,
         )

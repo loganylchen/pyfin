@@ -396,6 +396,93 @@ def expand_canonical_chain_alternatives(
     return out
 
 
+def expand_canonical_chain_alternatives_v2(
+    read_chains: List[Tuple[Dict, IntronChain]],
+    genome_seq: str,
+    strand: str,
+    motif_set,
+    search_bp: int = 4,
+    max_chains_per_read: int = 16,
+) -> Dict[str, List[IntronChain]]:
+    """Motif-aware canonical chain expansion (Stage C; shared-module backed).
+
+    Same role as :func:`expand_canonical_chain_alternatives` but fixes the
+    legacy donor/acceptor-independent Cartesian bug: per-junction alternatives
+    are enumerated as PAIRED (s', e') candidates via
+    :func:`fin.candidates.canonical.canonical_intron_alts`, so only valid
+    (donor, acceptor) motif pairings from ``motif_set`` are produced. The same
+    ``motif_set`` is shared with the canonical FILTER ("search what you filter").
+
+    The original chain is ALWAYS retained (reads already on the true junction
+    keep their strict match). Per-read chain count is bounded by
+    ``max_chains_per_read``: if the per-intron Cartesian product would exceed the
+    cap, the read keeps only its original chain (no expansion).
+
+    Args:
+        read_chains: Per-read ``(read_dict, IntronChain)`` pairs.
+        genome_seq: Full chromosome sequence string for motif lookup.
+        strand: "+" or "-".
+        motif_set: Frozenset of canonical (donor, acceptor) pairs to accept.
+        search_bp: Window radius (bp) around each junction. 0 disables.
+        max_chains_per_read: Hard cap on the per-read alternative count.
+
+    Returns:
+        Mapping ``query_name -> [IntronChain, ...]`` (each list non-empty;
+        contains at least the original chain).
+    """
+    import itertools
+
+    from fin.candidates.canonical import canonical_intron_alts
+
+    out: Dict[str, List[IntronChain]] = {}
+    if search_bp <= 0 or not genome_seq:
+        return out
+
+    for rd, chain in read_chains:
+        qname = rd.get("query_name")
+        if qname is None:
+            continue
+        if not chain.introns:
+            out[qname] = [chain]
+            continue
+
+        per_intron_alts: List[List[Tuple[int, int]]] = []
+        for s, e in chain.introns:
+            # Always keep the original junction first so reads already on the
+            # true (possibly non-canonical) position never lose their match.
+            alts: List[Tuple[int, int]] = [(s, e)]
+            for ns, ne in canonical_intron_alts(
+                s, e, strand, genome_seq, motif_set, search_bp
+            ):
+                if (ns, ne) != (s, e):
+                    alts.append((ns, ne))
+            per_intron_alts.append(alts)
+
+        # Quick size check before exploding the Cartesian product.
+        total = 1
+        for ia in per_intron_alts:
+            total *= len(ia)
+            if total > max_chains_per_read:
+                break
+        if total > max_chains_per_read:
+            out[qname] = [chain]
+            continue
+
+        chains_for_read: List[IntronChain] = []
+        seen_chains = set()
+        for combo in itertools.product(*per_intron_alts):
+            key = tuple(combo)
+            if key in seen_chains:
+                continue
+            seen_chains.add(key)
+            chains_for_read.append(IntronChain(introns=key))
+        if not chains_for_read:
+            chains_for_read = [chain]
+        out[qname] = chains_for_read
+
+    return out
+
+
 def group_reads_by_three_prime_and_intron_chain(
     read_dicts: List[Dict],
     strand: str,
