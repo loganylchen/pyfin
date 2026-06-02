@@ -30,6 +30,22 @@ class PipelineConfig:
     min_max_r: float = 0.0            # Phase A T2: drop NOVEL transcripts whose max EM responsibility < this (Cohen's d=1.34)
     min_novel_combined_score: float = 0.0  # Step 3: drop NOVEL transcripts whose combined_score < this (F1-optimal: 0.288 with-GTF, 0.428 no-GTF; Cohen's d=0.70)
 
+    # Minimum isoform fraction (locus-relative abundance) FILTER. Drop a NOVEL
+    # multi-exon transcript whose abundance is below this fraction of the
+    # dominant OVERLAPPING novel isoform at its locus. This is the standard
+    # Cufflinks --min-isoform-fraction (-F, default 0.10) / StringTie -f
+    # (default 0.01) minor-isoform suppression heuristic: the low-fraction tail
+    # of a locus is enriched for incompletely-spliced pre-mRNA, RT/template-
+    # switching artifacts, and assembly noise rather than genuine isoforms.
+    # Applied as a post-quant candidate FILTER (never inside EM/assignment);
+    # GTF-passthrough, fusion, and single-exon candidates are EXEMPT. Default
+    # 0.01 (StringTie-aligned, recall-safe for long reads). Set 0.0 to disable.
+    # SIRV WARNING: synthetic SIRV's F1-optimal value (~0.4) is 4-40x more
+    # aggressive than any real tool because SIRV lacks a real low-abundance
+    # isoform tail — NEVER use it on real data. Configurable; re-tune on real
+    # transcriptomes.
+    min_isoform_fraction: float = 0.01
+
     # Canonical-motif alternative expansion: scan ±N bp around each read's
     # CIGAR-derived junction for GT-AG and emit additional chains.
     # Stage C: ea extended canonical SEARCH. For each read-derived novel

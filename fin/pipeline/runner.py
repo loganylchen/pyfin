@@ -16,6 +16,7 @@ from fin.analysis.quantification import (
     QuantResult,
     _exons_from_candidate,
     aggregate_across_intervals,
+    isoform_fraction_drops,
     quantify_transcripts,
 )
 from fin.candidates.canonical import chain_all_canonical, parse_motifs
@@ -359,6 +360,30 @@ class PipelineRunner:
                     "Dropped %d novel transcripts with combined_score < %.3f",
                     dropped,
                     self.config.min_novel_combined_score,
+                )
+
+        # Minimum isoform fraction (locus-relative abundance) filter. Drops
+        # NOVEL multi-exon transcripts whose abundance is below
+        # `min_isoform_fraction` of the dominant overlapping novel isoform at
+        # the same locus — the standard Cufflinks --min-isoform-fraction /
+        # StringTie -f heuristic (the low-fraction tail is enriched for
+        # incompletely-spliced precursors and assembly artifacts).
+        # gtf/fusion/mono candidates are EXEMPT. SIRV WARNING: the conservative
+        # literature default (0.01) is used; SIRV's F1-optimal ~0.4 is overfit.
+        if _score_filter_on and self.config.min_isoform_fraction > 0.0:
+            drop_ids = isoform_fraction_drops(
+                aggregated, self.config.min_isoform_fraction
+            )
+            if drop_ids:
+                aggregated = {
+                    cid: qr
+                    for cid, qr in aggregated.items()
+                    if cid not in drop_ids
+                }
+                logger.info(
+                    "Dropped %d novel transcripts with isoform fraction < %.3f",
+                    len(drop_ids),
+                    self.config.min_isoform_fraction,
                 )
 
         # Resolve gene_ids from GTF annotation

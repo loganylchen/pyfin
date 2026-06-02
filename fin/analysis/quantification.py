@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -106,6 +107,68 @@ def quantify_transcripts(
         )
 
     return results
+
+
+def _qr_overlap(a: QuantResult, b: QuantResult) -> bool:
+    """1-D genomic interval overlap on (chrom, strand, [start, end))."""
+    if a.chrom != b.chrom or a.strand != b.strand:
+        return False
+    return a.start < b.end and b.start < a.end
+
+
+def isoform_fraction_drops(
+    results: Dict[str, QuantResult],
+    min_fraction: float,
+) -> set:
+    """Return candidate_ids to drop by the minimum-isoform-fraction heuristic.
+
+    For every NOVEL multi-exon transcript C, compute its locus-relative
+    abundance::
+
+        relabund(C) = C.abundance / max(abundance over the NOVEL multi-exon
+                       transcripts that OVERLAP C, C included)
+
+    and drop C when ``relabund(C) < min_fraction``. This is the standard
+    Cufflinks ``--min-isoform-fraction`` / StringTie ``-f`` minor-isoform
+    suppression rule: the low-fraction tail of a locus is enriched for
+    incompletely-spliced precursors (pre-mRNA), RT/template-switching
+    artifacts, and assembly noise rather than genuine isoforms.
+
+    GTF-passthrough (``source="gtf"``), fusion (``source="fusion"``), and
+    single-exon (mono) candidates are EXEMPT and never dropped. ``min_fraction
+    <= 0`` disables the filter (returns an empty set).
+
+    SIRV WARNING: synthetic SIRV has no genuine low-abundance isoform tail, so
+    its F1-optimal threshold (~0.4) is 4-40x more aggressive than real tools
+    and would gut recall on a real transcriptome. Keep this conservative
+    (literature default 0.01) and re-tune on real data.
+    """
+    if min_fraction <= 0.0:
+        return set()
+    # Bucket by (chrom, strand): only candidates on the same chromosome and
+    # strand can share a locus, so the pairwise overlap scan stays within a
+    # bucket instead of running all-vs-all across the whole genome. (Within a
+    # locus-dense single chrom/strand it is still O(n^2); a sweep-line could be
+    # added if a real run ever makes that the bottleneck.)
+    buckets: Dict[Tuple[str, str], List[QuantResult]] = defaultdict(list)
+    for qr in results.values():
+        if qr.source == "novel" and len(qr.exons) >= 2:
+            buckets[(qr.chrom, qr.strand)].append(qr)
+    drops: set = set()
+    for bucket in buckets.values():
+        for qr in bucket:
+            locus_max = qr.abundance
+            for other in bucket:
+                if other.candidate_id != qr.candidate_id and _qr_overlap(qr, other):
+                    if other.abundance > locus_max:
+                        locus_max = other.abundance
+            # The locus-dominant isoform (relabund == 1.0) is NEVER dropped,
+            # even if a caller mis-configures min_fraction > 1.0.
+            if qr.abundance >= locus_max:
+                continue
+            if locus_max > 0 and (qr.abundance / locus_max) < min_fraction:
+                drops.add(qr.candidate_id)
+    return drops
 
 
 def compute_tpm(

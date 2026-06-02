@@ -1,0 +1,115 @@
+"""Unit tests for the minimum-isoform-fraction (locus-relative abundance) filter.
+
+Covers ``fin.analysis.quantification.isoform_fraction_drops`` — the production
+port of the ``benchmarks/diag_fp_gtf_features.py`` relabund lever (Cufflinks
+``--min-isoform-fraction`` / StringTie ``-f`` minor-isoform suppression).
+"""
+from __future__ import annotations
+
+from fin.analysis.quantification import QuantResult, isoform_fraction_drops
+
+
+def _qr(
+    cid,
+    abundance,
+    *,
+    source="novel",
+    chrom="chr1",
+    strand="+",
+    start=0,
+    end=1000,
+    exons=None,
+):
+    if exons is None:
+        exons = ((start, 400), (600, end))  # 2 exons => multi-exon
+    return QuantResult(
+        candidate_id=cid,
+        abundance=abundance,
+        confidence=1.0,
+        num_assigned_reads=int(abundance),
+        source=source,
+        chrom=chrom,
+        strand=strand,
+        start=start,
+        end=end,
+        exons=exons,
+    )
+
+
+def _drops(results, thr):
+    return isoform_fraction_drops({qr.candidate_id: qr for qr in results}, thr)
+
+
+def test_minor_overlapping_isoform_below_fraction_is_dropped():
+    dominant = _qr("dom", 100.0)
+    minor = _qr("min", 0.5)  # 0.5 / 100 = 0.005 < 0.01
+    assert _drops([dominant, minor], 0.01) == {"min"}
+
+
+def test_minor_at_or_above_fraction_is_kept():
+    dominant = _qr("dom", 100.0)
+    minor = _qr("min", 2.0)  # 2 / 100 = 0.02 >= 0.01
+    assert _drops([dominant, minor], 0.01) == set()
+
+
+def test_dominant_isoform_never_dropped():
+    # The dominant isoform has relabund == 1.0 by construction.
+    dominant = _qr("dom", 100.0)
+    minor = _qr("min", 0.5)
+    drops = _drops([dominant, minor], 0.01)
+    assert "dom" not in drops
+
+
+def test_gtf_and_fusion_sources_are_exempt():
+    dominant = _qr("dom", 100.0)
+    gtf_minor = _qr("gtf_min", 0.1, source="gtf")
+    fusion_minor = _qr("fus_min", 0.1, source="fusion")
+    assert _drops([dominant, gtf_minor, fusion_minor], 0.01) == set()
+
+
+def test_mono_exon_novel_is_exempt():
+    dominant = _qr("dom", 100.0)
+    mono = _qr("mono", 0.1, exons=((0, 1000),))  # single exon
+    assert _drops([dominant, mono], 0.01) == set()
+
+
+def test_non_overlapping_candidates_are_each_their_own_locus():
+    # Different chromosome => no overlap => each is locus-dominant (relabund 1).
+    a = _qr("a", 100.0, chrom="chr1")
+    b = _qr("b", 0.5, chrom="chr2")
+    assert _drops([a, b], 0.01) == set()
+
+
+def test_opposite_strand_does_not_form_a_locus():
+    a = _qr("a", 100.0, strand="+")
+    b = _qr("b", 0.5, strand="-")
+    assert _drops([a, b], 0.01) == set()
+
+
+def test_zero_fraction_disables_filter():
+    dominant = _qr("dom", 100.0)
+    minor = _qr("min", 0.0001)
+    assert _drops([dominant, minor], 0.0) == set()
+
+
+def test_higher_threshold_drops_more():
+    dominant = _qr("dom", 100.0)
+    minor = _qr("min", 5.0)  # relabund 0.05
+    assert _drops([dominant, minor], 0.01) == set()
+    assert _drops([dominant, minor], 0.10) == {"min"}
+
+
+def test_min_fraction_above_one_never_drops_dominant():
+    # Defensive: a mis-configured fraction > 1.0 must NOT drop the locus
+    # dominant (relabund == 1.0). Non-dominant minors may still be dropped.
+    dominant = _qr("dom", 100.0)
+    minor = _qr("min", 50.0)
+    drops = _drops([dominant, minor], 1.5)
+    assert "dom" not in drops
+
+
+def test_three_isoform_locus_uses_max_as_denominator():
+    dominant = _qr("dom", 100.0)
+    mid = _qr("mid", 50.0)  # 0.5 -> kept
+    minor = _qr("min", 0.5)  # 0.005 -> dropped
+    assert _drops([dominant, mid, minor], 0.01) == {"min"}
