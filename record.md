@@ -224,6 +224,26 @@ heuristic, NOT the SIRV-tuned 0.4.
   gffcompare-neutral on SIRV by design (does no harm), and the user may raise it (e.g. 0.10 for the
   visible low-T SIRV gain, or re-tune on real data). NEVER set the SIRV-optimal 0.4 in production.
 
+- **★ CLI flag added:** `--min-isoform-fraction FLOAT` (`fin/cli.py`, default 0.01, 0.0 disables,
+  passed straight to `PipelineConfig`). ruff-clean; appears in `python -m fin --help`.
+
+- **★★ END-TO-END PRODUCTION VERIFICATION (true same-run apples-to-apples, NOT diag-emit).** Ran the
+  full production pipeline twice on SIRV (no-GTF de novo, Docker `btrspg/pyfin:cpu-dev`, `--no-gpu`),
+  identical except `--min-isoform-fraction`; gffcompare-swept each `assembly.gtf`:
+
+  | run | raw transcripts | T3 | T5 | T7 | T10 |
+  |---|---|---|---|---|---|
+  | `--min-isoform-fraction 0.0` (OFF) | 1117 | 41.1 | 45.2 | 44.7 | **45.4** |
+  | `0.01` (default, ON) | 521 | 41.1 | 45.2 | 44.7 | **45.4** |
+
+  **BYTE-IDENTICAL at every T (even nPred 174/134/124/106).** The filter is LIVE in the real pipeline
+  (logged `Dropped 596 novel transcripts with isoform fraction < 0.010`, 1117→521 raw), but all 596
+  dropped candidates fall below the gffcompare T≥3 abundance floor → zero survive → identical
+  gffcompare. This is the definitive same-run proof that `0.01` is a true no-op on SIRV (does no
+  harm, zero recall cost) while remaining a real-data insurance feature. Production peak **45.4**
+  beats FLAIR 44.0 and matches the ablation M1-first champion 45.2.
+  Artifacts: `experiments/prod_isofrac_default/` (0.01), `experiments/prod_isofrac_off/` (0.0).
+
 ### USER DECISION — do NOT re-propose
 - `n_introns ≥ N` structural gate is REJECTED (+0.8 on SIRV but a SIRV artifact; real genes
   legitimately have many introns).

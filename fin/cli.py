@@ -34,6 +34,7 @@ import click
 @click.option("--min-abundance", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose EM-estimated abundance is below this threshold (GTF candidates are exempt).")
 @click.option("--min-max-r", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose max EM responsibility is below this (try 0.2 for ~+20pp precision; GTF candidates are exempt).")
 @click.option("--min-novel-combined-score", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose combined_score is below this (F1-optimal: 0.288 with-GTF, 0.428 no-GTF; GTF candidates are exempt).")
+@click.option("--min-isoform-fraction", default=0.01, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose abundance is below this fraction of the dominant overlapping novel isoform at their locus (Cufflinks --min-isoform-fraction / StringTie -f minor-isoform suppression). GTF/fusion/mono exempt; 0.0 disables. Default 0.01 (StringTie-aligned, recall-safe). SIRV WARNING: F1-optimal ~0.4 is overfit — never use on real data.")
 @click.option("--persist-R/--no-persist-R", "persist_R_matrix", default=True, show_default=True, help="Enable/disable R-matrix (R.npy) persistence per interval.")
 @click.option("--canonical-gate/--no-canonical-gate", "canonical_gate", default=True, show_default=True, help="Drop NOVEL multi-exon candidates whose junctions aren't all canonical (GTF/fusion/mono exempt). SIRV-tuned default ON.")
 @click.option("--canonical-motifs", default="GT-AG,GC-AG,AT-AC", show_default=True, help="Comma-separated donor-acceptor motifs accepted by the canonical gate AND search.")
@@ -64,6 +65,7 @@ def main(
     min_abundance,
     min_max_r,
     min_novel_combined_score,
+    min_isoform_fraction,
     persist_R_matrix,
     canonical_gate,
     canonical_motifs,
@@ -130,6 +132,7 @@ def main(
         min_abundance=min_abundance,
         min_max_r=min_max_r,
         min_novel_combined_score=min_novel_combined_score,
+        min_isoform_fraction=min_isoform_fraction,
         persist_R_matrix=persist_R_matrix,
         canonical_gate=canonical_gate,
         canonical_motifs=tuple(
