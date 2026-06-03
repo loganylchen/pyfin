@@ -35,7 +35,7 @@ def _build_m2_f5c_rna(
         Can be used directly as R matrix.
     FAIL → 0.
     """
-    import f5c_rna
+    import krill as f5c_rna
 
     n_reads = len(read_ids)
     n_cands = len(candidates)
@@ -178,7 +178,7 @@ def f5c_rna_tiebreak(
 
     Returns updated R matrix (copy).
     """
-    import f5c_rna
+    import krill as f5c_rna
 
     R_new = R.copy()
     n_reads, n_cands = R.shape

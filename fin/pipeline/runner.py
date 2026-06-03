@@ -1054,7 +1054,7 @@ class PipelineRunner:
         )
         if m2_on:
             try:
-                import f5c_rna
+                import krill as f5c_rna
 
                 m2_f5c = f5c_rna.Aligner(
                     pore=self.config.f5c_rna_pore, use_gpu=False,

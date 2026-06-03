@@ -133,7 +133,7 @@ def build_m3_coherence(
 
     # Signal-path deps imported lazily so the pure no-window paths above stay
     # importable without f5c_rna (e.g. unit tests).
-    import f5c_rna
+    import krill as f5c_rna
     import mappy
 
     f5c_aligner = f5c_rna.Aligner(pore=pore, use_gpu=False, hmm_confidence=False)

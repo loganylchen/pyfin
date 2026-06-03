@@ -351,7 +351,7 @@ def read_cand_mean_nll(
     Returns ``(mean_nll, n_events)``; ``(nan, 0)`` when there is no usable hit,
     eventalign fails, or no event falls in the window.
     """
-    import f5c_rna
+    import krill as f5c_rna
 
     # mappy best hit by reconstructed AS (rejects > M1_MAX_INDEL_BP single indel)
     best_hit = None
@@ -423,7 +423,7 @@ def build_m2_distance(
     Returns:
         (n_reads, n_cands) float64 distance matrix; lower = better.
     """
-    import f5c_rna
+    import krill as f5c_rna
 
     n_reads = len(read_ids)
     n_cands = len(candidates)
@@ -577,7 +577,7 @@ def m2_resolve_tie(
         return (None, 0.0, []) if return_scored else (None, 0.0)
 
     if f5c_aligner is None:
-        import f5c_rna
+        import krill as f5c_rna
 
         f5c_aligner = f5c_rna.Aligner(pore=pore, use_gpu=False, hmm_confidence=False)
     if mappy_aligners is None:

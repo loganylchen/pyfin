@@ -1,7 +1,20 @@
 """
-CUDA-accelerated Dynamic Time Warping (DTW) module
+DTW (Dynamic Time Warping) module — krill backend.
 
-This module provides GPU-accelerated DTW distance calculation.
+This module previously wrapped a self-shipped CUDA DTW extension
+(``._cuda_dtw``). It now delegates all DTW work to ``krill`` (same faithful
+f5c-engine port used for eventalign), giving one signal dependency for the
+whole stack.
+
+Notes
+-----
+* ``use_open_start`` / ``use_open_end`` are accepted for backward
+  compatibility but IGNORED — krill implements standard global DTW (no
+  open-boundary parameter) and the project decided open boundaries are not
+  needed.
+* GPU is used only when krill was built with CUDA AND a device is visible;
+  otherwise everything runs on CPU (krill's DTW ``use_gpu=True`` raises when
+  no GPU is present, so we guard it).
 """
 
 import logging
@@ -12,24 +25,57 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Try to import the CUDA extension
+# Try to import krill (the DTW backend).
 try:
-    from ._cuda_dtw import dtw_distance as _dtw_distance_cuda
-    from ._cuda_dtw import dtw_pairwise as _dtw_pairwise_cuda
-    from ._cuda_dtw import dtw_pairwise_varlen as _dtw_pairwise_varlen_cuda
-    from ._cuda_dtw import get_free_gpu_memory as _get_free_gpu_memory_cuda
-    from ._cuda_dtw import cleanup as _cuda_cleanup
+    import krill as _krill
 
-    CUDA_AVAILABLE = True
-except ImportError as e:
-    CUDA_AVAILABLE = False
+    _KRILL_OK = True
+except ImportError as e:  # pragma: no cover - only when krill missing
+    _KRILL_OK = False
     _import_error = str(e)
 
-# Log backend availability upon module import
-if CUDA_AVAILABLE:
-    logger.info("DTW: GPU (CUDA) acceleration ENABLED")
+
+def _gpu_ok() -> bool:
+    """True only if krill was built with CUDA and a device is visible."""
+    if not _KRILL_OK:
+        return False
+    try:
+        if not bool(getattr(_krill, "built_with_cuda", False)):
+            return False
+        return _krill.gpu_device_count() > 0
+    except Exception:
+        return False
+
+
+_GPU = _gpu_ok()
+
+# Backward-compat flag. True whenever krill DTW is usable (GPU or CPU); callers
+# (signal_dtw) use this to route into the batched krill path instead of their
+# pure-python CPU fallback.
+CUDA_AVAILABLE = _KRILL_OK
+
+if _KRILL_OK:
+    logger.info("DTW: krill backend ENABLED (gpu=%s)", _GPU)
 else:
-    logger.info("DTW: CPU implementation (CUDA not available)")
+    logger.info("DTW: krill not available — callers fall back to CPU")
+
+
+def _require_krill() -> None:
+    if not _KRILL_OK:
+        raise RuntimeError(
+            "krill DTW backend is not available.\n"
+            f"Import error: {_import_error}\n\n"
+            "Install with: pip install krill --no-deps "
+            "--index-url https://loganylchen.github.io/krill-dist/simple/"
+        )
+
+
+def _varlen(segments) -> np.ndarray:
+    """Pairwise DTW over variable-length 1D sequences via krill."""
+    _require_krill()
+    segs = [np.ascontiguousarray(s, dtype=np.float32) for s in segments]
+    out = _krill.dtw_pairwise_varlen(segs, use_gpu=_GPU)
+    return np.asarray(out, dtype=np.float64)
 
 
 def dtw_distance(
@@ -38,215 +84,37 @@ def dtw_distance(
     use_open_start: bool = False,
     use_open_end: bool = False,
 ) -> float:
+    """DTW distance between two 1D sequences (krill backend).
+
+    ``use_open_start`` / ``use_open_end`` are accepted but ignored.
     """
-    Compute DTW distance between two sequences using CUDA acceleration.
-
-    Parameters
-    ----------
-    seq1 : array-like
-        First sequence (will be converted to float32 numpy array)
-    seq2 : array-like
-        Second sequence (will be converted to float32 numpy array)
-    use_open_start : bool, optional
-        Enable open start boundary condition (default: False)
-    use_open_end : bool, optional
-        Enable open end boundary condition (default: False)
-
-    Returns
-    -------
-    float
-        DTW distance between seq1 and seq2
-
-    Raises
-    ------
-    RuntimeError
-        If CUDA extension is not available
-    ValueError
-        If input sequences are invalid
-
-    Examples
-    --------
-    >>> import numpy as np
-    >>> from fin._dtw import dtw_distance
-    >>> seq1 = np.random.randn(100).astype(np.float32)
-    >>> seq2 = np.random.randn(100).astype(np.float32)
-    >>> distance = dtw_distance(seq1, seq2)
-    >>> print(f"DTW distance: {distance}")
-    """
-    if not CUDA_AVAILABLE:
-        raise RuntimeError(
-            f"CUDA DTW extension is not available.\n"
-            f"Import error: {_import_error}\n\n"
-            f"The extension was not built during installation. This can happen if:\n"
-            f"  1. CUDA Toolkit is not installed (check with: nvcc --version)\n"
-            f"  2. The build process skipped the CUDA extension\n"
-            f"  3. The package was installed in a different environment\n\n"
-            f"To build with CUDA support:\n"
-            f"  1. Install CUDA Toolkit from NVIDIA\n"
-            f"  2. Ensure nvcc is in PATH\n"
-            f"  3. Reinstall: pip uninstall py-fin && pip install -e .\n\n"
-            f"Check availability with: fin._dtw.is_available()"
-        )
-
-    # Convert inputs to numpy arrays if needed
-    if not isinstance(seq1, np.ndarray):
-        seq1 = np.array(seq1, dtype=np.float32)
-    else:
-        seq1 = np.asarray(seq1, dtype=np.float32)
-
-    if not isinstance(seq2, np.ndarray):
-        seq2 = np.array(seq2, dtype=np.float32)
-    else:
-        seq2 = np.asarray(seq2, dtype=np.float32)
-
-    # Ensure arrays are contiguous
-    if not seq1.flags["C_CONTIGUOUS"]:
-        seq1 = np.ascontiguousarray(seq1)
-    if not seq2.flags["C_CONTIGUOUS"]:
-        seq2 = np.ascontiguousarray(seq2)
-
-    # Validate shapes
-    if seq1.ndim != 1:
-        raise ValueError(f"seq1 must be 1-dimensional, got shape {seq1.shape}")
-    if seq2.ndim != 1:
-        raise ValueError(f"seq2 must be 1-dimensional, got shape {seq2.shape}")
-
-    if len(seq1) == 0 or len(seq2) == 0:
+    _require_krill()
+    a = np.ascontiguousarray(seq1, dtype=np.float32)
+    b = np.ascontiguousarray(seq2, dtype=np.float32)
+    if a.ndim != 1 or b.ndim != 1:
+        raise ValueError("dtw_distance expects 1-dimensional sequences")
+    if len(a) == 0 or len(b) == 0:
         raise ValueError("Sequences cannot be empty")
-
-    # Call the CUDA function
-    return _dtw_distance_cuda(
-        seq1, seq2, use_open_start=int(use_open_start), use_open_end=int(use_open_end)
-    )
+    return float(_krill.dtw_distance(a, b, use_gpu=_GPU))
 
 
 def dtw_pairwise(
-    sequences: Union[np.ndarray, list], use_open_start: bool = False, use_open_end: bool = False
+    sequences: Union[np.ndarray, list],
+    use_open_start: bool = False,
+    use_open_end: bool = False,
 ) -> np.ndarray:
+    """Pairwise DTW for a batch of equal-length sequences (krill backend).
+
+    ``use_open_start`` / ``use_open_end`` are accepted but ignored.
     """
-    Compute pairwise DTW distances for a batch of sequences using CUDA.
-
-    This is significantly more efficient than calling dtw_distance() in a loop,
-    as it:
-    - Transfers all sequences to GPU in one batch
-    - Computes multiple DTW pairs in parallel
-    - Amortizes memory allocation/deallocation overhead
-
-    Parameters
-    ----------
-    sequences : array-like
-        2D array of sequences with shape (num_sequences, seq_length)
-        All sequences must have the same length
-        Will be converted to float32 if needed
-    use_open_start : bool, optional
-        Enable open start boundary condition (default: False)
-    use_open_end : bool, optional
-        Enable open end boundary condition (default: False)
-
-    Returns
-    -------
-    np.ndarray
-        Distance matrix of shape (num_sequences, num_sequences)
-        Matrix is symmetric with zeros on the diagonal
-
-    Raises
-    ------
-    RuntimeError
-        If CUDA extension is not available
-    ValueError
-        If input sequences are invalid
-
-    Examples
-    --------
-    >>> import numpy as np
-    >>> from fin._dtw import dtw_pairwise
-    >>> # Generate 10 sequences of length 100
-    >>> sequences = np.random.randn(10, 100).astype(np.float32)
-    >>> distance_matrix = dtw_pairwise(sequences)
-    >>> print(f"Distance matrix shape: {distance_matrix.shape}")
-    >>> # distance_matrix[i, j] is the DTW distance between sequences[i] and sequences[j]
-    """
-    if not CUDA_AVAILABLE:
-        raise RuntimeError(
-            f"CUDA DTW extension is not available.\n"
-            f"Import error: {_import_error}\n\n"
-            f"Check availability with: fin._dtw.is_available()"
-        )
-
-    # Convert to numpy array if needed
-    if not isinstance(sequences, np.ndarray):
-        sequences = np.array(sequences, dtype=np.float32)
-    else:
-        sequences = np.asarray(sequences, dtype=np.float32)
-
-    # Validate input
-    if sequences.ndim != 2:
-        raise ValueError(f"sequences must be 2D array, got shape {sequences.shape}")
-
-    if sequences.shape[0] < 2:
-        raise ValueError(f"Need at least 2 sequences, got {sequences.shape[0]}")
-
-    if sequences.shape[1] == 0:
+    arr = np.asarray(sequences, dtype=np.float32)
+    if arr.ndim != 2:
+        raise ValueError(f"sequences must be 2D array, got shape {arr.shape}")
+    if arr.shape[0] < 2:
+        raise ValueError(f"Need at least 2 sequences, got {arr.shape[0]}")
+    if arr.shape[1] == 0:
         raise ValueError("Sequence length cannot be 0")
-
-    # GPU memory guard: estimate required memory and check availability
-    num_seq, seq_len = sequences.shape
-    # Memory estimate: cost matrix = seq_len * (num_seq-1) * 4 bytes + sequences + distance matrix
-    estimated_bytes = (seq_len * (num_seq - 1) * 4) + (num_seq * seq_len * 4) + (num_seq * num_seq * 4)
-    try:
-        import subprocess as _sp
-        _mem_result = _sp.run(
-            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if _mem_result.returncode == 0:
-            free_mb = int(_mem_result.stdout.strip().split("\n")[0])
-            free_bytes = free_mb * 1024 * 1024
-            if estimated_bytes > free_bytes * 0.9:  # 90% safety margin
-                raise MemoryError(
-                    f"Insufficient GPU memory for DTW pairwise batch: "
-                    f"estimated {estimated_bytes / 1e9:.1f} GB needed, "
-                    f"{free_bytes / 1e9:.1f} GB available. "
-                    f"Reduce batch size or use dtw_distance() in a loop."
-                )
-    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
-        pass  # Can't check memory, proceed and let CUDA handle it
-
-    # Call the CUDA function
-    return _dtw_pairwise_cuda(
-        sequences, use_open_start=int(use_open_start), use_open_end=int(use_open_end)
-    )
-
-
-def cleanup():
-    """
-    Reset CUDA device and free all GPU resources.
-
-    This function should be called when you're done using the CUDA DTW
-    functionality to properly clean up GPU resources.
-
-    Examples
-    --------
-    >>> from fin._dtw import cleanup
-    >>> # After computing many DTW distances...
-    >>> cleanup()
-    """
-    if not CUDA_AVAILABLE:
-        return  # Nothing to cleanup if CUDA is not available
-
-    _cuda_cleanup()
-
-
-def is_available() -> bool:
-    """
-    Check if CUDA DTW extension is available.
-
-    Returns
-    -------
-    bool
-        True if CUDA extension is available, False otherwise
-    """
-    return CUDA_AVAILABLE
+    return _varlen([arr[i] for i in range(arr.shape[0])])
 
 
 def dtw_pairwise_varlen(
@@ -254,61 +122,25 @@ def dtw_pairwise_varlen(
     use_open_start: bool = False,
     use_open_end: bool = False,
 ) -> np.ndarray:
-    """Pairwise DTW for variable-length sequences (single GPU batch call).
+    """Pairwise DTW for variable-length sequences (krill backend).
 
-    Accepts a list of variable-length 1D arrays. Handles padding internally.
-
-    Parameters
-    ----------
-    segments : list of array-like
-        Variable-length 1D sequences.
-    use_open_start : bool, optional
-        Enable open start boundary (default: False).
-    use_open_end : bool, optional
-        Enable open end boundary (default: False).
-
-    Returns
-    -------
-    np.ndarray
-        Distance matrix (num_sequences, num_sequences).
+    ``use_open_start`` / ``use_open_end`` are accepted but ignored.
     """
-    if not CUDA_AVAILABLE:
-        raise RuntimeError(
-            f"CUDA DTW extension is not available.\n"
-            f"Import error: {_import_error}\n"
-            f"Check availability with: fin._dtw.is_available()"
-        )
+    return _varlen(segments)
 
-    lengths = np.array([len(s) for s in segments], dtype=np.int64)
-    max_len = int(lengths.max())
 
-    padded = np.zeros((len(segments), max_len), dtype=np.float32)
-    for i, s in enumerate(segments):
-        s = np.asarray(s, dtype=np.float32)
-        padded[i, : len(s)] = s
+def cleanup():
+    """No-op (krill manages its own resources)."""
+    return None
 
-    return _dtw_pairwise_varlen_cuda(
-        padded, lengths,
-        use_open_start=int(use_open_start),
-        use_open_end=int(use_open_end),
-    )
+
+def is_available() -> bool:
+    """True if the krill DTW backend is importable."""
+    return _KRILL_OK
 
 
 def estimate_gpu_memory(num_sequences: int, max_length: int) -> int:
-    """Estimate GPU bytes needed for pairwise varlen DTW.
-
-    Parameters
-    ----------
-    num_sequences : int
-        Number of sequences.
-    max_length : int
-        Maximum sequence length (padding width).
-
-    Returns
-    -------
-    int
-        Estimated GPU memory in bytes (with 20% headroom).
-    """
+    """Estimate GPU bytes needed for pairwise varlen DTW (with 20% headroom)."""
     input_bytes = num_sequences * max_length * 4
     lengths_bytes = num_sequences * 8
     num_pairs = num_sequences * (num_sequences - 1) // 2
@@ -319,16 +151,21 @@ def estimate_gpu_memory(num_sequences: int, max_length: int) -> int:
 
 
 def get_free_gpu_memory() -> int:
-    """Query free GPU memory in bytes.
-
-    Returns
-    -------
-    int
-        Free GPU memory in bytes, or 0 if CUDA unavailable.
-    """
-    if not CUDA_AVAILABLE:
+    """Free GPU memory in bytes (via nvidia-smi), or 0 if unavailable."""
+    if not _GPU:
         return 0
-    return _get_free_gpu_memory_cuda()
+    try:
+        res = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if res.returncode == 0:
+            free_mb = int(res.stdout.strip().split("\n")[0])
+            return free_mb * 1024 * 1024
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return 0
 
 
 __all__ = [

@@ -1,0 +1,10 @@
+# Verification image: cpu-dev (mappy + pyfin deps) + krill signal backend.
+# krill replaces f5c_rna (eventalign) and fin._dtw (DTW).
+FROM btrspg/pyfin:cpu-dev
+
+RUN pip install krill --no-deps \
+        --index-url https://loganylchen.github.io/krill-dist/simple/
+
+# Source tree is mounted at /work; PYTHONPATH=/work lets it shadow the
+# site-packages pyfin so the krill-swapped fin/* is used.
+ENV PYTHONPATH=/work
