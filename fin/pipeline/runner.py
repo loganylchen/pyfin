@@ -16,6 +16,8 @@ from fin.analysis.quantification import (
     QuantResult,
     _exons_from_candidate,
     aggregate_across_intervals,
+    compute_fulllen_frac,
+    fulllen_fraction_drops,
     isoform_fraction_drops,
     quantify_transcripts,
 )
@@ -386,6 +388,34 @@ class PipelineRunner:
                     self.config.min_isoform_fraction,
                 )
 
+        # Full-length end-coherence filter (FLAIR/TALON-style full-length read
+        # support). Drops NOVEL multi-exon (>=2 intron) transcripts whose
+        # fraction of full-length assigned reads (read genomic 5' AND 3' both
+        # within fulllen_window_bp of the candidate's ends) is below
+        # min_fulllen_fraction. The fulllen_frac METRIC itself is signal-free
+        # (BAM primary-alignment spans only), but it is computed per-interval
+        # over the production argmax assignment population (which may use the
+        # M2-tiebreak signal); candidates with fulllen_frac < 0 (unreachable
+        # or never scored, e.g. the legacy EM path) are EXEMPT and never
+        # dropped. gtf/fusion/mono exempt. ORTHOGONAL to the isoform-fraction
+        # filter above (the two stack on the competitor metric). SIRV WARNING:
+        # the default 0.1 is SIRV-tuned; re-tune or disable on real data.
+        if _score_filter_on and self.config.min_fulllen_fraction > 0.0:
+            drop_ids = fulllen_fraction_drops(
+                aggregated, self.config.min_fulllen_fraction
+            )
+            if drop_ids:
+                aggregated = {
+                    cid: qr
+                    for cid, qr in aggregated.items()
+                    if cid not in drop_ids
+                }
+                logger.info(
+                    "Dropped %d novel transcripts with full-length fraction < %.3f",
+                    len(drop_ids),
+                    self.config.min_fulllen_fraction,
+                )
+
         # Resolve gene_ids from GTF annotation
         for cid, qr in aggregated.items():
             if qr.source == "gtf" and self._gtf_reader:
@@ -496,9 +526,24 @@ class PipelineRunner:
 
         # R1 ablation: enable_signal=False → skip signal/EM, use mappy argmax.
         if not getattr(self.config, "enable_signal", True):
-            return self._process_interval_mappy_argmax(
+            results = self._process_interval_mappy_argmax(
                 candidate_set, read_ids, interval
             )
+            # Full-length end-coherence: compute fulllen_frac per candidate over
+            # its production argmax-assigned reads (the non-circular population;
+            # the fulllen METRIC itself uses BAM spans only — no signal). Gated
+            # by the same switches as the drop in _finalize_and_write so a
+            # filter-disabled run (enable_score_filter=False or
+            # min_fulllen_fraction<=0) pays no BAM-fetch cost and leaves the
+            # -1.0 sentinel untouched.
+            _filter_on = getattr(self.config, "enable_score_filter", True)
+            if (
+                results
+                and _filter_on
+                and getattr(self.config, "min_fulllen_fraction", 0.0) > 0.0
+            ):
+                self._annotate_fulllen_frac(results, interval)
+            return results
 
         # --- Phase 2: Per-candidate scoring (mappy + f5c eventalign) ---
         tsv_paths = self._tool_runner.score_candidates(candidate_set, work_dir)
@@ -1105,6 +1150,49 @@ class PipelineRunner:
             interval.region_string, len(read_ids), len(cand_list), n_m2_override,
         )
         return quant_results
+
+    def _annotate_fulllen_frac(
+        self,
+        results: List[QuantResult],
+        interval: GenomicInterval,
+    ) -> None:
+        """Store fulllen_frac on NOVEL multi-exon QuantResults (in place).
+
+        full-length read support: the fraction of a candidate's argmax-assigned
+        reads whose primary genomic 5' AND 3' alignment ends both fall within
+        ``fulllen_window_bp`` of the candidate's genomic 5'/3' ends. Signal-free
+        (BAM primary spans only). A single fetch over the interval builds the
+        read-end map shared by every candidate. Candidates with fewer than
+        ``fulllen_min_reads`` reads carrying a span keep the -1.0 sentinel
+        (unreachable -> never dropped). gtf/fusion/mono candidates are skipped.
+        """
+        novel_multi = [
+            qr for qr in results
+            if qr.source == "novel" and len(qr.exons) >= 3
+        ]
+        if not novel_multi:
+            return
+        window = getattr(self.config, "fulllen_window_bp", 25)
+        min_reads = getattr(self.config, "fulllen_min_reads", 4)
+        # Single BAM fetch over the interval -> genomic read-end map (primary
+        # mapped alignments only; first occurrence per read id wins).
+        read_ends: Dict[str, Tuple[int, int]] = {}
+        with pysam.AlignmentFile(self.config.bam_path, "rb") as bam:
+            for r in bam.fetch(interval.chrom, interval.start, interval.end):
+                if r.is_unmapped or r.is_secondary or r.is_supplementary:
+                    continue
+                rid = r.query_name
+                if rid is None or rid in read_ends:
+                    continue
+                rs = r.reference_start
+                re = r.reference_end
+                if rs is None or re is None:
+                    continue
+                read_ends[rid] = (int(rs), int(re))
+        for qr in novel_multi:
+            qr.fulllen_frac = compute_fulllen_frac(
+                qr, read_ends, window, min_reads
+            )
 
     def _process_interval_mappy_argmax(
         self,

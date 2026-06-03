@@ -40,6 +40,14 @@ class QuantResult:
     # T8: maximum EM responsibility any single read assigned to this transcript.
     # max_R = R[:, j].max() after EM. Used for FP-by-EM analysis.
     max_R: float = 0.0
+    # Full-length end-coherence fraction: fraction of this candidate's assigned
+    # reads that are full-length wrt its genomic 5'/3' ends (read 5' AND 3'
+    # within fulllen_window_bp). -1.0 = exempt / unreachable / never scored
+    # (NEVER dropped by the fulllen filter). The METRIC itself is signal-free
+    # (BAM primary-alignment spans only), but it is computed over the production
+    # argmax assignment population (which may use the M2-tiebreak signal); see
+    # fulllen_fraction_drops.
+    fulllen_frac: float = -1.0
 
 
 def _exons_from_candidate(c: TranscriptCandidate) -> Tuple[Tuple[int, int], ...]:
@@ -171,6 +179,78 @@ def isoform_fraction_drops(
     return drops
 
 
+def _five_three(start: int, end: int, strand: str) -> Tuple[int, int]:
+    """(genomic 5' end, genomic 3' end) for a span on the given strand."""
+    if strand == "-":
+        return end, start
+    return start, end
+
+
+def compute_fulllen_frac(
+    qr: QuantResult,
+    read_ends: Dict[str, Tuple[int, int]],
+    window: int,
+    min_reads: int,
+) -> float:
+    """Fraction of qr's assigned reads that are full-length wrt qr's ends.
+
+    A read counts as full-length when its genomic 5' end is within ``window``
+    bp of the candidate's genomic 5' AND its genomic 3' end is within ``window``
+    bp of the candidate's genomic 3' (both strand-aware). ``read_ends`` maps a
+    read id to its primary-alignment ``(ref_start, ref_end)`` genomic span.
+
+    Returns the full-length fraction in [0, 1], or ``-1.0`` when fewer than
+    ``min_reads`` of qr's assigned reads carry a genomic span (unreachable ->
+    never dropped by the filter).
+    """
+    c5, c3 = _five_three(qr.start, qr.end, qr.strand)
+    full = 0
+    n_used = 0
+    for rid in qr.assigned_read_ids:
+        sp = read_ends.get(rid)
+        if sp is None:
+            continue
+        r5, r3 = _five_three(sp[0], sp[1], qr.strand)
+        n_used += 1
+        if abs(r5 - c5) <= window and abs(r3 - c3) <= window:
+            full += 1
+    if n_used < min_reads:
+        return -1.0
+    return full / n_used
+
+
+def fulllen_fraction_drops(
+    results: Dict[str, QuantResult],
+    min_fraction: float,
+) -> set:
+    """Return candidate_ids to drop by the full-length end-coherence filter.
+
+    Drop a NOVEL multi-exon (>=2 intron, i.e. >=3 exon) transcript whose stored
+    ``fulllen_frac`` is in ``[0, min_fraction)``. ``fulllen_frac < 0`` (exempt /
+    unreachable / never scored) is NEVER dropped. GTF-passthrough
+    (``source="gtf"``), fusion, and single-exon (mono) candidates are EXEMPT.
+    ``min_fraction <= 0`` disables the filter (returns an empty set).
+
+    This is the FLAIR/TALON-style full-length read-support filter. It is
+    ORTHOGONAL to ``isoform_fraction_drops`` (locus-relative abundance): on the
+    competitor metric the two stack cleanly. SIRV WARNING: the SIRV-tuned
+    default (0.1) drops most reachable novel-multi candidates because synthetic
+    SIRV lacks a real 5'-truncated isoform tail — re-tune or disable on real
+    data.
+    """
+    if min_fraction <= 0.0:
+        return set()
+    drops: set = set()
+    for qr in results.values():
+        if qr.source != "novel":
+            continue
+        if len(qr.exons) < 3:  # require >=2 introns (the AUC-measured population)
+            continue
+        if 0.0 <= qr.fulllen_frac < min_fraction:
+            drops.add(qr.candidate_id)
+    return drops
+
+
 def compute_tpm(
     results: Dict[str, QuantResult],
     transcript_lengths: Dict[str, int],
@@ -244,12 +324,19 @@ def aggregate_across_intervals(
                     "breakpoint_left": qr.breakpoint_left,
                     "breakpoint_right": qr.breakpoint_right,
                     "max_R": 0.0,
+                    "fulllen_frac": -1.0,
                 }
             a = agg[qr.candidate_id]
             # Preserve max EM responsibility across intervals (a candidate's
             # max_R is the highest single-read responsibility it ever sees).
             if qr.max_R > a["max_R"]:
                 a["max_R"] = qr.max_R
+            # Preserve the highest (most full-length, recall-safe) fulllen_frac
+            # across intervals. -1.0 (unreachable/never scored) stays -1.0 only
+            # if every interval is unreachable, so a candidate is never dropped
+            # on the strength of an interval that couldn't score it.
+            if qr.fulllen_frac > a["fulllen_frac"]:
+                a["fulllen_frac"] = qr.fulllen_frac
             # P0-6: track per-interval abundance and dedup read IDs across
             # intervals. Naive sum double-counts reads that overlap interval
             # boundaries; we instead average per-read abundance across the
@@ -329,6 +416,7 @@ def aggregate_across_intervals(
             breakpoint_right=a["breakpoint_right"],
             assigned_read_ids=tuple(sorted(unique_ids)),
             max_R=a["max_R"],
+            fulllen_frac=a["fulllen_frac"],
         )
 
     return result

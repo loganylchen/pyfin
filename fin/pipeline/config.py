@@ -46,6 +46,30 @@ class PipelineConfig:
     # transcriptomes.
     min_isoform_fraction: float = 0.01
 
+    # Full-length end-coherence FILTER (FLAIR/TALON-style full-length read
+    # support). Drop a NOVEL multi-exon (>=2 intron) transcript whose fraction
+    # of full-length assigned reads is below `min_fulllen_fraction`. A read is
+    # full-length wrt candidate C when its genomic 5' AND 3' alignment ends are
+    # BOTH within `fulllen_window_bp` of C's genomic 5'/3' ends (strand-aware).
+    # Signal-free: uses BAM primary-alignment spans only (no f5c/f5c_rna).
+    # Applied as a post-quant candidate FILTER (never inside EM/assignment),
+    # over the argmax assignment population where it is non-circular (discovery
+    # groups support reads by 3' end, so it must NOT be applied at candidate
+    # generation). It is ORTHOGONAL to min_isoform_fraction and stacks with it.
+    # GTF-passthrough, fusion, and single-exon candidates are EXEMPT. Candidates
+    # with fewer than `fulllen_min_reads` assigned reads carrying a genomic span
+    # (unreachable), and candidates on the legacy EM path (fulllen never
+    # computed), keep the -1.0 sentinel and are NEVER dropped. Set 0.0 to
+    # disable. SIRV WARNING: the default 0.1 is SIRV-tuned (it drops ~74% of
+    # reachable novel-multi candidates "for free" because synthetic SIRV lacks a
+    # real 5'-truncated minor-isoform tail). On a real dRNA transcriptome
+    # (sequenced 3'->5', genuine 5'-truncated isoforms) this same value would
+    # cost recall — re-tune or disable on real data. Configurable; never
+    # hardcode a SIRV-tuned threshold for production real-data runs.
+    min_fulllen_fraction: float = 0.1
+    fulllen_window_bp: int = 25          # bp tolerance for a read end to count as full-length
+    fulllen_min_reads: int = 4           # min assigned reads-with-span to score (else unreachable)
+
     # Canonical-motif alternative expansion: scan ±N bp around each read's
     # CIGAR-derived junction for GT-AG and emit additional chains.
     # Stage C: ea extended canonical SEARCH. For each read-derived novel
