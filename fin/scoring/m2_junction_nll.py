@@ -526,7 +526,8 @@ def m2_resolve_tie(
     flank: int = 2,
     f5c_aligner=None,
     mappy_aligners: Optional[List] = None,
-) -> Tuple[Optional[int], float]:
+    return_scored: bool = False,
+) -> Tuple:
     """Resolve an M1 tie with the validated junction-window mean-NLL metric.
 
     Builds the transcript-frame two-sided junction discrimination window for the
@@ -548,9 +549,15 @@ def m2_resolve_tie(
             when None; pass one to reuse across reads in a loop).
         mappy_aligners: optional list aligned with ``tied_cands`` of pre-built
             ``mappy.Aligner`` (built lazily when None).
+        return_scored: when True, append a third element to the returned tuple:
+            the sorted (best-first) list of LOCAL indices into ``tied_cands``
+            that eventalign could score in the window. Enables the caller's
+            score-gated fallback split (assign the read only to scored siblings;
+            empty list -> nothing scored -> caller keeps its full default split).
 
     Returns:
-        ``(best_local_idx, margin)``:
+        ``(best_local_idx, margin)`` (or ``(best_local_idx, margin, scored_idxs)``
+        when ``return_scored``):
           * ``best_local_idx`` indexes ``tied_cands``; ``None`` when M2 cannot
             decide (fewer than 2 candidates, no discrimination window, or no
             candidate has signal in the window) -> caller should fall back to its
@@ -558,13 +565,16 @@ def m2_resolve_tie(
           * ``margin`` = runner-up NLL - best NLL (>= 0); ``inf`` when exactly one
             tied candidate has window signal; ``0.0`` when ``best_local_idx`` is
             None. Larger = more confident; gate with ``margin >= threshold``.
+          * ``scored_idxs`` (only with ``return_scored``): local indices of the
+            tied candidates with finite window NLL, sorted best (lowest NLL)
+            first. Empty when none scored.
     """
     if len(tied_cands) < 2 or not read_seq:
-        return None, 0.0
+        return (None, 0.0, []) if return_scored else (None, 0.0)
 
     gset = class_junction_window_set(tied_cands, flank=flank, k=junction_k)
     if not gset:
-        return None, 0.0
+        return (None, 0.0, []) if return_scored else (None, 0.0)
 
     if f5c_aligner is None:
         import f5c_rna
@@ -592,9 +602,10 @@ def m2_resolve_tie(
             scored.append((idx, nll))
 
     if not scored:
-        return None, 0.0
+        return (None, 0.0, []) if return_scored else (None, 0.0)
     scored.sort(key=lambda t: t[1])
     best_idx = scored[0][0]
-    if len(scored) == 1:
-        return best_idx, float("inf")
-    return best_idx, scored[1][1] - scored[0][1]
+    margin = float("inf") if len(scored) == 1 else scored[1][1] - scored[0][1]
+    if return_scored:
+        return best_idx, margin, [idx for idx, _ in scored]
+    return best_idx, margin

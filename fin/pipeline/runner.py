@@ -1104,11 +1104,12 @@ class PipelineRunner:
 
                 tied_cands = [cand_list[j] for j in tied]
                 tied_aligners = [aligners[j] for j in tied]
-                best_local, margin = m2_resolve_tie(
+                best_local, margin, scored_local = m2_resolve_tie(
                     rid, seq, tied_cands, self.config.signal_path,
                     pore=self.config.f5c_rna_pore,
                     junction_k=self.config.m2_tiebreak_junction_k,
                     f5c_aligner=m2_f5c, mappy_aligners=tied_aligners,
+                    return_scored=True,
                 )
                 if best_local is not None and margin >= self.config.m2_tiebreak_margin:
                     j = tied[best_local]
@@ -1118,6 +1119,14 @@ class PipelineRunner:
                         max_weight[j] = 1.0
                     n_m2_override += 1
                     continue
+                # Score-gated fallback split (mk1): restrict the 1/K split to the
+                # candidates eventalign could score. If none scored, keep the full
+                # tied set (== M1). Recall-safe: the read is never dropped.
+                if (
+                    getattr(self.config, "m2_tie_scoregate_split", False)
+                    and scored_local
+                ):
+                    tied = [tied[k] for k in scored_local]
             w = 1.0 / len(tied)
             for j in tied:
                 counts[j] += w

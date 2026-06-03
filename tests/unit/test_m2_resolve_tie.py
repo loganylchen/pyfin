@@ -141,3 +141,54 @@ def test_none_mappy_aligner_skips_candidate(monkeypatch):
     # b is skipped (None aligner) -> only a scored -> infinite margin.
     assert idx == 0
     assert math.isinf(margin)
+
+
+# --- return_scored: score-gated fallback split (mk1) ----------------------
+
+
+def test_return_scored_both_scored_best_first(monkeypatch):
+    # Both candidates score; scored_idxs is sorted best (lowest NLL) first.
+    a, b = _wobble_pair()
+    _patch_scores(monkeypatch, {"a": (2.5, 5), "b": (1.0, 5)})
+    idx, margin, scored = m2.m2_resolve_tie(
+        "r0", "ACGT", [a, b], "/x.blow5",
+        f5c_aligner=object(), mappy_aligners=[object(), object()],
+        return_scored=True,
+    )
+    assert idx == 1
+    assert margin == 1.5
+    assert scored == [1, 0]
+
+
+def test_return_scored_mixed_excludes_unscored(monkeypatch):
+    # Only a scores -> scored_idxs == [0]; b (no events) is excluded for this read.
+    a, b = _wobble_pair()
+    _patch_scores(monkeypatch, {"a": (1.2, 7), "b": (float("nan"), 0)})
+    idx, margin, scored = m2.m2_resolve_tie(
+        "r0", "ACGT", [a, b], "/x.blow5",
+        f5c_aligner=object(), mappy_aligners=[object(), object()],
+        return_scored=True,
+    )
+    assert idx == 0
+    assert math.isinf(margin)
+    assert scored == [0]
+
+
+def test_return_scored_none_scored_empty_list(monkeypatch):
+    # No candidate scores -> (None, 0.0, []) so caller keeps its full split (M1).
+    a, b = _wobble_pair()
+    _patch_scores(monkeypatch, {"a": (float("nan"), 0), "b": (float("nan"), 0)})
+    out = m2.m2_resolve_tie(
+        "r0", "ACGT", [a, b], "/x.blow5",
+        f5c_aligner=object(), mappy_aligners=[object(), object()],
+        return_scored=True,
+    )
+    assert out == (None, 0.0, [])
+
+
+def test_return_scored_early_return_has_empty_list():
+    # Early returns (no window) also yield an empty scored list under the flag.
+    a, b = _wobble_pair()
+    assert m2.m2_resolve_tie(
+        "r0", "", [a, b], "/x.blow5", return_scored=True
+    ) == (None, 0.0, [])

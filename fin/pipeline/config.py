@@ -183,6 +183,15 @@ class PipelineConfig:
     m2_tiebreak: bool = True
     m2_tiebreak_junction_k: int = 10
     m2_tiebreak_margin: float = 1e-9
+    # Score-gated fallback split (mk1). On a tie that M2 does NOT win
+    # outright (margin < m2_tiebreak_margin), restrict the 1/K split to the
+    # candidates eventalign could actually score in the junction window; the
+    # candidates with NO window signal are excluded for THIS read. If NONE
+    # scored, keep the full 1/K split over all tied candidates (== M1). The read
+    # is never dropped, so this is recall-safe. On SIRV it is a no-op (only ~2
+    # "mixed" reads; verified gffcompare == baseline); kept ON as the principled
+    # per-read rule that may matter on real dRNA. Configurable.
+    m2_tie_scoregate_split: bool = True
     # Scoring method for the R1 (enable_signal=False) path.
     # "mappy" = M1 mappy AS-gap distance (default).
     # "f5c_rna" = M2 f5c_rna match score distance (pure signal scoring).
