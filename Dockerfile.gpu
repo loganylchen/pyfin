@@ -8,6 +8,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget build-essential zlib1g-dev libhdf5-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Install krill signal backend (in-memory eventalign + DTW) plus signal IO deps.
+# krill ships CPU-only manylinux wheels (pip picks cp310 for ubuntu22.04's python
+# 3.10), so DTW (fin._dtw delegates to krill) runs on CPU here — GPU-accelerated
+# DTW would need a CUDA krill build, which the index does not yet publish. The EM
+# step is still GPU-accelerated via cupy below. --no-deps keeps the custom index
+# from resolving numpy/etc (those arrive with pyfin).
+RUN pip3 install --no-cache-dir pyslow5 pyfastx \
+    && pip3 install --no-cache-dir "krill==0.1.5" --no-deps \
+        --index-url https://loganylchen.github.io/krill-dist/simple/
+
 # Install pyfin and CUDA-12 prebuilt cupy wheel (avoids 30 min source build)
 WORKDIR /app
 COPY . .
@@ -17,14 +27,6 @@ RUN pip3 install --no-cache-dir cupy-cuda12x numba \
 # Record Python version for runtime stage verification
 RUN python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' \
     > /tmp/python_version.txt
-
-# Fetch prebuilt f5c CPU binary (used for both CPU and GPU images)
-ARG F5C_VERSION=1.5
-RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v${F5C_VERSION}/f5c-v${F5C_VERSION}-binaries.tar.gz" \
-        -O /tmp/f5c.tar.gz \
-    && tar -xzf /tmp/f5c.tar.gz -C /tmp \
-    && install -m 0755 "/tmp/f5c-v${F5C_VERSION}/f5c_x86_64_linux" /usr/local/bin/f5c \
-    && rm -rf /tmp/f5c.tar.gz "/tmp/f5c-v${F5C_VERSION}"
 
 # --- Runtime stage ---
 FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
@@ -38,7 +40,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /tmp/python_version.txt /tmp/python_version.txt
-COPY --from=builder /usr/local/bin/f5c /usr/local/bin/f5c
 
 # Copy installed Python packages (Ubuntu 22.04 ships Python 3.10)
 COPY --from=builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/python3.10/dist-packages

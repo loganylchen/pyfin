@@ -5,21 +5,21 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential zlib1g-dev libhdf5-dev \
-    wget ca-certificates \
+    wget ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
+
+# Install krill signal backend (in-memory eventalign + DTW, CPU) plus signal IO
+# deps. krill replaces the legacy f5c_rna wheel and f5c CLI binary; pip picks the
+# cp311 manylinux wheel to match python:3.11-slim. --no-deps keeps the custom
+# index from resolving numpy/etc (those arrive with the pyfin install below).
+RUN pip install --no-cache-dir pyslow5 pyfastx \
+    && pip install --no-cache-dir "krill==0.1.5" --no-deps \
+        --index-url https://loganylchen.github.io/krill-dist/simple/
 
 # Install pyfin (CPU only — no nvcc, so setup.py skips CUDA extension)
 WORKDIR /app
 COPY . .
 RUN pip install --no-cache-dir .
-
-# Fetch prebuilt f5c CPU binary
-ARG F5C_VERSION=1.5
-RUN wget -q "https://github.com/hasindu2008/f5c/releases/download/v${F5C_VERSION}/f5c-v${F5C_VERSION}-binaries.tar.gz" \
-        -O /tmp/f5c.tar.gz \
-    && tar -xzf /tmp/f5c.tar.gz -C /tmp \
-    && install -m 0755 "/tmp/f5c-v${F5C_VERSION}/f5c_x86_64_linux" /usr/local/bin/f5c \
-    && rm -rf /tmp/f5c.tar.gz "/tmp/f5c-v${F5C_VERSION}"
 
 # --- Runtime stage ---
 FROM python:3.11-slim
@@ -31,7 +31,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin/f5c /usr/local/bin/f5c
 COPY --from=builder /usr/local/bin/fin /usr/local/bin/fin
 
 WORKDIR /data
