@@ -1,7 +1,7 @@
 """Unit tests for fin/scoring/m2_junction_nll.py pure-logic helpers.
 
 The signal path (``read_cand_mean_nll`` GTF<NOV behaviour) is validated
-end-to-end against real f5c_rna + blow5 data in the Docker ablation run; these
+end-to-end against real krill + blow5 data in the Docker ablation run; these
 tests cover the coordinate / diff-window logic that has no external deps.
 """
 from __future__ import annotations

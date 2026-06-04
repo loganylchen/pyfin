@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -26,93 +24,11 @@ from fin.candidates.dataclasses import CandidateSet
 from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
 from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
 from fin.pipeline.config import PipelineConfig
-from fin.scoring.composite import (
-    derive_prior_weights,
-    populate_quant_scores,
-    score_candidates_composite,
-    subsample_reads_for_dtw,
-)
-from fin.scoring.diff_region_dtw import compute_diff_region_m4
 from fin.scoring.em_inputs import build_em_matrices
-from fin.scoring.eventalign_parser import (
-    build_distance_matrix,
-    parse_eventalign_tsv,
-)
-from fin.scoring.external_tools import ExternalToolPaths, ExternalToolRunner
+from fin.scoring.krill_tiebreak import krill_tiebreak
 from fin.scoring.mappy_distance import compute_mappy_distance
-from fin.scoring.signal_dtw import compute_read_to_read_dtw, extract_signal_segments
-from fin.scoring.signal_tiebreak import signal_tiebreak
-from fin.scoring.fake_fastq_tiebreak import fake_fastq_tiebreak
-from fin.scoring.f5c_rna_tiebreak import f5c_rna_tiebreak
 
 logger = logging.getLogger(__name__)
-
-
-def _project_responsibilities_full(
-    R_sub: np.ndarray,
-    sub_read_ids: List[str],
-    full_read_ids: List[str],
-    dist_read_to_tx_full: np.ndarray,
-    sigma: float,
-    prior_weights: Optional[np.ndarray],
-) -> tuple:
-    """Project EM responsibilities from subsampled to full read set.
-
-    Subsampled reads keep their EM responsibilities (which include coherence).
-    Non-subsampled reads get a coherence-free softmax over the full d_tx using
-    the same sigma + (optional) prior. This restores correct quantification
-    when DTW subsampling is in effect.
-    """
-    n_full = len(full_read_ids)
-    n_tx = R_sub.shape[1]
-    sub_index = {rid: i for i, rid in enumerate(sub_read_ids)}
-
-    R_full = np.zeros((n_full, n_tx), dtype=R_sub.dtype)
-
-    # Coherence-free softmax for non-subsampled reads (numerically stable).
-    d_tx = dist_read_to_tx_full
-    d_min = d_tx.min(axis=1, keepdims=True)
-    R_softmax = np.exp(-(d_tx - d_min) / max(sigma, 1e-6))
-    if prior_weights is not None:
-        R_softmax = R_softmax * np.asarray(prior_weights).reshape(1, -1)
-    row_sums = np.maximum(R_softmax.sum(axis=1, keepdims=True), 1e-10)
-    R_softmax = R_softmax / row_sums
-
-    for i, rid in enumerate(full_read_ids):
-        si = sub_index.get(rid)
-        if si is not None:
-            R_full[i, :] = R_sub[si, :]
-        else:
-            R_full[i, :] = R_softmax[i, :]
-
-    hard_full = np.argmax(R_full, axis=1)
-    return R_full, hard_full
-
-
-@dataclass
-class _IntervalBuildState:
-    """Intermediate artifacts that are independent of em_matrix_subset.
-
-    Built once per interval; reused across all EM-subset variants so the
-    expensive Phase 1-3 work (candidate discovery, eventalign, DTW, mappy)
-    is not repeated 7x for a 7-subset ablation sweep.
-    """
-
-    interval: GenomicInterval
-    work_dir: Path
-    candidate_set: CandidateSet
-    read_ids: List[str]
-    candidate_ids: List[str]
-    dtw_read_ids: List[str]
-    dist_read_to_tx: np.ndarray         # m2 (eventalign), rows=dtw_read_ids
-    dist_read_to_tx_full: np.ndarray    # m2 over full read set (for projection)
-    dist_read_to_read: np.ndarray       # m3 (DTW or diff-region)
-    m1: Optional[np.ndarray]            # mappy distance, built lazily
-    composite_scores: list
-    combined_scores_arr: np.ndarray
-    sigma_use: float
-    em_max_iter_use: int
-    scores_by_pair: Optional[dict] = None  # (read, cand) → ReadCandidateScore
 
 
 class PipelineRunner:
@@ -123,26 +39,13 @@ class PipelineRunner:
         self._gtf_reader = None
         self._genome_fasta = None
         self._signal_reader = None
-        self._tool_runner = None
 
     def setup(self):
-        """Validate tools, open file handles, load references."""
-        # Validate external tools
-        tool_paths = ExternalToolPaths(f5c=self.config.f5c_path)
-        missing = tool_paths.validate()
-        if missing:
-            raise RuntimeError(f"Missing external tools: {', '.join(missing)}")
+        """Open file handles and load references.
 
-        # Create tool runner and build f5c index ONCE with all reads
-        self._tool_runner = ExternalToolRunner(
-            fastq_path=self.config.fastq_path,
-            signal_path=self.config.signal_path,
-            signal_format=self.config.signal_format,
-            work_dir=self.config.work_dir,
-            tools=tool_paths,
-        )
-        self._tool_runner.build_f5c_index()
-
+        All signal scoring is in-memory krill (no f5c CLI / external-tool
+        validation / f5c index build required).
+        """
         # Load GTF
         if self.config.gtf_path:
             from fin.io.io_gtf import GTFReader
@@ -195,75 +98,6 @@ class PipelineRunner:
             output_gtf=self.config.output_gtf,
             output_tsv=self.config.output_tsv,
         )
-
-    def run_subsets(
-        self,
-        subsets: List[str],
-        output_paths: Dict[str, Tuple[Optional[str], Optional[str]]],
-    ) -> Dict[str, Dict[str, QuantResult]]:
-        """Run all intervals once, branch EM/quant per subset (matrix reuse).
-
-        For each interval the expensive Phase 1-4 work (candidates, eventalign,
-        DTW, mappy, composite scoring) is computed once via
-        ``_build_interval_state``. Then for each subset in ``subsets`` we run
-        only Phases 5-6 (``_em_score_and_quantify``). After all intervals are
-        processed, per-subset results are aggregated, filtered, and written.
-
-        Args:
-            subsets: list of em_matrix_subset values, e.g. ['m2+m3', 'all'].
-            output_paths: subset -> (gtf_path or None, tsv_path or None).
-
-        Returns:
-            subset -> aggregated quant results dict.
-        """
-        result = generate_isolated_intervals(
-            self.config.bam_path,
-            gtf_path=self.config.gtf_path,
-            max_gap=self.config.max_gap,
-            max_reads=self.config.max_reads,
-        )
-        intervals = result["intervals"]
-        logger.info(
-            "run_subsets: %d intervals × %d subsets = %d EM passes",
-            len(intervals), len(subsets), len(intervals) * len(subsets),
-        )
-
-        per_subset_lists: Dict[str, List[List[QuantResult]]] = {
-            s: [] for s in subsets
-        }
-
-        for i, interval in enumerate(intervals):
-            logger.info(
-                "Building state for interval %d/%d: %s",
-                i + 1, len(intervals), interval.region_string,
-            )
-            state = self._build_interval_state(interval)
-            if state is None:
-                continue
-            if isinstance(state, list):
-                # R1 mappy-argmax bypass: same result for every subset.
-                for s in subsets:
-                    per_subset_lists[s].append(state)
-                continue
-            for s in subsets:
-                logger.info(
-                    "  subset=%s EM/quant for %s",
-                    s, interval.region_string,
-                )
-                qr = self._em_score_and_quantify(
-                    state, s, r_suffix=s.replace("+", "_")
-                )
-                if qr:
-                    per_subset_lists[s].append(qr)
-
-        finalized: Dict[str, Dict[str, QuantResult]] = {}
-        for s in subsets:
-            agg = aggregate_across_intervals(per_subset_lists[s])
-            out_gtf, out_tsv = output_paths.get(s, (None, None))
-            finalized[s] = self._finalize_and_write(
-                agg, output_gtf=out_gtf, output_tsv=out_tsv
-            )
-        return finalized
 
     def _finalize_and_write(
         self,
@@ -457,25 +291,10 @@ class PipelineRunner:
     def process_interval(
         self, interval: GenomicInterval
     ) -> Optional[List[QuantResult]]:
-        """Process a single interval; returns QuantResults for the configured subset."""
-        state = self._build_interval_state(interval)
-        if state is None:
-            return None
-        if isinstance(state, list):
-            # R1 mappy-argmax path bypasses EM entirely.
-            return state
-        subset = getattr(self.config, "em_matrix_subset", "m2+m3")
-        return self._em_score_and_quantify(state, subset)
-
-    def _build_interval_state(
-        self, interval: GenomicInterval
-    ) -> "Optional[_IntervalBuildState | List[QuantResult]]":
-        """Run Phases 1-4 (subset-independent) and return reusable state.
+        """Discover candidates and quantify a single interval via ``quant_mode``.
 
         Returns:
-            - _IntervalBuildState for the normal EM path.
-            - List[QuantResult] when R1 mappy-argmax bypass is engaged
-              (enable_signal=False) — caller should treat it as a finished result.
+            - List[QuantResult] from the dispatched quant_mode engine.
             - None when the interval has no candidates or no reads.
         """
         work_dir = Path(self.config.work_dir) / interval.region_string.replace(":", "_").replace("-", "_")
@@ -524,402 +343,30 @@ class PipelineRunner:
         read_ids = sorted(candidate_set.read_ids)
         candidate_ids = candidate_set.candidate_ids()
 
-        # R1 ablation: enable_signal=False → skip signal/EM, use mappy argmax.
-        if not getattr(self.config, "enable_signal", True):
-            results = self._process_interval_mappy_argmax(
-                candidate_set, read_ids, interval
-            )
-            # Full-length end-coherence: compute fulllen_frac per candidate over
-            # its production argmax-assigned reads (the non-circular population;
-            # the fulllen METRIC itself uses BAM spans only — no signal). Gated
-            # by the same switches as the drop in _finalize_and_write so a
-            # filter-disabled run (enable_score_filter=False or
-            # min_fulllen_fraction<=0) pays no BAM-fetch cost and leaves the
-            # -1.0 sentinel untouched.
-            _filter_on = getattr(self.config, "enable_score_filter", True)
-            if (
-                results
-                and _filter_on
-                and getattr(self.config, "min_fulllen_fraction", 0.0) > 0.0
-            ):
-                self._annotate_fulllen_frac(results, interval)
-            return results
-
-        # --- Phase 2: Per-candidate scoring (mappy + f5c eventalign) ---
-        tsv_paths = self._tool_runner.score_candidates(candidate_set, work_dir)
-
-        # Merge per-candidate eventalign results
-        candidate_lengths = {
-            c.candidate_id: len(c.sequence) for c in candidate_set.candidates
-        }
-        all_scores = []
-        for tsv_path in tsv_paths:
-            scores = parse_eventalign_tsv(str(tsv_path), candidate_lengths)
-            all_scores.extend(scores)
-
-        # Build scores lookup for signal tiebreak (keyed by (read, cand))
-        scores_by_pair = {
-            (s.read_name, s.candidate_id): s for s in all_scores
-        }
-
-        # DTW subsampling (m1): uniformly subsample reads when above cap.
-        dtw_read_ids = subsample_reads_for_dtw(
-            read_ids, self.config.max_reads_per_interval_for_dtw
-        )
-        if len(dtw_read_ids) != len(read_ids):
-            logger.info(
-                "Interval %s: subsampling DTW reads %d -> %d",
-                interval.region_string,
-                len(read_ids),
-                len(dtw_read_ids),
-            )
-
-        # Read-to-tx distances (aligned with dtw_read_ids for m3 consistency).
-        dist_read_to_tx = build_distance_matrix(
-            all_scores, dtw_read_ids, candidate_ids,
-            metric=self.config.m2_metric,
-        )
-        # Also build the full-read d_tx so quantification can include
-        # non-subsampled reads (P0-1: prevent abundance underestimation when
-        # max_reads_per_interval_for_dtw caps the EM input).
-        dist_read_to_tx_full = build_distance_matrix(
-            all_scores, read_ids, candidate_ids,
-            metric=self.config.m2_metric,
-        )
-
-        # --- Phase 3: Signal DTW (read-to-read) ---
-        # m4_source controls which read-to-read matrix is used (AC1).
-        m4_src = getattr(self.config, "m4_source", "whole_read")
-        if m4_src == "none":
-            # AC5: zero matrix (no coherence); not None so EM shape checks pass.
-            dist_read_to_read = np.zeros(
-                (len(dtw_read_ids), len(dtw_read_ids)), dtype=np.float32
-            )
-        elif m4_src == "diff_region":
-            # Collect per-event records needed by diff-region DTW (AC7-pre).
-            scores_with_events = []
-            cand_lengths_map = {
-                c.candidate_id: len(c.sequence) for c in candidate_set.candidates
-            }
-            for tsv_path in tsv_paths:
-                ev_scores = parse_eventalign_tsv(
-                    str(tsv_path), cand_lengths_map, collect_events=True
-                )
-                scores_with_events.extend(ev_scores)
-            scores_by_pair = {
-                (s.read_name, s.candidate_id): s for s in scores_with_events
-            }
-            from fin.ablation.runner import _nan_to_row_mean
-
-            m4_raw = compute_diff_region_m4(
-                read_ids=dtw_read_ids,
-                candidates=candidate_set.candidates,
-                scores_by_pair=scores_by_pair,
-                signal_reader=self._signal_reader,
-                interval_start=interval.start,
-                interval_end=interval.end,
-                signal_format=self.config.signal_format,
-                use_gpu=self.config.use_gpu,
-                normalize=self.config.signal_normalize,
-            )
-            # AC8: sanitize NaN rows before EM.
-            dist_read_to_read = _nan_to_row_mean(m4_raw)
+        # Quantification engine dispatch (quant_mode). All three modes are
+        # krill-only (no f5c CLI).
+        quant_mode = getattr(self.config, "quant_mode", "argmax")
+        if quant_mode == "argmax":
+            results = self._quant_argmax_keep(candidate_set, read_ids, interval)
+        elif quant_mode == "m1_em":
+            results = self._quant_m1_em(candidate_set, read_ids, interval)
+        elif quant_mode == "m2_em":
+            results = self._quant_m2_em(candidate_set, read_ids, interval)
         else:
-            # Default: whole-read signal DTW.
-            segments = extract_signal_segments(
-                all_scores,
-                self._signal_reader,
-                signal_format=self.config.signal_format,
-                normalize=self.config.signal_normalize,
-            )
-            dist_read_to_read = compute_read_to_read_dtw(
-                segments, dtw_read_ids, use_gpu=self.config.use_gpu
-            )
-
-        # m3 alignment check: both distance matrices share the same read axis.
-        if not (
-            dist_read_to_tx.shape[0]
-            == dist_read_to_read.shape[0]
-            == len(dtw_read_ids)
-        ):
-            raise ValueError(
-                f"Read axis mismatch: dist_read_to_tx rows={dist_read_to_tx.shape[0]}, "
-                f"dist_read_to_read rows={dist_read_to_read.shape[0]}, "
-                f"dtw_read_ids={len(dtw_read_ids)}"
-            )
-        if dist_read_to_read.shape[0] != dist_read_to_read.shape[1]:
-            raise ValueError("dist_read_to_read must be square")
-
-        n_reads = len(dtw_read_ids)
-        n_tx = len(candidate_ids)
-
-        # --- Phase 4: Composite scoring (uniform R seed) ---
-        R_uniform = np.full((n_reads, n_tx), 1.0 / max(n_tx, 1))
-        composite_scores = score_candidates_composite(
-            candidates=candidate_set.candidates,
-            dist_read_to_tx=dist_read_to_tx,
-            dist_read_to_read=dist_read_to_read,
-            R=R_uniform,
-            alpha=self.config.score_alpha,
-            use_gpu=self.config.use_gpu,
-        )
-        combined_scores_arr = np.array(
-            [s.combined for s in composite_scores], dtype=float
-        )
-
-        # Data-adaptive sigma (P0-α): with per-event normalized d_tx the
-        # absolute scale is dataset-dependent (~0.5-5 nats). A fixed sigma=1.0
-        # often collapses R to one-hot, defeating EM. Use the median per-read
-        # range as a robust scale; clip into [min_sigma, em_sigma_max].
-        if n_tx >= 2 and n_reads > 0:
-            d_max = dist_read_to_tx.max(axis=1)
-            d_min = dist_read_to_tx.min(axis=1)
-            adaptive = float(np.median(d_max - d_min))
-            sigma_use = float(np.clip(
-                adaptive if adaptive > 0 else self.config.em_sigma,
-                getattr(self.config, "em_sigma_min", 0.05),
-                getattr(self.config, "em_sigma_max", 50.0),
-            ))
-        else:
-            sigma_use = self.config.em_sigma
-
-        # R2 ablation: em_max_iter_override=1 forces single-step EM.
-        em_max_iter_use = (
-            self.config.em_max_iter_override
-            if getattr(self.config, "em_max_iter_override", None) is not None
-            else self.config.em_max_iter
-        )
-
-        return _IntervalBuildState(
-            interval=interval,
-            work_dir=work_dir,
-            candidate_set=candidate_set,
-            read_ids=read_ids,
-            candidate_ids=list(candidate_ids),
-            dtw_read_ids=dtw_read_ids,
-            dist_read_to_tx=dist_read_to_tx,
-            dist_read_to_tx_full=dist_read_to_tx_full,
-            dist_read_to_read=dist_read_to_read,
-            m1=None,
-            composite_scores=composite_scores,
-            combined_scores_arr=combined_scores_arr,
-            sigma_use=sigma_use,
-            em_max_iter_use=em_max_iter_use,
-            scores_by_pair=scores_by_pair,
-        )
-
-    def _em_score_and_quantify(
-        self,
-        state: _IntervalBuildState,
-        subset: str,
-        r_suffix: Optional[str] = None,
-    ) -> List[QuantResult]:
-        """Phase 5+6: run EM with the chosen M-subset, then quantify.
-
-        Reuses everything in ``state`` so candidate discovery, eventalign,
-        DTW, and mappy are not recomputed across subsets.
-        """
-        # Prior is subset-independent (depends only on combined_scores_arr).
-        prior_weights: Optional[np.ndarray] = None
-        if self.config.use_prior:
-            prior_weights = derive_prior_weights(
-                state.combined_scores_arr,
-                len(state.candidate_ids),
-                self.config.prior_weight_cap,
-            )
-
-        # M-subset selector: m1 cached on state so a 7-subset sweep computes it once.
-        if "m1" in subset:
-            if state.m1 is None:
-                read_sequences = (
-                    getattr(state.candidate_set, "read_sequences", {}) or {}
-                )
-                state.m1 = compute_mappy_distance(
-                    read_sequences,
-                    state.candidate_set.candidates,
-                    state.dtw_read_ids,
-                )
-            m1 = state.m1
-        else:
-            m1 = np.zeros_like(state.dist_read_to_tx)
-
-        d_tx_em, d_rr_em, beta_use = build_em_matrices(
-            subset=subset,
-            m1=m1,
-            m2=state.dist_read_to_tx,
-            m3=state.dist_read_to_read,
-            em_beta=self.config.em_beta,
-            m2_norm=self.config.m2_norm,
-            m1m2_fusion=self.config.m1m2_fusion,
-        )
-
-        R, hard_assignments, _log_likelihoods = em_with_coherence(
-            dist_read_to_tx=d_tx_em,
-            dist_read_to_read=d_rr_em,
-            sigma=state.sigma_use,
-            beta=beta_use,
-            max_iter=state.em_max_iter_use,
-            tol=self.config.em_tol,
-            verbose=False,
-            use_gpu=self.config.use_gpu,
-            prior_weights=prior_weights,
-        )
-
-        # --- Phase 5.5: Signal tiebreak (optional) ---
+            raise ValueError(f"unknown quant_mode: {quant_mode!r}")
+        # Full-length end-coherence: compute fulllen_frac per candidate over its
+        # assigned reads (the non-circular population; the fulllen METRIC itself
+        # uses BAM spans only — no signal). Gated by the same switches as the
+        # drop in _finalize_and_write so a filter-disabled run pays no BAM-fetch
+        # cost and leaves the -1.0 sentinel untouched.
+        _filter_on = getattr(self.config, "enable_score_filter", True)
         if (
-            self.config.signal_tiebreak
-            and self.config.enable_signal
-            and state.scores_by_pair
+            results
+            and _filter_on
+            and getattr(self.config, "min_fulllen_fraction", 0.0) > 0.0
         ):
-            R = signal_tiebreak(
-                R=R,
-                read_ids=state.dtw_read_ids,
-                candidates=state.candidate_set.candidates,
-                scores_by_pair=state.scores_by_pair,
-                ambig_threshold=self.config.tiebreak_ambig_threshold,
-            )
-            hard_assignments = R.argmax(axis=1)
-
-        # --- Phase 5.6: Fake-FASTQ tiebreak (optional) ---
-        if (
-            self.config.fake_fastq_tiebreak
-            and self.config.enable_signal
-        ):
-            # Build read_seqs from BAM for the tiebreak
-            _tb_read_seqs = {}
-            with pysam.AlignmentFile(self.config.bam_path, "rb") as _tb_bam:
-                for _r in _tb_bam.fetch(
-                    state.interval.chrom, state.interval.start, state.interval.end
-                ):
-                    if _r.is_secondary or _r.is_supplementary:
-                        continue
-                    if _r.query_sequence and _r.query_name not in _tb_read_seqs:
-                        _tb_read_seqs[_r.query_name] = _r.query_sequence
-
-            R = fake_fastq_tiebreak(
-                R=R,
-                read_ids=state.dtw_read_ids,
-                read_seqs=_tb_read_seqs,
-                candidates=state.candidate_set.candidates,
-                signal_path=self.config.signal_path,
-                f5c_path=self.config.f5c_path,
-                ambig_threshold=self.config.tiebreak_ambig_threshold,
-            )
-            hard_assignments = R.argmax(axis=1)
-
-        # --- Phase 5.7: f5c_rna in-memory tiebreak (optional) ---
-        if self.config.f5c_rna_tiebreak:
-            _tb_read_seqs = {}
-            with pysam.AlignmentFile(self.config.bam_path, "rb") as _tb_bam:
-                for _r in _tb_bam.fetch(
-                    state.interval.chrom, state.interval.start, state.interval.end
-                ):
-                    if _r.is_secondary or _r.is_supplementary:
-                        continue
-                    if _r.query_sequence and _r.query_name not in _tb_read_seqs:
-                        _tb_read_seqs[_r.query_name] = _r.query_sequence
-
-            R = f5c_rna_tiebreak(
-                R=R,
-                read_ids=state.dtw_read_ids,
-                read_seqs=_tb_read_seqs,
-                candidates=state.candidate_set.candidates,
-                signal_path=self.config.signal_path,
-                pore=self.config.f5c_rna_pore,
-                ambig_threshold=self.config.tiebreak_ambig_threshold,
-            )
-            hard_assignments = R.argmax(axis=1)
-
-        # --- Phase 6: Quantification + score field population ---
-        if len(state.dtw_read_ids) == len(state.read_ids):
-            R_quant = R
-            hard_quant = hard_assignments
-            quant_read_ids = state.dtw_read_ids
-        else:
-            R_quant, hard_quant = _project_responsibilities_full(
-                R_sub=R,
-                sub_read_ids=state.dtw_read_ids,
-                full_read_ids=state.read_ids,
-                dist_read_to_tx_full=state.dist_read_to_tx_full,
-                sigma=state.sigma_use,
-                prior_weights=prior_weights,
-            )
-            quant_read_ids = state.read_ids
-
-        quant_results = quantify_transcripts(
-            R_quant, hard_quant, state.candidate_set.candidates, quant_read_ids
-        )
-        populate_quant_scores(quant_results, state.composite_scores)
-
-        for j, qr in enumerate(quant_results):
-            qr.max_R = float(R_quant[:, j].max()) if R_quant.shape[0] > 0 else 0.0
-
-        # --- Post-hoc M2 validation (option 5) ---
-        # After M1-based EM, check if M2 agrees with each read assignment.
-        # Discount abundance for candidates where M2 doesn't support.
-        if (
-            self.config.m2_posthoc
-            and self.config.enable_signal
-            and hasattr(state, "dist_read_to_tx_full")
-            and state.dist_read_to_tx_full is not None
-        ):
-            m2_full = state.dist_read_to_tx_full
-            top_k = self.config.m2_posthoc_top_k
-            n_reads_q = len(quant_read_ids)
-            for j, qr in enumerate(quant_results):
-                if qr.abundance <= 0:
-                    continue
-                assigned = np.where(hard_quant == j)[0]
-                if len(assigned) == 0:
-                    continue
-                n_supported = 0
-                for i in assigned:
-                    if i >= m2_full.shape[0]:
-                        n_supported += 1  # safety: count as supported
-                        continue
-                    m2_row = m2_full[i]
-                    m2_j = m2_row[j]
-                    if m2_j >= 1e5:
-                        continue  # no M2 data for this pair
-                    # Rank: how many valid candidates have lower M2 distance?
-                    valid_mask = m2_row < 1e5
-                    rank = int(np.sum(m2_row[valid_mask] < m2_j)) + 1
-                    n_valid = int(valid_mask.sum())
-                    k_use = min(top_k, max(1, n_valid // 3))
-                    if rank <= k_use:
-                        n_supported += 1
-                support_frac = n_supported / len(assigned) if len(assigned) > 0 else 1.0
-                old_ab = qr.abundance
-                qr.abundance *= support_frac
-                if support_frac < 1.0:
-                    logger.debug(
-                        "M2 posthoc: %s support=%.2f (%d/%d) abundance %.2f→%.2f",
-                        qr.candidate_id, support_frac, n_supported,
-                        len(assigned), old_ab, qr.abundance,
-                    )
-
-        if self.config.persist_R_matrix:
-            if r_suffix:
-                r_name = f"R_{r_suffix}.npy"
-                meta_name = f"R_{r_suffix}_meta.json"
-            else:
-                r_name = "R.npy"
-                meta_name = "R_meta.json"
-            np.save(str(state.work_dir / r_name), R_quant.astype(np.float32))
-            meta = {
-                "read_ids": list(quant_read_ids),
-                "candidate_ids": list(state.candidate_ids),
-                "interval_region": state.interval.region_string,
-                "sigma_used": state.sigma_use,
-                "subset": subset,
-                "was_subsampled": len(state.dtw_read_ids) != len(state.read_ids),
-                "n_reads_subsampled": len(state.dtw_read_ids),
-                "n_reads_full": len(state.read_ids),
-            }
-            with open(state.work_dir / meta_name, "w") as _f:
-                json.dump(meta, _f)
-
-        return quant_results
+            self._annotate_fulllen_frac(results, interval)
+        return results
 
     def _quant_argmax_first(
         self,
@@ -1047,21 +494,21 @@ class PipelineRunner:
         # best-AS across >=2 candidates, the validated junction-window mean-NLL
         # metric picks the single true wobble sibling and (if confident) takes the
         # read's FULL mass instead of the 1/K split. Lazily build a shared non-HMM
-        # f5c_rna aligner; auto-skip the whole leg if signal is absent.
-        m2_f5c = None
+        # krill aligner; auto-skip the whole leg if signal is absent.
+        m2_krill = None
         m2_on = bool(getattr(self.config, "m2_tiebreak", False)) and bool(
             self.config.signal_path
         )
         if m2_on:
             try:
-                import krill as f5c_rna
+                import krill
 
-                m2_f5c = f5c_rna.Aligner(
-                    pore=self.config.f5c_rna_pore, use_gpu=False,
+                m2_krill = krill.Aligner(
+                    pore=self.config.krill_pore, use_gpu=False,
                     hmm_confidence=False,
                 )
             except Exception as exc:  # signal stack unavailable -> keep 1/K split
-                logger.warning("M2 tiebreak disabled (f5c_rna init failed): %s", exc)
+                logger.warning("M2 tiebreak disabled (krill init failed): %s", exc)
                 m2_on = False
 
         counts = [0.0] * n_c
@@ -1106,9 +553,9 @@ class PipelineRunner:
                 tied_aligners = [aligners[j] for j in tied]
                 best_local, margin, scored_local = m2_resolve_tie(
                     rid, seq, tied_cands, self.config.signal_path,
-                    pore=self.config.f5c_rna_pore,
+                    pore=self.config.krill_pore,
                     junction_k=self.config.m2_tiebreak_junction_k,
-                    f5c_aligner=m2_f5c, mappy_aligners=tied_aligners,
+                    krill_aligner=m2_krill, mappy_aligners=tied_aligners,
                     return_scored=True,
                 )
                 if best_local is not None and margin >= self.config.m2_tiebreak_margin:
@@ -1203,250 +650,179 @@ class PipelineRunner:
                 qr, read_ends, window, min_reads
             )
 
-    def _process_interval_mappy_argmax(
+    def _adaptive_sigma(self, dist_read_to_tx: np.ndarray) -> float:
+        """Data-adaptive EM sigma: median per-read range of the read×tx distance,
+        clipped to [em_sigma_min, em_sigma_max]. Falls back to em_sigma.
+
+        With per-event-normalized krill distances the absolute scale is dataset-
+        dependent (~0.5-5 nats); a fixed sigma=1.0 often collapses R to one-hot.
+        """
+        n_reads, n_tx = dist_read_to_tx.shape
+        if n_tx >= 2 and n_reads > 0:
+            d_max = dist_read_to_tx.max(axis=1)
+            d_min = dist_read_to_tx.min(axis=1)
+            adaptive = float(np.median(d_max - d_min))
+            return float(np.clip(
+                adaptive if adaptive > 0 else self.config.em_sigma,
+                getattr(self.config, "em_sigma_min", 0.05),
+                getattr(self.config, "em_sigma_max", 50.0),
+            ))
+        return self.config.em_sigma
+
+    def _quant_m1_em(
         self,
         candidate_set: CandidateSet,
         read_ids: List[str],
         interval: GenomicInterval,
     ) -> Optional[List[QuantResult]]:
-        """R1 ablation: AS-weighted multi-mapping baseline (no signal, no EM).
+        """quant_mode='m1_em': EM seeded by the M1 mappy AS-gap distance (β=0,
+        no signal coherence). Pure-alignment soft assignment over krill-free
+        mappy distances."""
+        from fin.ablation.mappy_argmax import mappy_multimap_responsibilities
 
-        Each read distributes responsibility proportional to mappy alignment
-        score across all hit candidates (salmon/NanoCount-style). Returns a
-        list of QuantResult with abundance = fractional column-sum.
-        """
-        variant = getattr(self.config, "r1_variant", "argmax_keep")
+        cand_list = list(candidate_set.candidates)
+        read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
+        reads_iter = [(rid, read_sequences.get(rid, "")) for rid in read_ids]
+        reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
+        R_mm, kept_read_ids = mappy_multimap_responsibilities(reads_iter, cand_list)
+        if R_mm.size == 0:
+            return []
 
-        # M1-keep split (production default): assign each read to ALL its
-        # simultaneously-best-AS candidates, abundance split 1/K (read mass
-        # conserved). Mirrors harness _quant_tie(mode="split") == M1-split.
-        if variant == "argmax_keep":
-            return self._quant_argmax_keep(candidate_set, read_ids, interval)
-
-        # M1-first hard argmin: single best-AS pick per read, ties → lowest
-        # candidate index (GTF prior).
-        if variant == "argmax_first":
-            return self._quant_argmax_first(candidate_set, read_ids, interval)
-
-        from fin.ablation.mappy_argmax import (
-            mappy_multimap_responsibilities,
-            per_tx_counts_from_responsibilities,
+        read_seqs = {rid: seq for rid, seq in reads_iter}
+        n_reads_em = len(kept_read_ids)
+        n_cands_em = len(cand_list)
+        max_iter_em = (
+            self.config.em_max_iter_override
+            if self.config.em_max_iter_override is not None
+            else self.config.em_max_iter
         )
 
-        candidates = candidate_set.candidates
-        cand_list = list(candidates)
-        read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
-        reads_iter = [
-            (rid, read_sequences.get(rid, "")) for rid in read_ids
-        ]
-        reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
+        m1 = compute_mappy_distance(read_seqs, cand_list, kept_read_ids)
+        m2_dummy = np.zeros((n_reads_em, n_cands_em), dtype=np.float32)
+        m3_dummy = np.zeros((n_reads_em, n_reads_em), dtype=np.float32)
+        dist_read_to_tx, _, _ = build_em_matrices(
+            "m1", m1, m2_dummy, m3_dummy, em_beta=0.0,
+        )
+        dist_read_to_read = np.zeros((n_reads_em, n_reads_em), dtype=np.float32)
+        R, hard_assignments, _ = em_with_coherence(
+            dist_read_to_tx=dist_read_to_tx,
+            dist_read_to_read=dist_read_to_read,
+            sigma=self.config.em_sigma,
+            beta=0.0,
+            max_iter=max_iter_em,
+            tol=self.config.em_tol,
+            verbose=False,
+            use_gpu=self.config.use_gpu,
+        )
 
-        R_mm, kept_read_ids = mappy_multimap_responsibilities(reads_iter, cand_list)
-
-        if variant == "argmax_em" and R_mm.size > 0:
-            # R1c: real m1 mappy-edit-distance matrix as EM dist_read_to_tx
-            # (β=0, dist_read_to_read=zeros). Pure-alignment EM — no signal
-            # involved. m1 carries strictly more information than R_mm at
-            # this point: it preserves per-read AS gaps in score units rather
-            # than collapsing to normalized shares.
-            from fin.scoring.em_inputs import build_em_matrices
-            from fin.scoring.mappy_distance import compute_mappy_distance
-
-            read_seqs = {rid: seq for rid, seq in reads_iter}
-            n_reads_em = len(kept_read_ids)
-            n_cands_em = len(cand_list)
-            max_iter_em = (
-                self.config.em_max_iter_override
-                if self.config.em_max_iter_override is not None
-                else self.config.em_max_iter
+        if self.config.krill_tiebreak:
+            R = krill_tiebreak(
+                R=R, read_ids=kept_read_ids, read_seqs=read_seqs,
+                candidates=cand_list, signal_path=self.config.signal_path,
+                pore=self.config.krill_pore,
+                ambig_threshold=self.config.tiebreak_ambig_threshold,
             )
+            hard_assignments = R.argmax(axis=1)
 
-            scoring = getattr(self.config, "r1_scoring", "mappy")
-            use_em = (max_iter_em > 1)
-
-            if scoring == "f5c_rna":
-                from fin.scoring.f5c_rna_tiebreak import _build_m2_f5c_rna
-
-                if use_em:
-                    # R2c: build M2 distance, run EM
-                    dist_read_to_tx = _build_m2_f5c_rna(
-                        kept_read_ids, read_seqs, cand_list,
-                        self.config.signal_path, self.config.f5c_rna_pore,
-                        as_distance=True,
-                    )
-                    dist_read_to_read = np.zeros(
-                        (n_reads_em, n_reads_em), dtype=np.float32)
-                    R, hard_assignments, _ = em_with_coherence(
-                        dist_read_to_tx=dist_read_to_tx,
-                        dist_read_to_read=dist_read_to_read,
-                        sigma=self.config.em_sigma,
-                        beta=0.0,
-                        max_iter=max_iter_em,
-                        tol=self.config.em_tol,
-                        verbose=False,
-                        use_gpu=self.config.use_gpu,
-                    )
-                else:
-                    # R2a: normalized scores as R directly (no EM)
-                    R = _build_m2_f5c_rna(
-                        kept_read_ids, read_seqs, cand_list,
-                        self.config.signal_path, self.config.f5c_rna_pore,
-                        as_distance=False,
-                    )
-                    hard_assignments = R.argmax(axis=1)
-
-                # f5c_rna tiebreak (if enabled, further refine)
-                if self.config.f5c_rna_tiebreak:
-                    R = f5c_rna_tiebreak(
-                        R=R,
-                        read_ids=kept_read_ids,
-                        read_seqs=read_seqs,
-                        candidates=cand_list,
-                        signal_path=self.config.signal_path,
-                        pore=self.config.f5c_rna_pore,
-                        ambig_threshold=self.config.tiebreak_ambig_threshold,
-                    )
-                    hard_assignments = R.argmax(axis=1)
-
-                quant_results = quantify_transcripts(
-                    R, hard_assignments, cand_list, kept_read_ids
-                )
-                for j, qr in enumerate(quant_results):
-                    qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
-                logger.info(
-                    "R2 f5c_rna interval %s: %d reads -> %d candidates",
-                    interval.region_string, len(read_ids), len(candidates),
-                )
-                return quant_results
-            else:
-                # M1: mappy AS-gap distance → normalized scores (sum=1)
-                m1 = compute_mappy_distance(read_seqs, cand_list, kept_read_ids)
-                if use_em:
-                    # M1 + EM: use distance matrix through EM softmax (R1c)
-                    m2_dummy = np.zeros((n_reads_em, n_cands_em), dtype=np.float32)
-                    m3_dummy = np.zeros((n_reads_em, n_reads_em), dtype=np.float32)
-                    dist_read_to_tx, _, _ = build_em_matrices(
-                        "m1", m1, m2_dummy, m3_dummy, em_beta=0.0,
-                    )
-                    dist_read_to_read = np.zeros(
-                        (n_reads_em, n_reads_em), dtype=np.float32)
-                    R, hard_assignments, _ = em_with_coherence(
-                        dist_read_to_tx=dist_read_to_tx,
-                        dist_read_to_read=dist_read_to_read,
-                        sigma=self.config.em_sigma,
-                        beta=0.0,
-                        max_iter=max_iter_em,
-                        tol=self.config.em_tol,
-                        verbose=False,
-                        use_gpu=self.config.use_gpu,
-                    )
-                else:
-                    # M1 normalized scores: 1/(1+dist), row-sum=1
-                    m1_scores = 1.0 / (1.0 + m1.astype(np.float64))
-                    row_sums = m1_scores.sum(axis=1, keepdims=True)
-                    row_sums = np.where(row_sums > 0, row_sums, 1.0)
-                    R = (m1_scores / row_sums).astype(np.float32)
-                    hard_assignments = R.argmax(axis=1)
-
-                # f5c_rna tiebreak in R1 path
-                if self.config.f5c_rna_tiebreak:
-                    R = f5c_rna_tiebreak(
-                        R=R,
-                        read_ids=kept_read_ids,
-                        read_seqs=read_seqs,
-                        candidates=cand_list,
-                        signal_path=self.config.signal_path,
-                        pore=self.config.f5c_rna_pore,
-                        ambig_threshold=self.config.tiebreak_ambig_threshold,
-                    )
-                    hard_assignments = R.argmax(axis=1)
-
-                quant_results = quantify_transcripts(
-                    R, hard_assignments, cand_list, kept_read_ids
-                )
-                for j, qr in enumerate(quant_results):
-                    qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
-                logger.info(
-                    "R1 mappy interval %s: %d reads -> %d candidates",
-                    interval.region_string, len(read_ids), len(candidates),
-                )
-                return quant_results
-            R, hard_assignments, _ = em_with_coherence(
-                dist_read_to_tx=dist_read_to_tx,
-                dist_read_to_read=dist_read_to_read,
-                sigma=self.config.em_sigma,
-                beta=beta_use,
-                max_iter=max_iter_em,
-                tol=self.config.em_tol,
-                verbose=False,
-                use_gpu=self.config.use_gpu,
-            )
-
-            # f5c_rna tiebreak in R1 path (no signal pipeline needed)
-            if self.config.f5c_rna_tiebreak:
-                R = f5c_rna_tiebreak(
-                    R=R,
-                    read_ids=kept_read_ids,
-                    read_seqs=read_seqs,
-                    candidates=cand_list,
-                    signal_path=self.config.signal_path,
-                    pore=self.config.f5c_rna_pore,
-                    ambig_threshold=self.config.tiebreak_ambig_threshold,
-                )
-                hard_assignments = R.argmax(axis=1)
-
-            quant_results = quantify_transcripts(
-                R, hard_assignments, cand_list, kept_read_ids
-            )
-            for j, qr in enumerate(quant_results):
-                qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
-            logger.info(
-                "R1 mappy+EM interval %s: %d reads -> %d candidates",
-                interval.region_string,
-                len(read_ids),
-                len(candidates),
-            )
-            return quant_results
-
-        # variant == "argmax_only": existing AS-weighted multimap baseline.
-        counts = per_tx_counts_from_responsibilities(R_mm, cand_list)
-
-        # Hard argmax per read for reporting `assigned_read_ids`.
-        argmax_by_read: Dict[str, str] = {}
-        if R_mm.size > 0:
-            arg = np.argmax(R_mm, axis=1)
-            for i, rid in enumerate(kept_read_ids):
-                argmax_by_read[rid] = cand_list[int(arg[i])].candidate_id
-
-        quant_results: List[QuantResult] = []
-        for j, cand in enumerate(cand_list):
-            cnt = counts.get(cand.candidate_id, 0.0)
-            assigned = [
-                rid for rid, cid in argmax_by_read.items()
-                if cid == cand.candidate_id
-            ]
-            col_max = float(R_mm[:, j].max()) if R_mm.size > 0 else 0.0
-            qr = QuantResult(
-                candidate_id=cand.candidate_id,
-                abundance=cnt,
-                confidence=col_max,
-                num_assigned_reads=len(assigned),
-                source=cand.source,
-                chrom=cand.chrom,
-                strand=cand.strand,
-                start=cand.start,
-                end=cand.end,
-                exons=_exons_from_candidate(cand),
-                assigned_read_ids=tuple(assigned),
-            )
-            qr.max_R = col_max
-            quant_results.append(qr)
-
+        quant_results = quantify_transcripts(
+            R, hard_assignments, cand_list, kept_read_ids
+        )
+        for j, qr in enumerate(quant_results):
+            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
         logger.info(
-            "R1 mappy multimap interval %s: %d reads -> %d candidates",
-            interval.region_string,
-            len(read_ids),
-            len(candidates),
+            "m1_em interval %s: %d reads -> %d candidates",
+            interval.region_string, len(read_ids), len(cand_list),
+        )
+        return quant_results
+
+    def _quant_m2_em(
+        self,
+        candidate_set: CandidateSet,
+        read_ids: List[str],
+        interval: GenomicInterval,
+    ) -> Optional[List[QuantResult]]:
+        """quant_mode='m2_em': EM seeded by the M2 krill junction distance plus
+        the M3 read×read krill DTW coherence (β=em_beta when m4_source != 'none').
+        All signal scoring is in-memory krill — no f5c CLI."""
+        from fin.ablation.mappy_argmax import mappy_multimap_responsibilities
+        from fin.scoring.krill_tiebreak import _build_m2_krill
+        from fin.scoring.m3_junction_coherence import build_m3_coherence
+
+        cand_list = list(candidate_set.candidates)
+        read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
+        reads_iter = [(rid, read_sequences.get(rid, "")) for rid in read_ids]
+        reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
+        R_mm, kept_read_ids = mappy_multimap_responsibilities(reads_iter, cand_list)
+        if R_mm.size == 0:
+            return []
+
+        read_seqs = {rid: seq for rid, seq in reads_iter}
+        n_reads_em = len(kept_read_ids)
+        max_iter_em = (
+            self.config.em_max_iter_override
+            if self.config.em_max_iter_override is not None
+            else self.config.em_max_iter
+        )
+
+        # M2: per-(read, candidate) krill junction distance (lower = better).
+        dist_read_to_tx = _build_m2_krill(
+            kept_read_ids, read_seqs, cand_list,
+            self.config.signal_path, self.config.krill_pore, as_distance=True,
+        )
+
+        # M3: read×read junction-window DTW coherence, each read anchored to its
+        # M2-best candidate. m4_source='none' disables coherence (β=0).
+        m4_src = getattr(self.config, "m4_source", "diff_region")
+        if m4_src == "none":
+            dist_read_to_read = np.zeros((n_reads_em, n_reads_em), dtype=np.float32)
+            beta_use = 0.0
+        else:
+            if m4_src == "whole_read":
+                logger.warning(
+                    "m2_em: m4_source='whole_read' is not supported on krill; "
+                    "using junction-window coherence (diff_region)."
+                )
+            winner_col = np.asarray(dist_read_to_tx).argmin(axis=1).astype(np.int64)
+            # Reads with no krill signal have an all-default row; mark uncoupled.
+            no_data = dist_read_to_tx.min(axis=1) >= 0.999
+            winner_col[no_data] = -1
+            dist_read_to_read = build_m3_coherence(
+                kept_read_ids, read_seqs, cand_list, winner_col,
+                self.config.signal_path, pore=self.config.krill_pore,
+                junction_k=self.config.m2_tiebreak_junction_k,
+            )
+            beta_use = self.config.em_beta
+
+        sigma_use = self._adaptive_sigma(dist_read_to_tx)
+        R, hard_assignments, _ = em_with_coherence(
+            dist_read_to_tx=dist_read_to_tx,
+            dist_read_to_read=dist_read_to_read,
+            sigma=sigma_use,
+            beta=beta_use,
+            max_iter=max_iter_em,
+            tol=self.config.em_tol,
+            verbose=False,
+            use_gpu=self.config.use_gpu,
+        )
+
+        if self.config.krill_tiebreak:
+            R = krill_tiebreak(
+                R=R, read_ids=kept_read_ids, read_seqs=read_seqs,
+                candidates=cand_list, signal_path=self.config.signal_path,
+                pore=self.config.krill_pore,
+                ambig_threshold=self.config.tiebreak_ambig_threshold,
+            )
+            hard_assignments = R.argmax(axis=1)
+
+        quant_results = quantify_transcripts(
+            R, hard_assignments, cand_list, kept_read_ids
+        )
+        for j, qr in enumerate(quant_results):
+            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
+        logger.info(
+            "m2_em interval %s: %d reads -> %d candidates (m4=%s, beta=%.2f)",
+            interval.region_string, len(read_ids), len(cand_list),
+            m4_src, beta_use,
         )
         return quant_results
 

@@ -22,18 +22,16 @@ from fin.candidates.dataclasses import TranscriptCandidate
 from fin.candidates.discovery import discover_gtf_only
 from fin.io.interval_manager import GenomicInterval
 from fin.pipeline.config import PipelineConfig
-from fin.scoring.eventalign_parser import (
-    build_distance_matrix,
-    parse_eventalign_tsv,
-)
 from fin.scoring.composite import (
     derive_prior_weights,
     populate_quant_scores,
     score_candidates_composite,
     subsample_reads_for_dtw,
 )
-from fin.scoring.external_tools import ExternalToolPaths, ExternalToolRunner
-from fin.scoring.signal_dtw import compute_read_to_read_dtw, extract_signal_segments
+from fin.scoring.krill_tiebreak import _build_m2_krill
+from fin.scoring.m3_junction_coherence import build_m3_coherence
+from fin.scoring.mappy_bam import align_reads_with_mappy
+from fin.ablation.mappy_argmax import mappy_multimap_responsibilities
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +125,6 @@ class QuantifyRunner:
         output_dir: str,
         signal_format: str = "slow5",
         use_gpu: bool = True,
-        f5c_path: str = "f5c",
         em_sigma: float = 1.0,
         em_beta: float = 0.5,
         em_max_iter: int = 1000,
@@ -146,7 +143,6 @@ class QuantifyRunner:
         if config is not None:
             self.signal_format = config.signal_format
             self.use_gpu = config.use_gpu
-            self.f5c_path = config.f5c_path
             self.em_sigma = config.em_sigma
             self.em_beta = config.em_beta
             self.em_max_iter = config.em_max_iter
@@ -155,7 +151,6 @@ class QuantifyRunner:
         else:
             self.signal_format = signal_format
             self.use_gpu = use_gpu
-            self.f5c_path = f5c_path
             self.em_sigma = em_sigma
             self.em_beta = em_beta
             self.em_max_iter = em_max_iter
@@ -167,13 +162,11 @@ class QuantifyRunner:
         self._intervals: List[GenomicInterval] = []
 
     def setup(self):
-        """Load GTF and genome FASTA once, validate tools, generate intervals."""
-        # Validate external tools
-        tool_paths = ExternalToolPaths(f5c=self.f5c_path)
-        missing = tool_paths.validate()
-        if missing:
-            raise RuntimeError(f"Missing external tools: {', '.join(missing)}")
+        """Load GTF and genome FASTA once, generate intervals.
 
+        All signal scoring is in-memory krill — no external-tool (f5c CLI)
+        validation or index build is required.
+        """
         # Load GTF
         from fin.io.io_gtf import GTFReader
 
@@ -258,19 +251,17 @@ class QuantifyRunner:
         sample_work_dir = self.output_dir / "work" / sample.name
         sample_work_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create tool runner and build f5c index for this sample
-        tool_paths = ExternalToolPaths(f5c=self.f5c_path)
-        tool_runner = ExternalToolRunner(
-            fastq_path=sample.fastq_path,
-            signal_path=sample.signal_path,
-            signal_format=self.signal_format,
-            work_dir=str(sample_work_dir),
-            tools=tool_paths,
-        )
-        tool_runner.build_f5c_index()
+        # Load this sample's FASTQ ONCE (name, seq, qual) so per-candidate
+        # alignment BAMs reuse it instead of re-reading the file per candidate.
+        import mappy
 
-        # Open signal reader for this sample
-        signal_reader = self._open_signal_reader(sample.signal_path)
+        cached_reads = [
+            (name, seq, qual)
+            for name, seq, qual in mappy.fastx_read(str(sample.fastq_path))
+        ]
+        logger.info(
+            "Sample %s: cached %d FASTQ reads", sample.name, len(cached_reads)
+        )
 
         all_quant_results: List[List[QuantResult]] = []
         all_assignments: List[IntervalAssignment] = []
@@ -283,14 +274,12 @@ class QuantifyRunner:
                 interval.region_string,
             )
             result = self._process_interval(
-                interval, sample, tool_runner, signal_reader, sample_work_dir
+                interval, sample, sample_work_dir, cached_reads
             )
             if result:
                 quant, assignment = result
                 all_quant_results.append(quant)
                 all_assignments.append(assignment)
-
-        signal_reader.close()
 
         # Build per-sample assignment BAM
         if all_assignments:
@@ -310,15 +299,37 @@ class QuantifyRunner:
 
         return aggregated
 
+    def _adaptive_sigma(self, dist_read_to_tx: np.ndarray) -> float:
+        """Data-adaptive EM sigma: median per-read range of the read×tx distance,
+        clipped to [em_sigma_min, em_sigma_max]. Falls back to em_sigma.
+
+        With per-event-normalized krill distances the absolute scale is dataset-
+        dependent; a fixed sigma often collapses R to one-hot.
+        """
+        n_reads, n_tx = dist_read_to_tx.shape
+        if n_tx >= 2 and n_reads > 0:
+            d_max = dist_read_to_tx.max(axis=1)
+            d_min = dist_read_to_tx.min(axis=1)
+            adaptive = float(np.median(d_max - d_min))
+            lo = getattr(self.config, "em_sigma_min", 0.05) if self.config else 0.05
+            hi = getattr(self.config, "em_sigma_max", 50.0) if self.config else 50.0
+            return float(np.clip(adaptive if adaptive > 0 else self.em_sigma, lo, hi))
+        return self.em_sigma
+
     def _process_interval(
         self,
         interval: GenomicInterval,
         sample: SampleInput,
-        tool_runner: ExternalToolRunner,
-        signal_reader,
         sample_work_dir: Path,
+        cached_reads: List[tuple],
     ) -> Optional[Tuple[List[QuantResult], IntervalAssignment]]:
         """Process a single interval for a single sample.
+
+        All signal scoring is in-memory krill: M2 = per-(read, candidate)
+        junction distance (``_build_m2_krill``); M3 = read×read junction-window
+        DTW coherence (``build_m3_coherence``), each read anchored to its
+        M2-best candidate. The coherence source is selected by ``m4_source``
+        ('none' disables coherence, β=0).
 
         Returns a tuple of (quantification results, interval assignment data)
         or None if no candidates/reads found.
@@ -342,18 +353,17 @@ class QuantifyRunner:
         read_ids = sorted(candidate_set.read_ids)
         if not read_ids:
             return None
+        cand_list = list(candidate_set.candidates)
         candidate_ids = candidate_set.candidate_ids()
 
-        # Per-candidate scoring (mappy + f5c eventalign)
-        tsv_paths = tool_runner.score_candidates(candidate_set, work_dir)
-
-        candidate_lengths = {
-            c.candidate_id: len(c.sequence) for c in candidate_set.candidates
-        }
-        all_scores = []
-        for tsv_path in tsv_paths:
-            scores = parse_eventalign_tsv(str(tsv_path), candidate_lengths)
-            all_scores.extend(scores)
+        # Reads aligning to >=1 candidate (mappy structural floor).
+        read_sequences = candidate_set.read_sequences or {}
+        reads_iter = [(rid, read_sequences.get(rid, "")) for rid in read_ids]
+        reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
+        R_mm, kept_read_ids = mappy_multimap_responsibilities(reads_iter, cand_list)
+        if R_mm.size == 0:
+            return None
+        read_seqs = {rid: seq for rid, seq in reads_iter}
 
         # DTW subsampling: cap reads for the O(n^2) read-to-read DTW.
         max_dtw = (
@@ -361,29 +371,49 @@ class QuantifyRunner:
             if self.config is not None
             else 2000
         )
-        dtw_read_ids = subsample_reads_for_dtw(read_ids, max_dtw)
-        if len(dtw_read_ids) != len(read_ids):
+        dtw_read_ids = subsample_reads_for_dtw(kept_read_ids, max_dtw)
+        if len(dtw_read_ids) != len(kept_read_ids):
             logger.info(
                 "Interval %s: subsampling DTW reads %d -> %d",
                 interval.region_string,
-                len(read_ids),
+                len(kept_read_ids),
                 len(dtw_read_ids),
             )
 
-        dist_read_to_tx = build_distance_matrix(
-            all_scores, dtw_read_ids, candidate_ids
+        krill_pore = self.config.krill_pore if self.config is not None else "rna002"
+
+        # M2: per-(read, candidate) krill junction distance (lower = better).
+        dist_read_to_tx = _build_m2_krill(
+            dtw_read_ids, read_seqs, cand_list,
+            sample.signal_path, krill_pore, as_distance=True,
         )
 
-        # Signal DTW (read-to-read)
-        segments = extract_signal_segments(
-            all_scores,
-            signal_reader,
-            signal_format=self.signal_format,
-            normalize=self.signal_normalize,
-        )
-        dist_read_to_read = compute_read_to_read_dtw(
-            segments, dtw_read_ids, use_gpu=self.use_gpu
-        )
+        # M3: read×read junction-window DTW coherence, each read anchored to its
+        # M2-best candidate. m4_source='none' disables coherence (β=0).
+        n_reads = len(dtw_read_ids)
+        n_tx = len(candidate_ids)
+        m4_src = getattr(self.config, "m4_source", "diff_region") if self.config else "diff_region"
+        if m4_src == "none":
+            dist_read_to_read = np.zeros((n_reads, n_reads), dtype=np.float32)
+            beta_use = 0.0
+        else:
+            if m4_src == "whole_read":
+                logger.warning(
+                    "quantify: m4_source='whole_read' is not supported on krill; "
+                    "using junction-window coherence (diff_region)."
+                )
+            winner_col = np.asarray(dist_read_to_tx).argmin(axis=1).astype(np.int64)
+            # Reads with no krill signal have an all-default row; mark uncoupled.
+            no_data = dist_read_to_tx.min(axis=1) >= 0.999
+            winner_col[no_data] = -1
+            junction_k = (
+                self.config.m2_tiebreak_junction_k if self.config is not None else 10
+            )
+            dist_read_to_read = build_m3_coherence(
+                dtw_read_ids, read_seqs, cand_list, winner_col,
+                sample.signal_path, pore=krill_pore, junction_k=junction_k,
+            )
+            beta_use = self.em_beta
 
         # Shape checks: both distance matrices share the same read axis.
         if not (
@@ -398,9 +428,6 @@ class QuantifyRunner:
             )
         if dist_read_to_read.shape[0] != dist_read_to_read.shape[1]:
             raise ValueError("dist_read_to_read must be square")
-
-        n_reads = len(dtw_read_ids)
-        n_tx = len(candidate_ids)
 
         # --- Composite scoring (uniform R seed) ---
         score_alpha = self.config.score_alpha if self.config is not None else 0.5
@@ -428,12 +455,13 @@ class QuantifyRunner:
                 combined_scores_arr, n_tx, prior_cap
             )
 
-        # EM assignment
+        # EM assignment (data-adaptive sigma for krill-scale distances)
+        sigma_use = self._adaptive_sigma(dist_read_to_tx)
         R, hard_assignments, _ = em_with_coherence(
             dist_read_to_tx=dist_read_to_tx,
             dist_read_to_read=dist_read_to_read,
-            sigma=self.em_sigma,
-            beta=self.em_beta,
+            sigma=sigma_use,
+            beta=beta_use,
             max_iter=self.em_max_iter,
             tol=self.em_tol,
             verbose=False,
@@ -443,7 +471,7 @@ class QuantifyRunner:
 
         # Quantification + score field population
         quant = quantify_transcripts(
-            R, hard_assignments, candidate_set.candidates, dtw_read_ids
+            R, hard_assignments, cand_list, dtw_read_ids
         )
         populate_quant_scores(quant, composite_scores)
 
@@ -461,18 +489,34 @@ class QuantifyRunner:
                 "read_ids": list(dtw_read_ids),
                 "candidate_ids": list(candidate_ids),
                 "interval_region": interval.region_string,
-                "sigma_used": self.em_sigma,
-                "was_subsampled": len(dtw_read_ids) != len(read_ids),
+                "sigma_used": sigma_use,
+                "was_subsampled": len(dtw_read_ids) != len(kept_read_ids),
                 "n_reads_subsampled": len(dtw_read_ids),
-                "n_reads_full": len(read_ids),
+                "n_reads_full": len(kept_read_ids),
             }
             with open(work_dir / "R_meta.json", "w") as _f:
                 json.dump(meta, _f)
 
+        # Per-candidate alignment BAM for the candidates that received reads,
+        # so _build_assignment_bam can assemble the final per-sample BAM.
+        assigned_cand_idxs = {
+            int(c) for c in hard_assignments if 0 <= int(c) < len(cand_list)
+        }
+        for cand_idx in assigned_cand_idxs:
+            candidate = cand_list[cand_idx]
+            if not candidate.sequence:
+                continue
+            cand_dir = work_dir / candidate.candidate_id
+            cand_dir.mkdir(parents=True, exist_ok=True)
+            align_reads_with_mappy(
+                candidate, sample.fastq_path, cand_dir / "aligned.bam",
+                cached_reads=cached_reads,
+            )
+
         assignment = IntervalAssignment(
             read_ids=dtw_read_ids,
             hard_assignments=hard_assignments,
-            candidates=list(candidate_set.candidates),
+            candidates=cand_list,
             work_dir=work_dir,
         )
 
@@ -560,21 +604,6 @@ class QuantifyRunner:
         logger.info(
             "Wrote assignment BAM for sample %s: %s", sample.name, output_path
         )
-
-    def _open_signal_reader(self, signal_path: str):
-        """Open the appropriate signal reader."""
-        if self.signal_format == "pod5":
-            from fin.io.io_pod5 import Pod5Reader
-
-            reader = Pod5Reader(signal_path)
-            reader.open()
-            return reader
-        else:
-            from fin.io.io_slow5 import Slow5Reader
-
-            reader = Slow5Reader(signal_path)
-            reader.open()
-            return reader
 
     def cleanup(self):
         """Close file handles."""

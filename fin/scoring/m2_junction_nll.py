@@ -2,7 +2,7 @@
 
 This is the production-shaped form of the validated "version B" wobble
 discriminator (see ``experiments/_gt_zval_multi.py``; SIRV interval 10582-11643,
-6 wobble pairs, pooled 86.2%). The signal engine is f5c_rna ``align_read_variants``
+6 wobble pairs, pooled 86.2%). The signal engine is krill ``align_read_variants``
 (in-memory eventalign, ``hmm_confidence=False``).
 
 The three essential ingredients of the metric:
@@ -334,7 +334,7 @@ def read_cand_mean_nll(
     read_seq: str,
     cand: TranscriptCandidate,
     windows: List[Tuple[int, int]],
-    f5c_aligner,
+    krill_aligner,
     mappy_aligner,
     sig_path: str,
     pore: str,
@@ -343,7 +343,7 @@ def read_cand_mean_nll(
     """Per-event mean NLL of one read against one candidate over ``windows``.
 
     Pipeline: mappy best hit on ``cand`` (rejecting single indels > cap via
-    :func:`score_hit`) -> slice ``cand.sequence[r_st:r_en]`` -> f5c_rna
+    :func:`score_hit`) -> slice ``cand.sequence[r_st:r_en]`` -> krill
     ``align_read_variants(start=r_st)`` -> project each event back to genomic
     via :func:`_tx2genome`, keep those inside ``windows``, average
     ``0.5·z² + log(model_stdv)``.
@@ -351,7 +351,7 @@ def read_cand_mean_nll(
     Returns ``(mean_nll, n_events)``; ``(nan, 0)`` when there is no usable hit,
     eventalign fails, or no event falls in the window.
     """
-    import krill as f5c_rna
+    import krill
 
     # mappy best hit by reconstructed AS (rejects > M1_MAX_INDEL_BP single indel)
     best_hit = None
@@ -366,16 +366,16 @@ def read_cand_mean_nll(
         return float("nan"), 0
 
     try:
-        recs = f5c_rna.align_read_variants(
+        recs = krill.align_read_variants(
             sig_path,
             read_id,
             {cand.candidate_id: cand.sequence[best_hit.r_st:best_hit.r_en]},
             pore=pore,
             use_gpu=False,
-            aligner=f5c_aligner,
+            aligner=krill_aligner,
             start=best_hit.r_st,
         )
-    except Exception as e:  # noqa: BLE001 - f5c_rna raises broad errors
+    except Exception as e:  # noqa: BLE001 - krill raises broad errors
         logger.debug("align_read_variants failed for %s/%s: %s", read_id, cand.candidate_id, e)
         return float("nan"), 0
 
@@ -415,15 +415,15 @@ def build_m2_distance(
         candidates: Column order.
         m1_mask: (n_reads, n_cands) bool; True where M1 accepts the alignment.
         dist_m1: (n_reads, n_cands) M1 distance, used as the no-window fallback.
-        sig_path: blow5/slow5 signal path for f5c_rna.
-        pore: f5c_rna pore model (default rna002).
+        sig_path: blow5/slow5 signal path for krill.
+        pore: krill pore model (default rna002).
         flank: diff-window padding (bp).
         chain_wobble: junction wobble tolerance (bp) for class clustering.
 
     Returns:
         (n_reads, n_cands) float64 distance matrix; lower = better.
     """
-    import krill as f5c_rna
+    import krill
 
     n_reads = len(read_ids)
     n_cands = len(candidates)
@@ -436,7 +436,7 @@ def build_m2_distance(
     accepted = np.asarray(m1_mask, dtype=bool)
     dist[accepted] = np.asarray(dist_m1, dtype=np.float64)[accepted]
 
-    # Cluster candidates; only classes with an internal diff window run f5c.
+    # Cluster candidates; only classes with an internal diff window run krill.
     # When junction_k is set, the discrimination region is the transcript-frame
     # two-sided junction window (validated 99.2% pairwise); otherwise the OLD
     # contiguous genomic sliver (86.2%).
@@ -458,7 +458,7 @@ def build_m2_distance(
     if not class_windows:
         return dist  # no wobble competition anywhere -> pure M1 ranking
 
-    f5c_aligner = f5c_rna.Aligner(pore=pore, use_gpu=False, hmm_confidence=False)
+    krill_aligner = krill.Aligner(pore=pore, use_gpu=False, hmm_confidence=False)
     preset = get_m1_preset()
 
     # Build mappy aligners once per candidate that participates in a window.
@@ -489,7 +489,7 @@ def build_m2_distance(
                 if not seq:
                     continue
                 nll, n_ev = read_cand_mean_nll(
-                    rid, seq, cand, windows, f5c_aligner, aln, sig_path, pore,
+                    rid, seq, cand, windows, krill_aligner, aln, sig_path, pore,
                     gset=gset,
                 )
                 if n_ev > 0 and math.isfinite(nll):
@@ -524,7 +524,7 @@ def m2_resolve_tie(
     pore: str = "rna002",
     junction_k: int = 10,
     flank: int = 2,
-    f5c_aligner=None,
+    krill_aligner=None,
     mappy_aligners: Optional[List] = None,
     return_scored: bool = False,
 ) -> Tuple:
@@ -537,15 +537,15 @@ def m2_resolve_tie(
     candidate's claimed exon structure better.
 
     Args:
-        read_id: Read identifier (for f5c_rna signal lookup).
+        read_id: Read identifier (for krill signal lookup).
         read_seq: Read query sequence.
         tied_cands: The simultaneously-best-AS candidates to disambiguate.
-        sig_path: blow5/slow5 signal path for f5c_rna.
-        pore: f5c_rna pore model.
+        sig_path: blow5/slow5 signal path for krill.
+        pore: krill pore model.
         junction_k: tx-bp on each side of the wobbling junction (10 = SIRV sweet
             spot, validated 99.2% pairwise).
         flank: diff-window padding (bp).
-        f5c_aligner: optional pre-built non-HMM ``f5c_rna.Aligner`` (built lazily
+        krill_aligner: optional pre-built non-HMM ``krill.Aligner`` (built lazily
             when None; pass one to reuse across reads in a loop).
         mappy_aligners: optional list aligned with ``tied_cands`` of pre-built
             ``mappy.Aligner`` (built lazily when None).
@@ -576,10 +576,10 @@ def m2_resolve_tie(
     if not gset:
         return (None, 0.0, []) if return_scored else (None, 0.0)
 
-    if f5c_aligner is None:
-        import krill as f5c_rna
+    if krill_aligner is None:
+        import krill
 
-        f5c_aligner = f5c_rna.Aligner(pore=pore, use_gpu=False, hmm_confidence=False)
+        krill_aligner = krill.Aligner(pore=pore, use_gpu=False, hmm_confidence=False)
     if mappy_aligners is None:
         import mappy
 
@@ -595,7 +595,7 @@ def m2_resolve_tie(
         if aln is None:
             continue
         nll, n_ev = read_cand_mean_nll(
-            read_id, read_seq, cand, [], f5c_aligner, aln, sig_path, pore,
+            read_id, read_seq, cand, [], krill_aligner, aln, sig_path, pore,
             gset=gset,
         )
         if n_ev > 0 and math.isfinite(nll):

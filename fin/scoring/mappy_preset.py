@@ -7,7 +7,7 @@ environment variable, defaulting to ``map-ont`` so existing behaviour is
 unchanged.
 
 Only M1 sequence-alignment call sites use this. Signal-side tiebreak alignment
-(f5c_rna) deliberately keeps ``map-ont`` so that the preset under test is the
+(krill) deliberately keeps ``map-ont`` so that the preset under test is the
 single isolated variable.
 """
 from __future__ import annotations

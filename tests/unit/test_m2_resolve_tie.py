@@ -2,8 +2,8 @@
 
 The production tie-resolution entry point. Early-return paths (no window, <2
 candidates) need no signal deps. The decision-aggregation logic is exercised by
-monkeypatching ``read_cand_mean_nll`` (the f5c_rna leg is validated end-to-end
-in the Docker ablation), so these tests run on a host without f5c_rna.
+monkeypatching ``read_cand_mean_nll`` (the krill leg is validated end-to-end
+in the Docker ablation), so these tests run on a host without krill.
 """
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def test_no_discrimination_window_returns_none():
 def _patch_scores(monkeypatch, scores):
     """scores: dict candidate_id -> (nll, n_events)."""
 
-    def fake(read_id, read_seq, cand, windows, f5c_aligner, mappy_aligner,
+    def fake(read_id, read_seq, cand, windows, krill_aligner, mappy_aligner,
              sig_path, pore, gset=None):
         return scores.get(cand.candidate_id, (float("nan"), 0))
 
@@ -90,7 +90,7 @@ def test_two_way_picks_lower_nll_with_margin(monkeypatch):
     _patch_scores(monkeypatch, {"a": (1.0, 5), "b": (2.5, 5)})
     idx, margin = m2.m2_resolve_tie(
         "r0", "ACGT", [a, b], "/x.blow5",
-        f5c_aligner=object(), mappy_aligners=[object(), object()],
+        krill_aligner=object(), mappy_aligners=[object(), object()],
     )
     assert idx == 0
     assert margin == 1.5
@@ -101,7 +101,7 @@ def test_winner_is_global_min_regardless_of_order(monkeypatch):
     _patch_scores(monkeypatch, {"a": (3.0, 5), "b": (0.5, 5)})
     idx, margin = m2.m2_resolve_tie(
         "r0", "ACGT", [a, b], "/x.blow5",
-        f5c_aligner=object(), mappy_aligners=[object(), object()],
+        krill_aligner=object(), mappy_aligners=[object(), object()],
     )
     assert idx == 1
     assert margin == 2.5
@@ -114,7 +114,7 @@ def test_single_covered_candidate_is_infinite_margin(monkeypatch):
     _patch_scores(monkeypatch, {"a": (1.2, 7), "b": (float("nan"), 0)})
     idx, margin = m2.m2_resolve_tie(
         "r0", "ACGT", [a, b], "/x.blow5",
-        f5c_aligner=object(), mappy_aligners=[object(), object()],
+        krill_aligner=object(), mappy_aligners=[object(), object()],
     )
     assert idx == 0
     assert math.isinf(margin)
@@ -125,7 +125,7 @@ def test_no_candidate_covered_returns_none(monkeypatch):
     _patch_scores(monkeypatch, {"a": (float("nan"), 0), "b": (float("nan"), 0)})
     out = m2.m2_resolve_tie(
         "r0", "ACGT", [a, b], "/x.blow5",
-        f5c_aligner=object(), mappy_aligners=[object(), object()],
+        krill_aligner=object(), mappy_aligners=[object(), object()],
     )
     assert out == (None, 0.0)
 
@@ -136,7 +136,7 @@ def test_none_mappy_aligner_skips_candidate(monkeypatch):
     _patch_scores(monkeypatch, {"a": (1.0, 5), "b": (0.1, 5)})
     idx, margin = m2.m2_resolve_tie(
         "r0", "ACGT", [a, b], "/x.blow5",
-        f5c_aligner=object(), mappy_aligners=[object(), None],
+        krill_aligner=object(), mappy_aligners=[object(), None],
     )
     # b is skipped (None aligner) -> only a scored -> infinite margin.
     assert idx == 0
@@ -152,7 +152,7 @@ def test_return_scored_both_scored_best_first(monkeypatch):
     _patch_scores(monkeypatch, {"a": (2.5, 5), "b": (1.0, 5)})
     idx, margin, scored = m2.m2_resolve_tie(
         "r0", "ACGT", [a, b], "/x.blow5",
-        f5c_aligner=object(), mappy_aligners=[object(), object()],
+        krill_aligner=object(), mappy_aligners=[object(), object()],
         return_scored=True,
     )
     assert idx == 1
@@ -166,7 +166,7 @@ def test_return_scored_mixed_excludes_unscored(monkeypatch):
     _patch_scores(monkeypatch, {"a": (1.2, 7), "b": (float("nan"), 0)})
     idx, margin, scored = m2.m2_resolve_tie(
         "r0", "ACGT", [a, b], "/x.blow5",
-        f5c_aligner=object(), mappy_aligners=[object(), object()],
+        krill_aligner=object(), mappy_aligners=[object(), object()],
         return_scored=True,
     )
     assert idx == 0
@@ -180,7 +180,7 @@ def test_return_scored_none_scored_empty_list(monkeypatch):
     _patch_scores(monkeypatch, {"a": (float("nan"), 0), "b": (float("nan"), 0)})
     out = m2.m2_resolve_tie(
         "r0", "ACGT", [a, b], "/x.blow5",
-        f5c_aligner=object(), mappy_aligners=[object(), object()],
+        krill_aligner=object(), mappy_aligners=[object(), object()],
         return_scored=True,
     )
     assert out == (None, 0.0, [])

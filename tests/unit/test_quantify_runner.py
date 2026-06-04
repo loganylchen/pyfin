@@ -1,4 +1,4 @@
-"""Tests for QuantifyRunner config wiring (US-012)."""
+"""Tests for QuantifyRunner config wiring (US-012), krill-only signal path."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def _make_runner(config: PipelineConfig) -> QuantifyRunner:
 
 
 def _make_process_interval_mocks():
-    """Return mock objects needed to exercise _process_interval without I/O."""
+    """Return the args _process_interval needs (krill path), without I/O."""
     interval = MagicMock()
     interval.region_string = "chr1:1-1000"
     interval.chrom = "chr1"
@@ -35,72 +35,110 @@ def _make_process_interval_mocks():
         signal_path="/dev/null",
     )
 
-    tool_runner = MagicMock()
-    tool_runner.score_candidates.return_value = []
-
-    signal_reader = MagicMock()
     sample_work_dir = MagicMock()
+    cached_reads: list = []
 
-    return interval, sample, tool_runner, signal_reader, sample_work_dir
+    return interval, sample, sample_work_dir, cached_reads
+
+
+def _wire_krill_mocks(
+    mock_discover,
+    mock_mm,
+    mock_m2,
+    mock_m3,
+    mock_em,
+    mock_quant,
+    n_reads: int,
+    n_tx: int,
+    *,
+    seed: int = 0,
+    quant_return=None,
+):
+    """Configure the krill-path mocks for a single interval.
+
+    The shape-coupled mocks use side_effects so DTW subsampling (which changes
+    the read axis between the mappy floor and the krill matrices) stays
+    internally consistent.
+    """
+    read_ids = [f"r{i:03d}" for i in range(n_reads)]
+    cand_ids = [f"t{i}" for i in range(n_tx)]
+
+    candidate_set = MagicMock()
+    candidate_set.num_candidates = n_tx
+    candidate_set.read_ids = read_ids
+    candidate_set.candidate_ids.return_value = cand_ids
+    # sequence="" so the per-candidate alignment BAM loop is skipped.
+    candidate_set.candidates = [
+        MagicMock(candidate_id=cid, sequence="") for cid in cand_ids
+    ]
+    candidate_set.read_sequences = {rid: "ACGT" for rid in read_ids}
+    mock_discover.return_value = candidate_set
+
+    # mappy structural floor: keep all reads, uniform responsibilities.
+    mock_mm.return_value = (np.ones((n_reads, n_tx)) / n_tx, list(read_ids))
+
+    rng = np.random.default_rng(seed)
+
+    def _m2(dtw_ids, *args, **kwargs):
+        # Moderate distances in (0, 0.5): below the 0.999 no-data sentinel.
+        return 0.1 + 0.3 * np.abs(rng.standard_normal((len(dtw_ids), n_tx)))
+
+    mock_m2.side_effect = _m2
+    mock_m3.side_effect = lambda dtw_ids, *a, **k: np.zeros(
+        (len(dtw_ids), len(dtw_ids)), dtype=np.float32
+    )
+
+    def _em(**kwargs):
+        d = kwargs["dist_read_to_tx"]
+        nr, nt = d.shape
+        return (np.ones((nr, nt)) / nt, np.zeros(nr, dtype=int), [])
+
+    mock_em.side_effect = _em
+    mock_quant.return_value = [] if quant_return is None else quant_return
+    return candidate_set
+
+
+# Common patch stack for the krill _process_interval path. Decorators apply
+# bottom-up, so the wrapped test receives:
+#   mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant, mock_align
+def _krill_patches(fn):
+    # Applied innermost-first: the first patch applied maps to the first arg.
+    fn = patch("fin.pipeline.quantify_runner.discover_gtf_only")(fn)
+    fn = patch("fin.pipeline.quantify_runner.mappy_multimap_responsibilities")(fn)
+    fn = patch("fin.pipeline.quantify_runner._build_m2_krill")(fn)
+    fn = patch("fin.pipeline.quantify_runner.build_m3_coherence")(fn)
+    fn = patch("fin.pipeline.quantify_runner.em_with_coherence")(fn)
+    fn = patch("fin.pipeline.quantify_runner.quantify_transcripts")(fn)
+    fn = patch("fin.pipeline.quantify_runner.align_reads_with_mappy")(fn)
+    return fn
 
 
 # ---------------------------------------------------------------------------
 # AC: use_gpu forwarded to em_with_coherence
 # ---------------------------------------------------------------------------
 
-@patch("fin.pipeline.quantify_runner.em_with_coherence")
-@patch("fin.pipeline.quantify_runner.discover_gtf_only")
-@patch("fin.pipeline.quantify_runner.build_distance_matrix")
-@patch("fin.pipeline.quantify_runner.parse_eventalign_tsv")
-@patch("fin.pipeline.quantify_runner.extract_signal_segments")
-@patch("fin.pipeline.quantify_runner.compute_read_to_read_dtw")
-@patch("fin.pipeline.quantify_runner.quantify_transcripts")
+@_krill_patches
 def test_quantify_runner_forwards_use_gpu(
-    mock_quant,
-    mock_dtw,
-    mock_segments,
-    mock_parse,
-    mock_build_dm,
-    mock_discover,
-    mock_em,
+    mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant, mock_align
 ):
     """em_with_coherence must receive use_gpu from PipelineConfig."""
-    n_reads, n_tx = 3, 2
-    mock_em.return_value = (
-        np.ones((n_reads, n_tx)) / n_tx,
-        np.zeros(n_reads, dtype=int),
-        [],
-    )
-    mock_quant.return_value = []
-    mock_dtw.return_value = np.zeros((n_reads, n_reads))
-    mock_build_dm.return_value = np.zeros((n_reads, n_tx))
-    mock_segments.return_value = {}
-
-    candidate_set = MagicMock()
-    candidate_set.num_candidates = n_tx
-    candidate_set.read_ids = ["r0", "r1", "r2"]
-    candidate_set.candidate_ids.return_value = ["t0", "t1"]
-    candidate_set.candidates = [MagicMock(), MagicMock()]
-    mock_discover.return_value = candidate_set
-    mock_parse.return_value = []
-
     for gpu_val in (True, False):
         mock_em.reset_mock()
-        cfg = PipelineConfig(bam_path="/dev/null", use_gpu=gpu_val, use_prior=False, persist_R_matrix=False)
+        _wire_krill_mocks(
+            mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant,
+            n_reads=3, n_tx=2,
+        )
+        cfg = PipelineConfig(
+            bam_path="/dev/null", use_gpu=gpu_val, use_prior=False,
+            persist_R_matrix=False,
+        )
         runner = _make_runner(cfg)
         runner._genome_fasta = {"chr1": "ACGT" * 250}
 
-        interval, sample, tool_runner, signal_reader, sample_work_dir = (
+        interval, sample, sample_work_dir, cached_reads = (
             _make_process_interval_mocks()
         )
-        sample_work_dir.__truediv__ = lambda self, other: MagicMock(
-            __truediv__=lambda s, o: MagicMock(mkdir=MagicMock(), exists=MagicMock(return_value=False))
-        )
-
-        with patch("pathlib.Path.mkdir"):
-            runner._process_interval(
-                interval, sample, tool_runner, signal_reader, sample_work_dir
-            )
+        runner._process_interval(interval, sample, sample_work_dir, cached_reads)
 
         call_kwargs = mock_em.call_args.kwargs
         assert call_kwargs["use_gpu"] == gpu_val, (
@@ -123,57 +161,25 @@ def test_quantify_runner_reads_score_alpha():
 # AC: use_prior=False passes prior_weights=None
 # ---------------------------------------------------------------------------
 
-@patch("fin.pipeline.quantify_runner.em_with_coherence")
-@patch("fin.pipeline.quantify_runner.discover_gtf_only")
-@patch("fin.pipeline.quantify_runner.build_distance_matrix")
-@patch("fin.pipeline.quantify_runner.parse_eventalign_tsv")
-@patch("fin.pipeline.quantify_runner.extract_signal_segments")
-@patch("fin.pipeline.quantify_runner.compute_read_to_read_dtw")
-@patch("fin.pipeline.quantify_runner.quantify_transcripts")
+@_krill_patches
 def test_quantify_runner_use_prior_false_passes_none(
-    mock_quant,
-    mock_dtw,
-    mock_segments,
-    mock_parse,
-    mock_build_dm,
-    mock_discover,
-    mock_em,
+    mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant, mock_align
 ):
-    """When use_prior=False, em_with_coherence must be called with prior_weights=None."""
-    n_reads, n_tx = 2, 2
-    mock_em.return_value = (
-        np.ones((n_reads, n_tx)) / n_tx,
-        np.zeros(n_reads, dtype=int),
-        [],
+    """When use_prior=False, em_with_coherence must get prior_weights=None."""
+    _wire_krill_mocks(
+        mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant,
+        n_reads=2, n_tx=2,
     )
-    mock_quant.return_value = []
-    mock_dtw.return_value = np.zeros((n_reads, n_reads))
-    mock_build_dm.return_value = np.zeros((n_reads, n_tx))
-    mock_segments.return_value = {}
-
-    candidate_set = MagicMock()
-    candidate_set.num_candidates = n_tx
-    candidate_set.read_ids = ["r0", "r1"]
-    candidate_set.candidate_ids.return_value = ["t0", "t1"]
-    candidate_set.candidates = [MagicMock(), MagicMock()]
-    mock_discover.return_value = candidate_set
-    mock_parse.return_value = []
-
-    cfg = PipelineConfig(bam_path="/dev/null", use_prior=False, persist_R_matrix=False)
+    cfg = PipelineConfig(
+        bam_path="/dev/null", use_prior=False, persist_R_matrix=False,
+    )
     runner = _make_runner(cfg)
     runner._genome_fasta = {"chr1": "ACGT" * 250}
 
-    interval, sample, tool_runner, signal_reader, sample_work_dir = (
-        _make_process_interval_mocks()
-    )
+    interval, sample, sample_work_dir, cached_reads = _make_process_interval_mocks()
+    runner._process_interval(interval, sample, sample_work_dir, cached_reads)
 
-    with patch("pathlib.Path.mkdir"):
-        runner._process_interval(
-            interval, sample, tool_runner, signal_reader, sample_work_dir
-        )
-
-    call_kwargs = mock_em.call_args.kwargs
-    assert call_kwargs["prior_weights"] is None
+    assert mock_em.call_args.kwargs["prior_weights"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -193,58 +199,26 @@ def test_quantify_runner_config_defaults():
 # AC: backward compat — use_prior=False gives same em call shape as pre-change
 # ---------------------------------------------------------------------------
 
-@patch("fin.pipeline.quantify_runner.em_with_coherence")
-@patch("fin.pipeline.quantify_runner.discover_gtf_only")
-@patch("fin.pipeline.quantify_runner.build_distance_matrix")
-@patch("fin.pipeline.quantify_runner.parse_eventalign_tsv")
-@patch("fin.pipeline.quantify_runner.extract_signal_segments")
-@patch("fin.pipeline.quantify_runner.compute_read_to_read_dtw")
-@patch("fin.pipeline.quantify_runner.quantify_transcripts")
+@_krill_patches
 def test_quantify_runner_backward_compat_no_prior(
-    mock_quant,
-    mock_dtw,
-    mock_segments,
-    mock_parse,
-    mock_build_dm,
-    mock_discover,
-    mock_em,
+    mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant, mock_align
 ):
-    """With use_prior=False, em_with_coherence is called with prior_weights=None,
-    which is bit-identical to the pre-change behavior (verified by US-009 tests)."""
-    n_reads, n_tx = 4, 3
-    mock_em.return_value = (
-        np.ones((n_reads, n_tx)) / n_tx,
-        np.zeros(n_reads, dtype=int),
-        [],
+    """use_prior=False -> prior_weights=None and use_gpu forwarded."""
+    _wire_krill_mocks(
+        mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant,
+        n_reads=4, n_tx=3,
     )
-    mock_quant.return_value = []
-    mock_dtw.return_value = np.zeros((n_reads, n_reads))
-    mock_build_dm.return_value = np.zeros((n_reads, n_tx))
-    mock_segments.return_value = {}
-
-    candidate_set = MagicMock()
-    candidate_set.num_candidates = n_tx
-    candidate_set.read_ids = ["r0", "r1", "r2", "r3"]
-    candidate_set.candidate_ids.return_value = ["t0", "t1", "t2"]
-    candidate_set.candidates = [MagicMock(), MagicMock(), MagicMock()]
-    mock_discover.return_value = candidate_set
-    mock_parse.return_value = []
-
-    cfg = PipelineConfig(bam_path="/dev/null", use_prior=False, use_gpu=False, persist_R_matrix=False)
+    cfg = PipelineConfig(
+        bam_path="/dev/null", use_prior=False, use_gpu=False,
+        persist_R_matrix=False,
+    )
     runner = _make_runner(cfg)
     runner._genome_fasta = {"chr1": "ACGT" * 250}
 
-    interval, sample, tool_runner, signal_reader, sample_work_dir = (
-        _make_process_interval_mocks()
-    )
-
-    with patch("pathlib.Path.mkdir"):
-        runner._process_interval(
-            interval, sample, tool_runner, signal_reader, sample_work_dir
-        )
+    interval, sample, sample_work_dir, cached_reads = _make_process_interval_mocks()
+    runner._process_interval(interval, sample, sample_work_dir, cached_reads)
 
     call_kwargs = mock_em.call_args.kwargs
-    # prior_weights=None is equivalent to pre-change (no prior_weights kwarg)
     assert call_kwargs["prior_weights"] is None
     assert call_kwargs["use_gpu"] is False
 
@@ -253,44 +227,16 @@ def test_quantify_runner_backward_compat_no_prior(
 # AC: use_prior=True derives a valid probability vector and forwards to EM
 # ---------------------------------------------------------------------------
 
-@patch("fin.pipeline.quantify_runner.em_with_coherence")
-@patch("fin.pipeline.quantify_runner.discover_gtf_only")
-@patch("fin.pipeline.quantify_runner.build_distance_matrix")
-@patch("fin.pipeline.quantify_runner.parse_eventalign_tsv")
-@patch("fin.pipeline.quantify_runner.extract_signal_segments")
-@patch("fin.pipeline.quantify_runner.compute_read_to_read_dtw")
-@patch("fin.pipeline.quantify_runner.quantify_transcripts")
+@_krill_patches
 def test_quantify_runner_use_prior_true_yields_valid_weights(
-    mock_quant,
-    mock_dtw,
-    mock_segments,
-    mock_parse,
-    mock_build_dm,
-    mock_discover,
-    mock_em,
+    mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant, mock_align
 ):
     """When use_prior=True, em_with_coherence receives a valid probability vector."""
-    n_reads, n_tx = 4, 3
-    mock_em.return_value = (
-        np.ones((n_reads, n_tx)) / n_tx,
-        np.zeros(n_reads, dtype=int),
-        [],
+    n_tx = 3
+    _wire_krill_mocks(
+        mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant,
+        n_reads=4, n_tx=n_tx, seed=1,
     )
-    mock_quant.return_value = []
-    # Distinct distances to make composite scores non-degenerate.
-    rng = np.random.default_rng(0)
-    mock_dtw.return_value = np.abs(rng.standard_normal((n_reads, n_reads)))
-    mock_build_dm.return_value = np.abs(rng.standard_normal((n_reads, n_tx)))
-    mock_segments.return_value = {}
-
-    candidate_set = MagicMock()
-    candidate_set.num_candidates = n_tx
-    candidate_set.read_ids = ["r0", "r1", "r2", "r3"]
-    candidate_set.candidate_ids.return_value = ["t0", "t1", "t2"]
-    candidate_set.candidates = [MagicMock(candidate_id=f"t{i}") for i in range(n_tx)]
-    mock_discover.return_value = candidate_set
-    mock_parse.return_value = []
-
     cfg = PipelineConfig(
         bam_path="/dev/null",
         use_prior=True,
@@ -301,21 +247,14 @@ def test_quantify_runner_use_prior_true_yields_valid_weights(
     runner = _make_runner(cfg)
     runner._genome_fasta = {"chr1": "ACGT" * 250}
 
-    interval, sample, tool_runner, signal_reader, sample_work_dir = (
-        _make_process_interval_mocks()
-    )
-
-    with patch("pathlib.Path.mkdir"):
-        runner._process_interval(
-            interval, sample, tool_runner, signal_reader, sample_work_dir
-        )
+    interval, sample, sample_work_dir, cached_reads = _make_process_interval_mocks()
+    runner._process_interval(interval, sample, sample_work_dir, cached_reads)
 
     pw = mock_em.call_args.kwargs["prior_weights"]
     assert pw is not None
     assert pw.shape == (n_tx,)
     assert np.all(pw > 0)
     assert pw.sum() == pytest.approx(1.0)
-    # Cap=10 enforces an upper bound of uniform*cap on each weight.
     uniform = 1.0 / n_tx
     assert np.all(pw <= uniform * 10.0 + 1e-9)
 
@@ -324,31 +263,13 @@ def test_quantify_runner_use_prior_true_yields_valid_weights(
 # AC: composite scores are written back onto each QuantResult
 # ---------------------------------------------------------------------------
 
-@patch("fin.pipeline.quantify_runner.em_with_coherence")
-@patch("fin.pipeline.quantify_runner.discover_gtf_only")
-@patch("fin.pipeline.quantify_runner.build_distance_matrix")
-@patch("fin.pipeline.quantify_runner.parse_eventalign_tsv")
-@patch("fin.pipeline.quantify_runner.extract_signal_segments")
-@patch("fin.pipeline.quantify_runner.compute_read_to_read_dtw")
-@patch("fin.pipeline.quantify_runner.quantify_transcripts")
+@_krill_patches
 def test_quantify_runner_populates_quant_score_fields(
-    mock_quant,
-    mock_dtw,
-    mock_segments,
-    mock_parse,
-    mock_build_dm,
-    mock_discover,
-    mock_em,
+    mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant, mock_align
 ):
-    """coherence_score / discrimination_score / combined_score must be set on QuantResult."""
+    """coherence/discrimination/combined_score must be set on each QuantResult."""
     from fin.analysis.quantification import QuantResult
 
-    n_reads, n_tx = 3, 2
-    mock_em.return_value = (
-        np.ones((n_reads, n_tx)) / n_tx,
-        np.zeros(n_reads, dtype=int),
-        [],
-    )
     qr0 = QuantResult(
         candidate_id="t0", abundance=1.0, confidence=0.9,
         num_assigned_reads=2, source="gtf",
@@ -357,40 +278,26 @@ def test_quantify_runner_populates_quant_score_fields(
         candidate_id="t1", abundance=0.0, confidence=0.0,
         num_assigned_reads=0, source="gtf",
     )
-    mock_quant.return_value = [qr0, qr1]
-    rng = np.random.default_rng(1)
-    mock_dtw.return_value = np.abs(rng.standard_normal((n_reads, n_reads)))
-    mock_build_dm.return_value = np.abs(rng.standard_normal((n_reads, n_tx)))
-    mock_segments.return_value = {}
+    _wire_krill_mocks(
+        mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant,
+        n_reads=3, n_tx=2, seed=1, quant_return=[qr0, qr1],
+    )
 
-    candidate_set = MagicMock()
-    candidate_set.num_candidates = n_tx
-    candidate_set.read_ids = ["r0", "r1", "r2"]
-    candidate_set.candidate_ids.return_value = ["t0", "t1"]
-    candidate_set.candidates = [
-        MagicMock(candidate_id="t0"),
-        MagicMock(candidate_id="t1"),
-    ]
-    mock_discover.return_value = candidate_set
-    mock_parse.return_value = []
-
-    cfg = PipelineConfig(bam_path="/dev/null", use_prior=False, use_gpu=False, persist_R_matrix=False)
+    cfg = PipelineConfig(
+        bam_path="/dev/null", use_prior=False, use_gpu=False,
+        persist_R_matrix=False,
+    )
     runner = _make_runner(cfg)
     runner._genome_fasta = {"chr1": "ACGT" * 250}
 
-    interval, sample, tool_runner, signal_reader, sample_work_dir = (
-        _make_process_interval_mocks()
+    interval, sample, sample_work_dir, cached_reads = _make_process_interval_mocks()
+    result = runner._process_interval(
+        interval, sample, sample_work_dir, cached_reads
     )
-
-    with patch("pathlib.Path.mkdir"):
-        result = runner._process_interval(
-            interval, sample, tool_runner, signal_reader, sample_work_dir
-        )
 
     assert result is not None
     quant, _assignment = result
     assert quant is mock_quant.return_value
-    # populate_quant_scores must have stamped the score fields on both QRs.
     for qr in quant:
         assert 0.0 <= qr.coherence_score <= 1.0
         assert 0.0 <= qr.discrimination_score <= 1.0
@@ -401,43 +308,16 @@ def test_quantify_runner_populates_quant_score_fields(
 # AC: DTW subsampling honors max_reads_per_interval_for_dtw
 # ---------------------------------------------------------------------------
 
-@patch("fin.pipeline.quantify_runner.em_with_coherence")
-@patch("fin.pipeline.quantify_runner.discover_gtf_only")
-@patch("fin.pipeline.quantify_runner.build_distance_matrix")
-@patch("fin.pipeline.quantify_runner.parse_eventalign_tsv")
-@patch("fin.pipeline.quantify_runner.extract_signal_segments")
-@patch("fin.pipeline.quantify_runner.compute_read_to_read_dtw")
-@patch("fin.pipeline.quantify_runner.quantify_transcripts")
+@_krill_patches
 def test_quantify_runner_dtw_subsampling(
-    mock_quant,
-    mock_dtw,
-    mock_segments,
-    mock_parse,
-    mock_build_dm,
-    mock_discover,
-    mock_em,
+    mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant, mock_align
 ):
-    """When read count exceeds max_reads_per_interval_for_dtw, reads are subsampled."""
-    n_reads_total, n_tx = 50, 2
+    """When read count exceeds the cap, the krill matrices use subsampled reads."""
     cap = 10
-    mock_em.return_value = (
-        np.ones((cap, n_tx)) / n_tx,
-        np.zeros(cap, dtype=int),
-        [],
+    _wire_krill_mocks(
+        mock_discover, mock_mm, mock_m2, mock_m3, mock_em, mock_quant,
+        n_reads=50, n_tx=2,
     )
-    mock_quant.return_value = []
-    mock_dtw.return_value = np.zeros((cap, cap))
-    mock_build_dm.return_value = np.zeros((cap, n_tx))
-    mock_segments.return_value = {}
-
-    candidate_set = MagicMock()
-    candidate_set.num_candidates = n_tx
-    candidate_set.read_ids = [f"r{i:03d}" for i in range(n_reads_total)]
-    candidate_set.candidate_ids.return_value = ["t0", "t1"]
-    candidate_set.candidates = [MagicMock(candidate_id=f"t{i}") for i in range(n_tx)]
-    mock_discover.return_value = candidate_set
-    mock_parse.return_value = []
-
     cfg = PipelineConfig(
         bam_path="/dev/null",
         use_prior=False,
@@ -448,24 +328,14 @@ def test_quantify_runner_dtw_subsampling(
     runner = _make_runner(cfg)
     runner._genome_fasta = {"chr1": "ACGT" * 250}
 
-    interval, sample, tool_runner, signal_reader, sample_work_dir = (
-        _make_process_interval_mocks()
-    )
+    interval, sample, sample_work_dir, cached_reads = _make_process_interval_mocks()
+    runner._process_interval(interval, sample, sample_work_dir, cached_reads)
 
-    with patch("pathlib.Path.mkdir"):
-        runner._process_interval(
-            interval, sample, tool_runner, signal_reader, sample_work_dir
-        )
-
-    # build_distance_matrix and compute_read_to_read_dtw must have been called
-    # with the subsampled read list, not all 50 reads.
-    bdm_args = mock_build_dm.call_args
-    sub_reads = bdm_args.args[1] if len(bdm_args.args) > 1 else bdm_args.kwargs.get("read_ids")
-    assert len(sub_reads) == cap
-
-    dtw_args = mock_dtw.call_args
-    sub_reads_dtw = dtw_args.args[1] if len(dtw_args.args) > 1 else dtw_args.kwargs.get("read_ids")
-    assert len(sub_reads_dtw) == cap
+    # _build_m2_krill and build_m3_coherence must receive the subsampled list.
+    m2_reads = mock_m2.call_args.args[0]
+    assert len(m2_reads) == cap
+    m3_reads = mock_m3.call_args.args[0]
+    assert len(m3_reads) == cap
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +352,6 @@ def test_quantify_runner_config_overrides_ctor_params():
         em_beta=0.7,
         em_max_iter=42,
         em_tol=1e-3,
-        f5c_path="/usr/local/bin/f5c",
     )
     runner = QuantifyRunner(
         gtf_path="/dev/null",
@@ -496,7 +365,6 @@ def test_quantify_runner_config_overrides_ctor_params():
         em_beta=0.5,
         em_max_iter=1000,
         em_tol=1e-4,
-        f5c_path="f5c",
         config=cfg,
     )
     assert runner.signal_format == "pod5"
@@ -505,7 +373,6 @@ def test_quantify_runner_config_overrides_ctor_params():
     assert runner.em_beta == 0.7
     assert runner.em_max_iter == 42
     assert runner.em_tol == 1e-3
-    assert runner.f5c_path == "/usr/local/bin/f5c"
 
 
 def test_quantify_runner_no_config_uses_ctor_params():

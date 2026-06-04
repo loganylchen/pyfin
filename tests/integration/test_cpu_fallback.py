@@ -133,6 +133,7 @@ def test_cpu_scoring_tsv_columns(tmp_path: Path) -> None:
         "combined_score",
         "num_reads",
         "tpm",
+        "max_R",
     ]
     assert header == expected_header, (
         f"Header mismatch.\nExpected: {expected_header}\nGot:      {header}"

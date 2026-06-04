@@ -5,10 +5,9 @@ from __future__ import annotations
 import csv
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 
 from fin.ablation.runner import AblationResult
-from fin.analysis.quantification import QuantResult
 
 logger = logging.getLogger(__name__)
 

@@ -45,7 +45,7 @@ def _cand(cid, seq, source="novel"):
 
 
 def _runner():
-    cfg = PipelineConfig(bam_path="x", r1_variant="argmax_keep")
+    cfg = PipelineConfig(bam_path="x", quant_mode="argmax")
     return PipelineRunner(cfg)
 
 

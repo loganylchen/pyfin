@@ -22,6 +22,10 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fin.pipeline.config import PipelineConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,9 +60,9 @@ def _build_base_config(args) -> "PipelineConfig":
         min_max_r=0.05,
         min_novel_combined_score=0.0,
         # Ablation-specific overrides set per row below
-        enable_signal=True,
+        quant_mode="m2_em",
         enable_score_filter=True,
-        m4_source="whole_read",
+        m4_source="diff_region",
     )
 
 
@@ -67,7 +71,7 @@ def _row_config(base, row_cfg) -> "PipelineConfig":
     import dataclasses
 
     overrides = {
-        "enable_signal": row_cfg.enable_signal,
+        "quant_mode": row_cfg.quant_mode,
         "em_max_iter_override": row_cfg.em_max_iter_override,
         "m4_source": row_cfg.m4_source,
         "enable_score_filter": row_cfg.enable_score_filter,
@@ -136,6 +140,12 @@ def main(argv=None):
 
         tsv_path = write_per_row_tsv(ablation_result, str(out_dir))
         logger.info("Wrote: %s", tsv_path)
+
+        # Write per-row GTF for intron-chain evaluation against ground truth
+        from fin.io.io_gtf import write_gtf
+        gtf_path = str(out_dir / f"{row_cfg.row_id}_{row_cfg.label}.gtf")
+        write_gtf(aggregated, gtf_path)
+        logger.info("Wrote GTF: %s", gtf_path)
 
     summary_path = write_ablation_summary(all_results, str(out_dir))
     logger.info("Summary written: %s", summary_path)

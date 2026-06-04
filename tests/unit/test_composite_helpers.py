@@ -1,8 +1,6 @@
-"""Tests for shared helpers in fin/scoring/composite.py and external_tools.py."""
+"""Tests for shared helpers in fin/scoring/composite.py."""
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -13,7 +11,6 @@ from fin.scoring.composite import (
     subsample_reads_for_dtw,
     CompositeScore,
 )
-from fin.scoring.external_tools import _signal_format_args
 
 
 # ---------------------------------------------------------------------------
@@ -139,35 +136,3 @@ def test_subsample_reads_for_dtw_uniform_indices():
     assert sub[-1] == "r099"
     # Strictly increasing original ordering.
     assert sub == sorted(sub)
-
-
-# ---------------------------------------------------------------------------
-# _signal_format_args
-# ---------------------------------------------------------------------------
-
-
-def test_signal_format_args_slow5():
-    assert _signal_format_args("slow5", Path("/x.slow5")) == ["--slow5", "/x.slow5"]
-
-
-def test_signal_format_args_blow5_uses_slow5_flag():
-    assert _signal_format_args("blow5", Path("/x.blow5")) == ["--slow5", "/x.blow5"]
-
-
-def test_signal_format_args_pod5():
-    assert _signal_format_args("pod5", Path("/x.pod5")) == ["--pod5", "/x.pod5"]
-
-
-def test_signal_format_args_case_insensitive():
-    assert _signal_format_args("SLOW5", Path("/x")) == ["--slow5", "/x"]
-    assert _signal_format_args("PoD5", Path("/x")) == ["--pod5", "/x"]
-
-
-def test_signal_format_args_rejects_unknown():
-    with pytest.raises(ValueError, match="fast5"):
-        _signal_format_args("fast5", Path("/x"))
-
-
-def test_signal_format_args_rejects_empty():
-    with pytest.raises(ValueError):
-        _signal_format_args("", Path("/x"))

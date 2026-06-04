@@ -5,7 +5,6 @@ Covers:
   - AblationRowConfig defaults
   - _nan_to_row_mean: AC8 NaN adapter
   - _apply_score_filters: AC7 score-filter bypass
-  - run_ablation_row: smoke test with fully mocked pipeline internals
   - write_ablation_summary / write_per_row_tsv: IO correctness
 """
 
@@ -64,46 +63,60 @@ def _ablation_result(row_id: str = "R3", label: str = "test",
 # ---------------------------------------------------------------------------
 
 class TestAblationRowsDefinitions:
-    def test_five_rows_defined(self):
-        assert len(ABLATION_ROWS) == 5
+    def test_seven_rows_defined(self):
+        assert len(ABLATION_ROWS) == 7
 
     def test_row_ids_ordered(self):
         ids = [r.row_id for r in ABLATION_ROWS]
-        assert ids == ["R1", "R2", "R3", "R4", "R5"]
+        assert ids == ["R1a", "R1b", "R1c", "R2", "R3", "R4", "R5"]
 
-    def test_r1_no_signal(self):
-        r1 = next(r for r in ABLATION_ROWS if r.row_id == "R1")
-        assert r1.enable_signal is False
+    def test_r1a_argmax_unfiltered(self):
+        r1a = next(r for r in ABLATION_ROWS if r.row_id == "R1a")
+        assert r1a.quant_mode == "argmax"
+        assert r1a.m4_source == "none"
+        assert r1a.em_max_iter_override is None
+        assert r1a.enable_score_filter is False
+
+    def test_r1b_argmax_filtered(self):
+        r1b = next(r for r in ABLATION_ROWS if r.row_id == "R1b")
+        assert r1b.quant_mode == "argmax"
+        assert r1b.m4_source == "none"
+        assert r1b.enable_score_filter is True
+
+    def test_r1c_mappy_em_filtered(self):
+        r1c = next(r for r in ABLATION_ROWS if r.row_id == "R1c")
+        assert r1c.quant_mode == "m1_em"
+        assert r1c.m4_source == "none"
+        assert r1c.em_max_iter_override is None
+        assert r1c.enable_score_filter is True
 
     def test_r2_single_step_em(self):
         r2 = next(r for r in ABLATION_ROWS if r.row_id == "R2")
+        assert r2.quant_mode == "m2_em"
         assert r2.em_max_iter_override == 1
-        assert r2.enable_signal is True
+        # R2 isolates "single-step EM" as the only variable vs R4 (coherence on).
+        assert r2.m4_source == "diff_region"
+        assert r2.enable_score_filter is False
 
     def test_r3_no_coherence(self):
         """AC5: R3 m4_source='none' means zero matrix, not None."""
         r3 = next(r for r in ABLATION_ROWS if r.row_id == "R3")
+        assert r3.quant_mode == "m2_em"
         assert r3.m4_source == "none"
-        assert r3.enable_signal is True
         assert r3.em_max_iter_override is None
+        assert r3.enable_score_filter is False
 
     def test_r4_diff_region(self):
         r4 = next(r for r in ABLATION_ROWS if r.row_id == "R4")
+        assert r4.quant_mode == "m2_em"
         assert r4.m4_source == "diff_region"
         assert r4.enable_score_filter is False
 
     def test_r5_diff_region_scored(self):
         r5 = next(r for r in ABLATION_ROWS if r.row_id == "R5")
+        assert r5.quant_mode == "m2_em"
         assert r5.m4_source == "diff_region"
         assert r5.enable_score_filter is True
-
-    def test_r1_score_filter_off(self):
-        r1 = next(r for r in ABLATION_ROWS if r.row_id == "R1")
-        assert r1.enable_score_filter is False
-
-    def test_r2_score_filter_off(self):
-        r2 = next(r for r in ABLATION_ROWS if r.row_id == "R2")
-        assert r2.enable_score_filter is False
 
 
 # ---------------------------------------------------------------------------
@@ -113,9 +126,9 @@ class TestAblationRowsDefinitions:
 class TestAblationRowConfigDefaults:
     def test_defaults(self):
         cfg = AblationRowConfig(row_id="X", label="test")
-        assert cfg.enable_signal is True
+        assert cfg.quant_mode == "m2_em"
         assert cfg.em_max_iter_override is None
-        assert cfg.m4_source == "whole_read"
+        assert cfg.m4_source == "diff_region"
         assert cfg.enable_score_filter is True
 
 

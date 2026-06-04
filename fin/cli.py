@@ -45,6 +45,13 @@ import click
 @click.option("--m2-tiebreak/--no-m2-tiebreak", "m2_tiebreak", default=True, show_default=True, help="Resolve argmax_keep ties with the junction-window mean-NLL signal metric: give a read's full mass to the M2-best tied candidate when the NLL margin >= --m2-tiebreak-margin, else keep the 1/K split. Needs --signal (auto-skips if absent). Default ON + aggressive (margin 1e-9): SIRV gffcompare Tx-F1 45.4 vs OFF 44.7, beats all tools + ablation champion 45.2.")
 @click.option("--m2-tiebreak-margin", default=1e-9, show_default=True, type=float, help="Minimum M2 NLL margin (runner-up - best) required to override the 1/K split with the M2 single winner. Default 1e-9 (aggressive: take M2's pick whenever it can discriminate at all).")
 @click.option("--m2-tiebreak-junction-k", default=10, show_default=True, type=int, help="Transcript-frame bp on each side of the wobbling junction for the M2 discrimination window (SIRV sweet spot 10).")
+@click.option(
+    "--quant-mode",
+    default="argmax",
+    type=click.Choice(["argmax", "m1_em", "m2_em"]),
+    show_default=True,
+    help="Quantification engine. 'argmax': mappy AS argmax + M2 krill junction tiebreak, hard counts, no EM (production default). 'm1_em': EM seeded by M1 mappy distance (beta=0). 'm2_em': EM seeded by M2 krill junction distance + M3 read-to-read krill DTW coherence (beta=em_beta). All signal scoring is in-memory krill.",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 @click.pass_context
 def main(
@@ -79,6 +86,7 @@ def main(
     m2_tiebreak,
     m2_tiebreak_margin,
     m2_tiebreak_junction_k,
+    quant_mode,
     verbose,
 ):
     """pyfin: nanopore signal-based transcriptome assembly.
@@ -151,6 +159,7 @@ def main(
         m2_tiebreak=m2_tiebreak,
         m2_tiebreak_margin=m2_tiebreak_margin,
         m2_tiebreak_junction_k=m2_tiebreak_junction_k,
+        quant_mode=quant_mode,
     )
 
     runner = PipelineRunner(cfg)
@@ -181,11 +190,10 @@ def main(
     show_default=True,
     help="Signal file format.",
 )
-@click.option("--f5c-path", default="f5c", show_default=True, help="Path to f5c binary.")
 @click.option("--use-prior/--no-prior", default=True, show_default=True, help="Apply combined_score-derived EM prior.")
 @click.option("--signal-normalize/--no-signal-normalize", default=True, show_default=True, help="Per-read robust z-score normalization before DTW.")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
-def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, f5c_path, use_prior, signal_normalize, verbose):
+def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, use_prior, signal_normalize, verbose):
     """Quantify known transcripts across multiple samples."""
     from fin.utils.log_config import setup_logger
 
@@ -222,7 +230,6 @@ def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, f5c_path, 
         output_dir=output_dir,
         signal_format=signal_format,
         use_gpu=use_gpu,
-        f5c_path=f5c_path,
         config=quant_config,
     )
 

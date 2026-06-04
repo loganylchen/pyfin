@@ -1,7 +1,7 @@
-"""f5c_rna-based tiebreak: resolve M1 ties using in-memory eventalign match score.
+"""krill-based tiebreak: resolve M1 ties using in-memory eventalign match score.
 
 For ambiguous reads (R_best < threshold):
-  1. For each tied candidate, run f5c_rna align with candidate's mapped region
+  1. For each tied candidate, run krill align with candidate's mapped region
   2. Compute match score = matched_events / max_events_across_candidates
      - matched = events with |z| < 2 AND model_kmer != NNNNN
      - FAIL (status!=0) → matched = 0
@@ -20,7 +20,7 @@ from fin.candidates.dataclasses import TranscriptCandidate
 logger = logging.getLogger(__name__)
 
 
-def _build_m2_f5c_rna(
+def _build_m2_krill(
     read_ids: List[str],
     read_seqs: Dict[str, str],
     candidates: List,
@@ -28,14 +28,14 @@ def _build_m2_f5c_rna(
     pore: str = "rna002",
     as_distance: bool = True,
 ) -> np.ndarray:
-    """Build (n_reads, n_cands) matrix from f5c_rna match scores.
+    """Build (n_reads, n_cands) matrix from krill match scores.
 
     If as_distance=True: distance = 1 - (matched/max_ev). Lower = better.
     If as_distance=False: returns row-normalized match scores (sum=1 per row).
         Can be used directly as R matrix.
     FAIL → 0.
     """
-    import krill as f5c_rna
+    import krill
 
     n_reads = len(read_ids)
     n_cands = len(candidates)
@@ -78,24 +78,24 @@ def _build_m2_f5c_rna(
 
     # Try batch API first (align_reads_variants, plural), fall back to per-read
     import os
-    num_threads = int(os.environ.get("F5C_RNA_THREADS", "0"))
-    aligner = f5c_rna.Aligner(pore=pore, use_gpu=False,
-                               hmm_confidence=True, num_thread=num_threads)
-    use_batch = hasattr(f5c_rna, 'align_reads_variants')
+    num_threads = int(os.environ.get("KRILL_THREADS", "0"))
+    aligner = krill.Aligner(pore=pore, use_gpu=False,
+                            hmm_confidence=True, num_thread=num_threads)
+    use_batch = hasattr(krill, 'align_reads_variants')
 
-    logger.info("f5c_rna scoring: %d reads, %d total pairs, batch=%s",
+    logger.info("krill scoring: %d reads, %d total pairs, batch=%s",
                 len(reads_variants),
                 sum(len(v) for v in reads_variants.values()),
                 use_batch)
 
     if use_batch:
         try:
-            all_results = f5c_rna.align_reads_variants(
+            all_results = krill.align_reads_variants(
                 signal_path, reads_variants,
                 pore=pore, num_thread=num_threads,
             )
         except Exception as e:
-            logger.warning("f5c_rna batch failed, falling back to per-read: %s", e)
+            logger.warning("krill batch failed, falling back to per-read: %s", e)
             use_batch = False
 
     if not use_batch:
@@ -103,7 +103,7 @@ def _build_m2_f5c_rna(
         all_results = {}
         for rid, seq_dict in reads_variants.items():
             try:
-                res = f5c_rna.align_read_variants(
+                res = krill.align_read_variants(
                     blow5_path=signal_path, read_id=rid,
                     sequences=seq_dict, pore=pore,
                     use_gpu=False, aligner=aligner,
@@ -165,7 +165,7 @@ def _build_m2_f5c_rna(
         return (scores / row_sums).astype(np.float32)
 
 
-def f5c_rna_tiebreak(
+def krill_tiebreak(
     R: np.ndarray,
     read_ids: List[str],
     read_seqs: Dict[str, str],
@@ -174,11 +174,11 @@ def f5c_rna_tiebreak(
     pore: str = "rna002",
     ambig_threshold: float = 0.90,
 ) -> np.ndarray:
-    """Resolve M1 ties using f5c_rna in-memory eventalign.
+    """Resolve M1 ties using krill in-memory eventalign.
 
     Returns updated R matrix (copy).
     """
-    import krill as f5c_rna
+    import krill
 
     R_new = R.copy()
     n_reads, n_cands = R.shape
@@ -193,8 +193,8 @@ def f5c_rna_tiebreak(
             if a:
                 aligners[j] = a
 
-    # Create f5c_rna aligner (reuse for all reads)
-    aligner = f5c_rna.Aligner(pore=pore, use_gpu=False, hmm_confidence=True)
+    # Create krill aligner (reuse for all reads)
+    aligner = krill.Aligner(pore=pore, use_gpu=False, hmm_confidence=True)
 
     n_ambiguous = 0
     n_tiebroken = 0
@@ -231,10 +231,10 @@ def f5c_rna_tiebreak(
         if len(mapped_seqs) < 2:
             continue
 
-        # Run f5c_rna for all tied candidates at once
+        # Run krill for all tied candidates at once
         seq_dict = {cid: seq for cid, (j, seq) in mapped_seqs.items()}
         try:
-            results = f5c_rna.align_read_variants(
+            results = krill.align_read_variants(
                 blow5_path=signal_path,
                 read_id=rid,
                 sequences=seq_dict,
@@ -243,7 +243,7 @@ def f5c_rna_tiebreak(
                 aligner=aligner,
             )
         except Exception as e:
-            logger.debug("f5c_rna failed for %s: %s", rid[:20], e)
+            logger.debug("krill failed for %s: %s", rid[:20], e)
             continue
 
         # Compute matched events per candidate
@@ -297,7 +297,7 @@ def f5c_rna_tiebreak(
         n_tiebroken += 1
 
     logger.info(
-        "f5c_rna tiebreak: %d ambiguous, %d tiebroken",
+        "krill tiebreak: %d ambiguous, %d tiebroken",
         n_ambiguous, n_tiebroken,
     )
     return R_new

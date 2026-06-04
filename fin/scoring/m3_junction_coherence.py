@@ -14,7 +14,7 @@ candidate. We resolve this by anchoring each read to its OWN winner candidate:
 The window itself is the *class-level* genomic union
 (:func:`class_junction_window_set`), so every read in a wobble class is scored
 over the same set of genomic positions; only the projection frame (each read's
-winner ``tx2genome``) is per-read. For each read we run f5c_rna eventalign once
+winner ``tx2genome``) is per-read. For each read we run krill eventalign once
 against its winner, keep the ``event_level_mean`` of events whose genomic
 projection lands in the class window (ordered by genomic position), robustly
 normalize, and take pairwise open-end DTW *within each class*. Cross-class and
@@ -97,8 +97,8 @@ def build_m3_coherence(
         candidates: Column order for ``winner_col``.
         winner_col: (n_reads,) int; candidate index each read is anchored to
             (its M1 or M2 argmin). ``< 0`` -> read is left uncoupled (zeros).
-        sig_path: blow5/slow5 signal path for f5c_rna.
-        pore: f5c_rna pore model.
+        sig_path: blow5/slow5 signal path for krill.
+        pore: krill pore model.
         flank: diff-window padding (bp), forwarded to the window builder.
         chain_wobble: junction wobble tolerance (bp) for class clustering.
         junction_k: tx-bp on each side of the junction (window half-width).
@@ -132,11 +132,11 @@ def build_m3_coherence(
         return m3  # no wobble competition anywhere
 
     # Signal-path deps imported lazily so the pure no-window paths above stay
-    # importable without f5c_rna (e.g. unit tests).
-    import krill as f5c_rna
+    # importable without krill (e.g. unit tests).
+    import krill
     import mappy
 
-    f5c_aligner = f5c_rna.Aligner(pore=pore, use_gpu=False, hmm_confidence=False)
+    krill_aligner = krill.Aligner(pore=pore, use_gpu=False, hmm_confidence=False)
     preset = get_m1_preset()
     mappy_by_col: Dict[int, "mappy.Aligner"] = {}
 
@@ -171,12 +171,12 @@ def build_m3_coherence(
         if best_hit is None:
             continue
         try:
-            recs = f5c_rna.align_read_variants(
+            recs = krill.align_read_variants(
                 sig_path, rid,
                 {cand.candidate_id: cand.sequence[best_hit.r_st:best_hit.r_en]},
-                pore=pore, use_gpu=False, aligner=f5c_aligner, start=best_hit.r_st,
+                pore=pore, use_gpu=False, aligner=krill_aligner, start=best_hit.r_st,
             )
-        except Exception as e:  # noqa: BLE001 - f5c_rna raises broad errors
+        except Exception as e:  # noqa: BLE001 - krill raises broad errors
             logger.debug("align_read_variants failed %s/%s: %s", rid, cand.candidate_id, e)
             continue
         res = {x.get("variant_label"): x for x in recs}.get(cand.candidate_id)

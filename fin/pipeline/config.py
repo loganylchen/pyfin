@@ -51,7 +51,7 @@ class PipelineConfig:
     # of full-length assigned reads is below `min_fulllen_fraction`. A read is
     # full-length wrt candidate C when its genomic 5' AND 3' alignment ends are
     # BOTH within `fulllen_window_bp` of C's genomic 5'/3' ends (strand-aware).
-    # Signal-free: uses BAM primary-alignment spans only (no f5c/f5c_rna).
+    # Signal-free: uses BAM primary-alignment spans only (no f5c CLI / krill).
     # Applied as a post-quant candidate FILTER (never inside EM/assignment),
     # over the argmax assignment population where it is non-circular (discovery
     # groups support reads by 3' end, so it must NOT be applied at candidate
@@ -99,30 +99,18 @@ class PipelineConfig:
     em_max_iter: int = 1000
     em_tol: float = 1e-4
 
-    # R1 default path. enable_signal=False skips signal/EM and assigns reads by
-    # mappy-AS argmax. This is now the PRODUCTION DEFAULT: the ablation champion
-    # (M1-first) strictly dominates every M2/M3 signal variant on SIRV. SIRV
-    # WARNING: tuned on synthetic SIRV; revisit for real transcriptomes (the
-    # toggle stays configurable — set enable_signal=True for the legacy EM path).
-    enable_signal: bool = False
-    # R1 sub-variant. Only honored when enable_signal=False.
-    #   "argmax_keep" : M1-keep SPLIT — each read assigned to ALL of its
-    #                   simultaneously-best-AS candidates; abundance contribution
-    #                   is split 1/K across the K tied winners (read mass
-    #                   conserved). Mirrors ablation harness _quant_tie(mode=
-    #                   "split") == config "M1-split". PRODUCTION DEFAULT (user
-    #                   directive: "如果是同时最优，那么就都保留" with +1/K abundance).
-    #   "argmax_first": M1-first HARD argmin — each read assigned to its single
-    #                   best-AS candidate, ties broken by lowest candidate index
-    #                   (== GTF prior: candidates are gtf_passthrough +
-    #                   collapsed_novel + fusion). Integer read-count abundance.
-    #                   Mirrors ablation harness _quant_tie(mode="first").
-    #   "argmax_only" : mappy AS-weighted multimap → abundance = column sum (legacy R1)
-    #   "argmax_em"   : mappy R_mm used as soft-init for EM (β=0, no signal),
-    #                   then quantify_transcripts; aggregated with optional filter.
-    r1_variant: Literal[
-        "argmax_keep", "argmax_first", "argmax_only", "argmax_em"
-    ] = "argmax_keep"
+    # Quantification engine selector (replaces the enable_signal/r1_variant/
+    # r1_scoring triplet). The three modes are mutually exclusive:
+    #   "argmax" : mappy AS argmax + M2 krill junction tiebreak, hard counts,
+    #              NO EM. PRODUCTION DEFAULT (M1-first dominates on SIRV).
+    #   "m1_em"  : EM seeded by the M1 mappy AS-gap distance (beta=0, no signal
+    #              coherence). Pure-alignment soft assignment.
+    #   "m2_em"  : EM seeded by the M2 krill junction distance PLUS the M3
+    #              read x read krill DTW coherence (beta=em_beta, m4_source).
+    # All signal scoring is krill (in-memory eventalign); the legacy f5c CLI
+    # path is gone. SIRV WARNING: tuned on synthetic SIRV; revisit for real data.
+    quant_mode: Literal["argmax", "m1_em", "m2_em"] = "argmax"
+
     # R2 uses em_max_iter_override=1 for single-step EM; None = use em_max_iter.
     em_max_iter_override: Optional[int] = None
     # R5 only: when False, min_abundance / min_max_r / min_novel_combined_score
@@ -134,42 +122,10 @@ class PipelineConfig:
     # (no coherence contribution) regardless of em_beta.
     m4_source: Literal["whole_read", "diff_region", "none"] = "whole_read"
 
-    # EM matrix subset selector. Controls which distance matrices feed EM.
-    #   "m1"     : mappy distance only (read×tx); zeros for read×read; β=0
-    #   "m2"     : eventalign distance only; zeros for read×read; β=0
-    #   "m3"     : zeros for read×tx (uniform); m3 for coherence; β=em_beta
-    #   "m1+m2"  : per-row z-score mean of M1/M2 → read×tx; zeros r×r; β=0
-    #   "m1+m3"  : M1 → read×tx; M3 → read×read; β=em_beta
-    #   "m2+m3"  : M2 → read×tx; M3 → read×read; β=em_beta  (DEFAULT, legacy)
-    #   "all"    : zscore_mean(M1,M2) → read×tx; M3 → read×read; β=em_beta
-    em_matrix_subset: Literal[
-        "m1", "m2", "m3", "m1+m2", "m1+m3", "m2+m3", "all"
-    ] = "m2+m3"
-    # M2 normalization before EM. "none" = raw absolute distances (default,
-    # legacy). "center" = per-row min subtraction (best→0, like M1).
-    # "zscore" = per-row z-score shifted non-negative.
-    m2_norm: Literal["none", "center", "zscore"] = "none"
-    # M2 distance metric. "nll" = mean negative log-likelihood per event
-    # (default, legacy). "gap" = weighted gap-run distance with flanking
-    # context confidence — better discrimination for isoforms sharing exons.
-    m2_metric: Literal["nll", "gap", "outlier"] = "nll"
-    # M1+M2 fusion method for em_matrix_subset="m1+m2" or "all".
-    m1m2_fusion: Literal["zscore_mean", "rank"] = "zscore_mean"
-    # Post-hoc M2 validation: after M1-based EM, check if M2 agrees with
-    # each read assignment. Discount abundance for candidates where M2
-    # doesn't support the M1 assignment. Only effective when enable_signal
-    # is True and em_matrix_subset uses M1 (not M2) for EM.
-    m2_posthoc: bool = False
-    m2_posthoc_top_k: int = 3  # M2 must rank the candidate in top-K
-    # Signal tiebreaker: after M1 EM, resolve d=0 ties using diff-region
-    # signal quality. Only effective when enable_signal=True.
-    signal_tiebreak: bool = False
     tiebreak_ambig_threshold: float = 0.90
-    # Fake-FASTQ tiebreak: binary fail/pass f5c test for d=0 ties.
-    fake_fastq_tiebreak: bool = False
-    # f5c_rna in-memory tiebreak (preferred over fake_fastq_tiebreak)
-    f5c_rna_tiebreak: bool = False
-    f5c_rna_pore: str = "rna002"
+    # krill in-memory tiebreak
+    krill_tiebreak: bool = False
+    krill_pore: str = "rna002"
     # M2 tie resolution on the argmax_keep tie set (Stage M2-1). When a read is
     # simultaneously-best-AS across >=2 candidates, score the (small) tie set with
     # the validated junction-window mean-NLL metric (m2_resolve_tie); if the NLL
@@ -192,10 +148,6 @@ class PipelineConfig:
     # "mixed" reads; verified gffcompare == baseline); kept ON as the principled
     # per-read rule that may matter on real dRNA. Configurable.
     m2_tie_scoregate_split: bool = True
-    # Scoring method for the R1 (enable_signal=False) path.
-    # "mappy" = M1 mappy AS-gap distance (default).
-    # "f5c_rna" = M2 f5c_rna match score distance (pure signal scoring).
-    r1_scoring: Literal["mappy", "f5c_rna"] = "mappy"
 
     # EM prior / scoring
     score_alpha: float = 0.5          # weight for coherence vs discrimination in combined_score
@@ -206,9 +158,6 @@ class PipelineConfig:
     use_gpu: bool = True
     max_reads_per_interval_for_dtw: int = 2000
     signal_normalize: bool = True   # per-read robust z-score before DTW
-
-    # External tools
-    f5c_path: str = "f5c"
 
     # Parallelism (future)
     num_workers: int = 1

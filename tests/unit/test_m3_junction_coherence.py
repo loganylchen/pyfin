@@ -1,7 +1,7 @@
 """Unit tests for fin/scoring/m3_junction_coherence.py pure-logic helpers.
 
 The signal path (winner-anchored eventalign -> read x read DTW) is validated
-end-to-end against real f5c_rna + blow5 data in the Docker ablation run; these
+end-to-end against real krill + blow5 data in the Docker ablation run; these
 tests cover the window-signal projection and the no-window short-circuit, which
 have no external deps.
 """

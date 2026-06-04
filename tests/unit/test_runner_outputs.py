@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from typing import Dict
-from unittest.mock import MagicMock, patch
-
-import numpy as np
+from unittest.mock import patch
 
 from fin.analysis.quantification import QuantResult
 from fin.pipeline.config import PipelineConfig
@@ -187,158 +184,8 @@ class TestGtfRegressionUnchanged:
 
 
 # ---------------------------------------------------------------------------
-# T8: R-matrix persistence tests
+# T8: max_R column in scoring TSV
 # ---------------------------------------------------------------------------
-
-def _make_interval_mock(region="chr1:1000-2000"):
-    """Return a minimal mock GenomicInterval."""
-    m = MagicMock()
-    m.region_string = region
-    m.chrom = "chr1"
-    return m
-
-
-class TestRMatrixPersistence:
-    """Unit tests for R.npy + R_meta.json writeout in process_interval."""
-
-    def _run_process_interval_with_mocks(self, tmp_path, persist_R_matrix=True):
-        """
-        Call process_interval() on a PipelineRunner with everything below EM
-        stubbed out. Returns (work_dir, quant_results).
-        """
-        from fin.pipeline.runner import PipelineRunner
-        from fin.pipeline.config import PipelineConfig
-        from fin.candidates.dataclasses import CandidateSet
-
-        cfg = PipelineConfig(
-            bam_path="/fake/reads.bam",
-            work_dir=str(tmp_path),
-            persist_R_matrix=persist_R_matrix,
-            enable_signal=True,  # R.npy persistence is an EM-path feature
-        )
-        runner = PipelineRunner(cfg)
-
-        # Synthetic interval
-        interval = _make_interval_mock("chr1_1000_2000")
-
-        # Synthetic inputs: 4 reads x 3 transcripts
-        n_reads, n_tx = 4, 3
-        read_ids = [f"read{i}" for i in range(n_reads)]
-        cand_ids = [f"tx{j}" for j in range(n_tx)]
-
-        # Build fake R matrix (rows sum to 1)
-        R_fake = np.array([
-            [0.7, 0.2, 0.1],
-            [0.1, 0.8, 0.1],
-            [0.2, 0.2, 0.6],
-            [0.4, 0.4, 0.2],
-        ], dtype=np.float32)
-        hard_fake = np.argmax(R_fake, axis=1)
-
-        # Minimal QuantResult list (what quantify_transcripts would return)
-        from fin.analysis.quantification import QuantResult
-        quant_fake = [
-            QuantResult(
-                candidate_id=cand_ids[j],
-                abundance=float(R_fake[:, j].sum()),
-                confidence=0.7,
-                num_assigned_reads=1,
-                source="gtf",
-            )
-            for j in range(n_tx)
-        ]
-
-        from fin.scoring.composite import CompositeScore
-        composite_fake = [
-            CompositeScore(candidate_id=cid, coherence=0.5, discrimination=0.5, combined=0.5)
-            for cid in cand_ids
-        ]
-
-        runner_mod = "fin.pipeline.runner"
-        with patch(f"{runner_mod}.discover_candidates") as mock_disc, \
-             patch(f"{runner_mod}.ExternalToolRunner") as mock_tr_cls, \
-             patch(f"{runner_mod}.parse_eventalign_tsv", return_value=[]), \
-             patch(f"{runner_mod}.build_distance_matrix",
-                   return_value=np.ones((n_reads, n_tx), dtype=np.float64)), \
-             patch(f"{runner_mod}.subsample_reads_for_dtw",
-                   return_value=read_ids), \
-             patch(f"{runner_mod}.extract_signal_segments", return_value=[]), \
-             patch(f"{runner_mod}.compute_read_to_read_dtw",
-                   return_value=np.zeros((n_reads, n_reads), dtype=np.float64)), \
-             patch(f"{runner_mod}.score_candidates_composite",
-                   return_value=composite_fake), \
-             patch(f"{runner_mod}.derive_prior_weights", return_value=None), \
-             patch(f"{runner_mod}.em_with_coherence",
-                   return_value=(R_fake, hard_fake, [])), \
-             patch(f"{runner_mod}.quantify_transcripts",
-                   return_value=quant_fake), \
-             patch(f"{runner_mod}.populate_quant_scores"):
-
-            # Build a fake CandidateSet
-            mock_cs = MagicMock()
-            mock_cs.num_candidates = n_tx
-            mock_cs.read_ids = set(read_ids)
-            mock_cs.candidate_ids.return_value = cand_ids
-            # candidates list for n_tx transcripts
-            mock_cs.candidates = [MagicMock(candidate_id=cid) for cid in cand_ids]
-            mock_disc.return_value = mock_cs
-
-            # fake tool runner
-            mock_tr = MagicMock()
-            mock_tr.score_candidates.return_value = []
-            mock_tr_cls.return_value = mock_tr
-            runner._tool_runner = mock_tr
-
-            work_dir = tmp_path / interval.region_string.replace(":", "_").replace("-", "_")
-            result = runner.process_interval(interval)
-
-        return work_dir, result, R_fake, cand_ids, read_ids
-
-    def test_R_npy_written(self, tmp_path):
-        work_dir, result, R_fake, cand_ids, read_ids = \
-            self._run_process_interval_with_mocks(tmp_path)
-        r_path = work_dir / "R.npy"
-        assert r_path.exists(), f"R.npy not found at {r_path}"
-
-    def test_R_npy_shape_matches_meta(self, tmp_path):
-        work_dir, result, R_fake, cand_ids, read_ids = \
-            self._run_process_interval_with_mocks(tmp_path)
-        R_loaded = np.load(str(work_dir / "R.npy"))
-        with open(work_dir / "R_meta.json") as f:
-            meta = json.load(f)
-        assert R_loaded.shape == (len(meta["read_ids"]), len(meta["candidate_ids"]))
-        assert R_loaded.shape == R_fake.shape
-
-    def test_R_meta_json_fields(self, tmp_path):
-        work_dir, result, R_fake, cand_ids, read_ids = \
-            self._run_process_interval_with_mocks(tmp_path)
-        with open(work_dir / "R_meta.json") as f:
-            meta = json.load(f)
-        assert "read_ids" in meta
-        assert "candidate_ids" in meta
-        assert "interval_region" in meta
-        assert "sigma_used" in meta
-        assert "was_subsampled" in meta
-        assert "n_reads_subsampled" in meta
-        assert "n_reads_full" in meta
-        assert meta["candidate_ids"] == cand_ids
-        assert meta["read_ids"] == read_ids
-
-    def test_R_npy_not_written_when_disabled(self, tmp_path):
-        work_dir, result, R_fake, cand_ids, read_ids = \
-            self._run_process_interval_with_mocks(tmp_path, persist_R_matrix=False)
-        assert not (work_dir / "R.npy").exists()
-        assert not (work_dir / "R_meta.json").exists()
-
-    def test_max_R_populated_on_quant_results(self, tmp_path):
-        work_dir, result, R_fake, cand_ids, read_ids = \
-            self._run_process_interval_with_mocks(tmp_path)
-        assert result is not None
-        for j, qr in enumerate(result):
-            expected = float(R_fake[:, j].max())
-            assert abs(qr.max_R - expected) < 1e-6, \
-                f"max_R mismatch for col {j}: got {qr.max_R}, expected {expected}"
-
 
 class TestMaxRInScoringTsv:
     """Verify max_R column appears in scoring TSV."""
