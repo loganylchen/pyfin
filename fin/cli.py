@@ -38,6 +38,9 @@ import click
 @click.option("--min-fulllen-fraction", default=0.1, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose fraction of full-length assigned reads (read genomic 5' AND 3' both within --fulllen-window-bp of the candidate's ends) is below this (FLAIR/TALON-style full-length read support; signal-free). Orthogonal to --min-isoform-fraction. GTF/fusion/mono and unreachable candidates exempt; 0.0 disables. SIRV WARNING: default 0.1 is SIRV-tuned (drops most reachable novel-multi for free as SIRV lacks a 5'-truncated isoform tail) — re-tune or disable on real dRNA data.")
 @click.option("--fulllen-window-bp", default=25, show_default=True, type=int, help="bp tolerance for a read genomic end to count as full-length wrt a candidate's 5'/3' end (used by --min-fulllen-fraction).")
 @click.option("--fulllen-min-reads", default=4, show_default=True, type=int, help="Minimum assigned reads carrying a genomic span required to score a candidate's full-length fraction; below this the candidate is unreachable and never dropped (used by --min-fulllen-fraction).")
+@click.option("--min-polya5p-reads", default=1, show_default=True, type=int, help="Drop a candidate unless >= N of its assigned reads BOTH have a krill whole-read polyA tail (qc PASS & length > --min-polya-length) AND map with their genomic 5' end within --polya5p-window-bp of the candidate's 5' end. UNLIKE other filters this also gates GTF candidates (fusion exempt). Needs --signal; adds a krill polyA pass to every run; 0 disables. SIRV WARNING: ON by default (=1); lifts no-GTF Tx-F1 but drops genuine annotated transcripts on with-GTF runs — re-tune or disable on real dRNA.")
+@click.option("--polya5p-window-bp", default=25, show_default=True, type=int, help="bp tolerance for a read's genomic 5' end to count toward --min-polya5p-reads.")
+@click.option("--min-polya-length", default=10.0, show_default=True, type=float, help="Minimum krill polya_length (with polya_qc PASS) for a read to support a candidate under --min-polya5p-reads.")
 @click.option("--persist-R/--no-persist-R", "persist_R_matrix", default=True, show_default=True, help="Enable/disable R-matrix (R.npy) persistence per interval.")
 @click.option("--canonical-gate/--no-canonical-gate", "canonical_gate", default=True, show_default=True, help="Drop NOVEL multi-exon candidates whose junctions aren't all canonical (GTF/fusion/mono exempt). SIRV-tuned default ON.")
 @click.option("--canonical-motifs", default="GT-AG,GC-AG,AT-AC", show_default=True, help="Comma-separated donor-acceptor motifs accepted by the canonical gate AND search.")
@@ -79,6 +82,9 @@ def main(
     min_fulllen_fraction,
     fulllen_window_bp,
     fulllen_min_reads,
+    min_polya5p_reads,
+    polya5p_window_bp,
+    min_polya_length,
     persist_R_matrix,
     canonical_gate,
     canonical_motifs,
@@ -150,6 +156,9 @@ def main(
         min_fulllen_fraction=min_fulllen_fraction,
         fulllen_window_bp=fulllen_window_bp,
         fulllen_min_reads=fulllen_min_reads,
+        min_polya5p_reads=min_polya5p_reads,
+        polya5p_window_bp=polya5p_window_bp,
+        min_polya_length=min_polya_length,
         persist_R_matrix=persist_R_matrix,
         canonical_gate=canonical_gate,
         canonical_motifs=tuple(

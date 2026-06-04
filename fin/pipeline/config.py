@@ -70,6 +70,25 @@ class PipelineConfig:
     fulllen_window_bp: int = 25          # bp tolerance for a read end to count as full-length
     fulllen_min_reads: int = 4           # min assigned reads-with-span to score (else unreachable)
 
+    # polyA + 5'-proximity candidate-retention FILTER. Drop a candidate unless at
+    # least `min_polya5p_reads` of its assigned reads BOTH (a) have a krill
+    # whole-read polyA tail with polya_qc == "PASS" and polya_length >
+    # `min_polya_length`, AND (b) map with their genomic 5' end within
+    # `polya5p_window_bp` of the candidate's genomic 5' end (strand-aware).
+    # UNLIKE every other post-quant filter, this gates GTF-sourced candidates
+    # TOO (annotated transcripts must clear the same polyA evidence bar); fusion
+    # candidates remain EXEMPT. Requires `signal_path`; it adds a krill
+    # whole-read eventalign (polya=True) pass over all reads to every run, and
+    # no-ops gracefully when signal is absent or krill produces nothing. Set
+    # `min_polya5p_reads = 0` to disable. SIRV WARNING: SIRV-tuned and ON by
+    # default (=1). On SIRV no-GTF this lifts gffcompare Tx-F1 (48.8 -> 49.5) by
+    # removing FP novels, but on with-GTF runs it drops genuine annotated
+    # transcripts whose reads lack a detectable/long polyA or are 5'-truncated
+    # (Tx-F1 cost observed). Re-tune or disable on real dRNA.
+    min_polya5p_reads: int = 1
+    polya5p_window_bp: int = 25          # bp 5' tolerance (mirrors fulllen_window_bp)
+    min_polya_length: float = 10.0       # min krill polya_length for a read to support (qc PASS required)
+
     # Canonical-motif alternative expansion: scan ±N bp around each read's
     # CIGAR-derived junction for GT-AG and emit additional chains.
     # Stage C: ea extended canonical SEARCH. For each read-derived novel

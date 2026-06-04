@@ -17,6 +17,7 @@ from fin.analysis.quantification import (
     compute_fulllen_frac,
     fulllen_fraction_drops,
     isoform_fraction_drops,
+    polya5p_drops,
     quantify_transcripts,
 )
 from fin.candidates.canonical import chain_all_canonical, parse_motifs
@@ -249,6 +250,20 @@ class PipelineRunner:
                     len(drop_ids),
                     self.config.min_fulllen_fraction,
                 )
+
+        # polyA + 5'-proximity candidate-retention filter. Drop a candidate
+        # unless >= min_polya5p_reads of its assigned reads BOTH have a krill
+        # whole-read polyA tail (qc PASS & length > min_polya_length) AND map
+        # with their genomic 5' end within polya5p_window_bp of the candidate's
+        # 5' end. UNLIKE the other filters this also gates GTF-sourced
+        # candidates (fusion stays exempt). Requires signal; no-ops when absent.
+        if (
+            _score_filter_on
+            and getattr(self.config, "min_polya5p_reads", 0) > 0
+            and self.config.signal_path
+            and Path(self.config.signal_path).exists()
+        ):
+            aggregated = self._apply_polya5p_filter(aggregated)
 
         # Resolve gene_ids from GTF annotation
         for cid, qr in aggregated.items():
@@ -649,6 +664,83 @@ class PipelineRunner:
             qr.fulllen_frac = compute_fulllen_frac(
                 qr, read_ends, window, min_reads
             )
+
+    def _fetch_read_seqs_and_ends(
+        self,
+    ) -> Tuple[Dict[str, str], Dict[str, Tuple[int, int]]]:
+        """Single BAM pass -> ({rid: query_sequence}, {rid: (ref_start, ref_end)}).
+
+        Primary mapped alignments only; first occurrence per read id wins. The
+        sequences feed krill whole-read polyA; the genomic spans feed 5'
+        proximity (mirrors ``_annotate_fulllen_frac``'s read-end map).
+        """
+        read_seqs: Dict[str, str] = {}
+        read_ends: Dict[str, Tuple[int, int]] = {}
+        with pysam.AlignmentFile(self.config.bam_path, "rb") as bam:
+            for r in bam.fetch():
+                if r.is_unmapped or r.is_secondary or r.is_supplementary:
+                    continue
+                rid = r.query_name
+                if rid is None or rid in read_ends:
+                    continue
+                rs, re = r.reference_start, r.reference_end
+                if rs is None or re is None:
+                    continue
+                read_ends[rid] = (int(rs), int(re))
+                if r.query_sequence:
+                    read_seqs[rid] = r.query_sequence
+        return read_seqs, read_ends
+
+    def _apply_polya5p_filter(
+        self, aggregated: Dict[str, QuantResult]
+    ) -> Dict[str, QuantResult]:
+        """Drop candidates failing the polyA + 5'-proximity gate (gates GTF too).
+
+        Runs a krill whole-read polyA pass over all reads, then removes any
+        novel/gtf candidate with fewer than ``min_polya5p_reads`` reads that both
+        have a confident polyA tail and map 5'-flush to the candidate. Fusion
+        candidates are exempt. No-ops if krill returns nothing.
+        """
+        from fin.scoring.polya import compute_polya
+
+        read_seqs, read_ends = self._fetch_read_seqs_and_ends()
+        polya_map = compute_polya(
+            read_seqs,
+            self.config.signal_path,
+            pore=self.config.krill_pore,
+            use_gpu=self.config.use_gpu,
+        )
+        if not polya_map:
+            logger.warning(
+                "polyA+5' filter: krill returned no polyA estimates; skipping"
+            )
+            return aggregated
+
+        drop_ids = polya5p_drops(
+            aggregated,
+            polya_map,
+            read_ends,
+            window=self.config.polya5p_window_bp,
+            min_polya_len=self.config.min_polya_length,
+            min_reads=self.config.min_polya5p_reads,
+        )
+        if not drop_ids:
+            return aggregated
+
+        n_gtf = sum(
+            1 for cid in drop_ids if aggregated[cid].source == "gtf"
+        )
+        n_novel = len(drop_ids) - n_gtf
+        aggregated = {
+            cid: qr for cid, qr in aggregated.items() if cid not in drop_ids
+        }
+        logger.info(
+            "Dropped %d gtf + %d novel transcripts failing polyA+5' (>= %d reads)",
+            n_gtf,
+            n_novel,
+            self.config.min_polya5p_reads,
+        )
+        return aggregated
 
     def _adaptive_sigma(self, dist_read_to_tx: np.ndarray) -> float:
         """Data-adaptive EM sigma: median per-read range of the read×tx distance,

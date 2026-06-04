@@ -251,6 +251,94 @@ def fulllen_fraction_drops(
     return drops
 
 
+def polya_read_passes(
+    rid: str,
+    polya_map: Dict[str, Tuple[Optional[float], Optional[str]]],
+    min_polya_len: float,
+) -> bool:
+    """True if read ``rid`` carries a confident polyA tail.
+
+    A read passes when krill estimated ``polya_qc == "PASS"`` and a finite
+    ``polya_length`` strictly greater than ``min_polya_len``. Reads absent from
+    ``polya_map`` (krill did not score them) do not pass.
+    """
+    v = polya_map.get(rid)
+    if v is None:
+        return False
+    plen, pqc = v
+    return (
+        pqc == "PASS"
+        and plen is not None
+        and plen == plen  # NaN guard
+        and plen > min_polya_len
+    )
+
+
+def compute_polya5p_support(
+    qr: QuantResult,
+    polya_map: Dict[str, Tuple[Optional[float], Optional[str]]],
+    read_ends: Dict[str, Tuple[int, int]],
+    window: int,
+    min_polya_len: float,
+) -> int:
+    """Count qr's assigned reads that support it by polyA AND 5' proximity.
+
+    A read counts when it BOTH (a) has a confident polyA tail
+    (``polya_read_passes``) AND (b) maps with its genomic 5' end within
+    ``window`` bp of the candidate's genomic 5' end (strand-aware, via
+    ``_five_three``). ``read_ends`` maps a read id to its primary-alignment
+    ``(ref_start, ref_end)`` genomic span; reads without a span do not count.
+    """
+    c5, _ = _five_three(qr.start, qr.end, qr.strand)
+    n = 0
+    for rid in qr.assigned_read_ids:
+        if not polya_read_passes(rid, polya_map, min_polya_len):
+            continue
+        sp = read_ends.get(rid)
+        if sp is None:
+            continue
+        r5, _ = _five_three(sp[0], sp[1], qr.strand)
+        if abs(r5 - c5) <= window:
+            n += 1
+    return n
+
+
+def polya5p_drops(
+    results: Dict[str, QuantResult],
+    polya_map: Dict[str, Tuple[Optional[float], Optional[str]]],
+    read_ends: Dict[str, Tuple[int, int]],
+    window: int,
+    min_polya_len: float,
+    min_reads: int,
+) -> set:
+    """Return candidate_ids to drop by the polyA + 5'-proximity filter.
+
+    Drop a candidate whose ``compute_polya5p_support`` is below ``min_reads``.
+    Unlike the other post-quant filters, this gates BOTH novel AND GTF-sourced
+    transcripts (the user requires reference candidates to face the same
+    polyA evidence bar). Fusion candidates are EXEMPT — they are a separate
+    detection path and must not be silently dropped. ``min_reads <= 0`` disables
+    the filter, and an empty ``polya_map`` (krill produced nothing) returns an
+    empty set so a signal-less/failed run never drops anything.
+
+    SIRV WARNING: this filter is SIRV-tuned. Applying it to GTF candidates drops
+    genuine annotated transcripts whose reads lack a detectable polyA tail or are
+    5'-truncated; on real dRNA this can cost recall. Re-tune or disable
+    (``min_polya5p_reads = 0``) on real data.
+    """
+    if min_reads <= 0 or not polya_map:
+        return set()
+    drops: set = set()
+    for qr in results.values():
+        if qr.source == "fusion":
+            continue
+        if compute_polya5p_support(
+            qr, polya_map, read_ends, window, min_polya_len
+        ) < min_reads:
+            drops.add(qr.candidate_id)
+    return drops
+
+
 def compute_tpm(
     results: Dict[str, QuantResult],
     transcript_lengths: Dict[str, int],
