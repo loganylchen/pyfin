@@ -29,7 +29,6 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from fin.candidates.dataclasses import TranscriptCandidate
-from fin.scoring.diff_region_dtw import cluster_candidates_by_chain
 from fin.scoring.mappy_preset import get_m1_preset
 from fin.scoring.mappy_score import score_hit
 
@@ -385,126 +384,6 @@ def read_cand_mean_nll(
     if gset is not None:
         return _mean_nll_in_gset(res, cand, gset)
     return _mean_nll_in_window(res, cand, windows)
-
-
-def build_m2_distance(
-    read_ids: List[str],
-    read_seqs: Dict[str, str],
-    candidates: List[TranscriptCandidate],
-    m1_mask: np.ndarray,
-    dist_m1: np.ndarray,
-    sig_path: str,
-    pore: str = "rna002",
-    flank: int = 2,
-    chain_wobble: int = 20,
-    junction_k: Optional[int] = 10,
-) -> np.ndarray:
-    """Read x candidate M2 distance matrix (junction mean-NLL refinement of M1).
-
-    Cell rules (row i = read, col j = candidate):
-      * M1-rejected (``m1_mask[i, j]`` False)        -> ``MISSING`` (1e6)
-      * candidate class has NO discrimination window -> ``dist_m1[i, j]``
-        (degrade to M1; no wobble competition to resolve)
-      * window exists, M1-accepted, events in window -> mean NLL
-      * window exists, M1-accepted, NO events        -> ``MISSING`` (read does
-        not cover the discriminative region -> evidence against this candidate)
-
-    Args:
-        read_ids: Row order.
-        read_seqs: read_id -> query sequence.
-        candidates: Column order.
-        m1_mask: (n_reads, n_cands) bool; True where M1 accepts the alignment.
-        dist_m1: (n_reads, n_cands) M1 distance, used as the no-window fallback.
-        sig_path: blow5/slow5 signal path for krill.
-        pore: krill pore model (default rna002).
-        flank: diff-window padding (bp).
-        chain_wobble: junction wobble tolerance (bp) for class clustering.
-
-    Returns:
-        (n_reads, n_cands) float64 distance matrix; lower = better.
-    """
-    import krill
-
-    n_reads = len(read_ids)
-    n_cands = len(candidates)
-    dist = np.full((n_reads, n_cands), MISSING, dtype=np.float64)
-    if n_reads == 0 or n_cands == 0:
-        return dist
-
-    # Default every M1-accepted cell to its M1 distance (degrade-to-M1). Cells
-    # in a windowed class are overwritten below.
-    accepted = np.asarray(m1_mask, dtype=bool)
-    dist[accepted] = np.asarray(dist_m1, dtype=np.float64)[accepted]
-
-    # Cluster candidates; only classes with an internal diff window run krill.
-    # When junction_k is set, the discrimination region is the transcript-frame
-    # two-sided junction window (validated 99.2% pairwise); otherwise the OLD
-    # contiguous genomic sliver (86.2%).
-    classes = cluster_candidates_by_chain(candidates, chain_wobble=chain_wobble)
-    class_windows: List[Tuple[List[int], List[Tuple[int, int]], Optional[set]]] = []
-    for members in classes:
-        if len(members) < 2:
-            continue
-        cands = [candidates[j] for j in members]
-        if junction_k is not None:
-            gset = class_junction_window_set(cands, flank=flank, k=junction_k)
-            if gset:
-                class_windows.append((members, [], gset))
-        else:
-            windows = internal_diff_regions(cands, flank=flank)
-            if windows:
-                class_windows.append((members, windows, None))
-
-    if not class_windows:
-        return dist  # no wobble competition anywhere -> pure M1 ranking
-
-    krill_aligner = krill.Aligner(pore=pore, use_gpu=False, hmm_confidence=False)
-    preset = get_m1_preset()
-
-    # Build mappy aligners once per candidate that participates in a window.
-    import mappy
-
-    mappy_by_col: Dict[int, "mappy.Aligner"] = {}
-    for members, _, _ in class_windows:
-        for j in members:
-            if j in mappy_by_col:
-                continue
-            seq = candidates[j].sequence
-            if seq:
-                mappy_by_col[j] = mappy.Aligner(seq=seq, preset=preset)
-
-    read_idx = {rid: i for i, rid in enumerate(read_ids)}
-    n_cells = 0
-    for members, windows, gset in class_windows:
-        for j in members:
-            aln = mappy_by_col.get(j)
-            if aln is None:
-                continue
-            cand = candidates[j]
-            for rid in read_ids:
-                i = read_idx[rid]
-                if not accepted[i, j]:
-                    continue
-                seq = read_seqs.get(rid)
-                if not seq:
-                    continue
-                nll, n_ev = read_cand_mean_nll(
-                    rid, seq, cand, windows, krill_aligner, aln, sig_path, pore,
-                    gset=gset,
-                )
-                if n_ev > 0 and math.isfinite(nll):
-                    dist[i, j] = nll
-                else:
-                    # M1-accepted but no signal in the discriminative window:
-                    # the read does not support this candidate's unique exon.
-                    dist[i, j] = MISSING
-                n_cells += 1
-
-    logger.info(
-        "build_m2_distance: %d windowed classes, scored %d (read,cand) cells",
-        len(class_windows), n_cells,
-    )
-    return dist
 
 
 # ---------------------------------------------------------------------------

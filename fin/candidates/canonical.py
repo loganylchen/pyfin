@@ -1,11 +1,9 @@
 """Shared canonical splice-site primitives (motif parsing, search, filter).
 
 These pure functions are the single source of truth for what counts as a
-*canonical* splice junction, used by BOTH the production pipeline and the
-ablation harness (``benchmarks/m1_m2_ablation.py``). Sharing one
-implementation guarantees the consistency constraint: a ±N bp canonical SEARCH
-and the canonical FILTER always agree on the motif set ("search what you
-filter").
+*canonical* splice junction. Sharing one implementation guarantees the
+consistency constraint: a ±N bp canonical SEARCH and the canonical FILTER
+always agree on the motif set ("search what you filter").
 
 Coordinate frame: introns are ``(s, e)`` 0-based half-open genomic bounds. The
 (donor, acceptor) dinucleotides are read in TRANSCRIPT orientation:
