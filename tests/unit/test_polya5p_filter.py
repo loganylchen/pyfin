@@ -240,7 +240,7 @@ def _fake_krill(*, init_raises_gpu=False, init_raises_all=False, align_raises=Fa
                 raise RuntimeError("no GPU")
             self.use_gpu = use_gpu
 
-    def _align(signal_path, reads_variants, aligner=None):
+    def _align(signal_path, reads_variants, aligner=None, use_gpu=False):
         call = state["calls"]
         state["calls"] += 1
         if align_raises or call == fail_on_call:

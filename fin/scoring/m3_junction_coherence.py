@@ -88,6 +88,7 @@ def build_m3_coherence(
     flank: int = 2,
     chain_wobble: int = 20,
     junction_k: int = 10,
+    use_gpu: bool = True,
 ) -> np.ndarray:
     """Read x read junction-window DTW coherence, anchored to each read's winner.
 
@@ -133,10 +134,20 @@ def build_m3_coherence(
 
     # Signal-path deps imported lazily so the pure no-window paths above stay
     # importable without krill (e.g. unit tests).
-    import krill
-    import mappy
+    try:
+        import krill
+        import mappy
 
-    krill_aligner = krill.Aligner(pore=pore, use_gpu=False, hmm_confidence=False)
+        from fin.scoring.krill_aligner import make_krill_aligner
+    except Exception as exc:  # krill/mappy not importable -> no coherence
+        logger.warning("build_m3_coherence: signal deps import failed (%s); skipping", exc)
+        return m3
+
+    krill_aligner, use_gpu = make_krill_aligner(
+        krill, pore, use_gpu, hmm_confidence=False
+    )
+    if krill_aligner is None:
+        return m3
     preset = get_m1_preset()
     mappy_by_col: Dict[int, "mappy.Aligner"] = {}
 
@@ -174,7 +185,7 @@ def build_m3_coherence(
             recs = krill.align_read_variants(
                 sig_path, rid,
                 {cand.candidate_id: cand.sequence[best_hit.r_st:best_hit.r_en]},
-                pore=pore, use_gpu=False, aligner=krill_aligner, start=best_hit.r_st,
+                pore=pore, use_gpu=use_gpu, aligner=krill_aligner, start=best_hit.r_st,
             )
         except Exception as e:  # noqa: BLE001 - krill raises broad errors
             logger.debug("align_read_variants failed %s/%s: %s", rid, cand.candidate_id, e)

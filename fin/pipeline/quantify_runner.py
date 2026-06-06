@@ -386,6 +386,7 @@ class QuantifyRunner:
         dist_read_to_tx = _build_m2_krill(
             dtw_read_ids, read_seqs, cand_list,
             sample.signal_path, krill_pore, as_distance=True,
+            use_gpu=self.use_gpu,
         )
 
         # M3: read×read junction-window DTW coherence, each read anchored to its
@@ -412,6 +413,7 @@ class QuantifyRunner:
             dist_read_to_read = build_m3_coherence(
                 dtw_read_ids, read_seqs, cand_list, winner_col,
                 sample.signal_path, pore=krill_pore, junction_k=junction_k,
+                use_gpu=self.use_gpu,
             )
             beta_use = self.em_beta
 

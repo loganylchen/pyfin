@@ -338,6 +338,7 @@ def read_cand_mean_nll(
     sig_path: str,
     pore: str,
     gset: Optional[set] = None,
+    use_gpu: bool = True,
 ) -> Tuple[float, int]:
     """Per-event mean NLL of one read against one candidate over ``windows``.
 
@@ -370,7 +371,7 @@ def read_cand_mean_nll(
             read_id,
             {cand.candidate_id: cand.sequence[best_hit.r_st:best_hit.r_en]},
             pore=pore,
-            use_gpu=False,
+            use_gpu=use_gpu,
             aligner=krill_aligner,
             start=best_hit.r_st,
         )
@@ -406,6 +407,7 @@ def m2_resolve_tie(
     krill_aligner=None,
     mappy_aligners: Optional[List] = None,
     return_scored: bool = False,
+    use_gpu: bool = True,
 ) -> Tuple:
     """Resolve an M1 tie with the validated junction-window mean-NLL metric.
 
@@ -456,9 +458,19 @@ def m2_resolve_tie(
         return (None, 0.0, []) if return_scored else (None, 0.0)
 
     if krill_aligner is None:
-        import krill
+        try:
+            import krill
 
-        krill_aligner = krill.Aligner(pore=pore, use_gpu=False, hmm_confidence=False)
+            from fin.scoring.krill_aligner import make_krill_aligner
+        except Exception as exc:  # krill not importable -> abstain (no tiebreak)
+            logger.warning("m2_resolve_tie: krill import failed (%s); skipping", exc)
+            return (None, 0.0, []) if return_scored else (None, 0.0)
+
+        krill_aligner, use_gpu = make_krill_aligner(
+            krill, pore, use_gpu, hmm_confidence=False
+        )
+        if krill_aligner is None:
+            return (None, 0.0, []) if return_scored else (None, 0.0)
     if mappy_aligners is None:
         import mappy
 
@@ -475,7 +487,7 @@ def m2_resolve_tie(
             continue
         nll, n_ev = read_cand_mean_nll(
             read_id, read_seq, cand, [], krill_aligner, aln, sig_path, pore,
-            gset=gset,
+            gset=gset, use_gpu=use_gpu,
         )
         if n_ev > 0 and math.isfinite(nll):
             scored.append((idx, nll))

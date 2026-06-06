@@ -79,7 +79,7 @@ def _patch_scores(monkeypatch, scores):
     """scores: dict candidate_id -> (nll, n_events)."""
 
     def fake(read_id, read_seq, cand, windows, krill_aligner, mappy_aligner,
-             sig_path, pore, gset=None):
+             sig_path, pore, gset=None, use_gpu=True):
         return scores.get(cand.candidate_id, (float("nan"), 0))
 
     monkeypatch.setattr(m2, "read_cand_mean_nll", fake)

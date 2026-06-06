@@ -511,6 +511,7 @@ class PipelineRunner:
         # read's FULL mass instead of the 1/K split. Lazily build a shared non-HMM
         # krill aligner; auto-skip the whole leg if signal is absent.
         m2_krill = None
+        m2_gpu = False
         m2_on = bool(getattr(self.config, "m2_tiebreak", False)) and bool(
             self.config.signal_path
         )
@@ -518,12 +519,17 @@ class PipelineRunner:
             try:
                 import krill
 
-                m2_krill = krill.Aligner(
-                    pore=self.config.krill_pore, use_gpu=False,
+                from fin.scoring.krill_aligner import make_krill_aligner
+
+                m2_krill, m2_gpu = make_krill_aligner(
+                    krill, self.config.krill_pore, self.config.use_gpu,
                     hmm_confidence=False,
                 )
-            except Exception as exc:  # signal stack unavailable -> keep 1/K split
-                logger.warning("M2 tiebreak disabled (krill init failed): %s", exc)
+            except Exception as exc:  # krill not importable -> keep 1/K split
+                logger.warning("M2 tiebreak disabled (krill import failed): %s", exc)
+                m2_krill = None
+            if m2_krill is None:  # signal stack unavailable -> keep 1/K split
+                logger.warning("M2 tiebreak disabled (krill init failed)")
                 m2_on = False
 
         counts = [0.0] * n_c
@@ -571,7 +577,7 @@ class PipelineRunner:
                     pore=self.config.krill_pore,
                     junction_k=self.config.m2_tiebreak_junction_k,
                     krill_aligner=m2_krill, mappy_aligners=tied_aligners,
-                    return_scored=True,
+                    return_scored=True, use_gpu=m2_gpu,
                 )
                 if best_local is not None and margin >= self.config.m2_tiebreak_margin:
                     j = tied[best_local]
@@ -813,6 +819,7 @@ class PipelineRunner:
                 candidates=cand_list, signal_path=self.config.signal_path,
                 pore=self.config.krill_pore,
                 ambig_threshold=self.config.tiebreak_ambig_threshold,
+                use_gpu=self.config.use_gpu,
             )
             hard_assignments = R.argmax(axis=1)
 
@@ -860,6 +867,7 @@ class PipelineRunner:
         dist_read_to_tx = _build_m2_krill(
             kept_read_ids, read_seqs, cand_list,
             self.config.signal_path, self.config.krill_pore, as_distance=True,
+            use_gpu=self.config.use_gpu,
         )
 
         # M3: read×read junction-window DTW coherence, each read anchored to its
@@ -882,6 +890,7 @@ class PipelineRunner:
                 kept_read_ids, read_seqs, cand_list, winner_col,
                 self.config.signal_path, pore=self.config.krill_pore,
                 junction_k=self.config.m2_tiebreak_junction_k,
+                use_gpu=self.config.use_gpu,
             )
             beta_use = self.config.em_beta
 
@@ -903,6 +912,7 @@ class PipelineRunner:
                 candidates=cand_list, signal_path=self.config.signal_path,
                 pore=self.config.krill_pore,
                 ambig_threshold=self.config.tiebreak_ambig_threshold,
+                use_gpu=self.config.use_gpu,
             )
             hard_assignments = R.argmax(axis=1)
 

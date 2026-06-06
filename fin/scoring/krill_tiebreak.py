@@ -27,6 +27,7 @@ def _build_m2_krill(
     signal_path: str,
     pore: str = "rna002",
     as_distance: bool = True,
+    use_gpu: bool = True,
 ) -> np.ndarray:
     """Build (n_reads, n_cands) matrix from krill match scores.
 
@@ -35,11 +36,16 @@ def _build_m2_krill(
         Can be used directly as R matrix.
     FAIL → 0.
     """
-    import krill
-
     n_reads = len(read_ids)
     n_cands = len(candidates)
     dist = np.ones((n_reads, n_cands), dtype=np.float32)
+    try:
+        import krill
+
+        from fin.scoring.krill_aligner import make_krill_aligner
+    except Exception as exc:  # krill not importable -> default (max) distances
+        logger.warning("_build_m2_krill: krill import failed (%s); skipping", exc)
+        return dist
 
     # Build mappy aligners
     cand_aligners = {}
@@ -79,8 +85,11 @@ def _build_m2_krill(
     # Try batch API first (align_reads_variants, plural), fall back to per-read
     import os
     num_threads = int(os.environ.get("KRILL_THREADS", "0"))
-    aligner = krill.Aligner(pore=pore, use_gpu=False,
-                            hmm_confidence=True, num_thread=num_threads)
+    aligner, use_gpu = make_krill_aligner(
+        krill, pore, use_gpu, hmm_confidence=True, num_thread=num_threads
+    )
+    if aligner is None:
+        return dist
     use_batch = hasattr(krill, 'align_reads_variants')
 
     logger.info("krill scoring: %d reads, %d total pairs, batch=%s",
@@ -92,7 +101,7 @@ def _build_m2_krill(
         try:
             all_results = krill.align_reads_variants(
                 signal_path, reads_variants,
-                pore=pore, num_thread=num_threads,
+                pore=pore, num_thread=num_threads, use_gpu=use_gpu,
             )
         except Exception as e:
             logger.warning("krill batch failed, falling back to per-read: %s", e)
@@ -106,7 +115,7 @@ def _build_m2_krill(
                 res = krill.align_read_variants(
                     blow5_path=signal_path, read_id=rid,
                     sequences=seq_dict, pore=pore,
-                    use_gpu=False, aligner=aligner,
+                    use_gpu=use_gpu, aligner=aligner,
                 )
                 all_results[rid] = res
             except Exception:
@@ -173,16 +182,23 @@ def krill_tiebreak(
     signal_path: str,
     pore: str = "rna002",
     ambig_threshold: float = 0.90,
+    use_gpu: bool = True,
 ) -> np.ndarray:
     """Resolve M1 ties using krill in-memory eventalign.
 
     Returns updated R matrix (copy).
     """
-    import krill
-
     R_new = R.copy()
     n_reads, n_cands = R.shape
     if n_cands < 2:
+        return R_new
+
+    try:
+        import krill
+
+        from fin.scoring.krill_aligner import make_krill_aligner
+    except Exception as exc:  # krill not importable -> R unchanged
+        logger.warning("krill_tiebreak: krill import failed (%s); skipping", exc)
         return R_new
 
     # Build mappy aligners
@@ -194,7 +210,9 @@ def krill_tiebreak(
                 aligners[j] = a
 
     # Create krill aligner (reuse for all reads)
-    aligner = krill.Aligner(pore=pore, use_gpu=False, hmm_confidence=True)
+    aligner, use_gpu = make_krill_aligner(krill, pore, use_gpu, hmm_confidence=True)
+    if aligner is None:
+        return R_new
 
     n_ambiguous = 0
     n_tiebroken = 0
@@ -239,7 +257,7 @@ def krill_tiebreak(
                 read_id=rid,
                 sequences=seq_dict,
                 pore=pore,
-                use_gpu=False,
+                use_gpu=use_gpu,
                 aligner=aligner,
             )
         except Exception as e:
