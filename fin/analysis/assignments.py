@@ -36,6 +36,10 @@ def em_with_coherence(
     verbose=True,
     use_gpu=True,
     prior_weights: Optional[np.ndarray] = None,
+    abundance_feedback: bool = False,
+    eff_lengths: Optional[np.ndarray] = None,
+    abundance_length_norm: bool = False,
+    abundance_eps: float = 1e-12,
 ):
     """
     EM algorithm with coherence regularization for clustering reads to transcripts.
@@ -74,6 +78,28 @@ def em_with_coherence(
             finite. If all weights are zero, falls back to uniform prior with a
             warning. When None (default), behavior is identical to the original
             (uniform) initialization.
+        abundance_feedback: bool, default=False
+            Enable RSEM/Salmon-style iterative abundance feedback. When True, each
+            M-step re-estimates a transcript-abundance vector theta from the current
+            responsibilities (theta_j proportional to R[:,j].sum()) and adds a
+            -sigma*log(theta_j + abundance_eps) term to the energy, so that
+            R[i,j] is proportional to exp(...) * theta_j. This pulls reads shared
+            between candidates toward the more abundant one (e.g. a 0.5/0.5 split
+            migrating toward 0.99/0.01 once theta diverges 100:1). When False
+            (default), the energy and output are identical to the original
+            (no-feedback) behavior. Note: reads that are equidistant to two
+            candidates for EVERY read in the locus stay at 0.5/0.5 even with
+            feedback on (the abundances are non-identifiable; same as RSEM).
+        eff_lengths: np.ndarray or None, shape (n_tx,), default=None
+            Per-transcript effective lengths used only when
+            abundance_length_norm is True. Must be finite and strictly positive.
+        abundance_length_norm: bool, default=False
+            When True (and abundance_feedback is True), divide the responsibility
+            counts by eff_lengths before normalizing theta (Salmon effective-length
+            normalization). Requires eff_lengths.
+        abundance_eps: float, default=1e-12
+            Floor added to theta inside the log to avoid log(0) when a transcript's
+            estimated abundance underflows to ~0.
 
     Returns:
         tuple: (R, hard_assignments, log_likelihoods)
@@ -141,6 +167,20 @@ def em_with_coherence(
         else:
             pi = prior_weights / s
 
+    # Validate effective lengths (only needed for length-normalized feedback)
+    if abundance_feedback and abundance_length_norm:
+        if eff_lengths is None:
+            raise ValueError(
+                "abundance_length_norm=True requires eff_lengths"
+            )
+        eff_lengths = np.asarray(eff_lengths, dtype=float)
+        if eff_lengths.shape != (n_tx,):
+            raise ValueError(
+                f"eff_lengths must be ({n_tx},), got {eff_lengths.shape}"
+            )
+        if np.any(eff_lengths <= 0) or not np.all(np.isfinite(eff_lengths)):
+            raise ValueError("eff_lengths must be finite and strictly positive")
+
     # Select array backend (cupy GPU or numpy CPU)
     xp, to_device, to_host = _get_array_module(use_gpu)
     if xp is not np and verbose:
@@ -149,6 +189,9 @@ def em_with_coherence(
     # Transfer to device
     d_tx = to_device(dist_read_to_tx)
     d_rr = to_device(dist_read_to_read)
+    eff_lengths_dev = None
+    if abundance_feedback and abundance_length_norm:
+        eff_lengths_dev = to_device(eff_lengths.reshape(1, -1))  # (1, n_tx)
 
     # Initialize responsibility matrix: R[i, j] = P(read_i -> transcript_j)
     # Numerically stable softmax: subtract row-min before exp so the best
@@ -177,6 +220,17 @@ def em_with_coherence(
         # M-step: energy = dist + beta * coherence, then softmax
         # Row-shift for numerical stability (see init step above for rationale).
         energy = d_tx + beta * coherence_penalty
+        if abundance_feedback:
+            # RSEM/Salmon abundance feedback: re-estimate theta_j from the
+            # current responsibilities and bias the energy by -sigma*log(theta_j).
+            # Dividing by sigma in the softmax turns this into a clean linear
+            # multiplier R[i,j] ∝ exp(...) * theta_j. cluster_weights is the
+            # already-floored column sum of R (= read mass per transcript).
+            counts = cluster_weights  # (1, n_tx), floored at 1e-10 above
+            if eff_lengths_dev is not None:
+                counts = counts / eff_lengths_dev
+            theta = counts / counts.sum()
+            energy = energy - sigma * xp.log(theta + abundance_eps)
         energy_min = energy.min(axis=1, keepdims=True)
         R_new = xp.exp(-(energy - energy_min) / sigma)
         row_sums = R_new.sum(axis=1, keepdims=True)

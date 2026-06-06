@@ -767,6 +767,23 @@ class PipelineRunner:
             ))
         return self.config.em_sigma
 
+    def _eff_lengths(self, cand_list) -> Optional[np.ndarray]:
+        """Per-candidate spliced effective length in cand_list column order, for
+        Salmon-style abundance-feedback length normalization. Returns None unless
+        abundance_feedback AND abundance_length_norm are both on. Lengths are
+        floored at 1.0 so a degenerate (zero-length) candidate cannot divide-by-0.
+        """
+        if not (self.config.abundance_feedback and self.config.abundance_length_norm):
+            return None
+        lengths = np.array(
+            [
+                max(1.0, float(sum(e - s for s, e in _exons_from_candidate(c))))
+                for c in cand_list
+            ],
+            dtype=float,
+        )
+        return lengths
+
     def _quant_m1_em(
         self,
         candidate_set: CandidateSet,
@@ -811,6 +828,9 @@ class PipelineRunner:
             tol=self.config.em_tol,
             verbose=False,
             use_gpu=self.config.use_gpu,
+            abundance_feedback=self.config.abundance_feedback,
+            abundance_length_norm=self.config.abundance_length_norm,
+            eff_lengths=self._eff_lengths(cand_list),
         )
 
         if self.config.krill_tiebreak:
@@ -904,6 +924,9 @@ class PipelineRunner:
             tol=self.config.em_tol,
             verbose=False,
             use_gpu=self.config.use_gpu,
+            abundance_feedback=self.config.abundance_feedback,
+            abundance_length_norm=self.config.abundance_length_norm,
+            eff_lengths=self._eff_lengths(cand_list),
         )
 
         if self.config.krill_tiebreak:

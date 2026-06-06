@@ -55,6 +55,8 @@ import click
     show_default=True,
     help="Quantification engine. 'argmax': mappy AS argmax + M2 krill junction tiebreak, hard counts, no EM (production default). 'm1_em': EM seeded by M1 mappy distance (beta=0). 'm2_em': EM seeded by M2 krill junction distance + M3 read-to-read krill DTW coherence (beta=em_beta). All signal scoring is in-memory krill.",
 )
+@click.option("--abundance-feedback/--no-abundance-feedback", default=False, show_default=True, help="RSEM/Salmon-style iterative abundance feedback in the EM: each M-step re-estimates per-transcript abundance theta and biases a read shared between candidates toward the more abundant one (a 0.5/0.5 split migrating toward 0.99/0.01 once theta diverges, e.g. 100:1). Only affects --quant-mode m1_em|m2_em (no effect on the 'argmax' production default). Experimental; OFF by default.")
+@click.option("--abundance-length-norm/--no-abundance-length-norm", default=False, show_default=True, help="With --abundance-feedback, divide abundance counts by per-transcript spliced effective length before forming theta (Salmon effective-length normalization). Experimental; OFF by default.")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 @click.pass_context
 def main(
@@ -93,6 +95,8 @@ def main(
     m2_tiebreak_margin,
     m2_tiebreak_junction_k,
     quant_mode,
+    abundance_feedback,
+    abundance_length_norm,
     verbose,
 ):
     """pyfin: nanopore signal-based transcriptome assembly.
@@ -169,6 +173,8 @@ def main(
         m2_tiebreak_margin=m2_tiebreak_margin,
         m2_tiebreak_junction_k=m2_tiebreak_junction_k,
         quant_mode=quant_mode,
+        abundance_feedback=abundance_feedback,
+        abundance_length_norm=abundance_length_norm,
     )
 
     runner = PipelineRunner(cfg)

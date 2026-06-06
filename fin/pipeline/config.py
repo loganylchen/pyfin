@@ -118,6 +118,19 @@ class PipelineConfig:
     em_max_iter: int = 1000
     em_tol: float = 1e-4
 
+    # RSEM/Salmon-style iterative abundance feedback inside the EM (assignments.
+    # em_with_coherence). When ON, each M-step re-estimates a transcript-abundance
+    # vector theta from the current responsibilities and biases the energy by
+    # -sigma*log(theta_j), so a read shared between candidates is pulled toward the
+    # more abundant one (a 0.5/0.5 split migrating toward 0.99/0.01 once theta
+    # diverges, e.g. 100:1). Only affects the EM quant modes ("m1_em"/"m2_em");
+    # the production "argmax" mode does no EM and is unaffected. OFF by default
+    # (production output is byte-identical). abundance_length_norm additionally
+    # divides theta counts by per-transcript effective length (Salmon-style);
+    # requires the runner to supply eff_lengths. SIRV-experimental.
+    abundance_feedback: bool = False
+    abundance_length_norm: bool = False
+
     # Quantification engine selector (replaces the enable_signal/r1_variant/
     # r1_scoring triplet). The three modes are mutually exclusive:
     #   "argmax" : mappy AS argmax + M2 krill junction tiebreak, hard counts,
