@@ -29,6 +29,12 @@ class QuantResult:
     end: int = 0
     exons: Tuple[Tuple[int, int], ...] = ()  # 0-based
     gene_id: str = ""
+    # Composite signal scores. ONLY populated by the composite scorer
+    # (fin/scoring/composite.py), which is wired exclusively into the
+    # `quantify` subcommand (quantify_runner.py). The main assembly runner
+    # never invokes it, so in every assembly quant_mode (argmax/m1_em/m2_em)
+    # these stay at their 0.0 defaults -- do not gate assembly-mode filters on
+    # them (see runner._finalize_and_write's combined_score guard).
     coherence_score: float = 0.0
     discrimination_score: float = 0.0
     combined_score: float = 0.0

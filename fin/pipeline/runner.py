@@ -159,8 +159,13 @@ class PipelineRunner:
                     self.config.min_abundance,
                 )
 
-        # Phase A Tier-2: max_R filter (FP-by-EM). EM responsibility is a
-        # strong FP discriminator (Cohen's d=1.34 vs combined_score's 0.70).
+        # Phase A Tier-2: max_R filter. EM responsibility is a strong FP
+        # discriminator (Cohen's d=1.34 vs combined_score's 0.70) -- but that
+        # statistic was measured on the EM quant modes. NOTE: under the
+        # production default quant_mode='argmax', max_R is the max single-read
+        # *mappy* assignment weight (set in _quant_argmax_keep), NOT an EM
+        # responsibility, so the d=1.34 calibration does not transfer; only
+        # m1_em / m2_em populate max_R with a true EM responsibility.
         # GTF-sourced and fusion transcripts are exempt to preserve annotation
         # visibility and avoid silently dropping fusion calls.
         if _score_filter_on and self.config.min_max_r > 0.0:
@@ -183,21 +188,41 @@ class PipelineRunner:
         # the geometric mean of coherence and discrimination (Cohen's d=0.70).
         # The F1-optimal threshold from profile_fp.md is 0.288 for with-GTF and
         # 0.428 for no-GTF runs. GTF-sourced and fusion transcripts are exempt.
+        #
+        # WARNING: combined_score is ONLY populated by the composite scorer,
+        # which the assembly pipeline (this runner) never invokes -- it is wired
+        # solely into the `quantify` subcommand. In every assembly quant_mode
+        # (argmax / m1_em / m2_em) combined_score stays at its 0.0 default, so a
+        # threshold > 0 here would drop EVERY novel candidate. Guard against that
+        # foot-gun: skip the filter (with a loud warning) unless some novel
+        # candidate actually carries a non-zero combined_score.
         if _score_filter_on and self.config.min_novel_combined_score > 0.0:
-            before = len(aggregated)
-            aggregated = {
-                cid: qr
-                for cid, qr in aggregated.items()
-                if qr.source in ("gtf", "fusion")
-                or qr.combined_score >= self.config.min_novel_combined_score
-            }
-            dropped = before - len(aggregated)
-            if dropped:
-                logger.info(
-                    "Dropped %d novel transcripts with combined_score < %.3f",
-                    dropped,
+            if not any(
+                qr.source not in ("gtf", "fusion") and qr.combined_score > 0.0
+                for qr in aggregated.values()
+            ):
+                logger.warning(
+                    "min_novel_combined_score=%.3f requested but no novel "
+                    "candidate has a non-zero combined_score (the composite "
+                    "scorer is not run in assembly mode); skipping this filter "
+                    "to avoid dropping all novel transcripts.",
                     self.config.min_novel_combined_score,
                 )
+            else:
+                before = len(aggregated)
+                aggregated = {
+                    cid: qr
+                    for cid, qr in aggregated.items()
+                    if qr.source in ("gtf", "fusion")
+                    or qr.combined_score >= self.config.min_novel_combined_score
+                }
+                dropped = before - len(aggregated)
+                if dropped:
+                    logger.info(
+                        "Dropped %d novel transcripts with combined_score < %.3f",
+                        dropped,
+                        self.config.min_novel_combined_score,
+                    )
 
         # Minimum isoform fraction (locus-relative abundance) filter. Drops
         # NOVEL multi-exon transcripts whose abundance is below
