@@ -96,13 +96,15 @@ class TestAblationRowsDefinitions:
         assert r2.em_max_iter_override == 1
         # R2 isolates "single-step EM" as the only variable vs R4 (coherence on).
         assert r2.m4_source == "diff_region"
+        assert r2.m3_coherence is True
         assert r2.enable_score_filter is False
 
     def test_r3_no_coherence(self):
-        """AC5: R3 m4_source='none' means zero matrix, not None."""
+        """AC5: R3 disables coherence (m3_coherence=False -> EM beta=0)."""
         r3 = next(r for r in ABLATION_ROWS if r.row_id == "R3")
         assert r3.quant_mode == "m2_em"
         assert r3.m4_source == "none"
+        assert r3.m3_coherence is False
         assert r3.em_max_iter_override is None
         assert r3.enable_score_filter is False
 
@@ -110,12 +112,14 @@ class TestAblationRowsDefinitions:
         r4 = next(r for r in ABLATION_ROWS if r.row_id == "R4")
         assert r4.quant_mode == "m2_em"
         assert r4.m4_source == "diff_region"
+        assert r4.m3_coherence is True
         assert r4.enable_score_filter is False
 
     def test_r5_diff_region_scored(self):
         r5 = next(r for r in ABLATION_ROWS if r.row_id == "R5")
         assert r5.quant_mode == "m2_em"
         assert r5.m4_source == "diff_region"
+        assert r5.m3_coherence is True
         assert r5.enable_score_filter is True
 
 
@@ -129,6 +133,7 @@ class TestAblationRowConfigDefaults:
         assert cfg.quant_mode == "m2_em"
         assert cfg.em_max_iter_override is None
         assert cfg.m4_source == "diff_region"
+        assert cfg.m3_coherence is False
         assert cfg.enable_score_filter is True
 
 

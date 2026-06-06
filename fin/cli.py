@@ -32,7 +32,7 @@ import click
 @click.option("--max-reads-per-interval-for-dtw", "max_reads_for_dtw", default=2000, show_default=True, type=int, help="Cap reads per interval for read-to-read DTW (subsample beyond this).")
 @click.option("--min-novel-reads", default=1, show_default=True, type=int, help="Drop novel candidates with fewer supporting reads (after collapsing).")
 @click.option("--min-abundance", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose EM-estimated abundance is below this threshold (GTF candidates are exempt).")
-@click.option("--min-max-r", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose max_R is below this (GTF candidates are exempt). NOTE: max_R is a true EM responsibility (the d=1.34 FP discriminator, try 0.2) ONLY in --quant-mode m1_em/m2_em; under the default 'argmax' mode max_R is the max single-read mappy weight, so that calibration does not apply.")
+@click.option("--min-max-r", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose max_R is below this (GTF candidates are exempt). NOTE: max_R is a true EM responsibility (the d=1.34 FP discriminator, try 0.2) ONLY in --quant-mode m1_em/m2_em (m2_em is the default); under 'argmax' mode max_R is instead the max single-read mappy weight, so that calibration does not apply.")
 @click.option("--min-novel-combined-score", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose combined_score is below this (F1-optimal: 0.288 with-GTF, 0.428 no-GTF; GTF candidates are exempt). WARNING: combined_score is only computed by the `quantify` subcommand's composite scorer; in assembly mode (this command, any quant_mode) it stays 0.0, so a value > 0 is IGNORED (the runner skips the filter with a warning rather than dropping all novel transcripts).")
 @click.option("--min-isoform-fraction", default=0.01, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose abundance is below this fraction of the dominant overlapping novel isoform at their locus (Cufflinks --min-isoform-fraction / StringTie -f minor-isoform suppression). GTF/fusion/mono exempt; 0.0 disables. Default 0.01 (StringTie-aligned, recall-safe). SIRV WARNING: F1-optimal ~0.4 is overfit — never use on real data.")
 @click.option("--min-fulllen-fraction", default=0.1, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose fraction of full-length assigned reads (read genomic 5' AND 3' both within --fulllen-window-bp of the candidate's ends) is below this (FLAIR/TALON-style full-length read support; signal-free). Orthogonal to --min-isoform-fraction. GTF/fusion/mono and unreachable candidates exempt; 0.0 disables. SIRV WARNING: default 0.1 is SIRV-tuned (drops most reachable novel-multi for free as SIRV lacks a 5'-truncated isoform tail) — re-tune or disable on real dRNA data.")
@@ -50,12 +50,19 @@ import click
 @click.option("--m2-tiebreak-junction-k", default=10, show_default=True, type=int, help="Transcript-frame bp on each side of the wobbling junction for the M2 discrimination window (SIRV sweet spot 10).")
 @click.option(
     "--quant-mode",
-    default="argmax",
+    default="m2_em",
     type=click.Choice(["argmax", "m1_em", "m2_em"]),
     show_default=True,
-    help="Quantification engine. 'argmax': mappy AS argmax + M2 krill junction tiebreak, hard counts, no EM (production default). 'm1_em': EM seeded by M1 mappy distance (beta=0). 'm2_em': EM seeded by M2 krill junction distance + M3 read-to-read krill DTW coherence (beta=em_beta). All signal scoring is in-memory krill.",
+    help="Quantification engine. 'm2_em' (production default): EM seeded by the PURE tie-break junction-NLL M2 distance (M1/AS selects each read's best-AS tie set + mappability mask; per-event junction NLL is the sole graded distance over that tie set), no M3 unless --m3-coherence. 'argmax': mappy AS argmax + M2 krill junction tiebreak, hard counts, no EM. 'm1_em': EM seeded by M1 mappy distance (beta=0). All signal scoring is in-memory krill.",
 )
-@click.option("--abundance-feedback/--no-abundance-feedback", default=False, show_default=True, help="RSEM/Salmon-style iterative abundance feedback in the EM: each M-step re-estimates per-transcript abundance theta and biases a read shared between candidates toward the more abundant one (a 0.5/0.5 split migrating toward 0.99/0.01 once theta diverges, e.g. 100:1). Only affects --quant-mode m1_em|m2_em (no effect on the 'argmax' production default). Experimental; OFF by default.")
+@click.option(
+    "--m3-coherence/--no-m3-coherence",
+    "m3_coherence",
+    default=False,
+    show_default=True,
+    help="Add the M3 read×read junction-window krill DTW coherence to the EM quant modes (beta=em_beta). OFF by default because the pairwise DTW is expensive; the m2_em default runs the pure tie-break junction-NLL EM with no DTW. SIRV with-GTF Tx-F1 59.7 (M3 on, beta=1) vs 59.2 (off) — high-precision, recall-neutral; the payoff is the real-dRNA bet.",
+)
+@click.option("--abundance-feedback/--no-abundance-feedback", default=False, show_default=True, help="RSEM/Salmon-style iterative abundance feedback in the EM: each M-step re-estimates per-transcript abundance theta and biases a read shared between candidates toward the more abundant one (a 0.5/0.5 split migrating toward 0.99/0.01 once theta diverges, e.g. 100:1). Only affects the EM quant modes --quant-mode m1_em|m2_em (m2_em is the default; no effect under 'argmax'). Experimental; OFF by default.")
 @click.option("--abundance-length-norm/--no-abundance-length-norm", default=False, show_default=True, help="With --abundance-feedback, divide abundance counts by per-transcript spliced effective length before forming theta (Salmon effective-length normalization). Experimental; OFF by default.")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 @click.pass_context
@@ -95,6 +102,7 @@ def main(
     m2_tiebreak_margin,
     m2_tiebreak_junction_k,
     quant_mode,
+    m3_coherence,
     abundance_feedback,
     abundance_length_norm,
     verbose,
@@ -173,6 +181,7 @@ def main(
         m2_tiebreak_margin=m2_tiebreak_margin,
         m2_tiebreak_junction_k=m2_tiebreak_junction_k,
         quant_mode=quant_mode,
+        m3_coherence=m3_coherence,
         abundance_feedback=abundance_feedback,
         abundance_length_norm=abundance_length_norm,
     )
@@ -207,8 +216,14 @@ def main(
 )
 @click.option("--use-prior/--no-prior", default=True, show_default=True, help="Apply combined_score-derived EM prior.")
 @click.option("--signal-normalize/--no-signal-normalize", default=True, show_default=True, help="Per-read robust z-score normalization before DTW.")
+@click.option(
+    "--m3-coherence/--no-m3-coherence",
+    default=False,
+    show_default=True,
+    help="Enable read×read junction-window DTW coherence (M3, EM weight=em_beta). OFF by default because DTW is costly.",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
-def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, use_prior, signal_normalize, verbose):
+def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, use_prior, signal_normalize, m3_coherence, verbose):
     """Quantify known transcripts across multiple samples."""
     from fin.utils.log_config import setup_logger
 
@@ -236,6 +251,7 @@ def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, use_prior,
         use_gpu=use_gpu,
         use_prior=use_prior,
         signal_normalize=signal_normalize,
+        m3_coherence=m3_coherence,
     )
 
     runner = QuantifyRunner(

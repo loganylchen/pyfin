@@ -23,10 +23,20 @@ from fin.pipeline.config import PipelineConfig
 class TestEmIterToggleConfig:
     """PipelineConfig ablation field defaults and overrides."""
 
-    def test_quant_mode_default_argmax(self):
-        # Aggressive production default: M1-first argmax path (no EM).
+    def test_quant_mode_default_m2_em(self):
+        # Production default: pure tie-break junction-NLL EM (signal + EM).
         c = PipelineConfig(bam_path="/tmp/x.bam")
-        assert c.quant_mode == "argmax"
+        assert c.quant_mode == "m2_em"
+
+    def test_m3_coherence_default_false(self):
+        # M3 read×read DTW coherence is opt-in (DTW is costly).
+        c = PipelineConfig(bam_path="/tmp/x.bam")
+        assert c.m3_coherence is False
+
+    def test_em_beta_default_one(self):
+        # SIRV beta-sweep sweet spot (used as the M3 weight when m3_coherence).
+        c = PipelineConfig(bam_path="/tmp/x.bam")
+        assert c.em_beta == 1.0
 
     def test_em_max_iter_override_default_none(self):
         c = PipelineConfig(bam_path="/tmp/x.bam")

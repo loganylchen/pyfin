@@ -114,7 +114,11 @@ class PipelineConfig:
 
     # EM parameters
     em_sigma: float = 1.0
-    em_beta: float = 0.5
+    # M3 read×read coherence weight in em_with_coherence (only applied when
+    # m3_coherence=True). Default 1.0 = the SIRV beta-sweep sweet spot for the
+    # pure tie-break junction-NLL EM (with-GTF Tx-F1 59.7 at β=1 vs 59.2 M3-off);
+    # β≥2 over-smooths. SIRV-tuned; revisit on real dRNA.
+    em_beta: float = 1.0
     em_max_iter: int = 1000
     em_tol: float = 1e-4
 
@@ -134,14 +138,21 @@ class PipelineConfig:
     # Quantification engine selector (replaces the enable_signal/r1_variant/
     # r1_scoring triplet). The three modes are mutually exclusive:
     #   "argmax" : mappy AS argmax + M2 krill junction tiebreak, hard counts,
-    #              NO EM. PRODUCTION DEFAULT (M1-first dominates on SIRV).
+    #              NO EM. (M1-first; on SIRV peaks slightly above m2_em.)
     #   "m1_em"  : EM seeded by the M1 mappy AS-gap distance (beta=0, no signal
     #              coherence). Pure-alignment soft assignment.
-    #   "m2_em"  : EM seeded by the M2 krill junction distance PLUS the M3
-    #              read x read krill DTW coherence (beta=em_beta, m4_source).
+    #   "m2_em"  : PRODUCTION DEFAULT. EM seeded by the PURE tie-break junction-NLL
+    #              M2 distance: M1/AS picks each read's best-AS tie set + mappability
+    #              mask, and the per-event junction-NLL is the sole graded distance
+    #              over that tie set (m2_resolve_tie semantics, NOT the dense
+    #              read×candidate matrix). Optionally adds the M3 read×read DTW
+    #              coherence when m3_coherence=True (beta=em_beta). Chosen as the
+    #              default for real-dRNA robustness (principled soft assignment);
+    #              on SIRV it clears the competitor floor (Tx-F1 ~48.9 no-GTF /
+    #              59.2 with-GTF, M3 off) just under argmax.
     # All signal scoring is krill (in-memory eventalign); the legacy f5c CLI
     # path is gone. SIRV WARNING: tuned on synthetic SIRV; revisit for real data.
-    quant_mode: Literal["argmax", "m1_em", "m2_em"] = "argmax"
+    quant_mode: Literal["argmax", "m1_em", "m2_em"] = "m2_em"
 
     # R2 uses em_max_iter_override=1 for single-step EM; None = use em_max_iter.
     em_max_iter_override: Optional[int] = None
@@ -153,6 +164,15 @@ class PipelineConfig:
     # diff-region DTW (R4/R5 of the ablation). "none" forces a zero matrix
     # (no coherence contribution) regardless of em_beta.
     m4_source: Literal["whole_read", "diff_region", "none"] = "whole_read"
+
+    # Read×read junction-window DTW coherence (M3) in the EM quant modes. OFF by
+    # default because the pairwise DTW is expensive; the production m2_em default
+    # runs the pure tie-break junction-NLL EM with NO M3 (no DTW). When True the
+    # runner builds the M3 read×read matrix and mixes it into em_with_coherence at
+    # beta=em_beta. SIRV: with-GTF Tx-F1 59.7 (M3 on, β=1) vs 59.2 (off) — small,
+    # high-precision, recall-neutral; the payoff is expected on real dRNA. Gates
+    # M3 in BOTH the assembly runner (m2_em) and the quantify subcommand.
+    m3_coherence: bool = False
 
     tiebreak_ambig_threshold: float = 0.90
     # krill in-memory tiebreak

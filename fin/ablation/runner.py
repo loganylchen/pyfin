@@ -9,15 +9,20 @@ Row definitions (AC1):
   R1a quant_mode="argmax"           mappy argmax + M2 tiebreak, no EM
   R1b quant_mode="argmax"           + score filters on
   R1c quant_mode="m1_em"            mappy-distance EM (β=0), score filters on
-  R2  quant_mode="m2_em",           single-step krill EM (warm start from prior)
-      em_max_iter_override=1
-  R3  quant_mode="m2_em",           krill EM, coherence disabled (β irrelevant)
-      m4_source="none"
+  R2  quant_mode="m2_em",           single-step krill EM + DTW coherence
+      em_max_iter_override=1,        (isolates iteration count vs R4)
+      m3_coherence=True
+  R3  quant_mode="m2_em",           krill EM, coherence disabled (β=0)
+      m3_coherence=False
   R4  quant_mode="m2_em",           krill EM + junction-window DTW coherence
-      m4_source="diff_region"
+      m3_coherence=True
   R5  quant_mode="m2_em",           R4 + score filters on (production-equivalent)
-      m4_source="diff_region",
+      m3_coherence=True,
       enable_score_filter=True
+
+Note: the m2_em assembly path gates M3 read×read DTW coherence on
+``PipelineConfig.m3_coherence`` (NOT ``m4_source``). ``m4_source`` is retained
+because it still governs the ``quantify`` subcommand's coherence source.
 """
 
 from __future__ import annotations
@@ -39,7 +44,8 @@ class AblationRowConfig:
     label: str           # human-readable description
     quant_mode: str = "m2_em"   # "argmax" | "m1_em" | "m2_em"
     em_max_iter_override: Optional[int] = None
-    m4_source: str = "diff_region"   # "diff_region" | "none" (krill coherence)
+    m4_source: str = "diff_region"   # "diff_region" | "none" (quantify coherence src)
+    m3_coherence: bool = False  # gate read×read DTW coherence in the m2_em path
     enable_score_filter: bool = True
 
 
@@ -75,6 +81,7 @@ ABLATION_ROWS: List[AblationRowConfig] = [
         quant_mode="m2_em",
         em_max_iter_override=1,
         m4_source="diff_region",
+        m3_coherence=True,
         enable_score_filter=False,
     ),
     AblationRowConfig(
@@ -83,6 +90,7 @@ ABLATION_ROWS: List[AblationRowConfig] = [
         quant_mode="m2_em",
         em_max_iter_override=None,
         m4_source="none",
+        m3_coherence=False,
         enable_score_filter=False,
     ),
     AblationRowConfig(
@@ -91,6 +99,7 @@ ABLATION_ROWS: List[AblationRowConfig] = [
         quant_mode="m2_em",
         em_max_iter_override=None,
         m4_source="diff_region",
+        m3_coherence=True,
         enable_score_filter=False,
     ),
     AblationRowConfig(
@@ -99,6 +108,7 @@ ABLATION_ROWS: List[AblationRowConfig] = [
         quant_mode="m2_em",
         em_max_iter_override=None,
         m4_source="diff_region",
+        m3_coherence=True,
         enable_score_filter=True,
     ),
 ]

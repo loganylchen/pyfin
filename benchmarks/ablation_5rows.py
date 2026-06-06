@@ -49,7 +49,7 @@ def _build_base_config(args) -> "PipelineConfig":
         use_gpu=not args.no_gpu,
         max_reads=args.max_reads,
         em_sigma=1.0,
-        em_beta=0.5,
+        em_beta=1.0,  # SIRV-swept M3 weight; rows R2/R4/R5 use this when m3_coherence=True
         em_max_iter=200,
         use_prior=True,
         score_alpha=0.5,
@@ -74,6 +74,7 @@ def _row_config(base, row_cfg) -> "PipelineConfig":
         "quant_mode": row_cfg.quant_mode,
         "em_max_iter_override": row_cfg.em_max_iter_override,
         "m4_source": row_cfg.m4_source,
+        "m3_coherence": row_cfg.m3_coherence,
         "enable_score_filter": row_cfg.enable_score_filter,
     }
     return dataclasses.replace(base, **overrides)

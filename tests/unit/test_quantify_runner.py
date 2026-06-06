@@ -324,6 +324,7 @@ def test_quantify_runner_dtw_subsampling(
         use_gpu=False,
         max_reads_per_interval_for_dtw=cap,
         persist_R_matrix=False,
+        m3_coherence=True,  # M3 DTW is opt-in; this test exercises its subsampling
     )
     runner = _make_runner(cfg)
     runner._genome_fasta = {"chr1": "ACGT" * 250}

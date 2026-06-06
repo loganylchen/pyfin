@@ -1,9 +1,10 @@
 """Integration tests for PipelineRunner.process_interval() (US-011).
 
 Exercises the krill-only quant_mode='m2_em' EM path with heavy mocking — no
-real BAM/krill/CUDA. The signal matrices (M2 read×tx distance, M3 read×read
-coherence) and EM are stubbed; the test asserts the orchestration contract
-(dispatch, fusion augmentation, use_gpu threading).
+real BAM/krill/CUDA. The pure tie-break junction-NLL seed (``_tie_nll``), the
+per-candidate mappy aligners, the M3 read×read coherence and EM are all stubbed;
+the test asserts the orchestration contract (dispatch, fusion augmentation,
+use_gpu threading, the m3_coherence gate).
 """
 
 from __future__ import annotations
@@ -21,6 +22,23 @@ from fin.candidates.dataclasses import (
 from fin.io.interval_manager import GenomicInterval
 from fin.pipeline.config import PipelineConfig
 from fin.pipeline.runner import PipelineRunner
+
+
+class _FakeAligner:
+    """mappy.Aligner stub: builds, maps to nothing (raw AS stays -inf; the
+    tie sets come from the mocked ``_tie_nll`` so the raw matrix is unused)."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def map(self, *a, **k):
+        return iter(())
+
+
+def _fake_tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+    """Give every read a unique-best tie on candidate 0 (no scored NLLs)."""
+    ties = {i: [0] for i in range(len(kept_read_ids))}
+    return {}, ties, 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -96,11 +114,10 @@ def _patch_m2_phases(num_reads: int = 10, num_cands: int = 2, candidates=None):
         interval=_make_interval(),
         candidates=candidates,
         read_ids=set(read_ids),
+        read_sequences={rid: "ACGT" * 25 for rid in read_ids},
     )
 
     R_mm = np.full((num_reads, num_cands), 1.0 / num_cands)
-    # M2 read×tx distances in (0, 0.5): below the 0.999 no-data sentinel.
-    dist_tx = 0.1 + 0.3 * np.random.RandomState(0).rand(num_reads, num_cands)
     dist_rr = np.zeros((num_reads, num_reads), dtype=np.float32)
     R = np.full((num_reads, num_cands), 1.0 / num_cands)
     hard = np.zeros(num_reads, dtype=int)
@@ -132,9 +149,10 @@ def _patch_m2_phases(num_reads: int = 10, num_cands: int = 2, candidates=None):
             "fin.ablation.mappy_argmax.mappy_multimap_responsibilities",
             return_value=(R_mm, list(read_ids)),
         ),
-        "_build_m2_krill": patch(
-            "fin.scoring.krill_tiebreak._build_m2_krill",
-            return_value=dist_tx,
+        "mappy_aligner": patch("mappy.Aligner", _FakeAligner),
+        "tie_nll": patch.object(PipelineRunner, "_tie_nll", _fake_tie_nll),
+        "eff_lengths": patch.object(
+            PipelineRunner, "_eff_lengths", return_value=None
         ),
         "build_m3_coherence": patch(
             "fin.scoring.m3_junction_coherence.build_m3_coherence",
@@ -167,7 +185,8 @@ def test_process_interval_m2_em_smoke(tmp_path):
     )
 
     with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
-         patches["_build_m2_krill"], patches["build_m3_coherence"], \
+         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+         patches["build_m3_coherence"], \
          patches["em_with_coherence"], patches["quantify_transcripts"]:
         results = runner.process_interval(_make_interval())
 
@@ -186,7 +205,8 @@ def test_process_interval_use_gpu_threaded(tmp_path):
     patches, _, _ = _patch_m2_phases(num_reads=6, num_cands=2)
 
     with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
-         patches["_build_m2_krill"], patches["build_m3_coherence"], \
+         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+         patches["build_m3_coherence"], \
          patches["em_with_coherence"] as em_m, patches["quantify_transcripts"]:
         runner.process_interval(_make_interval())
 
@@ -194,21 +214,41 @@ def test_process_interval_use_gpu_threaded(tmp_path):
     assert em_kwargs.get("use_gpu") is False
 
 
-def test_process_interval_m4_none_disables_coherence(tmp_path):
-    """m4_source='none' -> EM beta=0 and build_m3_coherence is not called."""
-    cfg = _make_config(work_dir=str(tmp_path), m4_source="none")
+def test_process_interval_m3_off_by_default_disables_coherence(tmp_path):
+    """m3_coherence default OFF -> EM beta=0 and build_m3_coherence not called."""
+    cfg = _make_config(work_dir=str(tmp_path))
+    assert cfg.m3_coherence is False
     runner = _make_runner(cfg)
 
     patches, _, _ = _patch_m2_phases(num_reads=6, num_cands=2)
 
     with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
-         patches["_build_m2_krill"], patches["build_m3_coherence"] as m3_m, \
+         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+         patches["build_m3_coherence"] as m3_m, \
          patches["em_with_coherence"] as em_m, patches["quantify_transcripts"]:
         runner.process_interval(_make_interval())
 
     m3_m.assert_not_called()
     _, em_kwargs = em_m.call_args
     assert em_kwargs.get("beta") == 0.0
+
+
+def test_process_interval_m3_on_enables_coherence(tmp_path):
+    """m3_coherence=True -> build_m3_coherence is called and EM beta=em_beta."""
+    cfg = _make_config(work_dir=str(tmp_path), m3_coherence=True, em_beta=1.0)
+    runner = _make_runner(cfg)
+
+    patches, _, _ = _patch_m2_phases(num_reads=6, num_cands=2)
+
+    with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
+         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+         patches["build_m3_coherence"] as m3_m, \
+         patches["em_with_coherence"] as em_m, patches["quantify_transcripts"]:
+        runner.process_interval(_make_interval())
+
+    m3_m.assert_called_once()
+    _, em_kwargs = em_m.call_args
+    assert em_kwargs.get("beta") == 1.0
 
 
 def test_process_interval_fusion_enabled(tmp_path):
@@ -225,6 +265,7 @@ def test_process_interval_fusion_enabled(tmp_path):
         interval=_make_interval(),
         candidates=[gtf_cand],
         read_ids=read_ids,
+        read_sequences={rid: "ACGT" * 25 for rid in read_ids},
     )
 
     from fin.fusion.breakpoints import Breakpoint
@@ -246,7 +287,8 @@ def test_process_interval_fusion_enabled(tmp_path):
     )
 
     with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
-         patches["_build_m2_krill"], patches["build_m3_coherence"], \
+         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+         patches["build_m3_coherence"], \
          patches["em_with_coherence"], patches["quantify_transcripts"], \
          patch("fin.fusion.parse_sa_tags", return_value=[fake_bp]) as psa, \
          patch("fin.fusion.cluster_breakpoints", return_value=[fake_bp]), \
@@ -266,7 +308,8 @@ def test_process_interval_fusion_disabled_by_default(tmp_path):
     patches, _, _ = _patch_m2_phases(num_reads=5, num_cands=2)
 
     with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
-         patches["_build_m2_krill"], patches["build_m3_coherence"], \
+         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+         patches["build_m3_coherence"], \
          patches["em_with_coherence"], patches["quantify_transcripts"], \
          patch("fin.fusion.parse_sa_tags") as psa:
         runner.process_interval(_make_interval())

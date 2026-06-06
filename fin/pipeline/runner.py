@@ -31,6 +31,13 @@ from fin.scoring.mappy_distance import compute_mappy_distance
 
 logger = logging.getLogger(__name__)
 
+# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+# K (transcript-bp each side of the wobbling junction) comes from the configurable
+# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+# an unscorable tie cell (a tied candidate the eventalign window could not score).
+_M2_EM_FLANK = 2
+_M2_EM_PAD = 1.0
+
 
 class PipelineRunner:
     """Orchestrates the full pyfin pipeline."""
@@ -160,12 +167,12 @@ class PipelineRunner:
                 )
 
         # Phase A Tier-2: max_R filter. EM responsibility is a strong FP
-        # discriminator (Cohen's d=1.34 vs combined_score's 0.70) -- but that
-        # statistic was measured on the EM quant modes. NOTE: under the
-        # production default quant_mode='argmax', max_R is the max single-read
-        # *mappy* assignment weight (set in _quant_argmax_keep), NOT an EM
-        # responsibility, so the d=1.34 calibration does not transfer; only
-        # m1_em / m2_em populate max_R with a true EM responsibility.
+        # discriminator (Cohen's d=1.34 vs combined_score's 0.70) -- measured on
+        # the EM quant modes. The production default quant_mode='m2_em' populates
+        # max_R with a true EM responsibility, so the d=1.34 calibration applies;
+        # m1_em likewise. NOTE: under quant_mode='argmax', max_R is instead the
+        # max single-read *mappy* assignment weight (set in _quant_argmax_keep),
+        # NOT an EM responsibility, so that calibration does not transfer.
         # GTF-sourced and fusion transcripts are exempt to preserve annotation
         # visibility and avoid silently dropping fusion calls.
         if _score_filter_on and self.config.min_max_r > 0.0:
@@ -254,9 +261,9 @@ class PipelineRunner:
         # within fulllen_window_bp of the candidate's ends) is below
         # min_fulllen_fraction. The fulllen_frac METRIC itself is signal-free
         # (BAM primary-alignment spans only), but it is computed per-interval
-        # over the production argmax assignment population (which may use the
-        # M2-tiebreak signal); candidates with fulllen_frac < 0 (unreachable
-        # or never scored, e.g. the legacy EM path) are EXEMPT and never
+        # over the quant assignment population (the m2_em/m1_em EM hard
+        # assignments or, under argmax, the M2-tiebreak picks); candidates with
+        # fulllen_frac < 0 (unreachable or never scored) are EXEMPT and never
         # dropped. gtf/fusion/mono exempt. ORTHOGONAL to the isoform-fraction
         # filter above (the two stack on the competitor metric). SIRV WARNING:
         # the default 0.1 is SIRV-tuned; re-tune or disable on real data.
@@ -385,7 +392,7 @@ class PipelineRunner:
 
         # Quantification engine dispatch (quant_mode). All three modes are
         # krill-only (no f5c CLI).
-        quant_mode = getattr(self.config, "quant_mode", "argmax")
+        quant_mode = getattr(self.config, "quant_mode", "m2_em")
         if quant_mode == "argmax":
             results = self._quant_argmax_keep(candidate_set, read_ids, interval)
         elif quant_mode == "m1_em":
@@ -879,18 +886,95 @@ class PipelineRunner:
         )
         return quant_results
 
+    def _tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+        """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
+
+        For each read whose raw mappy AS is simultaneously best across >=2
+        candidates, build the class junction-discrimination window over that tie
+        set and score each tied candidate with the per-event junction mean-NLL
+        (non-HMM krill eventalign over the window). Only tied, window-scorable
+        cells are touched — never the dense read×candidate matrix.
+
+        Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]},
+        n_ties, n_refined).
+        """
+        import krill
+
+        from fin.scoring.krill_aligner import make_krill_aligner
+        from fin.scoring.m2_junction_nll import (
+            class_junction_window_set,
+            read_cand_mean_nll,
+        )
+
+        n_c = len(cand_list)
+        nlls_by_read: Dict[int, Dict[int, float]] = {}
+        ties_by_read: Dict[int, List[int]] = {}
+        krill_aligner, eff_gpu = make_krill_aligner(
+            krill, self.config.krill_pore, self.config.use_gpu,
+            hmm_confidence=False,
+        )
+        if krill_aligner is None:
+            return nlls_by_read, ties_by_read, 0, 0
+
+        k = self.config.m2_tiebreak_junction_k
+        n_ties = n_refined = 0
+        for i, rid in enumerate(kept_read_ids):
+            row = raw[i]
+            finite = np.isfinite(row)
+            if not finite.any():
+                continue
+            best_as = float(row[finite].max())
+            tie = [j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9]
+            ties_by_read[i] = tie
+            if len(tie) < 2:
+                continue
+            n_ties += 1
+            gset = class_junction_window_set(
+                [cand_list[j] for j in tie], flank=_M2_EM_FLANK, k=k
+            )
+            if not gset:
+                continue
+            seq = read_seqs[rid]
+            nlls: Dict[int, float] = {}
+            for j in tie:
+                aln = aligners[j]
+                if aln is None:
+                    continue
+                nll, n_ev = read_cand_mean_nll(
+                    rid, seq, cand_list[j], [], krill_aligner, aln,
+                    self.config.signal_path, self.config.krill_pore,
+                    gset=gset, use_gpu=eff_gpu,
+                )
+                if n_ev > 0 and np.isfinite(nll):
+                    nlls[j] = float(nll)
+            if nlls:
+                n_refined += 1
+                nlls_by_read[i] = nlls
+        return nlls_by_read, ties_by_read, n_ties, n_refined
+
     def _quant_m2_em(
         self,
         candidate_set: CandidateSet,
         read_ids: List[str],
         interval: GenomicInterval,
     ) -> Optional[List[QuantResult]]:
-        """quant_mode='m2_em': EM seeded by the M2 krill junction distance plus
-        the M3 read×read krill DTW coherence (β=em_beta when m4_source != 'none').
-        All signal scoring is in-memory krill — no f5c CLI."""
+        """quant_mode='m2_em' (production default): pure tie-break junction-NLL EM.
+
+        M1/AS is used ONLY as a hard selector — it picks each read's best-AS tie
+        set and masks mappability — and the per-event junction NLL is the SOLE
+        graded distance over that tie set (m2_resolve_tie semantics, NOT the dense
+        read×candidate matrix, which collapses). Optionally adds the M3 read×read
+        junction-window DTW coherence when ``config.m3_coherence`` is True
+        (β=em_beta); OFF by default because the pairwise DTW is expensive. All
+        signal scoring is in-memory krill — no f5c CLI. (``m4_source`` does not
+        affect this path; it governs only the quantify subcommand.)
+        """
+        import mappy
+
         from fin.ablation.mappy_argmax import mappy_multimap_responsibilities
-        from fin.scoring.krill_tiebreak import _build_m2_krill
-        from fin.scoring.m3_junction_coherence import build_m3_coherence
+        from fin.scoring.m2_junction_nll import MISSING
+        from fin.scoring.mappy_preset import get_m1_preset
+        from fin.scoring.mappy_score import score_hit
 
         cand_list = list(candidate_set.candidates)
         read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
@@ -901,49 +985,94 @@ class PipelineRunner:
             return []
 
         read_seqs = {rid: seq for rid, seq in reads_iter}
-        n_reads_em = len(kept_read_ids)
+        n_r, n_c = len(kept_read_ids), len(cand_list)
         max_iter_em = (
             self.config.em_max_iter_override
             if self.config.em_max_iter_override is not None
             else self.config.em_max_iter
         )
 
-        # M2: per-(read, candidate) krill junction distance (lower = better).
-        dist_read_to_tx = _build_m2_krill(
-            kept_read_ids, read_seqs, cand_list,
-            self.config.signal_path, self.config.krill_pore, as_distance=True,
-            use_gpu=self.config.use_gpu,
+        # --- Per-candidate mappy aligners + raw AS matrix (tie detection). ---
+        preset = get_m1_preset()
+        aligners = [
+            mappy.Aligner(seq=c.sequence, preset=preset) if c.sequence else None
+            for c in cand_list
+        ]
+        raw = np.full((n_r, n_c), -np.inf, dtype=np.float64)
+        for i, rid in enumerate(kept_read_ids):
+            seq = read_seqs[rid]
+            for j, aln in enumerate(aligners):
+                if aln is None:
+                    continue
+                best = None
+                for h in aln.map(seq):
+                    v = score_hit(h)
+                    if v is None:
+                        continue
+                    if best is None or v > best:
+                        best = v
+                if best is not None:
+                    raw[i, j] = best
+
+        # --- Junction NLL on the per-read AS-tie cells only. ---
+        nlls_by_read, ties_by_read, n_ties, n_refined = self._tie_nll(
+            kept_read_ids, read_seqs, cand_list, aligners, raw
         )
 
-        # M3: read×read junction-window DTW coherence, each read anchored to its
-        # M2-best candidate. m4_source='none' disables coherence (β=0).
-        m4_src = getattr(self.config, "m4_source", "diff_region")
-        if m4_src == "none":
-            dist_read_to_read = np.zeros((n_reads_em, n_reads_em), dtype=np.float32)
-            beta_use = 0.0
-        else:
-            if m4_src == "whole_read":
-                logger.warning(
-                    "m2_em: m4_source='whole_read' is not supported on krill; "
-                    "using junction-window coherence (diff_region)."
-                )
-            winner_col = np.asarray(dist_read_to_tx).argmin(axis=1).astype(np.int64)
-            # Reads with no krill signal have an all-default row; mark uncoupled.
-            no_data = dist_read_to_tx.min(axis=1) >= 0.999
+        # --- Pure d_tx skeleton: M1/AS picks the tie set; junction-NLL is the
+        #     ONLY graded distance. Cells outside a read's tie set stay MISSING. ---
+        d_tx = np.full((n_r, n_c), MISSING, dtype=np.float64)
+        for i in range(n_r):
+            tie = ties_by_read.get(i)
+            if not tie:
+                continue
+            if len(tie) < 2:
+                d_tx[i, tie[0]] = 0.0
+                continue
+            nlls = nlls_by_read.get(i)
+            if not nlls:
+                # nothing scorable -> flat tie (EM 1/K split among ties)
+                for j in tie:
+                    d_tx[i, j] = 0.0
+                continue
+            lo = min(nlls.values())
+            hi = max(nlls.values())
+            miss = (hi - lo) + _M2_EM_PAD
+            for j in tie:
+                d_tx[i, j] = (nlls[j] - lo) if j in nlls else miss
+        small = (d_tx > 0) & (d_tx < 1e5)
+        diffs = d_tx[small]
+        sigma2 = max(float(np.median(diffs)) if diffs.size else 1.0, 1e-3)
+        d_tx[small] = d_tx[small] / sigma2
+        d_tx = d_tx.astype(np.float32)
+
+        # --- M3 read×read junction-window DTW coherence (opt-in; DTW is costly).
+        #     Each read anchored to its d_tx-argmin (best) candidate; σ3 (median
+        #     non-zero DTW) calibrates it to O(1) so β mixes cleanly. ---
+        if self.config.m3_coherence:
+            from fin.scoring.m3_junction_coherence import build_m3_coherence
+
+            winner_col = np.asarray(d_tx).argmin(axis=1).astype(np.int64)
+            no_data = np.asarray(d_tx).min(axis=1) >= 1e5  # all-MISSING rows
             winner_col[no_data] = -1
             dist_read_to_read = build_m3_coherence(
                 kept_read_ids, read_seqs, cand_list, winner_col,
                 self.config.signal_path, pore=self.config.krill_pore,
-                junction_k=self.config.m2_tiebreak_junction_k,
+                junction_k=self.config.m2_tiebreak_junction_k, flank=_M2_EM_FLANK,
                 use_gpu=self.config.use_gpu,
             )
+            nz = dist_read_to_read[dist_read_to_read > 0]
+            sigma3 = max(float(np.median(nz)) if nz.size else 1.0, 1e-3)
+            dist_read_to_read = (dist_read_to_read / sigma3).astype(np.float32)
             beta_use = self.config.em_beta
+        else:
+            dist_read_to_read = np.zeros((n_r, n_r), dtype=np.float32)
+            beta_use = 0.0
 
-        sigma_use = self._adaptive_sigma(dist_read_to_tx)
         R, hard_assignments, _ = em_with_coherence(
-            dist_read_to_tx=dist_read_to_tx,
+            dist_read_to_tx=d_tx,
             dist_read_to_read=dist_read_to_read,
-            sigma=sigma_use,
+            sigma=1.0,
             beta=beta_use,
             max_iter=max_iter_em,
             tol=self.config.em_tol,
@@ -970,9 +1099,10 @@ class PipelineRunner:
         for j, qr in enumerate(quant_results):
             qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
         logger.info(
-            "m2_em interval %s: %d reads -> %d candidates (m4=%s, beta=%.2f)",
+            "m2_em interval %s: %d reads -> %d candidates "
+            "(ties=%d refined=%d m3=%s beta=%.2f)",
             interval.region_string, len(read_ids), len(cand_list),
-            m4_src, beta_use,
+            n_ties, n_refined, self.config.m3_coherence, beta_use,
         )
         return quant_results
 

@@ -394,7 +394,11 @@ class QuantifyRunner:
         n_reads = len(dtw_read_ids)
         n_tx = len(candidate_ids)
         m4_src = getattr(self.config, "m4_source", "diff_region") if self.config else "diff_region"
-        if m4_src == "none":
+        # M3 read×read DTW coherence is opt-in (DTW is costly): only computed when
+        # m3_coherence=True AND a coherence source is selected. Default OFF mirrors
+        # the assembly runner so the quantify subcommand also defaults to no-DTW.
+        m3_on = getattr(self.config, "m3_coherence", False) if self.config else False
+        if m4_src == "none" or not m3_on:
             dist_read_to_read = np.zeros((n_reads, n_reads), dtype=np.float32)
             beta_use = 0.0
         else:
