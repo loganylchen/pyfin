@@ -547,15 +547,20 @@ class PipelineRunner:
         m2_on = bool(getattr(self.config, "m2_tiebreak", False)) and bool(
             self.config.signal_path
         )
+        m2_threads = 0
         if m2_on:
             try:
                 import krill
 
-                from fin.scoring.krill_aligner import make_krill_aligner
+                from fin.scoring.krill_aligner import (
+                    krill_thread_count,
+                    make_krill_aligner,
+                )
 
+                m2_threads = krill_thread_count()
                 m2_krill, m2_gpu = make_krill_aligner(
                     krill, self.config.krill_pore, self.config.use_gpu,
-                    hmm_confidence=False,
+                    hmm_confidence=False, num_thread=m2_threads,
                 )
             except Exception as exc:  # krill not importable -> keep 1/K split
                 logger.warning("M2 tiebreak disabled (krill import failed): %s", exc)
@@ -609,7 +614,7 @@ class PipelineRunner:
                     pore=self.config.krill_pore,
                     junction_k=self.config.m2_tiebreak_junction_k,
                     krill_aligner=m2_krill, mappy_aligners=tied_aligners,
-                    return_scored=True, use_gpu=m2_gpu,
+                    return_scored=True, use_gpu=m2_gpu, num_thread=m2_threads,
                 )
                 if best_local is not None and margin >= self.config.m2_tiebreak_margin:
                     j = tied[best_local]
@@ -900,18 +905,22 @@ class PipelineRunner:
         """
         import krill
 
-        from fin.scoring.krill_aligner import make_krill_aligner
+        from fin.scoring.krill_aligner import (
+            krill_thread_count,
+            make_krill_aligner,
+        )
         from fin.scoring.m2_junction_nll import (
             class_junction_window_set,
             read_cand_mean_nll,
         )
 
+        num_threads = krill_thread_count()
         n_c = len(cand_list)
         nlls_by_read: Dict[int, Dict[int, float]] = {}
         ties_by_read: Dict[int, List[int]] = {}
         krill_aligner, eff_gpu = make_krill_aligner(
             krill, self.config.krill_pore, self.config.use_gpu,
-            hmm_confidence=False,
+            hmm_confidence=False, num_thread=num_threads,
         )
         if krill_aligner is None:
             return nlls_by_read, ties_by_read, 0, 0
@@ -943,7 +952,7 @@ class PipelineRunner:
                 nll, n_ev = read_cand_mean_nll(
                     rid, seq, cand_list[j], [], krill_aligner, aln,
                     self.config.signal_path, self.config.krill_pore,
-                    gset=gset, use_gpu=eff_gpu,
+                    gset=gset, use_gpu=eff_gpu, num_thread=num_threads,
                 )
                 if n_ev > 0 and np.isfinite(nll):
                     nlls[j] = float(nll)

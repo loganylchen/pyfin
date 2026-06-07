@@ -339,6 +339,7 @@ def read_cand_mean_nll(
     pore: str,
     gset: Optional[set] = None,
     use_gpu: bool = True,
+    num_thread: int = 0,
 ) -> Tuple[float, int]:
     """Per-event mean NLL of one read against one candidate over ``windows``.
 
@@ -372,6 +373,7 @@ def read_cand_mean_nll(
             {cand.candidate_id: cand.sequence[best_hit.r_st:best_hit.r_en]},
             pore=pore,
             use_gpu=use_gpu,
+            num_thread=num_thread,
             aligner=krill_aligner,
             start=best_hit.r_st,
         )
@@ -408,6 +410,7 @@ def m2_resolve_tie(
     mappy_aligners: Optional[List] = None,
     return_scored: bool = False,
     use_gpu: bool = True,
+    num_thread: int = 0,
 ) -> Tuple:
     """Resolve an M1 tie with the validated junction-window mean-NLL metric.
 
@@ -467,7 +470,7 @@ def m2_resolve_tie(
             return (None, 0.0, []) if return_scored else (None, 0.0)
 
         krill_aligner, use_gpu = make_krill_aligner(
-            krill, pore, use_gpu, hmm_confidence=False
+            krill, pore, use_gpu, hmm_confidence=False, num_thread=num_thread
         )
         if krill_aligner is None:
             return (None, 0.0, []) if return_scored else (None, 0.0)
@@ -487,7 +490,7 @@ def m2_resolve_tie(
             continue
         nll, n_ev = read_cand_mean_nll(
             read_id, read_seq, cand, [], krill_aligner, aln, sig_path, pore,
-            gset=gset, use_gpu=use_gpu,
+            gset=gset, use_gpu=use_gpu, num_thread=num_thread,
         )
         if n_ev > 0 and math.isfinite(nll):
             scored.append((idx, nll))

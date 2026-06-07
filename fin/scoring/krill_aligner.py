@@ -11,9 +11,29 @@ returns the *effective* device so callers can keep the two in sync.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def krill_thread_count() -> int:
+    """krill ``num_thread`` from the ``KRILL_THREADS`` env var (default 0 = auto).
+
+    A malformed value must not change scoring behavior, so anything that does not
+    parse as a non-negative int falls back to ``0`` with a warning rather than
+    raising (which would silently disable a signal leg).
+    """
+    raw = os.environ.get("KRILL_THREADS", "0")
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("KRILL_THREADS=%r is not an int; using 0 (auto)", raw)
+        return 0
+    if n < 0:
+        logger.warning("KRILL_THREADS=%r is negative; using 0 (auto)", raw)
+        return 0
+    return n
 
 
 def make_krill_aligner(
