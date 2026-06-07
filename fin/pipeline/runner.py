@@ -910,9 +910,11 @@ class PipelineRunner:
             make_krill_aligner,
         )
         from fin.scoring.m2_junction_nll import (
+            _mean_nll_in_gset,
             class_junction_window_set,
             read_cand_mean_nll,
         )
+        from fin.scoring.mappy_score import score_hit
 
         num_threads = krill_thread_count()
         n_c = len(cand_list)
@@ -926,7 +928,19 @@ class PipelineRunner:
             return nlls_by_read, ties_by_read, 0, 0
 
         k = self.config.m2_tiebreak_junction_k
-        n_ties = n_refined = 0
+        pore = self.config.krill_pore
+        sig_path = self.config.signal_path
+
+        # --- Pass 1: tie detection + per-(read, candidate) mappy best-hit slices.
+        # Each tied cell is reduced to the SAME (sliced sequence, start offset)
+        # the singular read_cand_mean_nll would have eventaligned, so the batched
+        # eventalign below is byte-identical to the per-call path -- only the
+        # Python/GIL/per-call overhead is removed.
+        gset_by_read: Dict[int, set] = {}
+        reads_variants: Dict[str, Dict[str, str]] = {}  # rid -> {cand_id: seq}
+        starts: Dict[str, Dict[str, int]] = {}          # rid -> {cand_id: r_st}
+        cidj_by_read: Dict[str, Dict[str, int]] = {}     # rid -> {cand_id: col j}
+        n_ties = 0
         for i, rid in enumerate(kept_read_ids):
             row = raw[i]
             finite = np.isfinite(row)
@@ -944,15 +958,89 @@ class PipelineRunner:
             if not gset:
                 continue
             seq = read_seqs[rid]
-            nlls: Dict[int, float] = {}
+            per_seqs: Dict[str, str] = {}
+            per_starts: Dict[str, int] = {}
+            per_cidj: Dict[str, int] = {}
             for j in tie:
                 aln = aligners[j]
                 if aln is None:
                     continue
+                best_hit = None
+                best_hit_as = None
+                for h in aln.map(seq):
+                    v = score_hit(h)
+                    if v is None:
+                        continue
+                    if best_hit_as is None or v > best_hit_as:
+                        best_hit_as, best_hit = v, h
+                if best_hit is None:
+                    continue
+                cand = cand_list[j]
+                per_seqs[cand.candidate_id] = cand.sequence[best_hit.r_st:best_hit.r_en]
+                per_starts[cand.candidate_id] = best_hit.r_st
+                per_cidj[cand.candidate_id] = j
+            if not per_seqs:
+                continue
+            gset_by_read[i] = gset
+            reads_variants[rid] = per_seqs
+            starts[rid] = per_starts
+            cidj_by_read[rid] = per_cidj
+
+        if not reads_variants:
+            return nlls_by_read, ties_by_read, n_ties, 0
+
+        # --- Pass 2: ONE batched eventalign over every tied pair (per-pair start
+        # via the {label: offset} form); per-read singular fallback on absence or
+        # batch failure. Both branches score with the same _mean_nll_in_gset.
+        rid_to_i = {rid: i for i, rid in enumerate(kept_read_ids)}
+        n_refined = 0
+        use_batch = hasattr(krill, "align_reads_variants")
+        batch_out = None
+        if use_batch:
+            try:
+                batch_out = krill.align_reads_variants(
+                    sig_path, reads_variants, pore=pore,
+                    use_gpu=eff_gpu, num_thread=num_threads,
+                    aligner=krill_aligner, start=starts,
+                )
+            except Exception as exc:  # noqa: BLE001 - krill raises broad errors
+                logger.warning("M2 batch eventalign failed (%s); per-read fallback", exc)
+                use_batch = False
+
+        if use_batch and batch_out is not None:
+            for rid, res_list in batch_out.items():
+                i = rid_to_i.get(rid)
+                if i is None:
+                    continue
+                gset = gset_by_read.get(i)
+                if gset is None:
+                    continue
+                by_label = {x.get("variant_label"): x for x in res_list}
+                nlls: Dict[int, float] = {}
+                for cid, j in cidj_by_read.get(rid, {}).items():
+                    res = by_label.get(cid)
+                    if res is None or res.get("status", -1) != 0:
+                        continue
+                    nll, n_ev = _mean_nll_in_gset(res, cand_list[j], gset)
+                    if n_ev > 0 and np.isfinite(nll):
+                        nlls[j] = float(nll)
+                if nlls:
+                    n_refined += 1
+                    nlls_by_read[i] = nlls
+            return nlls_by_read, ties_by_read, n_ties, n_refined
+
+        for rid, per_cidj in cidj_by_read.items():
+            i = rid_to_i.get(rid)
+            if i is None:
+                continue
+            gset = gset_by_read.get(i)
+            seq = read_seqs[rid]
+            nlls = {}
+            for j in per_cidj.values():
                 nll, n_ev = read_cand_mean_nll(
-                    rid, seq, cand_list[j], [], krill_aligner, aln,
-                    self.config.signal_path, self.config.krill_pore,
-                    gset=gset, use_gpu=eff_gpu, num_thread=num_threads,
+                    rid, seq, cand_list[j], [], krill_aligner, aligners[j],
+                    sig_path, pore, gset=gset, use_gpu=eff_gpu,
+                    num_thread=num_threads,
                 )
                 if n_ev > 0 and np.isfinite(nll):
                     nlls[j] = float(nll)
