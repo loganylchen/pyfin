@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import math
+from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -42,18 +43,46 @@ MISSING = 1e6  # sentinel distance for M1-rejected / no-coverage cells
 # ---------------------------------------------------------------------------
 
 
-def _build_exons(c: TranscriptCandidate) -> List[Tuple[int, int]]:
-    """Genomic exon intervals (sorted ascending) from intron_chain + start/end."""
-    introns = sorted(c.intron_chain.introns)
+@lru_cache(maxsize=16384)
+def _build_exons_key(
+    introns: Tuple[Tuple[int, int], ...], start: int, end: int
+) -> Tuple[Tuple[int, int], ...]:
+    """Cached exon geometry keyed on the hashable candidate signature.
+
+    The exon layout is a pure function of (intron_chain, start, end), but the
+    per-event NLL loop calls ``_tx2genome`` (hence ``_exon_tx_map`` ->
+    ``_build_exons``) ~15M times against the SAME handful of candidates. Caching
+    on the geometry tuple collapses those rebuilds to one per unique candidate.
+    """
     exons: List[Tuple[int, int]] = []
-    pos = c.start
-    for s, e in introns:
+    pos = start
+    for s, e in sorted(introns):
         if s > pos:
             exons.append((pos, s))
         pos = max(pos, e)
-    if c.end > pos:
-        exons.append((pos, c.end))
-    return exons
+    if end > pos:
+        exons.append((pos, end))
+    return tuple(exons)
+
+
+@lru_cache(maxsize=16384)
+def _exon_tx_map_key(
+    introns: Tuple[Tuple[int, int], ...], start: int, end: int, strand: str
+) -> Tuple[Tuple[int, int, int], ...]:
+    """Cached (g_start, g_end, tx_offset) map; see :func:`_build_exons_key`."""
+    exons = _build_exons_key(introns, start, end)
+    order = tuple(reversed(exons)) if strand == "-" else exons
+    out: List[Tuple[int, int, int]] = []
+    t = 0
+    for s, e in order:
+        out.append((s, e, t))
+        t += e - s
+    return tuple(out)
+
+
+def _build_exons(c: TranscriptCandidate) -> List[Tuple[int, int]]:
+    """Genomic exon intervals (sorted ascending) from intron_chain + start/end."""
+    return list(_build_exons_key(c.intron_chain.introns, c.start, c.end))
 
 
 def _exon_tx_map(c: TranscriptCandidate) -> List[Tuple[int, int, int]]:
@@ -63,22 +92,16 @@ def _exon_tx_map(c: TranscriptCandidate) -> List[Tuple[int, int, int]]:
     the returned offsets index into ``c.sequence`` (the spliced transcript).
     Returns list of (g_start, g_end, tx_offset).
     """
-    exons = _build_exons(c)
-    order = list(reversed(exons)) if c.strand == "-" else exons
-    out: List[Tuple[int, int, int]] = []
-    t = 0
-    for s, e in order:
-        out.append((s, e, t))
-        t += e - s
-    return out
+    return list(_exon_tx_map_key(c.intron_chain.introns, c.start, c.end, c.strand))
 
 
 def _tx2genome(c: TranscriptCandidate, p: int) -> Optional[int]:
     """Map a transcript-frame position ``p`` (into c.sequence) to genomic."""
-    for s, e, t in _exon_tx_map(c):
+    minus = c.strand == "-"
+    for s, e, t in _exon_tx_map_key(c.intron_chain.introns, c.start, c.end, c.strand):
         if t <= p < t + (e - s):
             off = p - t
-            return (e - 1 - off) if c.strand == "-" else (s + off)
+            return (e - 1 - off) if minus else (s + off)
     return None
 
 
