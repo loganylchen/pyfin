@@ -17,8 +17,8 @@ over the same set of genomic positions; only the projection frame (each read's
 winner ``tx2genome``) is per-read. For each read we run krill eventalign once
 against its winner, keep the ``event_level_mean`` of events whose genomic
 projection lands in the class window (ordered by genomic position), robustly
-normalize, and take pairwise open-end DTW *within each class*. Cross-class and
-no-window pairs are 0 (no coherence signal).
+normalize, and take pairwise krill global DTW *within each class*. Cross-class
+and no-window pairs are 0 (no coherence signal).
 
 ``event_level_mean`` is the raw per-event current (reference-independent), so
 two reads of the same true transcript, both winner-anchored correctly, yield
@@ -38,7 +38,6 @@ from fin.scoring.diff_region_dtw import cluster_candidates_by_chain
 from fin.scoring.m2_junction_nll import class_junction_window_set, _tx2genome
 from fin.scoring.mappy_preset import get_m1_preset
 from fin.scoring.mappy_score import score_hit
-from fin.scoring.signal_dtw import _cpu_dtw
 
 logger = logging.getLogger(__name__)
 
@@ -204,17 +203,20 @@ def build_m3_coherence(
         seg_by_read[i] = seg
         rows_by_class.setdefault(ci, []).append(i)
 
-    # Within-class pairwise DTW (open-end, squared cost); cross-class stays 0.
+    # Within-class pairwise krill global DTW; cross-class stays 0.
     n_pairs = 0
     for ci, rows in rows_by_class.items():
         if len(rows) < 2:
             continue
+        segs = [np.ascontiguousarray(seg_by_read[i], dtype=np.float32) for i in rows]
+        # krill global DTW on the effective device (use_gpu is post-fallback:
+        # True only if GPU eventalign succeeded above, so GPU DTW is safe).
+        dmat = krill.dtw_pairwise_varlen(segs, use_gpu=use_gpu, num_threads=num_thread)
         for a in range(len(rows)):
             ia = rows[a]
-            sa = seg_by_read[ia]
             for b in range(a + 1, len(rows)):
                 ib = rows[b]
-                d = _cpu_dtw(sa, seg_by_read[ib])
+                d = float(dmat[a, b])
                 if math.isfinite(d):
                     m3[ia, ib] = d
                     m3[ib, ia] = d
