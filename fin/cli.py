@@ -31,7 +31,8 @@ import click
 @click.option("--flank-bp", default=500, show_default=True, type=int, help="Flank size (bp) around fusion breakpoint (only with --fusion).")
 @click.option("--max-reads-per-interval-for-dtw", "max_reads_for_dtw", default=2000, show_default=True, type=int, help="Cap reads per interval for read-to-read DTW (subsample beyond this).")
 @click.option("--min-novel-reads", default=1, show_default=True, type=int, help="Drop novel candidates with fewer supporting reads (after collapsing).")
-@click.option("--min-abundance", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose EM-estimated abundance is below this threshold (GTF candidates are exempt).")
+@click.option("--min-abundance", default=3.0, show_default=True, type=float, help="Drop NOVEL transcripts whose EM-estimated abundance is below this threshold (GTF candidates are exempt by default — see --floor-gtf-abundance; fusion always exempt). Default 3 reproduces the SIRV gffcompare T>=3 NOVEL operating point. SIRV-tuned WARNING: a nonzero floor guts recall of genuine low-abundance isoforms — on real data set 0 to disable.")
+@click.option("--floor-gtf-abundance/--no-floor-gtf-abundance", "floor_gtf_abundance", default=False, show_default=True, help="Also apply the --min-abundance floor to GTF-annotated transcripts (NOT just novel). Default OFF: GTF is exempt (annotation trusted; pyfin's competitive EM still drops unsupported GTF via zero abundance only when floored). Turn ON to reproduce the SIRV gffcompare T>=3 WITH-GTF operating point (e.g. T=3 -> Sn 43.2 / Pr 91.6). SIRV-tuned: on real data this drops genuine low-abundance annotated isoforms — leave OFF unless benchmarking. Fusion stays exempt regardless.")
 @click.option("--min-max-r", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose max_R is below this (GTF candidates are exempt). NOTE: max_R is a true EM responsibility (the d=1.34 FP discriminator, try 0.2) ONLY in --quant-mode m1_em/m2_em (m2_em is the default); under 'argmax' mode max_R is instead the max single-read mappy weight, so that calibration does not apply.")
 @click.option("--min-novel-combined-score", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose combined_score is below this (F1-optimal: 0.288 with-GTF, 0.428 no-GTF; GTF candidates are exempt). WARNING: combined_score is only computed by the `quantify` subcommand's composite scorer; in assembly mode (this command, any quant_mode) it stays 0.0, so a value > 0 is IGNORED (the runner skips the filter with a warning rather than dropping all novel transcripts).")
 @click.option("--min-isoform-fraction", default=0.01, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose abundance is below this fraction of the dominant overlapping novel isoform at their locus (Cufflinks --min-isoform-fraction / StringTie -f minor-isoform suppression). GTF/fusion/mono exempt; 0.0 disables. Default 0.01 (StringTie-aligned, recall-safe). SIRV WARNING: F1-optimal ~0.4 is overfit — never use on real data.")
@@ -87,6 +88,7 @@ def main(
     max_reads_for_dtw,
     min_novel_reads,
     min_abundance,
+    floor_gtf_abundance,
     min_max_r,
     min_novel_combined_score,
     min_isoform_fraction,
@@ -190,6 +192,7 @@ def main(
         max_reads_per_interval_for_dtw=max_reads_for_dtw,
         min_novel_reads=min_novel_reads,
         min_abundance=min_abundance,
+        floor_gtf_abundance=floor_gtf_abundance,
         min_max_r=min_max_r,
         min_novel_combined_score=min_novel_combined_score,
         min_isoform_fraction=min_isoform_fraction,

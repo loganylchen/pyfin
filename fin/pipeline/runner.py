@@ -157,24 +157,32 @@ class PipelineRunner:
                 len(aggregated),
             )
 
-        # A4: post-EM abundance filter. GTF-sourced and fusion transcripts are
-        # exempt so users can still see zero-abundance annotated entries
-        # (useful for debugging coverage gaps) and fusion calls are not
-        # silently dropped by NOVEL-targeted filters. Only NOVEL candidates
-        # are dropped here.
+        # A4: post-EM abundance filter. By default the floor targets NOVEL
+        # transcripts only (the `fin` CLI defaults --min-abundance to 3); GTF is
+        # EXEMPT unless floor_gtf_abundance is set (--floor-gtf-abundance), which
+        # extends the floor to GTF to reproduce the SIRV gffcompare T>=3 with-GTF
+        # operating point. Fusion is ALWAYS exempt so opt-in fusion calls are
+        # never silently dropped by an abundance-targeted filter. SIRV-tuned:
+        # this floor is overfit and guts genuine low-abundance isoform recall on
+        # real data; users disable it via --min-abundance 0.
+        # NOTE: the separate ablation harness (fin/ablation/runner.py) keeps GTF
+        # exempt regardless — that divergence is intentional (no-GTF de novo).
         if _score_filter_on and self.config.min_abundance > 0.0:
+            floor_gtf = self.config.floor_gtf_abundance
             before = len(aggregated)
             aggregated = {
                 cid: qr
                 for cid, qr in aggregated.items()
-                if qr.source in ("gtf", "fusion")
+                if qr.source == "fusion"
+                or (qr.source == "gtf" and not floor_gtf)
                 or qr.abundance >= self.config.min_abundance
             }
             dropped = before - len(aggregated)
             if dropped:
                 logger.info(
-                    "Dropped %d novel transcripts with abundance < %.3f",
+                    "Dropped %d transcripts (%s) with abundance < %.3f",
                     dropped,
+                    "GTF+novel" if floor_gtf else "novel only",
                     self.config.min_abundance,
                 )
 
