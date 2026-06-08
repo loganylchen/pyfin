@@ -182,7 +182,7 @@ class TestDiscoverGtfOnly:
         # Mock BamReader to return some reads
         mock_bam_instance = MagicMock()
         mock_alignment = MagicMock()
-        mock_rd = {"is_mapped": True, "query_name": "read1"}
+        mock_rd = {"is_mapped": True, "query_name": "read1", "is_forward": True}
         mock_bam_instance.fetch.return_value = [mock_alignment]
         mock_bam_instance.alignment_to_dict.return_value = mock_rd
         mock_bam_instance.__enter__ = MagicMock(return_value=mock_bam_instance)
@@ -201,6 +201,46 @@ class TestDiscoverGtfOnly:
         assert result.candidates[0].source == "gtf"
         assert result.candidates[0].candidate_id == "ENST001"
         assert "read1" in result.read_ids
+
+    def test_rejects_opposite_strand_reads(self):
+        """A strand-pure interval must drop reads mapped to the other strand.
+
+        bam.fetch returns reads on BOTH strands overlapping the region; each
+        read belongs to its own mapped strand's interval. A '-' read fetched
+        inside a '+' interval must not be swallowed (it belongs to the '-'
+        interval), otherwise sense/antisense overlaps corrupt strand assignment.
+        """
+        from unittest.mock import patch
+
+        from fin.candidates.discovery import discover_gtf_only
+
+        interval = GenomicInterval(chrom="chr1", start=100, end=1000, strand="+")
+
+        mock_gtf_reader = MagicMock()
+        mock_gtf_reader.get_transcripts_in_region.return_value = []
+
+        # One '+' read (kept) and one '-' read (must be rejected).
+        fwd = MagicMock()
+        rev = MagicMock()
+        mock_bam_instance = MagicMock()
+        mock_bam_instance.fetch.return_value = [fwd, rev]
+        mock_bam_instance.alignment_to_dict.side_effect = [
+            {"is_mapped": True, "query_name": "fwd_read", "is_forward": True},
+            {"is_mapped": True, "query_name": "rev_read", "is_forward": False},
+        ]
+        mock_bam_instance.__enter__ = MagicMock(return_value=mock_bam_instance)
+        mock_bam_instance.__exit__ = MagicMock(return_value=False)
+
+        with patch("fin.io.io_bam.BamReader", return_value=mock_bam_instance):
+            result = discover_gtf_only(
+                interval=interval,
+                bam_path="fake.bam",
+                gtf_reader=mock_gtf_reader,
+                genome_fasta="A" * 2000,
+            )
+
+        assert "fwd_read" in result.read_ids
+        assert "rev_read" not in result.read_ids
 
 
 # ---------------------------------------------------------------------------

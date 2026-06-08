@@ -126,6 +126,16 @@ def discover_gtf_only(
             rd = bam.alignment_to_dict(alignment)
             if not rd or not rd.get("is_mapped"):
                 continue
+            # Honor strand-separated intervals. bam.fetch returns reads on BOTH
+            # strands overlapping the region, but each read belongs to its own
+            # mapped strand's interval. Without this guard an antisense interval
+            # that spatially contains a sense interval swallows the sense reads,
+            # corrupting strand assignment (a candidate emitted on the wrong
+            # strand can never match) and read-to-candidate quantification.
+            if interval.strand is not None:
+                read_strand = "+" if rd.get("is_forward") else "-"
+                if read_strand != interval.strand:
+                    continue
             read_id = rd.get("query_name")
             if read_id:
                 all_read_ids.add(read_id)
@@ -228,6 +238,16 @@ def discover_candidates(
             rd = bam.alignment_to_dict(alignment)
             if not rd or not rd.get("is_mapped"):
                 continue
+            # Honor strand-separated intervals. bam.fetch returns reads on BOTH
+            # strands overlapping the region, but each read belongs to its own
+            # mapped strand's interval. Without this guard an antisense interval
+            # that spatially contains a sense interval swallows the sense reads,
+            # corrupting strand assignment (a candidate emitted on the wrong
+            # strand can never match) and read-to-candidate quantification.
+            if interval.strand is not None:
+                read_strand = "+" if rd.get("is_forward") else "-"
+                if read_strand != interval.strand:
+                    continue
             read_id = rd.get("query_name")
             if read_id:
                 all_read_ids.add(read_id)
