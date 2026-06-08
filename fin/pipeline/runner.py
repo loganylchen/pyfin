@@ -91,13 +91,25 @@ class PipelineRunner:
         intervals = result["intervals"]
         logger.info("Generated %d intervals", len(intervals))
 
-        # Process each interval
+        # Process each interval (serial by default; opt-in process parallelism).
         all_quant_results: List[List[QuantResult]] = []
-        for i, interval in enumerate(intervals):
-            logger.info("Processing interval %d/%d: %s", i + 1, len(intervals), interval.region_string)
-            quant = self.process_interval(interval)
-            if quant:
-                all_quant_results.append(quant)
+        if self.config.threads <= 1:
+            for i, interval in enumerate(intervals):
+                logger.info("Processing interval %d/%d: %s", i + 1, len(intervals), interval.region_string)
+                quant = self.process_interval(interval)
+                if quant:
+                    all_quant_results.append(quant)
+        else:
+            from fin.pipeline.parallel import run_parallel
+
+            log_level = logging.getLevelName(logging.getLogger("fin").getEffectiveLevel())
+            all_quant_results = run_parallel(
+                self.config,
+                intervals,
+                self.config.threads,
+                self.config.gpu_workers,
+                log_level,
+            )
 
         # Aggregate across intervals
         aggregated = aggregate_across_intervals(all_quant_results)

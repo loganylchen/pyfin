@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
@@ -98,3 +99,43 @@ def test_top_level_help_lists_quantify():
 def test_unknown_subcommand_errors():
     r = run_cli("nonexistent-command")
     assert r.returncode != 0
+
+
+# ---------------------------------------------------------------------------
+# Interval-level parallelism flags (--threads / --gpu-workers)
+# ---------------------------------------------------------------------------
+
+_TD = os.path.join(os.path.dirname(__file__), "..", "..", "testdata")
+_REQUIRED = [
+    "--bam", os.path.join(_TD, "mapped.bam"),
+    "--genome", os.path.join(_TD, "SIRV.genome.fa"),
+    "--fastq", os.path.join(_TD, "mapped.fq.gz"),
+    "--signal", os.path.join(_TD, "mapped.blow5"),
+    "--output-dir", "/tmp/_fin_cli_validate",
+]
+
+
+def test_help_shows_parallel_flags():
+    r = run_cli("--help")
+    assert r.returncode == 0
+    for flag in ["--threads", "--gpu-workers"]:
+        assert flag in r.stdout, f"Missing parallel flag in fin --help: {flag}"
+
+
+def test_threads_zero_rejected():
+    # Validation fires before the pipeline runs -> fast, non-zero exit.
+    r = run_cli(*_REQUIRED, "--threads", "0")
+    assert r.returncode != 0
+    assert "threads" in (r.stdout + r.stderr).lower()
+
+
+def test_gpu_workers_negative_rejected():
+    r = run_cli(*_REQUIRED, "--threads", "2", "--gpu-workers=-1")
+    assert r.returncode != 0
+    assert "gpu-workers" in (r.stdout + r.stderr).lower()
+
+
+def test_gpu_workers_exceeds_threads_rejected():
+    r = run_cli(*_REQUIRED, "--gpu", "--threads", "2", "--gpu-workers", "3")
+    assert r.returncode != 0
+    assert "gpu-workers" in (r.stdout + r.stderr).lower()

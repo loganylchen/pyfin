@@ -64,6 +64,8 @@ import click
 )
 @click.option("--abundance-feedback/--no-abundance-feedback", default=False, show_default=True, help="RSEM/Salmon-style iterative abundance feedback in the EM: each M-step re-estimates per-transcript abundance theta and biases a read shared between candidates toward the more abundant one (a 0.5/0.5 split migrating toward 0.99/0.01 once theta diverges, e.g. 100:1). Only affects the EM quant modes --quant-mode m1_em|m2_em (m2_em is the default; no effect under 'argmax'). Experimental; OFF by default.")
 @click.option("--abundance-length-norm/--no-abundance-length-norm", default=False, show_default=True, help="With --abundance-feedback, divide abundance counts by per-transcript spliced effective length before forming theta (Salmon effective-length normalization). Experimental; OFF by default.")
+@click.option("--threads", default=1, show_default=True, type=int, help="Interval-level worker processes. The pipeline is CPU-bound serial Python, so prefer many light workers; each worker is pinned to 1 BLAS/krill thread so total threads stay ~N. NOTE: the genome FASTA is loaded per worker (N× memory). 1 keeps the serial path.")
+@click.option("--gpu-workers", default=0, show_default=True, type=int, help="Of --threads workers, how many hold a GPU context (live CUDA contexts <= G; VRAM bound = G× per-context). 0 = all workers CPU-only. Forced to 0 with --no-gpu. Over-provisioned GPU workers auto-fall back to CPU on OOM.")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 @click.pass_context
 def main(
@@ -105,6 +107,8 @@ def main(
     m3_coherence,
     abundance_feedback,
     abundance_length_norm,
+    threads,
+    gpu_workers,
     verbose,
 ):
     """pyfin: nanopore signal-based transcriptome assembly.
@@ -131,6 +135,30 @@ def main(
         click.echo(f"Error: missing required option(s): {', '.join(missing)}", err=True)
         click.echo(ctx.get_help(), err=True)
         sys.exit(2)
+
+    if threads < 1:
+        raise click.BadParameter("must be >= 1", param_hint="--threads")
+    if gpu_workers < 0:
+        raise click.BadParameter("must be >= 0", param_hint="--gpu-workers")
+    if not use_gpu:
+        gpu_workers = 0
+    if gpu_workers > threads:
+        raise click.BadParameter(
+            f"must be <= --threads ({threads})", param_hint="--gpu-workers"
+        )
+
+    # Pin per-process thread pools to 1 BEFORE importing numpy (BLAS reads these at
+    # import). Workers spawn-inherit os.environ, so total threads stay ~--threads.
+    if threads > 1:
+        for _var in (
+            "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+            "KRILL_THREADS",
+        ):
+            os.environ.setdefault(_var, "1")
 
     from fin.utils.log_config import setup_logger
 
@@ -184,6 +212,8 @@ def main(
         m3_coherence=m3_coherence,
         abundance_feedback=abundance_feedback,
         abundance_length_norm=abundance_length_norm,
+        threads=threads,
+        gpu_workers=gpu_workers,
     )
 
     runner = PipelineRunner(cfg)

@@ -211,8 +211,12 @@ class PipelineConfig:
     max_reads_per_interval_for_dtw: int = 2000
     signal_normalize: bool = True   # per-read robust z-score before DTW
 
-    # Parallelism (future)
-    num_workers: int = 1
+    # Parallelism: interval-level process workers. threads=1 keeps the serial
+    # path verbatim. gpu_workers of the threads workers hold a GPU context (VRAM
+    # bound = G x per-context footprint); the rest are CPU-only. gpu_workers must
+    # be 0 when use_gpu is False.
+    threads: int = 1
+    gpu_workers: int = 0
 
     # Output
     output_gtf: Optional[str] = None
@@ -239,8 +243,16 @@ class PipelineConfig:
     fusion_flank_bp: int = 500     # bp to extract on each side of breakpoint for fusion sequence
 
     def validate(self):
-        """Validate that required paths exist."""
+        """Validate that required paths exist and parallelism knobs are coherent."""
         for attr in ("bam_path", "genome_fasta_path", "fastq_path", "signal_path"):
             val = getattr(self, attr)
             if val and not Path(val).exists():
                 raise FileNotFoundError(f"{attr}: {val}")
+        if self.threads < 1:
+            raise ValueError(f"threads must be >= 1, got {self.threads}")
+        if not 0 <= self.gpu_workers <= self.threads:
+            raise ValueError(
+                f"gpu_workers must be in [0, threads={self.threads}], got {self.gpu_workers}"
+            )
+        if self.gpu_workers and not self.use_gpu:
+            raise ValueError("gpu_workers must be 0 when use_gpu is False")
