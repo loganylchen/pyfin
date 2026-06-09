@@ -5,6 +5,10 @@ on:
     branches: ['*']
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build-gpu:
     name: GPU Image
@@ -21,6 +25,13 @@ jobs:
         username: ${{ secrets.DOCKER_HUB_USERNAME }}
         password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
     - name: Determine tag suffix
       id: tag
       run: |
@@ -35,7 +46,9 @@ jobs:
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin
+        images: |
+          ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin
+          ghcr.io/${{ github.repository_owner }}/pyfin
         tags: |
           type=sha,prefix=gpu-
           type=raw,value=gpu-${{ steps.tag.outputs.suffix }}
@@ -57,6 +70,8 @@ jobs:
         IMAGE=${{ secrets.DOCKER_HUB_USERNAME }}/pyfin:gpu-${{ steps.tag.outputs.suffix }}
         docker run --rm "$IMAGE" \
           python3 -c "from fin._dtw import is_available; print('CUDA:', is_available())"
+        docker run --rm "$IMAGE" \
+          python3 -c "from fin.ablation.mappy_argmax import mappy_multimap_responsibilities; print('fin.ablation OK')"
         docker run --rm "$IMAGE" f5c --version
 
   build-cpu:
@@ -74,6 +89,13 @@ jobs:
         username: ${{ secrets.DOCKER_HUB_USERNAME }}
         password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
     - name: Determine tag suffix
       id: tag
       run: |
@@ -88,7 +110,9 @@ jobs:
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin
+        images: |
+          ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin
+          ghcr.io/${{ github.repository_owner }}/pyfin
         tags: |
           type=sha,prefix=cpu-
           type=raw,value=cpu-${{ steps.tag.outputs.suffix }}
@@ -110,4 +134,6 @@ jobs:
         IMAGE=${{ secrets.DOCKER_HUB_USERNAME }}/pyfin:cpu-${{ steps.tag.outputs.suffix }}
         docker run --rm "$IMAGE" \
           python3 -c "from fin._dtw import is_available; print('CUDA:', is_available())"
+        docker run --rm "$IMAGE" \
+          python3 -c "from fin.ablation.mappy_argmax import mappy_multimap_responsibilities; print('fin.ablation OK')"
         docker run --rm "$IMAGE" f5c --version

@@ -337,6 +337,7 @@ def main():
             "fin.scoring",
             "fin.pipeline",
             "fin.fusion",
+            "fin.ablation",
         ],
         package_dir={"fin": "fin"},
         package_data={
