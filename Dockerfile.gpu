@@ -18,10 +18,20 @@ RUN pip3 install --no-cache-dir pyslow5 pyfastx \
     && pip3 install --no-cache-dir "krill==0.1.5" --no-deps \
         --index-url https://loganylchen.github.io/krill-dist/simple/
 
-# Install pyfin and CUDA-12 prebuilt cupy wheel (avoids 30 min source build)
+# Install pyfin and CUDA-12 prebuilt cupy wheel (avoids 30 min source build).
+# CuPy JIT-compiles the EM elementwise kernels at runtime via NVRTC, which needs
+# CUDA headers. The slim -runtime base has none (they live only in -devel), so on
+# the plain wheel the first cupy ufunc dies with "Failed to find CUDA headers".
+# Supply the headers via the pip-packaged NVRTC + cudart wheels, pinned to 12.2.*
+# to match the CUDA 12.2 base (avoids the broad cupy-cuda12x[ctk] umbrella, whose
+# unpinned component wheels would drift from the base and bloat the image). CuPy's
+# pathfinder discovers these under site-packages/nvidia/*; they install into
+# dist-packages and are carried into the runtime stage by the COPY below.
 WORKDIR /app
 COPY . .
-RUN pip3 install --no-cache-dir cupy-cuda12x numba \
+RUN pip3 install --no-cache-dir cupy-cuda12x \
+        "nvidia-cuda-nvrtc-cu12==12.2.*" "nvidia-cuda-runtime-cu12==12.2.*" \
+        numba \
     && pip3 install --no-cache-dir .
 
 # Record Python version for runtime stage verification
