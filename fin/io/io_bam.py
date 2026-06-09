@@ -137,7 +137,14 @@ class BamReader:
             raise RuntimeError("Alignment file not opened. Call open() first.")
 
         try:
-            return self._alignment_file.fetch(reference, start, end, region, until_eof)
+            # Pass by keyword: pysam.fetch's 5th positional parameter is `tid`,
+            # not `until_eof`. Passing until_eof positionally lands it in the tid
+            # slot, and tid=False (==0) overrides `contig`, so every region fetch
+            # silently returns reads from reference 0 regardless of `reference`.
+            return self._alignment_file.fetch(
+                contig=reference, start=start, stop=end,
+                region=region, until_eof=until_eof,
+            )
         except Exception as e:
             logger.error(f"Failed to fetch alignments: {e}")
             return iter([])
