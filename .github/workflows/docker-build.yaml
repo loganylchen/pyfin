@@ -72,7 +72,8 @@ jobs:
           python3 -c "from fin._dtw import is_available; print('CUDA:', is_available())"
         docker run --rm "$IMAGE" \
           python3 -c "from fin.ablation.mappy_argmax import mappy_multimap_responsibilities; print('fin.ablation OK')"
-        docker run --rm "$IMAGE" f5c --version
+        docker run --rm "$IMAGE" \
+          python3 -c "import krill; print('krill OK')"
 
   build-cpu:
     name: CPU Image
@@ -136,4 +137,5 @@ jobs:
           python3 -c "from fin._dtw import is_available; print('CUDA:', is_available())"
         docker run --rm "$IMAGE" \
           python3 -c "from fin.ablation.mappy_argmax import mappy_multimap_responsibilities; print('fin.ablation OK')"
-        docker run --rm "$IMAGE" f5c --version
+        docker run --rm "$IMAGE" \
+          python3 -c "import krill; print('krill OK')"
