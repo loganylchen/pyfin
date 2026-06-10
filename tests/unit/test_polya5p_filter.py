@@ -4,8 +4,8 @@ Covers ``fin.analysis.quantification``:
   - ``polya_read_passes`` — per-read polyA gate (qc PASS & length > min).
   - ``compute_polya5p_support`` — count of assigned reads that BOTH have a
     confident polyA tail AND map 5'-flush to the candidate (strand-aware).
-  - ``polya5p_drops`` — the production drop set. UNLIKE the other filters this
-    gates GTF candidates too; fusion is exempt; empty polya_map no-ops.
+  - ``polya5p_drops`` — the production drop set. GTF candidates are exempt by
+    default (like fusion); exempt_gtf=False gates them; empty polya_map no-ops.
 And the runner finalize wiring (``_apply_polya5p_filter``) with krill patched.
 """
 from __future__ import annotations
@@ -120,7 +120,7 @@ def test_support_read_without_span_not_counted():
 # --------------------------------------------------------------------------
 # polya5p_drops
 # --------------------------------------------------------------------------
-def _drops(results, polya, ends, min_reads):
+def _drops(results, polya, ends, min_reads, exempt_gtf=True):
     return polya5p_drops(
         {qr.candidate_id: qr for qr in results},
         polya,
@@ -128,6 +128,7 @@ def _drops(results, polya, ends, min_reads):
         window=25,
         min_polya_len=10.0,
         min_reads=min_reads,
+        exempt_gtf=exempt_gtf,
     )
 
 
@@ -139,11 +140,21 @@ def test_drop_novel_below_threshold():
     assert _drops([keep, drop], polya, ends, 1) == {"drop"}
 
 
-def test_gtf_is_gated_too():
+def test_gtf_exempt_by_default():
+    # Default exempt_gtf=True: GTF candidates are skipped like fusion, so a
+    # failing GTF candidate is NOT dropped.
+    g = _qr("g", source="gtf", assigned=("r1",))
+    polya = {"r1": (5.0, "PASS")}  # would fail support, but GTF is exempt
+    ends = {"r1": (100, 900)}
+    assert _drops([g], polya, ends, 1) == set()
+
+
+def test_gtf_gated_when_exempt_disabled():
+    # exempt_gtf=False restores the old behavior: GTF faces the polyA bar.
     g = _qr("g", source="gtf", assigned=("r1",))
     polya = {"r1": (5.0, "PASS")}  # fails
     ends = {"r1": (100, 900)}
-    assert _drops([g], polya, ends, 1) == {"g"}
+    assert _drops([g], polya, ends, 1, exempt_gtf=False) == {"g"}
 
 
 def test_fusion_exempt():
@@ -316,3 +327,4 @@ def test_config_default_on_at_one():
     assert cfg.min_polya5p_reads == 1
     assert cfg.polya5p_window_bp == 25
     assert cfg.min_polya_length == 10.0
+    assert cfg.polya5p_exempt_gtf is True

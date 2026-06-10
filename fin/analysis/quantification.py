@@ -316,18 +316,21 @@ def polya5p_drops(
     window: int,
     min_polya_len: float,
     min_reads: int,
+    exempt_gtf: bool = True,
 ) -> set:
     """Return candidate_ids to drop by the polyA + 5'-proximity filter.
 
     Drop a candidate whose ``compute_polya5p_support`` is below ``min_reads``.
-    Unlike the other post-quant filters, this gates BOTH novel AND GTF-sourced
-    transcripts (the user requires reference candidates to face the same
-    polyA evidence bar). Fusion candidates are EXEMPT — they are a separate
-    detection path and must not be silently dropped. ``min_reads <= 0`` disables
-    the filter, and an empty ``polya_map`` (krill produced nothing) returns an
-    empty set so a signal-less/failed run never drops anything.
+    Fusion candidates are always EXEMPT — they are a separate detection path and
+    must not be silently dropped. By default (``exempt_gtf=True``) GTF-sourced
+    candidates are exempt too: dRNA reads are frequently 5'-truncated or lack a
+    detectable polyA tail, so gating annotated transcripts costs recall on genuine
+    isoforms; only ``novel`` candidates face the polyA bar. Set
+    ``exempt_gtf=False`` to gate GTF candidates as well. ``min_reads <= 0``
+    disables the filter, and an empty ``polya_map`` (krill produced nothing)
+    returns an empty set so a signal-less/failed run never drops anything.
 
-    SIRV WARNING: this filter is SIRV-tuned. Applying it to GTF candidates drops
+    SIRV WARNING: this filter is SIRV-tuned. With ``exempt_gtf=False`` it drops
     genuine annotated transcripts whose reads lack a detectable polyA tail or are
     5'-truncated; on real dRNA this can cost recall. Re-tune or disable
     (``min_polya5p_reads = 0``) on real data.
@@ -336,7 +339,7 @@ def polya5p_drops(
         return set()
     drops: set = set()
     for qr in results.values():
-        if qr.source == "fusion":
+        if qr.source == "fusion" or (exempt_gtf and qr.source == "gtf"):
             continue
         if compute_polya5p_support(
             qr, polya_map, read_ends, window, min_polya_len

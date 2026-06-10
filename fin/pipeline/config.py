@@ -76,19 +76,25 @@ class PipelineConfig:
     # whole-read polyA tail with polya_qc == "PASS" and polya_length >
     # `min_polya_length`, AND (b) map with their genomic 5' end within
     # `polya5p_window_bp` of the candidate's genomic 5' end (strand-aware).
-    # UNLIKE every other post-quant filter, this gates GTF-sourced candidates
-    # TOO (annotated transcripts must clear the same polyA evidence bar); fusion
-    # candidates remain EXEMPT. Requires `signal_path`; it adds a krill
-    # whole-read eventalign (polya=True) pass over all reads to every run, and
-    # no-ops gracefully when signal is absent or krill produces nothing. Set
-    # `min_polya5p_reads = 0` to disable. SIRV WARNING: SIRV-tuned and ON by
-    # default (=1). On SIRV no-GTF this lifts gffcompare Tx-F1 (48.8 -> 49.5) by
-    # removing FP novels, but on with-GTF runs it drops genuine annotated
-    # transcripts whose reads lack a detectable/long polyA or are 5'-truncated
-    # (Tx-F1 cost observed). Re-tune or disable on real dRNA.
+    # Requires `signal_path`; it adds a krill whole-read eventalign (polya=True)
+    # pass over all reads to every run, and no-ops gracefully when signal is
+    # absent or krill produces nothing. Set `min_polya5p_reads = 0` to disable.
+    # SIRV WARNING: SIRV-tuned and ON by default (=1). On SIRV no-GTF this lifts
+    # gffcompare Tx-F1 (48.8 -> 49.5) by removing FP novels. Re-tune or disable
+    # on real dRNA.
+    #
+    # `polya5p_exempt_gtf` (default True): GTF-sourced candidates are EXEMPT from
+    # this filter, like fusion candidates — only `novel` candidates face the
+    # polyA evidence bar. This is the validated optimal configuration: a 6-sample
+    # x 6-ratio SIRV benchmark showed exempting GTF makes pyfin the corrected-recall
+    # leader at every annotation-completeness ratio with precision only ever rising
+    # vs gating, because dRNA reads are frequently 5'-truncated or lack a detectable
+    # polyA tail and would otherwise drop genuine annotated transcripts. Set
+    # `polya5p_exempt_gtf = False` to restore the old behavior of gating GTF too.
     min_polya5p_reads: int = 1
     polya5p_window_bp: int = 25          # bp 5' tolerance (mirrors fulllen_window_bp)
     min_polya_length: float = 10.0       # min krill polya_length for a read to support (qc PASS required)
+    polya5p_exempt_gtf: bool = True      # exempt GTF candidates from polyA+5' (like fusion); False gates GTF too
 
     # Canonical-motif alternative expansion: scan ±N bp around each read's
     # CIGAR-derived junction for GT-AG and emit additional chains.

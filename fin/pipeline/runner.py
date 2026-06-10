@@ -307,8 +307,9 @@ class PipelineRunner:
         # unless >= min_polya5p_reads of its assigned reads BOTH have a krill
         # whole-read polyA tail (qc PASS & length > min_polya_length) AND map
         # with their genomic 5' end within polya5p_window_bp of the candidate's
-        # 5' end. UNLIKE the other filters this also gates GTF-sourced
-        # candidates (fusion stays exempt). Requires signal; no-ops when absent.
+        # 5' end. GTF candidates are exempt by default (polya5p_exempt_gtf=True,
+        # like fusion); only novel candidates are gated. Requires signal; no-ops
+        # when absent.
         if (
             _score_filter_on
             and getattr(self.config, "min_polya5p_reads", 0) > 0
@@ -757,12 +758,14 @@ class PipelineRunner:
     def _apply_polya5p_filter(
         self, aggregated: Dict[str, QuantResult]
     ) -> Dict[str, QuantResult]:
-        """Drop candidates failing the polyA + 5'-proximity gate (gates GTF too).
+        """Drop candidates failing the polyA + 5'-proximity gate.
 
         Runs a krill whole-read polyA pass over all reads, then removes any
-        novel/gtf candidate with fewer than ``min_polya5p_reads`` reads that both
+        gated candidate with fewer than ``min_polya5p_reads`` reads that both
         have a confident polyA tail and map 5'-flush to the candidate. Fusion
-        candidates are exempt. No-ops if krill returns nothing.
+        candidates are always exempt; GTF candidates are exempt by default
+        (``polya5p_exempt_gtf``), so only novel candidates are gated. No-ops if
+        krill returns nothing.
         """
         from fin.scoring.polya import compute_polya
 
@@ -786,6 +789,7 @@ class PipelineRunner:
             window=self.config.polya5p_window_bp,
             min_polya_len=self.config.min_polya_length,
             min_reads=self.config.min_polya5p_reads,
+            exempt_gtf=self.config.polya5p_exempt_gtf,
         )
         if not drop_ids:
             return aggregated
