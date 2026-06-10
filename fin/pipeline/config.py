@@ -26,8 +26,9 @@ class PipelineConfig:
     three_prime_threshold: int = 24
     max_gap: int = 0
     min_novel_reads: int = 1          # A2: min supporting reads for a novel candidate (after collapsing)
-    min_abundance: float = 0.0        # A4: drop quantified transcripts with abundance < this. Field default stays 0 (programmatic/quantify/ablation callers unchanged); the `fin` CLI defaults it to 3 (NOVEL only).
-    floor_gtf_abundance: bool = False  # A4: when True the min_abundance floor also covers GTF transcripts; default False = GTF exempt (annotation trusted). The `fin` CLI exposes this as --floor-gtf-abundance (OFF). Fusion is always exempt. Ablation path is separate and keeps GTF exempt regardless.
+    min_abundance: float = 0.0        # A4: drop quantified NOVEL transcripts with abundance < this. Field default stays 0 (programmatic/quantify/ablation callers unchanged); the `fin` CLI defaults it to 3 (NOVEL only).
+    floor_gtf_abundance: bool = False  # A4: when True the GTF floor is raised to max(min_gtf_abundance, min_abundance) (i.e. up to the NOVEL floor, never below the explicit GTF floor); default False = GTF uses its own lighter min_gtf_abundance. The `fin` CLI exposes this as --floor-gtf-abundance (OFF). Fusion is always exempt. Ablation path is separate and keeps GTF exempt regardless.
+    min_gtf_abundance: float = 0.0    # A4: own (lighter) abundance floor for GTF transcripts, on soft EM abundance. Field default stays 0 (programmatic/quantify/ablation callers unchanged); the `fin` CLI defaults it to 1, so a GTF candidate whose EM soft-mass is below 1 read is dropped (avoids echoing annotation as a copy-tool). When floor_gtf_abundance is set the effective GTF floor becomes max(min_gtf_abundance, min_abundance). Fusion always exempt.
     min_max_r: float = 0.0            # Phase A T2: drop NOVEL transcripts whose max EM responsibility < this (Cohen's d=1.34)
     min_novel_combined_score: float = 0.0  # Step 3: drop NOVEL transcripts whose combined_score < this (F1-optimal: 0.288 with-GTF, 0.428 no-GTF; Cohen's d=0.70)
 

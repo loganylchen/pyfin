@@ -157,33 +157,47 @@ class PipelineRunner:
                 len(aggregated),
             )
 
-        # A4: post-EM abundance filter. By default the floor targets NOVEL
-        # transcripts only (the `fin` CLI defaults --min-abundance to 3); GTF is
-        # EXEMPT unless floor_gtf_abundance is set (--floor-gtf-abundance), which
-        # extends the floor to GTF to reproduce the SIRV gffcompare T>=3 with-GTF
+        # A4: post-EM abundance floor with per-source thresholds (on soft EM
+        # abundance). NOVEL transcripts face min_abundance (the `fin` CLI defaults
+        # it to 3). GTF transcripts face their own lighter floor min_gtf_abundance
+        # (CLI default 1) so a GTF candidate whose EM soft-mass is below 1 read is
+        # dropped — pyfin is not a copy-annotation tool — while genuine annotated
+        # transcripts with real EM support are kept. When floor_gtf_abundance is
+        # set (--floor-gtf-abundance) GTF is raised to the NOVEL floor — precisely
+        # max(min_gtf_abundance, min_abundance) so the toggle never LOWERS an
+        # explicit GTF floor — reproducing the SIRV gffcompare T>=3 with-GTF
         # operating point. Fusion is ALWAYS exempt so opt-in fusion calls are
-        # never silently dropped by an abundance-targeted filter. SIRV-tuned:
-        # this floor is overfit and guts genuine low-abundance isoform recall on
-        # real data; users disable it via --min-abundance 0.
+        # never silently dropped. SIRV-tuned: these floors are overfit and gut
+        # genuine low-abundance isoform recall on real data; disable via
+        # --min-abundance 0 / --min-gtf-abundance 0.
         # NOTE: the separate ablation harness (fin/ablation/runner.py) keeps GTF
         # exempt regardless — that divergence is intentional (no-GTF de novo).
-        if _score_filter_on and self.config.min_abundance > 0.0:
-            floor_gtf = self.config.floor_gtf_abundance
+        floor_gtf = self.config.floor_gtf_abundance
+        gtf_floor = (
+            max(self.config.min_gtf_abundance, self.config.min_abundance)
+            if floor_gtf
+            else self.config.min_gtf_abundance
+        )
+        if _score_filter_on and (self.config.min_abundance > 0.0 or gtf_floor > 0.0):
             before = len(aggregated)
             aggregated = {
                 cid: qr
                 for cid, qr in aggregated.items()
                 if qr.source == "fusion"
-                or (qr.source == "gtf" and not floor_gtf)
-                or qr.abundance >= self.config.min_abundance
+                or (
+                    qr.abundance >= gtf_floor
+                    if qr.source == "gtf"
+                    else qr.abundance >= self.config.min_abundance
+                )
             }
             dropped = before - len(aggregated)
             if dropped:
                 logger.info(
-                    "Dropped %d transcripts (%s) with abundance < %.3f",
+                    "Dropped %d transcripts with abundance < floor "
+                    "(novel < %.3f, gtf < %.3f)",
                     dropped,
-                    "GTF+novel" if floor_gtf else "novel only",
                     self.config.min_abundance,
+                    gtf_floor,
                 )
 
         # Phase A Tier-2: max_R filter. EM responsibility is a strong FP
