@@ -22,7 +22,7 @@ Row definitions (AC1):
 
 Note: the m2_em assembly path gates M3 read×read DTW coherence on
 ``PipelineConfig.m3_coherence`` (NOT ``m4_source``). ``m4_source`` is retained
-because it still governs the ``quantify`` subcommand's coherence source.
+because the ablation rows below still use it to select the coherence source.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ class AblationRowConfig:
     label: str           # human-readable description
     quant_mode: str = "m2_em"   # "argmax" | "m1_em" | "m2_em"
     em_max_iter_override: Optional[int] = None
-    m4_source: str = "diff_region"   # "diff_region" | "none" (quantify coherence src)
+    m4_source: str = "diff_region"   # "diff_region" | "none" (ablation coherence src)
     m3_coherence: bool = False  # gate read×read DTW coherence in the m2_em path
     enable_score_filter: bool = True
 

@@ -15,7 +15,6 @@ import click
 @click.option("--fastq", default=None, type=click.Path(exists=True), help="FASTQ reads file.")
 @click.option("--signal", default=None, type=click.Path(exists=True), help="SLOW5/BLOW5/POD5 signal file.")
 @click.option("--output-dir", default=None, help="Output directory.")
-@click.option("--use-prior/--no-prior", default=True, show_default=True, help="Apply combined_score-derived EM prior.")
 @click.option("--gpu/--no-gpu", "use_gpu", default=True, show_default=True, help="Enable/disable GPU acceleration.")
 @click.option(
     "--signal-format",
@@ -24,7 +23,6 @@ import click
     show_default=True,
     help="Signal file format.",
 )
-@click.option("--alpha", default=0.5, show_default=True, type=float, help="Score alpha (coherence vs discrimination weight).")
 @click.option("--fusion", "fusion_enabled", is_flag=True, default=False, help="Enable fusion detection.")
 @click.option("--min-support", default=2, show_default=True, type=int, help="Minimum read support for fusion breakpoint (only with --fusion).")
 @click.option("--max-dist", default=500, show_default=True, type=int, help="Maximum distance (bp) for breakpoint clustering (only with --fusion).")
@@ -35,7 +33,7 @@ import click
 @click.option("--min-gtf-abundance", default=1.0, show_default=True, type=float, help="Abundance floor for GTF-annotated transcripts on soft EM abundance (default 1: a GTF candidate must accrue at least one read of EM soft-mass to be kept, so pyfin is not a copy-annotation tool). Independent of --min-abundance (which gates novel); fusion always exempt. With --floor-gtf-abundance the effective GTF floor becomes max(this, --min-abundance). Set 0 to disable and keep every GTF candidate in an expressed locus. SIRV-tuned: on real data a nonzero floor can drop genuine low-abundance annotated isoforms.")
 @click.option("--floor-gtf-abundance/--no-floor-gtf-abundance", "floor_gtf_abundance", default=False, show_default=True, help="Raise the GTF abundance floor to the NOVEL floor: GTF must clear max(--min-gtf-abundance, --min-abundance) (never lowers the explicit GTF floor). Default OFF: GTF uses its own lighter --min-gtf-abundance. Turn ON to reproduce the SIRV gffcompare T>=3 WITH-GTF operating point (e.g. T=3 -> Sn 43.2 / Pr 91.6). SIRV-tuned: on real data this drops genuine low-abundance annotated isoforms — leave OFF unless benchmarking. Fusion stays exempt regardless.")
 @click.option("--min-max-r", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose max_R is below this (GTF candidates are exempt). NOTE: max_R is a true EM responsibility (the d=1.34 FP discriminator, try 0.2) ONLY in --quant-mode m1_em/m2_em (m2_em is the default); under 'argmax' mode max_R is instead the max single-read mappy weight, so that calibration does not apply.")
-@click.option("--min-novel-combined-score", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose combined_score is below this (F1-optimal: 0.288 with-GTF, 0.428 no-GTF; GTF candidates are exempt). WARNING: combined_score is only computed by the `quantify` subcommand's composite scorer; in assembly mode (this command, any quant_mode) it stays 0.0, so a value > 0 is IGNORED (the runner skips the filter with a warning rather than dropping all novel transcripts).")
+@click.option("--min-novel-combined-score", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose combined_score is below this (GTF candidates are exempt). WARNING: no code path populates combined_score anymore (the composite scorer was removed), so it stays 0.0 and a value > 0 is IGNORED (the runner skips the filter with a warning rather than dropping all novel transcripts). Retained for backward compatibility.")
 @click.option("--min-isoform-fraction", default=0.01, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose abundance is below this fraction of the dominant overlapping novel isoform at their locus (Cufflinks --min-isoform-fraction / StringTie -f minor-isoform suppression). GTF/fusion/mono exempt; 0.0 disables. Default 0.01 (StringTie-aligned, recall-safe). SIRV WARNING: F1-optimal ~0.4 is overfit — never use on real data.")
 @click.option("--min-fulllen-fraction", default=0.1, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose fraction of full-length assigned reads (read genomic 5' AND 3' both within --fulllen-window-bp of the candidate's ends) is below this (FLAIR/TALON-style full-length read support; signal-free). Orthogonal to --min-isoform-fraction. GTF/fusion/mono and unreachable candidates exempt; 0.0 disables. SIRV WARNING: default 0.1 is SIRV-tuned (drops most reachable novel-multi for free as SIRV lacks a 5'-truncated isoform tail) — re-tune or disable on real dRNA data.")
 @click.option("--fulllen-window-bp", default=25, show_default=True, type=int, help="bp tolerance for a read genomic end to count as full-length wrt a candidate's 5'/3' end (used by --min-fulllen-fraction).")
@@ -79,10 +77,8 @@ def main(
     fastq,
     signal,
     output_dir,
-    use_prior,
     use_gpu,
     signal_format,
-    alpha,
     fusion_enabled,
     min_support,
     max_dist,
@@ -119,9 +115,9 @@ def main(
 ):
     """pyfin: nanopore signal-based transcriptome assembly.
 
-    Default command performs reference-based transcriptome assembly. Pass
-    --fusion to additionally detect gene fusions. Use the `quantify`
-    subcommand for multi-sample known-transcript quantification.
+    Performs reference-based transcriptome assembly with EM-based abundance/TPM
+    quantification baked into the output. Pass --fusion to additionally detect
+    gene fusions.
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -186,9 +182,7 @@ def main(
         output_tsv=os.path.join(output_dir, "scores.tsv"),
         output_bedpe=os.path.join(output_dir, "fusions.bedpe") if fusion_enabled else None,
         use_gpu=use_gpu,
-        use_prior=use_prior,
         signal_format=signal_format,
-        score_alpha=alpha,
         fusion_enabled=fusion_enabled,
         fusion_min_support=min_support,
         fusion_max_dist=max_dist,
@@ -233,83 +227,6 @@ def main(
         runner.cleanup()
 
     click.echo(f"Assembly output written to {output_dir}/")
-
-
-@main.command()
-@click.option("--gtf", required=True, type=click.Path(exists=True), help="GTF annotation file.")
-@click.option("--genome", required=True, type=click.Path(exists=True), help="Genome FASTA file.")
-@click.option(
-    "--sample",
-    multiple=True,
-    required=True,
-    help="Sample in format name:bam:fastq:blow5. Can be specified multiple times.",
-)
-@click.option("--output-dir", default="./pyfin_quant", show_default=True, help="Output directory.")
-@click.option("--use-gpu/--no-gpu", default=True, show_default=True, help="Use GPU for DTW.")
-@click.option(
-    "--signal-format",
-    default="slow5",
-    type=click.Choice(["slow5", "pod5"]),
-    show_default=True,
-    help="Signal file format.",
-)
-@click.option("--use-prior/--no-prior", default=True, show_default=True, help="Apply combined_score-derived EM prior.")
-@click.option("--signal-normalize/--no-signal-normalize", default=True, show_default=True, help="Per-read robust z-score normalization before DTW.")
-@click.option(
-    "--m3-coherence/--no-m3-coherence",
-    default=False,
-    show_default=True,
-    help="Enable read×read junction-window DTW coherence (M3, EM weight=em_beta). OFF by default because DTW is costly.",
-)
-@click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
-def quantify(gtf, genome, sample, output_dir, use_gpu, signal_format, use_prior, signal_normalize, m3_coherence, verbose):
-    """Quantify known transcripts across multiple samples."""
-    from fin.utils.log_config import setup_logger
-
-    logger = setup_logger("fin", level="DEBUG" if verbose else "INFO")
-
-    from fin.pipeline.quantify_runner import QuantifyRunner, SampleInput
-
-    samples = []
-    for s in sample:
-        parts = s.split(":")
-        if len(parts) != 4:
-            click.echo(
-                f"Error: --sample must be name:bam:fastq:blow5, got '{s}'",
-                err=True,
-            )
-            sys.exit(1)
-        samples.append(SampleInput(name=parts[0], bam_path=parts[1], fastq_path=parts[2], signal_path=parts[3]))
-
-    logger.info("Quantifying %d samples against %s", len(samples), gtf)
-
-    from fin.pipeline.config import PipelineConfig
-
-    quant_config = PipelineConfig(
-        bam_path="",
-        use_gpu=use_gpu,
-        use_prior=use_prior,
-        signal_normalize=signal_normalize,
-        m3_coherence=m3_coherence,
-    )
-
-    runner = QuantifyRunner(
-        gtf_path=gtf,
-        genome_fasta_path=genome,
-        samples=samples,
-        output_dir=output_dir,
-        signal_format=signal_format,
-        use_gpu=use_gpu,
-        config=quant_config,
-    )
-
-    try:
-        runner.setup()
-        runner.run()
-    finally:
-        runner.cleanup()
-
-    click.echo(f"Output written to {output_dir}/")
 
 
 if __name__ == "__main__":

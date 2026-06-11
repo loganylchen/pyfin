@@ -179,7 +179,7 @@ class PipelineConfig:
     # runner builds the M3 read×read matrix and mixes it into em_with_coherence at
     # beta=em_beta. SIRV: with-GTF Tx-F1 59.7 (M3 on, β=1) vs 59.2 (off) — small,
     # high-precision, recall-neutral; the payoff is expected on real dRNA. Gates
-    # M3 in BOTH the assembly runner (m2_em) and the quantify subcommand.
+    # M3 in the assembly runner (m2_em).
     m3_coherence: bool = False
 
     tiebreak_ambig_threshold: float = 0.90
@@ -209,10 +209,12 @@ class PipelineConfig:
     # per-read rule that may matter on real dRNA. Configurable.
     m2_tie_scoregate_split: bool = True
 
-    # EM prior / scoring
-    score_alpha: float = 0.5          # weight for coherence vs discrimination in combined_score
-    prior_weight_cap: float = 10.0    # max multiplicative boost from prior
-    use_prior: bool = True            # apply combined_score-derived EM prior (set False for backward compat)
+    # EM prior / scoring. VESTIGIAL: the combined_score-derived EM prior was driven
+    # by the composite scorer, which has been removed; the assembly runner never
+    # reads these. Retained as inert config defaults for backward compatibility.
+    score_alpha: float = 0.5          # (inert) weight for coherence vs discrimination in combined_score
+    prior_weight_cap: float = 10.0    # (inert) max multiplicative boost from prior
+    use_prior: bool = True            # (inert) no code path applies a prior in assembly
 
     # DTW
     use_gpu: bool = True

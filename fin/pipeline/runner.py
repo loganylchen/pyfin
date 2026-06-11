@@ -230,13 +230,12 @@ class PipelineRunner:
         # The F1-optimal threshold from profile_fp.md is 0.288 for with-GTF and
         # 0.428 for no-GTF runs. GTF-sourced and fusion transcripts are exempt.
         #
-        # WARNING: combined_score is ONLY populated by the composite scorer,
-        # which the assembly pipeline (this runner) never invokes -- it is wired
-        # solely into the `quantify` subcommand. In every assembly quant_mode
-        # (argmax / m1_em / m2_em) combined_score stays at its 0.0 default, so a
-        # threshold > 0 here would drop EVERY novel candidate. Guard against that
-        # foot-gun: skip the filter (with a loud warning) unless some novel
-        # candidate actually carries a non-zero combined_score.
+        # WARNING: nothing populates combined_score anymore (the composite scorer
+        # was removed), so in every assembly quant_mode (argmax / m1_em / m2_em)
+        # it stays at its 0.0 default, and a threshold > 0 here would drop EVERY
+        # novel candidate. Guard against that foot-gun: skip the filter (with a
+        # loud warning) unless some novel candidate actually carries a non-zero
+        # combined_score.
         if _score_filter_on and self.config.min_novel_combined_score > 0.0:
             if not any(
                 qr.source not in ("gtf", "fusion") and qr.combined_score > 0.0
@@ -245,7 +244,7 @@ class PipelineRunner:
                 logger.warning(
                     "min_novel_combined_score=%.3f requested but no novel "
                     "candidate has a non-zero combined_score (the composite "
-                    "scorer is not run in assembly mode); skipping this filter "
+                    "scorer was removed); skipping this filter "
                     "to avoid dropping all novel transcripts.",
                     self.config.min_novel_combined_score,
                 )
@@ -1102,7 +1101,7 @@ class PipelineRunner:
         junction-window DTW coherence when ``config.m3_coherence`` is True
         (β=em_beta); OFF by default because the pairwise DTW is expensive. All
         signal scoring is in-memory krill — no f5c CLI. (``m4_source`` does not
-        affect this path; it governs only the quantify subcommand.)
+        affect this path.)
         """
         import mappy
 

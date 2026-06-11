@@ -1,4 +1,4 @@
-"""Tests for fin CLI (default assembly command + quantify subcommand)."""
+"""Tests for fin CLI (assembly-only; fusion and quantify subcommands removed)."""
 
 from __future__ import annotations
 
@@ -31,10 +31,7 @@ def test_default_help_shows_assembly_flags():
         "--fastq",
         "--signal",
         "--output-dir",
-        "--use-prior",
-        "--no-prior",
         "--no-gpu",
-        "--alpha",
         "--fusion",
     ]:
         assert flag in r.stdout, f"Missing flag in fin --help: {flag}"
@@ -64,17 +61,13 @@ def test_fusion_subcommand_removed():
 
 
 # ---------------------------------------------------------------------------
-# quantify subcommand backward compat
+# quantify subcommand removed (pyfin is assembly-only)
 # ---------------------------------------------------------------------------
 
 
-def test_quantify_help():
+def test_quantify_subcommand_removed():
     r = run_cli("quantify", "--help")
-    assert r.returncode == 0, f"Expected exit 0, got {r.returncode}\n{r.stderr}"
-    for flag in ["--gtf", "--genome", "--sample", "--output-dir", "--use-gpu", "--no-gpu"]:
-        assert flag in r.stdout, f"Missing existing flag in quantify --help: {flag}"
-    for flag in ["--use-prior", "--no-prior"]:
-        assert flag in r.stdout, f"Missing flag in quantify --help: {flag}"
+    assert r.returncode != 0
 
 
 # ---------------------------------------------------------------------------
@@ -90,10 +83,10 @@ def test_no_args_shows_help_or_error():
     )
 
 
-def test_top_level_help_lists_quantify():
+def test_top_level_help_omits_quantify():
     r = run_cli("--help")
     assert r.returncode == 0
-    assert "quantify" in r.stdout, "Subcommand 'quantify' missing from top-level --help"
+    assert "quantify" not in r.stdout, "Removed subcommand 'quantify' still in top-level --help"
 
 
 def test_unknown_subcommand_errors():
