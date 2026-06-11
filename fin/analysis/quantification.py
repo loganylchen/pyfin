@@ -40,6 +40,7 @@ class QuantResult:
     combined_score: float = 0.0
     breakpoint_left: Optional[Tuple[str, int, str]] = None
     breakpoint_right: Optional[Tuple[str, int, str]] = None
+    fusion_junction: Optional[Tuple[int, int]] = None
     # P0-6: read IDs hard-assigned to this candidate. Used by
     # aggregate_across_intervals to dedup reads that span multiple intervals.
     assigned_read_ids: Tuple[str, ...] = ()
@@ -117,6 +118,9 @@ def quantify_transcripts(
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
                 assigned_read_ids=assigned_ids,
+                breakpoint_left=cand.breakpoint_left,
+                breakpoint_right=cand.breakpoint_right,
+                fusion_junction=cand.fusion_junction,
             )
         )
 
@@ -420,6 +424,7 @@ def aggregate_across_intervals(
                     "score_weight": 0.0,
                     "breakpoint_left": qr.breakpoint_left,
                     "breakpoint_right": qr.breakpoint_right,
+                    "fusion_junction": qr.fusion_junction,
                     "max_R": 0.0,
                     "fulllen_frac": -1.0,
                 }
@@ -456,6 +461,8 @@ def aggregate_across_intervals(
                 a["breakpoint_left"] = qr.breakpoint_left
             if a["breakpoint_right"] is None:
                 a["breakpoint_right"] = qr.breakpoint_right
+            if a["fusion_junction"] is None:
+                a["fusion_junction"] = qr.fusion_junction
 
     result = {}
     for cid, a in agg.items():
@@ -511,6 +518,7 @@ def aggregate_across_intervals(
             combined_score=combined,
             breakpoint_left=a["breakpoint_left"],
             breakpoint_right=a["breakpoint_right"],
+            fusion_junction=a["fusion_junction"],
             assigned_read_ids=tuple(sorted(unique_ids)),
             max_R=a["max_R"],
             fulllen_frac=a["fulllen_frac"],

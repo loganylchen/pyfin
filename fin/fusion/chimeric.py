@@ -123,25 +123,28 @@ def _best_hit(aligner, segment_seq: str):
     return best
 
 
-def _arm_a_breakpoint_pos(side: str, strand: str, ref_start: int, ref_end: int) -> int:
+def _arm_a_breakpoint_pos(side: str, ref_start: int, ref_end: int) -> int:
     """Genomic junction edge of the PRIMARY arm.
 
-    Read coords run forward; on the '-' strand the read's forward direction is
-    opposite to the genome, so the junction edge flips. For a back soft-clip the
-    junction sits at the read 3' end of the aligned span: that is ``ref_end`` on
-    '+' but ``ref_start`` on '-'. A front clip is the mirror image.
+    pysam normalizes cigartuples and query_alignment_start/end to GENOME-FORWARD
+    orientation for every read (``is_reverse`` only records the sequenced strand),
+    so the read-coordinate-to-reference mapping is monotonic regardless of strand:
+    the aligned span's read-low end is ``ref_start`` and its read-high end is
+    ``ref_end``. For a back soft-clip the partner arm sits at higher read coords,
+    so the junction is the primary's read-high end (``ref_end``); a front clip is
+    the mirror image (``ref_start``).
     """
-    if side == "back":
-        return ref_start if strand == "-" else ref_end
-    return ref_end if strand == "-" else ref_start
+    return ref_end if side == "back" else ref_start
 
 
 def _arm_b_breakpoint_pos(side: str, strand: str, r_st: int, r_en: int) -> int:
     """Genomic junction edge of the PARTNER arm (nearest the junction).
 
-    For a back clip the partner lies downstream in read coords; the junction is
-    at the partner edge adjacent to the primary — ``r_st`` on '+', ``r_en`` on
-    '-'. A front clip mirrors this.
+    The partner arm is found by re-aligning the soft-clip SEGMENT with mappy, so
+    its orientation is the mappy hit ``strand`` (genuinely strand-aware, unlike the
+    pysam-normalized primary). For a back clip the partner lies downstream in read
+    coords; the junction is at the partner edge adjacent to the primary — its
+    read-low end, i.e. ``r_st`` on '+' and ``r_en`` on '-'. A front clip mirrors.
     """
     if side == "back":
         return r_en if strand == "-" else r_st
@@ -239,7 +242,7 @@ def collect_chimeric_reads(
         )
         # Breakpoint coordinate on each arm: the genomic edge nearest the
         # junction (strand-aware — read-forward coords flip vs genome on '-').
-        pos_a = _arm_a_breakpoint_pos(side, strand_a, ref_start, ref_end)
+        pos_a = _arm_a_breakpoint_pos(side, ref_start, ref_end)
         pos_b = _arm_b_breakpoint_pos(side, strand_b, hit.r_st, hit.r_en)
         out.append(ChimericRead(
             query_name=qname,

@@ -532,6 +532,9 @@ class PipelineRunner:
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
                 assigned_read_ids=tuple(assigned[j]),
+                breakpoint_left=cand.breakpoint_left,
+                breakpoint_right=cand.breakpoint_right,
+                fusion_junction=cand.fusion_junction,
             )
             qr.max_R = 1.0 if has else 0.0
             quant_results.append(qr)
@@ -692,6 +695,9 @@ class PipelineRunner:
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
                 assigned_read_ids=tuple(assigned[j]),
+                breakpoint_left=cand.breakpoint_left,
+                breakpoint_right=cand.breakpoint_right,
+                fusion_junction=cand.fusion_junction,
             )
             qr.max_R = max_weight[j]
             quant_results.append(qr)

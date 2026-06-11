@@ -190,12 +190,13 @@ def test_collect_minus_strand_partner_back_clip():
 
 
 def test_collect_minus_strand_primary_back_clip():
-    # back clip on a '-' primary: junction edge is ref_start, not ref_end.
+    # pysam normalizes the primary cigar to genome-forward regardless of
+    # is_reverse, so a back clip's junction is ref_end even on a '-' read.
     r = _read(qname="rp", ref_start=1000, ref_end=1100, is_reverse=True, back_clip=80)
     aligner = _FakeAligner([_FakeHit("chr2", 5000, 5080, 1, 0, 80, mlen=80)])
     out = collect_chimeric_reads([r], aligner, max_internal_gap_bp=30)
     assert len(out) == 1
-    assert out[0].breakpoint_a == ("chr1", 1000, "-")   # ref_start on '-'
+    assert out[0].breakpoint_a == ("chr1", 1100, "-")   # ref_end (no strand flip)
     assert out[0].breakpoint_b == ("chr2", 5000, "+")   # '+' partner -> r_st
 
 
