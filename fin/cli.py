@@ -27,6 +27,7 @@ import click
 @click.option("--min-support", default=2, show_default=True, type=int, help="Minimum read support for fusion breakpoint (only with --fusion).")
 @click.option("--max-dist", default=500, show_default=True, type=int, help="Maximum distance (bp) for breakpoint clustering (only with --fusion).")
 @click.option("--flank-bp", default=500, show_default=True, type=int, help="Flank size (bp) around fusion breakpoint (only with --fusion).")
+@click.option("--fusion-max-internal-gap-bp", default=30, show_default=True, type=int, help="Adapter-bridged chimera guard (only with --fusion): drop a chimeric read whose two arms are separated by an internal stretch of read sequence mapping to NEITHER arm of >= this many bp (typically a nanopore ONT internal adapter — a false fusion, cf. DeepChopper). 0 disables.")
 @click.option("--max-reads-per-interval-for-dtw", "max_reads_for_dtw", default=2000, show_default=True, type=int, help="Cap reads per interval for read-to-read DTW (subsample beyond this).")
 @click.option("--min-novel-reads", default=1, show_default=True, type=int, help="Drop novel candidates with fewer supporting reads (after collapsing).")
 @click.option("--min-abundance", default=3.0, show_default=True, type=float, help="Drop NOVEL transcripts whose EM-estimated abundance is below this threshold (GTF uses its own lighter floor --min-gtf-abundance unless --floor-gtf-abundance; fusion always exempt). Default 3 reproduces the SIRV gffcompare T>=3 NOVEL operating point. SIRV-tuned WARNING: a nonzero floor guts recall of genuine low-abundance isoforms — on real data set 0 to disable.")
@@ -83,6 +84,7 @@ def main(
     min_support,
     max_dist,
     flank_bp,
+    fusion_max_internal_gap_bp,
     max_reads_for_dtw,
     min_novel_reads,
     min_abundance,
@@ -187,6 +189,7 @@ def main(
         fusion_min_support=min_support,
         fusion_max_dist=max_dist,
         fusion_flank_bp=flank_bp,
+        fusion_max_internal_gap_bp=fusion_max_internal_gap_bp,
         max_reads_per_interval_for_dtw=max_reads_for_dtw,
         min_novel_reads=min_novel_reads,
         min_abundance=min_abundance,

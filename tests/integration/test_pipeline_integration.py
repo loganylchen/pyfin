@@ -251,6 +251,19 @@ def test_process_interval_m3_on_enables_coherence(tmp_path):
     assert em_kwargs.get("beta") == 1.0
 
 
+def _fake_bam_reader_with_reads(read_dicts):
+    """Return a patch target factory: BamReader(...) as ctx -> .get_reads_in_region."""
+    from unittest.mock import MagicMock
+
+    reader = MagicMock()
+    reader.get_reads_in_region.return_value = read_dicts
+    ctx = MagicMock()
+    ctx.__enter__.return_value = reader
+    ctx.__exit__.return_value = False
+    factory = MagicMock(return_value=ctx)
+    return factory
+
+
 def test_process_interval_fusion_enabled(tmp_path):
     """AC-16: fusion_enabled=True merges fusion candidates into the set."""
     cfg = _make_config(work_dir=str(tmp_path), fusion_enabled=True)
@@ -268,15 +281,6 @@ def test_process_interval_fusion_enabled(tmp_path):
         read_sequences={rid: "ACGT" * 25 for rid in read_ids},
     )
 
-    from fin.fusion.breakpoints import Breakpoint
-
-    fake_bp = Breakpoint(
-        chromA="chr1", posA=100, strandA="+",
-        chromB="chr2", posB=200, strandB="+",
-        support_count=3,
-        supporting_read_ids={"read_0", "read_1", "read_2"},
-    )
-
     patches, _, _ = _patch_m2_phases(
         num_reads=5, num_cands=2, candidates=[gtf_cand, fusion_cand],
     )
@@ -286,22 +290,25 @@ def test_process_interval_fusion_enabled(tmp_path):
         return_value=base_set,
     )
 
+    fake_bam = _fake_bam_reader_with_reads([{"query_name": "read_0"}])
+
     with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
          patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
          patches["build_m3_coherence"], \
          patches["em_with_coherence"], patches["quantify_transcripts"], \
-         patch("fin.fusion.parse_sa_tags", return_value=[fake_bp]) as psa, \
-         patch("fin.fusion.cluster_breakpoints", return_value=[fake_bp]), \
-         patch("fin.fusion.build_fusion_candidates", return_value=[fusion_cand]):
+         patch.object(runner, "_get_fusion_genome_aligner", return_value=object()), \
+         patch("fin.io.io_bam.BamReader", fake_bam), \
+         patch("fin.fusion.detect_fusion_candidates",
+               return_value=[fusion_cand]) as det:
         results = runner.process_interval(_make_interval())
 
-    psa.assert_called_once()
+    det.assert_called_once()
     ids = {qr.candidate_id for qr in results}
     assert "fusion_abc" in ids
 
 
 def test_process_interval_fusion_disabled_by_default(tmp_path):
-    """fusion_enabled=False -> parse_sa_tags NOT called."""
+    """fusion_enabled=False -> fusion detection NOT invoked."""
     cfg = _make_config(work_dir=str(tmp_path), fusion_enabled=False)
     runner = _make_runner(cfg)
 
@@ -311,7 +318,7 @@ def test_process_interval_fusion_disabled_by_default(tmp_path):
          patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
          patches["build_m3_coherence"], \
          patches["em_with_coherence"], patches["quantify_transcripts"], \
-         patch("fin.fusion.parse_sa_tags") as psa:
+         patch("fin.fusion.detect_fusion_candidates") as det:
         runner.process_interval(_make_interval())
 
-    psa.assert_not_called()
+    det.assert_not_called()

@@ -12,17 +12,16 @@ from fin.io.io_bedpe import write_fusion_bedpe
 
 def _make_fusion(
     candidate_id: str,
-    combined_score: float = 0.5,
+    num_assigned_reads: int = 10,
     breakpoint_left: tuple | None = ("chr1", 1000, "+"),
     breakpoint_right: tuple | None = ("chr2", 2000, "-"),
 ) -> QuantResult:
     return QuantResult(
         candidate_id=candidate_id,
-        abundance=10.0,
+        abundance=float(num_assigned_reads),
         confidence=0.9,
-        num_assigned_reads=10,
+        num_assigned_reads=num_assigned_reads,
         source="fusion",
-        combined_score=combined_score,
         breakpoint_left=breakpoint_left,
         breakpoint_right=breakpoint_right,
     )
@@ -79,21 +78,21 @@ def test_bedpe_column_count():
     assert len(fields) == 10
 
 
-def test_bedpe_score_formatting():
-    """combined_score=0.5 → BEDPE score column == 500."""
-    results = {"f1": _make_fusion("f1", combined_score=0.5)}
+def test_bedpe_score_is_read_support():
+    """score column == num_assigned_reads (the fusion's read evidence)."""
+    results = {"f1": _make_fusion("f1", num_assigned_reads=7)}
     lines = _write_and_read(results)
     fields = lines[0].split("\t")
-    assert fields[7] == "500"
+    assert fields[7] == "7"
 
 
 def test_bedpe_score_clamping():
-    """combined_score=1.5 → 1000; combined_score=-0.1 → 0."""
+    """num_assigned_reads > 1000 clamps to 1000; 0 stays 0."""
     results = {
-        "high": _make_fusion("high", combined_score=1.5),
+        "high": _make_fusion("high", num_assigned_reads=5000),
         "low": _make_fusion(
             "low",
-            combined_score=-0.1,
+            num_assigned_reads=0,
             breakpoint_left=("chrZ", 9999, "+"),
             breakpoint_right=("chrZ", 10000, "+"),
         ),

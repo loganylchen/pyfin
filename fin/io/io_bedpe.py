@@ -22,8 +22,9 @@ def write_fusion_bedpe(
     BEDPE columns (tab-separated, no header):
         chromA  startA  endA  chromB  startB  endB  name  score  strandA  strandB
 
-    Score is int(round(combined_score * 1000)) clamped to [0, 1000].
-    Rows are sorted by (chromA, startA) for determinism.
+    Score is the supporting-read count (``num_assigned_reads``) clamped to
+    [0, 1000] — the read evidence for the fusion. Rows are sorted by
+    (chromA, startA) for determinism.
 
     Args:
         results: Dict mapping candidate_id -> QuantResult, or any iterable
@@ -58,8 +59,7 @@ def write_fusion_bedpe(
         start_b = pos_b
         end_b = pos_b + 1
 
-        raw_score = int(round(qr.combined_score * 1000))
-        score = max(0, min(1000, raw_score))
+        score = max(0, min(1000, int(qr.num_assigned_reads)))
 
         rows.append((chrom_a, start_a, end_a, chrom_b, start_b, end_b,
                      qr.candidate_id, score, strand_a, strand_b))

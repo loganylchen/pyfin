@@ -47,6 +47,10 @@ class PipelineRunner:
         self._gtf_reader = None
         self._genome_fasta = None
         self._signal_reader = None
+        # Genome-wide mappy aligner for fusion soft-clip arm re-alignment; built
+        # lazily on first fusion interval and cached (indexing is expensive).
+        self._fusion_genome_aligner = None
+        self._fusion_aligner_built = False
 
     def setup(self):
         """Open file handles and load references.
@@ -1240,32 +1244,51 @@ class PipelineRunner:
         )
         return quant_results
 
+    def _get_fusion_genome_aligner(self):
+        """Lazily build and cache the genome-wide mappy aligner for fusion arms."""
+        if not self._fusion_aligner_built:
+            from fin.fusion import build_genome_aligner
+
+            self._fusion_aligner_built = True
+            if self.config.genome_fasta_path:
+                self._fusion_genome_aligner = build_genome_aligner(
+                    self.config.genome_fasta_path
+                )
+        return self._fusion_genome_aligner
+
     def _augment_with_fusion_candidates(
         self, candidate_set: CandidateSet, interval: GenomicInterval
     ) -> CandidateSet:
-        """Detect fusion breakpoints for the interval and merge into candidate_set."""
-        from fin.fusion import (
-            build_fusion_candidates,
-            cluster_breakpoints,
-            parse_sa_tags,
-        )
+        """Run the read-driven fusion sub-pipeline and merge into candidate_set.
 
-        region = interval.region_string
-        raw_bps = parse_sa_tags(
-            self.config.bam_path, region=region, min_mapq=10
-        )
-        clusters = cluster_breakpoints(
-            raw_bps,
-            max_dist=self.config.fusion_max_dist,
-            min_support=self.config.fusion_min_support,
-        )
-        if not clusters or build_fusion_candidates is None:
+        Collects chimeric (soft-clip) reads in the interval, re-aligns their
+        soft-clip arms to find partners (Stage F1), infers per-arm splice
+        structure (F2), and stitches cross-breakpoint fusion candidates (F3).
+        """
+        from fin.candidates.canonical import parse_motifs
+        from fin.fusion import detect_fusion_candidates
+        from fin.io.io_bam import BamReader
+
+        aligner = self._get_fusion_genome_aligner()
+        if aligner is None:
             return candidate_set
 
-        fusion_cands = build_fusion_candidates(
-            clusters,
+        with BamReader(self.config.bam_path) as bam:
+            read_dicts = bam.get_reads_in_region(interval.region_string)
+        if not read_dicts:
+            return candidate_set
+
+        fusion_cands = detect_fusion_candidates(
+            read_dicts,
+            aligner,
             self._genome_fasta or {},
-            flank_bp=self.config.fusion_flank_bp,
+            gtf_reader=self._gtf_reader,
+            motif_set=parse_motifs(self.config.canonical_motifs),
+            max_internal_gap_bp=self.config.fusion_max_internal_gap_bp,
+            max_dist=self.config.fusion_max_dist,
+            search_bp=self.config.canonical_search_bp,
+            max_chains_per_read=self.config.max_chains_per_read,
+            min_support=self.config.fusion_min_support,
         )
         if not fusion_cands:
             return candidate_set
