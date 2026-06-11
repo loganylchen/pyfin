@@ -251,6 +251,13 @@ class PipelineConfig:
     fusion_min_support: int = 2
     fusion_max_dist: int = 500     # bp window for breakpoint clustering
     fusion_flank_bp: int = 500     # bp to extract on each side of breakpoint for fusion sequence
+    # Adapter-bridged chimera guard (nanopore dRNA false fusions): a soft-clip
+    # read whose two arms are separated by an internal stretch of read sequence
+    # that maps to NEITHER arm (typically an ONT internal adapter, ~adapter
+    # length) is a sequencing artifact, not a real fusion. Drop the read when the
+    # internal unmapped gap (read coords, between the two aligned arms) is >= this
+    # many bp. See DeepChopper (Nat. Commun. 2026). 0 disables the guard.
+    fusion_max_internal_gap_bp: int = 30
 
     def validate(self):
         """Validate that required paths exist and parallelism knobs are coherent."""
