@@ -38,7 +38,7 @@ class _FakeAligner:
 def _fake_tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
     """Give every read a unique-best tie on candidate 0 (no scored NLLs)."""
     ties = {i: [0] for i in range(len(kept_read_ids))}
-    return {}, ties, 0, 0
+    return {}, ties, 0, 0, {}
 
 
 # ---------------------------------------------------------------------------

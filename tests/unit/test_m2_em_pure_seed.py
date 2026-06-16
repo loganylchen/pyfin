@@ -92,10 +92,11 @@ class _FakeAligner:
 def _fake_tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
     n_ties = sum(1 for t in TIES.values() if len(t) >= 2)
     n_refined = len(NLLS)
-    return dict(NLLS), dict(TIES), n_ties, n_refined
+    # cover_by_read is ignored on the gate-OFF path (these skeleton tests).
+    return dict(NLLS), dict(TIES), n_ties, n_refined, {}
 
 
-def _run(cfg, captured, m3_matrix=None):
+def _run(cfg, captured, m3_matrix=None, tie_nll_fn=_fake_tie_nll):
     """Run _quant_m2_em with all I/O boundaries mocked; capture EM inputs."""
 
     def _fake_em(**kwargs):
@@ -114,7 +115,7 @@ def _run(cfg, captured, m3_matrix=None):
     with patch("mappy.Aligner", _FakeAligner), patch(
         "fin.ablation.mappy_argmax.mappy_multimap_responsibilities",
         return_value=(np.ones((N_R, N_C)), list(READ_IDS)),
-    ), patch.object(PipelineRunner, "_tie_nll", _fake_tie_nll), patch.object(
+    ), patch.object(PipelineRunner, "_tie_nll", tie_nll_fn), patch.object(
         PipelineRunner, "_eff_lengths", return_value=None
     ), patch(
         "fin.pipeline.runner.em_with_coherence", side_effect=_fake_em
@@ -136,6 +137,7 @@ class TestPureSeedSkeleton:
         self.captured = {}
         cfg = PipelineConfig(
             bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
+            m2_diff_cover_gate=False,
         )
         self.mock_m3 = _run(cfg, self.captured)
         self.d_tx = np.asarray(self.captured["dist_read_to_tx"])
@@ -178,6 +180,183 @@ class TestPureSeedSkeleton:
         assert self.captured["sigma"] == 1.0
 
 
+# --- Diff-region coverage gate (gate ON): proportional redistribution --------
+# Scenario 1 (build a covered ratio, then a fuzzy read follows it):
+#   r0: tie{0,1} nlls 1/5 -> margin 4 >= 0.5, COVERED -> hard to 0; vote[0]+=1
+#   r1: tie{0,1} nlls 1/5 -> margin 4 >= 0.5, COVERED -> hard to 0; vote[0]+=1
+#   r2: tie{0,1} nlls 5/1 -> margin 4 >= 0.5, COVERED -> hard to 1; vote[1]+=1
+#   => covered_vote = [2, 1, 0]
+#   r3: tie{0,1} NO nlls -> fuzzy -> redistribute by [2,1] -> p=[2/3,1/3]
+ON_TIES = {0: [0, 1], 1: [0, 1], 2: [0, 1], 3: [0, 1]}
+ON_NLLS = {0: {0: 1.0, 1: 5.0}, 1: {0: 1.0, 1: 5.0}, 2: {0: 5.0, 1: 1.0}}
+ON_COVER = {0: True, 1: True, 2: True}  # r3 absent -> fallback covered=True (unused: no nlls)
+
+
+def _fake_tie_nll_on(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+    return dict(ON_NLLS), dict(ON_TIES), 4, len(ON_NLLS), dict(ON_COVER)
+
+
+# Scenario 2 (the prior is fed ONLY by covered+distinguishing reads):
+#   r0: tie{0,1} nlls 2.0/2.05 -> margin 0.05 < 0.5, COVERED -> FLAT (no vote)
+#   r1: tie{0,1} nlls 1/5 -> margin 4 >= 0.5, NOT covered -> hard to 0 (no vote)
+#   r2: tie{0,1} NO nlls -> fuzzy; covered_vote over {0,1} == 0 -> FLAT fallback
+#   r3: tie{0,1} NO nlls -> fuzzy -> FLAT fallback
+ON2_TIES = {0: [0, 1], 1: [0, 1], 2: [0, 1], 3: [0, 1]}
+ON2_NLLS = {0: {0: 2.0, 1: 2.05}, 1: {0: 1.0, 1: 5.0}}
+ON2_COVER = {0: True, 1: False}
+
+
+def _fake_tie_nll_on2(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+    return dict(ON2_NLLS), dict(ON2_TIES), 4, len(ON2_NLLS), dict(ON2_COVER)
+
+
+class TestDiffCoverGate:
+    """Gate-ON decision matrix with proportional redistribution (no read drop)."""
+
+    def setup_method(self):
+        self.captured = {}
+        cfg = PipelineConfig(
+            bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
+            m2_diff_cover_gate=True, m2_diff_cover_margin=0.5,
+        )
+        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on)
+        self.d_tx = np.asarray(self.captured["dist_read_to_tx"])
+
+    def test_no_reads_dropped(self):
+        # Every read keeps its row -> recall-safe (no row subsetting).
+        assert self.d_tx.shape == (N_R, N_C)
+
+    def test_hard_assign_winner(self):
+        # r0: margin 4.0 >= 0.5 -> full mass to candidate 0; others MISSING.
+        assert self.d_tx[0, 0] == pytest.approx(0.0)
+        assert self.d_tx[0, 1] == pytest.approx(MISSING)
+        assert self.d_tx[0, 2] == pytest.approx(MISSING)
+        # r2: hard to candidate 1.
+        assert self.d_tx[2, 1] == pytest.approx(0.0)
+        assert self.d_tx[2, 0] == pytest.approx(MISSING)
+
+    def test_fuzzy_read_follows_covered_ratio(self):
+        # r3: no signal -> redistribute by covered_vote [2,1] over tie {0,1}.
+        # d_tx = -log(p): p0=2/3 -> 0.405465, p1=1/3 -> 1.098612; cand2 MISSING.
+        assert self.d_tx[3, 0] == pytest.approx(-np.log(2 / 3))
+        assert self.d_tx[3, 1] == pytest.approx(-np.log(1 / 3))
+        assert self.d_tx[3, 2] == pytest.approx(MISSING)
+        # softmax(-d_tx) over the tie reproduces the 2:1 ratio.
+        w = np.exp(-(self.d_tx[3, :2] - self.d_tx[3, :2].min()))
+        p = w / w.sum()
+        assert p[0] == pytest.approx(2 / 3)
+        assert p[1] == pytest.approx(1 / 3)
+
+
+class TestDiffCoverGatePriorSource:
+    """Only covered+distinguishing reads feed the redistribution prior."""
+
+    def setup_method(self):
+        self.captured = {}
+        cfg = PipelineConfig(
+            bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
+            m2_diff_cover_gate=True, m2_diff_cover_margin=0.5,
+        )
+        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on2)
+        self.d_tx = np.asarray(self.captured["dist_read_to_tx"])
+
+    def test_covered_indistinguishable_is_flat(self):
+        # r0: covered but margin 0.05 < 0.5 -> flat over {0,1}.
+        assert self.d_tx[0, 0] == pytest.approx(0.0)
+        assert self.d_tx[0, 1] == pytest.approx(0.0)
+        assert self.d_tx[0, 2] == pytest.approx(MISSING)
+
+    def test_not_covered_distinguishing_still_hard(self):
+        # r1: not covered but margin 4 >= 0.5 -> hard to candidate 0.
+        assert self.d_tx[1, 0] == pytest.approx(0.0)
+        assert self.d_tx[1, 1] == pytest.approx(MISSING)
+
+    def test_fuzzy_falls_back_to_flat_when_no_covered_votes(self):
+        # Neither r0 (indistinguishable) nor r1 (not covered) feeds covered_vote,
+        # so r2/r3 fuzzy reads see an all-zero prior -> flat 1/K fallback.
+        for i in (2, 3):
+            assert self.d_tx[i, 0] == pytest.approx(0.0)
+            assert self.d_tx[i, 1] == pytest.approx(0.0)
+            assert self.d_tx[i, 2] == pytest.approx(MISSING)
+
+    def test_no_reads_dropped(self):
+        assert self.d_tx.shape == (N_R, N_C)
+
+
+# Scenario 3 (fallback path: cover_by_read empty -> coverage uncomputable):
+#   r0: tie{0,1} nlls 1/5 -> margin 4 distinguishes -> hard to 0, but coverage is
+#       UNKNOWN (not in cover map) -> must NOT seed the prior.
+#   r1..r3: tie{0,1} NO nlls -> fuzzy; no candidate earned prior votes -> flat.
+ON3_TIES = {0: [0, 1], 1: [0, 1], 2: [0, 1], 3: [0, 1]}
+ON3_NLLS = {0: {0: 1.0, 1: 5.0}}
+ON3_COVER: dict = {}  # empty -> mimics the per-read _tie_nll fallback path
+
+
+def _fake_tie_nll_on3(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+    return dict(ON3_NLLS), dict(ON3_TIES), 4, len(ON3_NLLS), dict(ON3_COVER)
+
+
+class TestDiffCoverGateFallbackCoverage:
+    """When coverage is uncomputable (empty cover map, the per-read fallback),
+    distinguishing reads still hard-assign but must NOT seed the prior, so fuzzy
+    reads fall back to the flat 1/K split (recall-safe)."""
+
+    def setup_method(self):
+        self.captured = {}
+        cfg = PipelineConfig(
+            bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
+            m2_diff_cover_gate=True, m2_diff_cover_margin=0.5,
+        )
+        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on3)
+        self.d_tx = np.asarray(self.captured["dist_read_to_tx"])
+
+    def test_distinguishing_read_still_hard_assigns(self):
+        assert self.d_tx[0, 0] == pytest.approx(0.0)
+        assert self.d_tx[0, 1] == pytest.approx(MISSING)
+
+    def test_fuzzy_reads_flat_not_biased_by_unverified_coverage(self):
+        # r0's coverage is unknown -> no prior -> r1/r2/r3 fuzzy -> flat 1/K.
+        for i in (1, 2, 3):
+            assert self.d_tx[i, 0] == pytest.approx(0.0)
+            assert self.d_tx[i, 1] == pytest.approx(0.0)
+            assert self.d_tx[i, 2] == pytest.approx(MISSING)
+
+
+class TestTieNllKrillUnavailable:
+    """When krill has no aligner, _tie_nll still exposes AS tie sets on the gate-ON
+    path (so the gate's unique-best/drop logic is well-defined), but leaves them
+    empty on the gate-OFF path (legacy byte-identical behavior)."""
+
+    def _call(self, gate):
+        cands = [_cand(f"c{j}") for j in range(N_C)]
+        kept = ["r0", "r1"]
+        read_seqs = {"r0": "ACGT" * 25, "r1": "ACGT" * 25}
+        # r0 unique-best on candidate 1; r1 ties candidates {0, 2}.
+        raw = np.array(
+            [[-np.inf, 5.0, -np.inf], [3.0, -np.inf, 3.0]], dtype=np.float64
+        )
+        cfg = PipelineConfig(
+            bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
+            m2_diff_cover_gate=gate,
+        )
+        runner = PipelineRunner(cfg)
+        with patch(
+            "fin.scoring.krill_aligner.make_krill_aligner",
+            return_value=(None, False),
+        ):
+            return runner._tie_nll(kept, read_seqs, cands, [None] * N_C, raw)
+
+    def test_gate_on_populates_ties_from_raw(self):
+        nlls, ties, n_ties, n_ref, cover = self._call(gate=True)
+        assert ties == {0: [1], 1: [0, 2]}
+        assert nlls == {} and cover == {}
+
+    def test_gate_off_leaves_ties_empty(self):
+        nlls, ties, n_ties, n_ref, cover = self._call(gate=False)
+        assert ties == {}
+        assert nlls == {} and cover == {}
+
+
 class TestM3Gate:
     """m3_coherence=True turns on the DTW term at beta=em_beta."""
 
@@ -188,7 +367,7 @@ class TestM3Gate:
         np.fill_diagonal(m3, 0.0)
         cfg = PipelineConfig(
             bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
-            m3_coherence=True, em_beta=1.0,
+            m3_coherence=True, em_beta=1.0, m2_diff_cover_gate=False,
         )
         mock_m3 = _run(cfg, captured, m3_matrix=m3)
         mock_m3.assert_called_once()

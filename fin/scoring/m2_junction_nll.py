@@ -196,6 +196,99 @@ def internal_diff_regions(
 
 
 # ---------------------------------------------------------------------------
+# Diff-region coverage gate (m2_em): genomic spans that bracket each wobbling
+# junction, plus a read-straddle test. Unlike internal_diff_regions (the narrow
+# sym-diff sliver) and class_junction_window_set (the per-candidate +-K scoring
+# window), these spans run donor->acceptor across the whole wobbling intron so the
+# coverage test asks "did the read's signal actually traverse this junction?".
+# ---------------------------------------------------------------------------
+
+
+def wobble_diff_spans(
+    class_cands: List[TranscriptCandidate],
+    flank: int = 2,
+) -> List[Tuple[int, int]]:
+    """Genomic spans bracketing each wobbling junction in a tie.
+
+    Collect every intron across the tie, cluster by genomic overlap, and emit a
+    flank-padded ``[min intron-start, max intron-end]`` span for each cluster that
+    is NOT unanimous — i.e. the candidates disagree there, either because the
+    intron boundaries wobble (donor/acceptor shift, intron retention) or because
+    some candidate has no intron in the cluster at all (exon skip). Shared
+    (unanimous) junctions are skipped.
+
+    Each returned span runs from the donor side to the acceptor side of the
+    wobbling intron (the intronic middle has no events by construction), so a read
+    "covers" the span only when its events straddle it (see :func:`read_straddles`).
+
+    Args:
+        class_cands: Candidates in a single wobble-tolerant tie.
+        flank: bp padding added on each side of every span.
+
+    Returns:
+        Sorted, merged list of (g_start, g_end) genomic spans. Empty when the tie
+        has < 2 candidates or no internal disagreement.
+    """
+    if len(class_cands) < 2:
+        return []
+
+    per_cand = [set(c.intron_chain.introns) for c in class_cands]
+    union: List[Tuple[int, int]] = sorted({iv for s in per_cand for iv in s})
+    if not union:
+        return []
+
+    # Cluster union introns by genomic overlap (one cluster per logical junction).
+    clusters: List[List[Tuple[int, int]]] = []
+    cur: List[Tuple[int, int]] = [union[0]]
+    cur_hi = union[0][1]
+    for s, e in union[1:]:
+        if s < cur_hi:  # overlaps the running cluster
+            cur.append((s, e))
+            cur_hi = max(cur_hi, e)
+        else:
+            clusters.append(cur)
+            cur = [(s, e)]
+            cur_hi = e
+    clusters.append(cur)
+
+    n = len(class_cands)
+    spans: List[Tuple[int, int]] = []
+    for cluster in clusters:
+        cluster_set = set(cluster)
+        distinct = len(cluster_set)
+        contributing = sum(1 for cs in per_cand if cs & cluster_set)
+        if distinct > 1 or contributing < n:  # not unanimous => wobbling
+            lo = min(s for s, _ in cluster) - flank
+            hi = max(e for _, e in cluster) + flank
+            spans.append((lo, hi))
+    return _merge(spans)
+
+
+def read_straddles(event_gpos: Sequence[int], lo: int, hi: int) -> bool:
+    """True iff the read's genomic event positions bracket the span ``[lo, hi]``.
+
+    Straddling (>=1 event at <= lo AND >=1 event at >= hi) means the read's signal
+    traverses the wobbling intron rather than clipping one side of it.
+    """
+    return any(g <= lo for g in event_gpos) and any(g >= hi for g in event_gpos)
+
+
+def event_genomic_positions(res: dict, cand: TranscriptCandidate) -> List[int]:
+    """Genomic positions of a read's eventalign events against ``cand``.
+
+    Projects every event's transcript-frame position back to genomic via
+    :func:`_tx2genome` (same projection :func:`_mean_nll_in_gset` uses). Used by the
+    diff-region coverage gate to test whether the read straddles a wobbling junction.
+    """
+    out: List[int] = []
+    for p in res.get("position", []):
+        g = _tx2genome(cand, int(p))
+        if g is not None:
+            out.append(g)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # NEW transcript-frame two-sided junction window (validated 99.2% pairwise;
 # see experiments/_gt_zval_window_compare.py). Each candidate contributes K
 # tx-bp on EACH side of its OWN wobbling junction; the genomic positions are

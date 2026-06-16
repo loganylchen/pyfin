@@ -50,6 +50,8 @@ import click
 @click.option("--m2-tiebreak/--no-m2-tiebreak", "m2_tiebreak", default=True, show_default=True, help="Resolve argmax_keep ties with the junction-window mean-NLL signal metric: give a read's full mass to the M2-best tied candidate when the NLL margin >= --m2-tiebreak-margin, else keep the 1/K split. Needs --signal (auto-skips if absent). Default ON + aggressive (margin 1e-9): SIRV gffcompare Tx-F1 45.4 vs OFF 44.7, beats all tools + ablation champion 45.2.")
 @click.option("--m2-tiebreak-margin", default=1e-9, show_default=True, type=float, help="Minimum M2 NLL margin (runner-up - best) required to override the 1/K split with the M2 single winner. Default 1e-9 (aggressive: take M2's pick whenever it can discriminate at all).")
 @click.option("--m2-tiebreak-junction-k", default=10, show_default=True, type=int, help="Transcript-frame bp on each side of the wobbling junction for the M2 discrimination window (SIRV sweet spot 10).")
+@click.option("--m2-diff-cover-gate/--no-m2-diff-cover-gate", "m2_diff_cover_gate", default=True, show_default=True, help="(--quant-mode m2_em only) Diff-region coverage gate. For a read in a >=2 best-AS tie: if the M2 NLL margin >= --m2-diff-cover-margin hard-assign its full mass to the best candidate (and, if it straddles every wobbling junction donor->acceptor, contribute that vote to the locus isoform-ratio prior); else if it covers every diff region keep the 1/K split; else (no junction signal, or not covered + indistinguishable) the read is ambiguous and its mass is redistributed in proportion to the prior learned from covered+distinguishing reads (flat 1/K when no prior exists). No read is dropped (recall-safe). Default ON; --no-m2-diff-cover-gate reverts to the soft NLL-graded d_tx. SIRV/dense-locus precision lever; re-tune the margin on real dRNA.")
+@click.option("--m2-diff-cover-margin", default=0.5, show_default=True, type=float, help="(--m2-diff-cover-gate) Minimum M2 NLL margin (runner-up - best) to HARD-assign a tied read to its lowest-NLL candidate. Below this, a covered read keeps the 1/K split and an ambiguous read is redistributed by the covered-read prior. SIRV-tuned; sweep on real data.")
 @click.option(
     "--quant-mode",
     default="m2_em",
@@ -107,6 +109,8 @@ def main(
     m2_tiebreak,
     m2_tiebreak_margin,
     m2_tiebreak_junction_k,
+    m2_diff_cover_gate,
+    m2_diff_cover_margin,
     quant_mode,
     m3_coherence,
     abundance_feedback,
@@ -214,6 +218,8 @@ def main(
         m2_tiebreak=m2_tiebreak,
         m2_tiebreak_margin=m2_tiebreak_margin,
         m2_tiebreak_junction_k=m2_tiebreak_junction_k,
+        m2_diff_cover_gate=m2_diff_cover_gate,
+        m2_diff_cover_margin=m2_diff_cover_margin,
         quant_mode=quant_mode,
         m3_coherence=m3_coherence,
         abundance_feedback=abundance_feedback,

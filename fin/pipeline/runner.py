@@ -948,7 +948,9 @@ class PipelineRunner:
         cells are touched — never the dense read×candidate matrix.
 
         Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]},
-        n_ties, n_refined).
+        n_ties, n_refined, cover_by_read {i: bool}). ``cover_by_read`` is populated
+        only when the diff-region coverage gate (config.m2_diff_cover_gate) is ON;
+        otherwise it is empty.
         """
         import krill
 
@@ -959,20 +961,41 @@ class PipelineRunner:
         from fin.scoring.m2_junction_nll import (
             _mean_nll_in_gset,
             class_junction_window_set,
+            event_genomic_positions,
             read_cand_mean_nll,
+            read_straddles,
+            wobble_diff_spans,
         )
         from fin.scoring.mappy_score import score_hit
 
+        gate = bool(getattr(self.config, "m2_diff_cover_gate", False))
         num_threads = krill_thread_count()
         n_c = len(cand_list)
         nlls_by_read: Dict[int, Dict[int, float]] = {}
         ties_by_read: Dict[int, List[int]] = {}
+        cover_by_read: Dict[int, bool] = {}
         krill_aligner, eff_gpu = make_krill_aligner(
             krill, self.config.krill_pore, self.config.use_gpu,
             hmm_confidence=False, num_thread=num_threads,
         )
         if krill_aligner is None:
-            return nlls_by_read, ties_by_read, 0, 0
+            # No krill signal backend. Gate OFF: preserve the legacy behavior
+            # (empty ties -> _quant_m2_em leaves rows MISSING, byte-identical).
+            # Gate ON: still expose the AS tie sets (derivable from ``raw`` alone,
+            # no signal needed) so the gate's unique-best / drop logic is
+            # well-defined; without them every row would be all-MISSING and the
+            # EM would normalize each read to a spurious uniform vote.
+            if gate:
+                for i in range(len(kept_read_ids)):
+                    row = raw[i]
+                    finite = np.isfinite(row)
+                    if not finite.any():
+                        continue
+                    best_as = float(row[finite].max())
+                    ties_by_read[i] = [
+                        j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9
+                    ]
+            return nlls_by_read, ties_by_read, 0, 0, cover_by_read
 
         k = self.config.m2_tiebreak_junction_k
         pore = self.config.krill_pore
@@ -984,6 +1007,7 @@ class PipelineRunner:
         # eventalign below is byte-identical to the per-call path -- only the
         # Python/GIL/per-call overhead is removed.
         gset_by_read: Dict[int, set] = {}
+        spans_by_read: Dict[int, List[Tuple[int, int]]] = {}  # diff-cover gate spans
         reads_variants: Dict[str, Dict[str, str]] = {}  # rid -> {cand_id: seq}
         starts: Dict[str, Dict[str, int]] = {}          # rid -> {cand_id: r_st}
         cidj_by_read: Dict[str, Dict[str, int]] = {}     # rid -> {cand_id: col j}
@@ -1004,6 +1028,10 @@ class PipelineRunner:
             )
             if not gset:
                 continue
+            if gate:
+                spans_by_read[i] = wobble_diff_spans(
+                    [cand_list[j] for j in tie], flank=_M2_EM_FLANK
+                )
             seq = read_seqs[rid]
             per_seqs: Dict[str, str] = {}
             per_starts: Dict[str, int] = {}
@@ -1034,7 +1062,7 @@ class PipelineRunner:
             cidj_by_read[rid] = per_cidj
 
         if not reads_variants:
-            return nlls_by_read, ties_by_read, n_ties, 0
+            return nlls_by_read, ties_by_read, n_ties, 0, cover_by_read
 
         # --- Pass 2: ONE batched eventalign over every tied pair (per-pair start
         # via the {label: offset} form); per-read singular fallback on absence or
@@ -1064,6 +1092,8 @@ class PipelineRunner:
                     continue
                 by_label = {x.get("variant_label"): x for x in res_list}
                 nlls: Dict[int, float] = {}
+                spans = spans_by_read.get(i) if gate else None
+                span_cov = [False] * len(spans) if spans else None
                 for cid, j in cidj_by_read.get(rid, {}).items():
                     res = by_label.get(cid)
                     if res is None or res.get("status", -1) != 0:
@@ -1071,10 +1101,20 @@ class PipelineRunner:
                     nll, n_ev = _mean_nll_in_gset(res, cand_list[j], gset)
                     if n_ev > 0 and np.isfinite(nll):
                         nlls[j] = float(nll)
+                    if span_cov is not None:
+                        egp = event_genomic_positions(res, cand_list[j])
+                        if egp:
+                            for s_idx, (lo, hi) in enumerate(spans):
+                                if not span_cov[s_idx] and read_straddles(egp, lo, hi):
+                                    span_cov[s_idx] = True
                 if nlls:
                     n_refined += 1
                     nlls_by_read[i] = nlls
-            return nlls_by_read, ties_by_read, n_ties, n_refined
+                    if gate:
+                        # covered iff every wobbling diff span is straddled by the
+                        # read on >=1 candidate (empty spans -> vacuously covered).
+                        cover_by_read[i] = all(span_cov) if span_cov else True
+            return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
 
         for rid, per_cidj in cidj_by_read.items():
             i = rid_to_i.get(rid)
@@ -1094,7 +1134,10 @@ class PipelineRunner:
             if nlls:
                 n_refined += 1
                 nlls_by_read[i] = nlls
-        return nlls_by_read, ties_by_read, n_ties, n_refined
+        # Per-read fallback path does not expose eventalign positions, so the
+        # coverage map is left empty here; the d_tx builder defaults missing reads
+        # to covered=True (recall-safe: never drops on the rare fallback path).
+        return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
 
     def _quant_m2_em(
         self,
@@ -1159,35 +1202,107 @@ class PipelineRunner:
                     raw[i, j] = best
 
         # --- Junction NLL on the per-read AS-tie cells only. ---
-        nlls_by_read, ties_by_read, n_ties, n_refined = self._tie_nll(
+        nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read = self._tie_nll(
             kept_read_ids, read_seqs, cand_list, aligners, raw
         )
 
-        # --- Pure d_tx skeleton: M1/AS picks the tie set; junction-NLL is the
-        #     ONLY graded distance. Cells outside a read's tie set stay MISSING. ---
+        # --- d_tx skeleton. Gate OFF: the pure soft NLL-graded skeleton (M1/AS
+        #     picks the tie set; junction-NLL is the only graded distance; cells
+        #     outside the tie stay MISSING). Gate ON: the diff-region coverage
+        #     decision matrix with proportional redistribution of ambiguous reads
+        #     (no read is ever dropped -> recall-safe). ---
+        gate = bool(getattr(self.config, "m2_diff_cover_gate", False))
         d_tx = np.full((n_r, n_c), MISSING, dtype=np.float64)
-        for i in range(n_r):
-            tie = ties_by_read.get(i)
-            if not tie:
-                continue
-            if len(tie) < 2:
-                d_tx[i, tie[0]] = 0.0
-                continue
-            nlls = nlls_by_read.get(i)
-            if not nlls:
-                # nothing scorable -> flat tie (EM 1/K split among ties)
+        if not gate:
+            for i in range(n_r):
+                tie = ties_by_read.get(i)
+                if not tie:
+                    continue
+                if len(tie) < 2:
+                    d_tx[i, tie[0]] = 0.0
+                    continue
+                nlls = nlls_by_read.get(i)
+                if not nlls:
+                    # nothing scorable -> flat tie (EM 1/K split among ties)
+                    for j in tie:
+                        d_tx[i, j] = 0.0
+                    continue
+                lo = min(nlls.values())
+                hi = max(nlls.values())
+                miss = (hi - lo) + _M2_EM_PAD
                 for j in tie:
-                    d_tx[i, j] = 0.0
-                continue
-            lo = min(nlls.values())
-            hi = max(nlls.values())
-            miss = (hi - lo) + _M2_EM_PAD
-            for j in tie:
-                d_tx[i, j] = (nlls[j] - lo) if j in nlls else miss
-        small = (d_tx > 0) & (d_tx < 1e5)
-        diffs = d_tx[small]
-        sigma2 = max(float(np.median(diffs)) if diffs.size else 1.0, 1e-3)
-        d_tx[small] = d_tx[small] / sigma2
+                    d_tx[i, j] = (nlls[j] - lo) if j in nlls else miss
+            small = (d_tx > 0) & (d_tx < 1e5)
+            diffs = d_tx[small]
+            sigma2 = max(float(np.median(diffs)) if diffs.size else 1.0, 1e-3)
+            d_tx[small] = d_tx[small] / sigma2
+        else:
+            # Diff-region coverage gate. margin = runner-up NLL - best NLL.
+            #
+            # Pass A: classify each tied read and accumulate a per-candidate prior
+            # (covered_vote) from ONLY the covered + distinguishing reads -- the
+            # gold-standard evidence of the locus isoform ratio. Ambiguous reads
+            # (no junction signal, or covered-but-indistinguishable that did not
+            # straddle every diff span) are deferred to Pass B.
+            margin_thr = float(getattr(self.config, "m2_diff_cover_margin", 0.0))
+            covered_vote = np.zeros(n_c, dtype=np.float64)
+            fuzzy: List[int] = []
+            for i in range(n_r):
+                tie = ties_by_read.get(i)
+                if not tie:
+                    continue
+                if len(tie) < 2:
+                    d_tx[i, tie[0]] = 0.0
+                    continue
+                nlls = nlls_by_read.get(i)
+                if not nlls:
+                    fuzzy.append(i)  # no junction signal -> defer (was: drop)
+                    continue
+                ordered = sorted(nlls.items(), key=lambda kv: kv[1])
+                best_j = ordered[0][0]
+                margin = (ordered[1][1] - ordered[0][1]) if len(ordered) > 1 else float("inf")
+                # Classification default is recall-safe (treat as covered -> hard /
+                # flat, never fuzzy). The PRIOR, however, must be fed only by reads
+                # with EXPLICIT coverage: the per-read _tie_nll fallback leaves
+                # cover_by_read empty (coverage uncomputable), so a missing entry
+                # must NOT seed covered_vote (else the fallback path biases fuzzy
+                # reads off unverified coverage).
+                covered = cover_by_read.get(i, True)
+                covered_for_vote = cover_by_read.get(i) is True
+                if margin >= margin_thr:
+                    # M2 distinguishes -> hard assign to the lowest-NLL candidate.
+                    d_tx[i, best_j] = 0.0  # every other tie cell stays MISSING
+                    if covered_for_vote:
+                        # Only covered+distinguishing reads define the locus ratio.
+                        covered_vote[best_j] += 1.0
+                elif covered:
+                    # covered but indistinguishable -> 1/K flat split across the tie
+                    for j in tie:
+                        d_tx[i, j] = 0.0
+                else:
+                    fuzzy.append(i)  # not covered + indistinguishable -> defer
+
+            # Pass B: redistribute each ambiguous read across its tie in proportion
+            # to the covered_vote ratio of those candidates (one-shot prior, not an
+            # EM feedback loop). d_tx = -log(p) so softmax(-d_tx) reproduces p at
+            # sigma=1; a zero-prior candidate stays MISSING. If NONE of the tie
+            # candidates earned covered votes, fall back to the flat 1/K split
+            # (== legacy behavior -> signal-dead loci are never starved).
+            for i in fuzzy:
+                tie = ties_by_read[i]
+                masses = np.array([covered_vote[j] for j in tie], dtype=np.float64)
+                s = masses.sum()
+                if s > 0:
+                    p = masses / s
+                    for idx, j in enumerate(tie):
+                        if p[idx] > 0:
+                            d_tx[i, j] = -float(np.log(p[idx]))
+                        # p==0 -> leave MISSING (no covered support for this cand)
+                else:
+                    for j in tie:
+                        d_tx[i, j] = 0.0  # flat 1/K (recall-safe fallback)
+            # ON-path d_tx values are already calibrated (0 / -log(p) / MISSING) for
+            # sigma=1; no sigma2 normalization (that is the OFF skeleton's step).
         d_tx = d_tx.astype(np.float32)
 
         # --- M3 read×read junction-window DTW coherence (opt-in; DTW is costly).

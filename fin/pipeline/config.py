@@ -199,6 +199,23 @@ class PipelineConfig:
     m2_tiebreak: bool = True
     m2_tiebreak_junction_k: int = 10
     m2_tiebreak_margin: float = 1e-9
+    # M2-EM diff-region coverage gate (quant_mode="m2_em" only). Default ON. For a
+    # read in a >=2 best-AS tie, only let it discriminate wobble siblings when its
+    # eventalign signal STRADDLES the wobbling junction(s) (donor->acceptor span;
+    # see scoring.m2_junction_nll.wobble_diff_spans). Per read x tie:
+    #   * M2 margin (2nd-best NLL - best NLL) >= m2_diff_cover_margin -> HARD assign
+    #     the read's full mass to the lowest-NLL candidate; if it also covered every
+    #     diff region it contributes that vote to the locus isoform-ratio prior;
+    #   * margin < threshold AND read covers every diff region -> 1/K flat split;
+    #   * otherwise (no junction signal, or not covered + indistinguishable) the read
+    #     is AMBIGUOUS: its tie mass is redistributed in proportion to the prior
+    #     (the ratio learned from covered+distinguishing reads). If no tie candidate
+    #     earned prior votes -> 1/K flat (signal-dead loci are never starved).
+    # No read is ever dropped (recall-safe). OFF reverts to the soft NLL-graded d_tx
+    # skeleton (byte-identical to the prior behavior). SIRV/dense-locus precision
+    # lever; on real dRNA re-tune the margin.
+    m2_diff_cover_gate: bool = True
+    m2_diff_cover_margin: float = 0.5
     # Score-gated fallback split (mk1). On a tie that M2 does NOT win
     # outright (margin < m2_tiebreak_margin), restrict the 1/K split to the
     # candidates eventalign could actually score in the junction window; the
