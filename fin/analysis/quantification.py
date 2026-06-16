@@ -143,8 +143,8 @@ def isoform_fraction_drops(
     For every NOVEL multi-exon transcript C, compute its locus-relative
     abundance::
 
-        relabund(C) = C.abundance / max(abundance over the NOVEL multi-exon
-                       transcripts that OVERLAP C, C included)
+        relabund(C) = C.abundance / max(abundance over ALL transcripts
+                       (novel, GTF and fusion) that OVERLAP C, C included)
 
     and drop C when ``relabund(C) < min_fraction``. This is the standard
     Cufflinks ``--min-isoform-fraction`` / StringTie ``-f`` minor-isoform
@@ -152,8 +152,17 @@ def isoform_fraction_drops(
     incompletely-spliced precursors (pre-mRNA), RT/template-switching
     artifacts, and assembly noise rather than genuine isoforms.
 
+    The locus maximum spans ALL sources (not just novel): on dense annotated
+    loci the dominant isoform is usually a GTF-passthrough transcript, so
+    comparing a novel only against other novels lets wobble-shadow isoforms
+    (junction-shifted near-copies of a true transcript) escape — they only
+    compete with each other and keep a deceptively high novel-only fraction.
+    Measuring each novel against the strongest transcript of ANY source at its
+    locus collapses those shadows below the threshold.
+
     GTF-passthrough (``source="gtf"``), fusion (``source="fusion"``), and
-    single-exon (mono) candidates are EXEMPT and never dropped. ``min_fraction
+    single-exon (mono) candidates are EXEMPT and never dropped — they only ever
+    contribute to the locus maximum, never to the drop set. ``min_fraction
     <= 0`` disables the filter (returns an empty set).
 
     SIRV WARNING: synthetic SIRV has no genuine low-abundance isoform tail, so
@@ -168,13 +177,20 @@ def isoform_fraction_drops(
     # bucket instead of running all-vs-all across the whole genome. (Within a
     # locus-dense single chrom/strand it is still O(n^2); a sweep-line could be
     # added if a real run ever makes that the bottleneck.)
+    #
+    # The bucket holds ALL candidates (so the locus maximum can come from a GTF
+    # or fusion transcript); only NOVEL multi-exon candidates are eligible to be
+    # dropped.
     buckets: Dict[Tuple[str, str], List[QuantResult]] = defaultdict(list)
     for qr in results.values():
-        if qr.source == "novel" and len(qr.exons) >= 2:
-            buckets[(qr.chrom, qr.strand)].append(qr)
+        buckets[(qr.chrom, qr.strand)].append(qr)
     drops: set = set()
     for bucket in buckets.values():
         for qr in bucket:
+            # Only novel multi-exon candidates are droppable; GTF/fusion/mono
+            # only ever serve as locus-maximum competitors.
+            if qr.source != "novel" or len(qr.exons) < 2:
+                continue
             locus_max = qr.abundance
             for other in bucket:
                 if other.candidate_id != qr.candidate_id and _qr_overlap(qr, other):

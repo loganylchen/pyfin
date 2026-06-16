@@ -113,3 +113,40 @@ def test_three_isoform_locus_uses_max_as_denominator():
     mid = _qr("mid", 50.0)  # 0.5 -> kept
     minor = _qr("min", 0.5)  # 0.005 -> dropped
     assert _drops([dominant, mid, minor], 0.01) == {"min"}
+
+
+# --- all-source denominator (the wobble-shadow fix) -----------------------
+def test_novel_shadow_dropped_against_high_gtf_at_locus():
+    # The locus dominant is a GTF transcript (read support in the hundreds).
+    # The novel shadow only competes with another novel; without the GTF in the
+    # denominator its relabund (4/8 = 0.5) would keep it. With GTF included
+    # (4/800 = 0.005) it is correctly dropped.
+    gtf = _qr("gtf_dom", 800.0, source="gtf")
+    novel_strong = _qr("nov_strong", 40.0)   # 40/800 = 0.05 >= 0.01 -> kept
+    novel_shadow = _qr("nov_shadow", 4.0)     # 4/800 = 0.005 < 0.01 -> dropped
+    drops = _drops([gtf, novel_strong, novel_shadow], 0.01)
+    assert "nov_shadow" in drops          # 0.005 < 0.01 vs GTF max
+    assert "nov_strong" not in drops      # 0.05 >= 0.01 -> kept
+    assert "gtf_dom" not in drops         # GTF never dropped
+
+
+def test_gtf_max_keeps_novel_at_or_above_fraction():
+    # A novel at exactly the fraction vs the GTF max survives (>= keeps).
+    gtf = _qr("gtf_dom", 800.0, source="gtf")
+    novel = _qr("nov", 8.0)               # 8/800 = 0.01 -> kept (>=)
+    assert _drops([gtf, novel], 0.01) == set()
+
+
+def test_gtf_only_locus_partner_still_drops_lone_novel_shadow():
+    # Even if the novel is the ONLY novel at the locus, a high GTF partner can
+    # now drop it (previously a lone novel was always locus-max -> never dropped).
+    gtf = _qr("gtf_dom", 500.0, source="gtf")
+    lone_shadow = _qr("shadow", 2.0)      # 2/500 = 0.004 < 0.01
+    assert _drops([gtf, lone_shadow], 0.01) == {"shadow"}
+
+
+def test_low_novel_with_no_overlapping_gtf_is_kept():
+    # Recall-safety: a low-abundance novel with no overlapping higher transcript
+    # is locus-dominant and must NOT be dropped.
+    lone = _qr("lone", 3.0)               # only candidate at its locus
+    assert _drops([lone], 0.01) == set()
