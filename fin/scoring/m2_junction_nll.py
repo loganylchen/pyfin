@@ -105,6 +105,54 @@ def _tx2genome(c: TranscriptCandidate, p: int) -> Optional[int]:
     return None
 
 
+@lru_cache(maxsize=16384)
+def _tx2genome_table(
+    introns: Tuple[Tuple[int, int], ...], start: int, end: int, strand: str
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, bool, int]:
+    """Cached arrays for a vectorized transcript->genome projection.
+
+    Returns ``(tx_starts, s_arr, e_arr, minus, total_len)`` where exon k spans
+    tx offsets ``[tx_starts[k], tx_starts[k] + (e-s))``. Mirrors :func:`_tx2genome`
+    exactly; built once per unique candidate geometry.
+    """
+    em = _exon_tx_map_key(introns, start, end, strand)
+    if not em:
+        return (np.empty(0, np.int64), np.empty(0, np.int64),
+                np.empty(0, np.int64), strand == "-", 0)
+    s_arr = np.array([s for s, _, _ in em], dtype=np.int64)
+    e_arr = np.array([e for _, e, _ in em], dtype=np.int64)
+    tx_starts = np.array([t for _, _, t in em], dtype=np.int64)
+    total = int(tx_starts[-1] + (e_arr[-1] - s_arr[-1]))
+    return tx_starts, s_arr, e_arr, strand == "-", total
+
+
+def tx2genome_array(c: TranscriptCandidate, positions: np.ndarray) -> np.ndarray:
+    """Vectorized :func:`_tx2genome` over many tx-frame positions.
+
+    Returns an int64 array of genomic positions; entries for out-of-range tx
+    positions (``_tx2genome`` would return None) are set to ``-1``. Exons tile the
+    transcript contiguously in tx order, so a single ``searchsorted`` on the exon
+    tx-start boundaries selects each position's exon.
+    """
+    tx_starts, s_arr, e_arr, minus, total = _tx2genome_table(
+        c.intron_chain.introns, c.start, c.end, c.strand
+    )
+    p = np.asarray(positions, dtype=np.int64)
+    out = np.full(p.shape, -1, dtype=np.int64)
+    if tx_starts.size == 0:
+        return out
+    valid = (p >= 0) & (p < total)
+    if not valid.any():
+        return out
+    pv = p[valid]
+    # exon index = last boundary <= pv (boundaries are tx_starts, ascending).
+    idx = np.searchsorted(tx_starts, pv, side="right") - 1
+    off = pv - tx_starts[idx]
+    gen = np.where(minus, e_arr[idx] - 1 - off, s_arr[idx] + off)
+    out[valid] = gen
+    return out
+
+
 def _isub(a: Sequence[Tuple[int, int]], b: Sequence[Tuple[int, int]]) -> List[Tuple[int, int]]:
     """Interval subtraction A \\ B (genomic, half-open)."""
     res: List[Tuple[int, int]] = []
@@ -280,12 +328,11 @@ def event_genomic_positions(res: dict, cand: TranscriptCandidate) -> List[int]:
     :func:`_tx2genome` (same projection :func:`_mean_nll_in_gset` uses). Used by the
     diff-region coverage gate to test whether the read straddles a wobbling junction.
     """
-    out: List[int] = []
-    for p in res.get("position", []):
-        g = _tx2genome(cand, int(p))
-        if g is not None:
-            out.append(g)
-    return out
+    pos = res.get("position", [])
+    if len(pos) == 0:
+        return []
+    gen = tx2genome_array(cand, np.asarray(pos, dtype=np.int64))
+    return gen[gen >= 0].tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -370,13 +417,16 @@ def _mean_nll_in_gset(
     """Mean per-event NLL over events whose genomic position is in ``gset``."""
     pos = res["position"]
     z, sd = _zrecords(res)
+    if len(pos) == 0:
+        return float("nan"), 0
+    gen = tx2genome_array(cand, np.asarray(pos, dtype=np.int64))
     total = 0.0
     n = 0
     for i in range(len(pos)):
         if not np.isfinite(z[i]):
             continue
-        gen = _tx2genome(cand, int(pos[i]))
-        if gen is None or gen not in gset:
+        g = gen[i]
+        if g < 0 or g not in gset:  # -1 == _tx2genome None (out of range)
             continue
         total += 0.5 * z[i] * z[i] + math.log(sd[i])
         n += 1
