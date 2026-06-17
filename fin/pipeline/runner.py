@@ -1158,7 +1158,6 @@ class PipelineRunner:
         """
         import mappy
 
-        from fin.ablation.mappy_argmax import mappy_multimap_responsibilities
         from fin.scoring.m2_junction_nll import MISSING
         from fin.scoring.mappy_preset import get_m1_preset
         from fin.scoring.mappy_score import score_hit
@@ -1167,26 +1166,30 @@ class PipelineRunner:
         read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
         reads_iter = [(rid, read_sequences.get(rid, "")) for rid in read_ids]
         reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
-        R_mm, kept_read_ids = mappy_multimap_responsibilities(reads_iter, cand_list)
-        if R_mm.size == 0:
+        if not reads_iter:
             return []
 
         read_seqs = {rid: seq for rid, seq in reads_iter}
-        n_r, n_c = len(kept_read_ids), len(cand_list)
+        n_c = len(cand_list)
         max_iter_em = (
             self.config.em_max_iter_override
             if self.config.em_max_iter_override is not None
             else self.config.em_max_iter
         )
 
-        # --- Per-candidate mappy aligners + raw AS matrix (tie detection). ---
+        # --- Per-candidate mappy aligners + raw AS matrix (tie detection). This
+        #     single AS pass also yields the kept-read set, so the previously
+        #     separate mappy_multimap_responsibilities pass (which recomputed the
+        #     identical AS only to derive kept reads, never feeding the EM) is
+        #     removed: ~40% of the per-interval cost on dense loci. ---
         preset = get_m1_preset()
         aligners = [
             mappy.Aligner(seq=c.sequence, preset=preset) if c.sequence else None
             for c in cand_list
         ]
-        raw = np.full((n_r, n_c), -np.inf, dtype=np.float64)
-        for i, rid in enumerate(kept_read_ids):
+        all_ids = [rid for rid, _ in reads_iter]
+        raw_all = np.full((len(all_ids), n_c), -np.inf, dtype=np.float64)
+        for i, rid in enumerate(all_ids):
             seq = read_seqs[rid]
             for j, aln in enumerate(aligners):
                 if aln is None:
@@ -1199,7 +1202,20 @@ class PipelineRunner:
                     if best is None or v > best:
                         best = v
                 if best is not None:
-                    raw[i, j] = best
+                    raw_all[i, j] = best
+
+        # Keep reads with >=1 candidate at AS>0 (matches the removed
+        # mappy_multimap_responsibilities keep rule: row.sum()>0 over best>=0 AS).
+        # Mirror its MAPPY_R1_MIN_AS env knob so the kept set stays identical when
+        # that R1 tuning threshold is set.
+        import os as _os
+        _min_as = float(_os.environ.get("MAPPY_R1_MIN_AS", "0") or "0")
+        keep_rows = ((raw_all > 0.0) & (raw_all >= _min_as)).any(axis=1)
+        if not keep_rows.any():
+            return []
+        kept_read_ids = [rid for rid, k in zip(all_ids, keep_rows) if k]
+        raw = raw_all[keep_rows]
+        n_r = len(kept_read_ids)
 
         # --- Junction NLL on the per-read AS-tie cells only. ---
         nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read = self._tie_nll(

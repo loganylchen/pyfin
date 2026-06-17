@@ -79,14 +79,15 @@ def _interval():
 
 
 class _FakeAligner:
-    """mappy.Aligner stub: builds, maps to nothing (raw stays -inf; _tie_nll is
-    mocked so the raw AS matrix is unused for tie detection here)."""
+    """mappy.Aligner stub: yields one dummy hit per read so the raw AS pass marks
+    every read as kept (score_hit is patched to a positive constant in _run). The
+    actual AS values are irrelevant because _tie_nll is mocked to drive ties."""
 
     def __init__(self, *a, **k):
         pass
 
     def map(self, *a, **k):
-        return iter(())
+        return iter((object(),))
 
 
 def _fake_tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
@@ -113,8 +114,7 @@ def _run(cfg, captured, m3_matrix=None, tie_nll_fn=_fake_tie_nll):
     runner = PipelineRunner(cfg)
 
     with patch("mappy.Aligner", _FakeAligner), patch(
-        "fin.ablation.mappy_argmax.mappy_multimap_responsibilities",
-        return_value=(np.ones((N_R, N_C)), list(READ_IDS)),
+        "fin.scoring.mappy_score.score_hit", return_value=1.0,
     ), patch.object(PipelineRunner, "_tie_nll", tie_nll_fn), patch.object(
         PipelineRunner, "_eff_lengths", return_value=None
     ), patch(

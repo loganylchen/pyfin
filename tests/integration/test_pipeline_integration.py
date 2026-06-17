@@ -24,15 +24,25 @@ from fin.pipeline.config import PipelineConfig
 from fin.pipeline.runner import PipelineRunner
 
 
+class _FakeHit:
+    """Minimal mappy hit: a clean 100-match alignment so the real score_hit
+    returns a positive AS (2*100), marking the read as kept in the raw pass."""
+
+    cigar = [(100, 0)]  # 100 matches, no indels
+    NM = 0
+    mlen = 100
+
+
 class _FakeAligner:
-    """mappy.Aligner stub: builds, maps to nothing (raw AS stays -inf; the
-    tie sets come from the mocked ``_tie_nll`` so the raw matrix is unused)."""
+    """mappy.Aligner stub: yields one clean hit per read so the raw AS pass marks
+    every read as kept. The tie sets still come from the mocked ``_tie_nll``, so
+    the raw matrix values beyond ">0" are unused."""
 
     def __init__(self, *a, **k):
         pass
 
     def map(self, *a, **k):
-        return iter(())
+        return iter((_FakeHit(),))
 
 
 def _fake_tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
