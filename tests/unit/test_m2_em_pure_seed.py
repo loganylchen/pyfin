@@ -260,8 +260,9 @@ class TestDiffCoverGatePriorSource:
         _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on2)
         self.d_tx = np.asarray(self.captured["dist_read_to_tx"])
 
-    def test_covered_indistinguishable_is_flat(self):
-        # r0: covered but margin 0.05 < 0.5 -> flat over {0,1}.
+    def test_covered_indistinguishable_flat_when_no_prior(self):
+        # r0: covered but margin 0.05 < 0.5 -> fuzzy; the tie has no covered prior
+        # (no covered+distinguishing read), so it falls back to a flat 1/K split.
         assert self.d_tx[0, 0] == pytest.approx(0.0)
         assert self.d_tx[0, 1] == pytest.approx(0.0)
         assert self.d_tx[0, 2] == pytest.approx(MISSING)
@@ -281,6 +282,45 @@ class TestDiffCoverGatePriorSource:
 
     def test_no_reads_dropped(self):
         assert self.d_tx.shape == (N_R, N_C)
+
+
+# Scenario 4 (covered+indistinguishable now FOLLOWS the covered prior, not flat):
+#   r0: tie{0,1} nlls 1.0/5.0 -> margin 4 >= 0.5, COVERED -> hard to 0; vote[0]+=1
+#   r1: tie{0,1} nlls 1.0/5.0 -> margin 4 >= 0.5, COVERED -> hard to 0; vote[0]+=1
+#   r2: tie{0,1} nlls 2.0/2.05 -> margin 0.05 < 0.5, COVERED -> fuzzy; prior
+#       [vote0=2, vote1=0] -> p=[1,0] -> hard-follows to candidate 0.
+#   r3: tie{0,1} nlls 2.0/2.05 -> margin 0.05 < 0.5, NOT covered -> fuzzy; same prior.
+ON4_TIES = {0: [0, 1], 1: [0, 1], 2: [0, 1], 3: [0, 1]}
+ON4_NLLS = {0: {0: 1.0, 1: 5.0}, 1: {0: 1.0, 1: 5.0},
+            2: {0: 2.0, 1: 2.05}, 3: {0: 2.0, 1: 2.05}}
+ON4_COVER = {0: True, 1: True, 2: True, 3: False}
+
+
+def _fake_tie_nll_on4(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+    return dict(ON4_NLLS), dict(ON4_TIES), 4, len(ON4_NLLS), dict(ON4_COVER)
+
+
+class TestDiffCoverGateCoveredIndistFollowsPrior:
+    """covered+indistinguishable reads now follow the covered-read ratio (the
+    margin is the SOLE decider of hard-assign vs ratio-follow)."""
+
+    def setup_method(self):
+        self.captured = {}
+        cfg = PipelineConfig(
+            bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
+            m2_diff_cover_gate=True, m2_diff_cover_margin=0.5,
+        )
+        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on4)
+        self.d_tx = np.asarray(self.captured["dist_read_to_tx"])
+
+    def test_covered_indistinguishable_follows_prior(self):
+        # r2 covered+indist -> prior [2,0] => p=[1,0]: -log(1)=0 on cand0, MISSING cand1.
+        assert self.d_tx[2, 0] == pytest.approx(0.0)
+        assert self.d_tx[2, 1] == pytest.approx(MISSING)
+
+    def test_not_covered_indistinguishable_follows_same_prior(self):
+        assert self.d_tx[3, 0] == pytest.approx(0.0)
+        assert self.d_tx[3, 1] == pytest.approx(MISSING)
 
 
 # Scenario 3 (fallback path: cover_by_read empty -> coverage uncomputable):

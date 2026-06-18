@@ -203,11 +203,11 @@ class PipelineConfig:
     #   * M2 margin (2nd-best NLL - best NLL) >= m2_diff_cover_margin -> HARD assign
     #     the read's full mass to the lowest-NLL candidate; if it also covered every
     #     diff region it contributes that vote to the locus isoform-ratio prior;
-    #   * margin < threshold AND read covers every diff region -> 1/K flat split;
-    #   * otherwise (no junction signal, or not covered + indistinguishable) the read
-    #     is AMBIGUOUS: its tie mass is redistributed in proportion to the prior
-    #     (the ratio learned from covered+distinguishing reads). If no tie candidate
-    #     earned prior votes -> 1/K flat (signal-dead loci are never starved).
+    #   * margin < threshold (whether or not the read covers) -> AMBIGUOUS: its tie
+    #     mass is redistributed in proportion to the prior (the ratio learned from
+    #     covered+distinguishing reads). If no tie candidate earned prior votes ->
+    #     1/K flat (signal-dead loci are never starved). The margin is thus the sole
+    #     decider of hard-assign vs ratio-follow.
     # No read is ever dropped (recall-safe). OFF reverts to the soft NLL-graded d_tx
     # skeleton (byte-identical to the prior behavior). SIRV/dense-locus precision
     # lever; on real dRNA re-tune the margin.

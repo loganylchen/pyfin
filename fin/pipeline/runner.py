@@ -1213,13 +1213,11 @@ class PipelineRunner:
                 ordered = sorted(nlls.items(), key=lambda kv: kv[1])
                 best_j = ordered[0][0]
                 margin = (ordered[1][1] - ordered[0][1]) if len(ordered) > 1 else float("inf")
-                # Classification default is recall-safe (treat as covered -> hard /
-                # flat, never fuzzy). The PRIOR, however, must be fed only by reads
+                # The redistribution PRIOR (covered_vote) must be fed only by reads
                 # with EXPLICIT coverage: the per-read _tie_nll fallback leaves
                 # cover_by_read empty (coverage uncomputable), so a missing entry
                 # must NOT seed covered_vote (else the fallback path biases fuzzy
                 # reads off unverified coverage).
-                covered = cover_by_read.get(i, True)
                 covered_for_vote = cover_by_read.get(i) is True
                 if margin >= margin_thr:
                     # M2 distinguishes -> hard assign to the lowest-NLL candidate.
@@ -1227,12 +1225,12 @@ class PipelineRunner:
                     if covered_for_vote:
                         # Only covered+distinguishing reads define the locus ratio.
                         covered_vote[best_j] += 1.0
-                elif covered:
-                    # covered but indistinguishable -> 1/K flat split across the tie
-                    for j in tie:
-                        d_tx[i, j] = 0.0
                 else:
-                    fuzzy.append(i)  # not covered + indistinguishable -> defer
+                    # Indistinguishable (margin < thr), whether or not covered:
+                    # defer to Pass B and redistribute by the covered-read ratio
+                    # (flat 1/K only when the tie has no covered prior). The margin
+                    # is thus the SOLE decider of hard-assign vs ratio-follow.
+                    fuzzy.append(i)
 
             # Pass B: redistribute each ambiguous read across its tie in proportion
             # to the covered_vote ratio of those candidates (one-shot prior, not an
