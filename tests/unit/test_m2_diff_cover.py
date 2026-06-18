@@ -11,6 +11,7 @@ from fin.candidates.dataclasses import IntronChain, TranscriptCandidate
 from fin.scoring.m2_junction_nll import (
     event_genomic_positions,
     read_straddles,
+    structural_wobble_clusters,
     wobble_diff_spans,
 )
 
@@ -88,3 +89,43 @@ class TestEventGenomicPositions:
     def test_missing_position_key(self):
         c = _cand([], start=100, end=200)
         assert event_genomic_positions({}, c) == []
+
+
+class TestStructuralWobbleClusters:
+    """Structural clustering: same intron count + every junction within +-bp,
+    all sources; the basis for the post-EM abundance-ratio shadow drop."""
+
+    def _members(self, clusters):
+        return sorted(sorted(v) for v in clusters.values() if len(v) > 1)
+
+    def test_wobble_within_bp_clusters(self):
+        # three +-2bp donor wobbles of one true junction -> one cluster.
+        cs = [
+            _cand([(200, 300)]), _cand([(202, 300)]), _cand([(198, 300)]),
+        ]
+        cl = structural_wobble_clusters(cs, bp=6)
+        assert self._members(cl) == [[0, 1, 2]]
+
+    def test_beyond_bp_separate(self):
+        cs = [_cand([(200, 300)]), _cand([(215, 300)])]  # 15bp > 6
+        assert self._members(structural_wobble_clusters(cs, bp=6)) == []
+
+    def test_different_intron_count_separate(self):
+        cs = [_cand([(200, 300)]), _cand([(200, 300), (400, 500)])]
+        assert self._members(structural_wobble_clusters(cs, bp=6)) == []
+
+    def test_opposite_strand_separate(self):
+        cs = [_cand([(200, 300)], strand="+"), _cand([(200, 300)], strand="-")]
+        assert self._members(structural_wobble_clusters(cs, bp=6)) == []
+
+    def test_mono_exon_never_clustered(self):
+        cs = [_cand([], start=0, end=500), _cand([], start=1, end=500)]
+        assert self._members(structural_wobble_clusters(cs, bp=6)) == []
+
+    def test_gtf_and_novel_cluster_together(self):
+        # a GTF anchor + its +-bp novel shadow land in one cluster (source-agnostic).
+        gtf = _cand([(200, 300)])
+        gtf.source = "gtf"
+        nov = _cand([(203, 300)])  # default source novel
+        cl = structural_wobble_clusters([gtf, nov], bp=6)
+        assert self._members(cl) == [[0, 1]]

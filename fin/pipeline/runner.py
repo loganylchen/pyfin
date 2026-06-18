@@ -1302,11 +1302,53 @@ class PipelineRunner:
             )
             hard_assignments = R.argmax(axis=1)
 
+        # --- Cluster-internal wobble recheck (post-EM, data-layer shadow kill).
+        #     Cluster ALL multi-exon candidates by structure (same intron count +
+        #     every junction within +-bp); within a cluster the highest-EM-abundance
+        #     candidate anchors (often the true isoform, frequently a GTF
+        #     passthrough), and a NOVEL sibling whose abundance/anchor < fraction is
+        #     a wobble shadow -> drop. GTF/fusion never dropped (they only anchor).
+        #     Pure abundance evidence: GTF participates in the abundance race but is
+        #     NOT used as a correctness oracle, so this stays robust when the
+        #     annotation is wrong (and self-disables with no GTF: a real novel
+        #     anchors its own cluster). OFF -> no drops (byte-identical). ---
+        drop_cols: set = set()
+        if getattr(self.config, "m2_cluster_recheck", False):
+            from fin.scoring.m2_junction_nll import structural_wobble_clusters
+
+            frac = self.config.m2_cluster_recheck_fraction
+            if frac <= 0.0:
+                frac = self.config.min_isoform_fraction
+            if frac > 0.0:
+                em_ab = np.asarray(R).sum(axis=0)
+                bp = self.config.m2_cluster_recheck_bp
+                clusters = structural_wobble_clusters(cand_list, bp)
+                for cols in clusters.values():
+                    if len(cols) < 2:
+                        continue
+                    anchor_ab = max(em_ab[j] for j in cols)
+                    if anchor_ab <= 0.0:
+                        continue
+                    for j in cols:
+                        if cand_list[j].source != "novel":
+                            continue  # GTF/fusion never dropped (anchors only)
+                        if (em_ab[j] / anchor_ab) < frac:
+                            drop_cols.add(j)
+
         quant_results = quantify_transcripts(
             R, hard_assignments, cand_list, kept_read_ids
         )
+        # Stamp max_R BEFORE any filtering: quant_results is column-aligned to R
+        # here (enumerate index == R column). Filtering would break that alignment.
         for j, qr in enumerate(quant_results):
             qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
+        if drop_cols:
+            drop_ids = {cand_list[j].candidate_id for j in drop_cols}
+            quant_results = [q for q in quant_results if q.candidate_id not in drop_ids]
+            logger.info(
+                "m2_em interval %s: cluster recheck dropped %d wobble shadows",
+                interval.region_string, len(drop_ids),
+            )
         logger.info(
             "m2_em interval %s: %d reads -> %d candidates "
             "(ties=%d refined=%d m3=%s beta=%.2f)",

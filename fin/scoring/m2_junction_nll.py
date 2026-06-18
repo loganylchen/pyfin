@@ -335,6 +335,59 @@ def event_genomic_positions(res: dict, cand: TranscriptCandidate) -> List[int]:
     return gen[gen >= 0].tolist()
 
 
+def structural_wobble_clusters(cands, bp: int):
+    """Union-find clusters of candidates that differ only by junction wobble.
+
+    Two multi-exon candidates join iff same chrom/strand, same intron count, and
+    every intron boundary within ``bp`` of the other's. Single-exon candidates are
+    never clustered. ALL sources (gtf/novel/fusion) participate, so a high-abundance
+    true isoform (often a GTF passthrough) anchors its +-bp novel shadows. Pure
+    structure — no GTF "rightness" judgement.
+
+    Args:
+        cands: list of TranscriptCandidate (column order = list order).
+        bp: per-junction tolerance (each donor & acceptor within +-bp).
+
+    Returns:
+        dict root_col -> [member cols] (only the connected-components map; callers
+        filter size>=2).
+    """
+    n = len(cands)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    # bucket by (chrom, strand, intron_count) so we only compare plausible pairs.
+    from collections import defaultdict
+    buckets = defaultdict(list)
+    introns = []
+    for j, c in enumerate(cands):
+        iv = tuple(sorted(c.intron_chain.introns))
+        introns.append(iv)
+        if len(iv) >= 1:  # multi-exon only
+            buckets[(c.chrom, c.strand, len(iv))].append(j)
+
+    def wobble(a, b):
+        ia, ib = introns[a], introns[b]
+        return all(abs(s1 - s2) <= bp and abs(e1 - e2) <= bp
+                   for (s1, e1), (s2, e2) in zip(ia, ib))
+
+    for cols in buckets.values():
+        for i in range(len(cols)):
+            for k in range(i + 1, len(cols)):
+                a, b = cols[i], cols[k]
+                if find(a) != find(b) and wobble(a, b):
+                    parent[find(a)] = find(b)
+    out = defaultdict(list)
+    for col in {c for cols in buckets.values() for c in cols}:
+        out[find(col)].append(col)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # NEW transcript-frame two-sided junction window (validated 99.2% pairwise;
 # see experiments/_gt_zval_window_compare.py). Each candidate contributes K

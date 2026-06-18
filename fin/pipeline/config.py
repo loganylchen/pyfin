@@ -213,6 +213,20 @@ class PipelineConfig:
     # lever; on real dRNA re-tune the margin.
     m2_diff_cover_gate: bool = True
     m2_diff_cover_margin: float = 0.5
+    # M2-EM cluster-internal wobble recheck (quant_mode="m2_em" only). Default ON.
+    # AFTER the full EM, cluster ALL multi-exon candidates by STRUCTURE (same
+    # chrom/strand, same intron count, every junction within m2_cluster_recheck_bp);
+    # within a cluster the highest-EM-abundance candidate anchors (usually the true
+    # isoform, often a GTF passthrough) and a NOVEL sibling whose abundance is below
+    # m2_cluster_recheck_fraction of the anchor is a wobble shadow and is dropped.
+    # GTF/fusion are never dropped (they only anchor). The judgement is pure
+    # abundance: GTF participates in the abundance race but is NOT a correctness
+    # oracle, so precision stays robust when the annotation is wrong; with no GTF a
+    # real novel anchors its own cluster. OFF == no drops (byte-identical).
+    # m2_cluster_recheck_fraction <= 0 falls back to min_isoform_fraction.
+    m2_cluster_recheck: bool = True
+    m2_cluster_recheck_bp: int = 6
+    m2_cluster_recheck_fraction: float = 0.05
     # Score-gated fallback split (mk1). On a tie that M2 does NOT win
     # outright (margin < m2_tiebreak_margin), restrict the 1/K split to the
     # candidates eventalign could actually score in the junction window; the
