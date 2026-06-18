@@ -184,12 +184,10 @@ class TestNanToRowMean:
 # ---------------------------------------------------------------------------
 
 class TestApplyScoreFilters:
-    def _config(self, min_ab=0.0, min_max_r=0.0, min_cs=0.0):
+    def _config(self, min_ab=0.0):
         return PipelineConfig(
             bam_path="/tmp/x.bam",
             min_abundance=min_ab,
-            min_max_r=min_max_r,
-            min_novel_combined_score=min_cs,
         )
 
     def test_no_filters_returns_all(self):
@@ -215,29 +213,9 @@ class TestApplyScoreFilters:
         out = _apply_score_filters(agg, cfg)
         assert "n1" in out
 
-    def test_min_max_r_drops_novel(self):
-        agg = {
-            "n1": _qr("n1", source="novel", max_R=0.01),
-            "n2": _qr("n2", source="novel", max_R=0.9),
-        }
-        cfg = self._config(min_max_r=0.1)
-        out = _apply_score_filters(agg, cfg)
-        assert "n1" not in out
-        assert "n2" in out
-
-    def test_min_combined_score_drops_novel(self):
-        agg = {
-            "n1": _qr("n1", source="novel", combined_score=0.1),
-            "n2": _qr("n2", source="novel", combined_score=0.9),
-        }
-        cfg = self._config(min_cs=0.3)
-        out = _apply_score_filters(agg, cfg)
-        assert "n1" not in out
-        assert "n2" in out
-
     def test_fusion_exempt_from_filters(self):
-        agg = {"f1": _qr("f1", source="fusion", abundance=0.0, max_R=0.0, combined_score=0.0)}
-        cfg = self._config(min_ab=1.0, min_max_r=1.0, min_cs=1.0)
+        agg = {"f1": _qr("f1", source="fusion", abundance=0.0)}
+        cfg = self._config(min_ab=1.0)
         out = _apply_score_filters(agg, cfg)
         assert "f1" in out
 

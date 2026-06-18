@@ -57,8 +57,6 @@ def _build_base_config(args) -> "PipelineConfig":
         persist_R_matrix=False,
         # Score filter thresholds — only active when enable_score_filter=True (R5)
         min_abundance=0.5,
-        min_max_r=0.05,
-        min_novel_combined_score=0.0,
         # Ablation-specific overrides set per row below
         quant_mode="m2_em",
         enable_score_filter=True,

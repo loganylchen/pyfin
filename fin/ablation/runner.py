@@ -153,24 +153,11 @@ def _apply_score_filters(
     aggregated: Dict[str, QuantResult],
     config: PipelineConfig,
 ) -> Dict[str, QuantResult]:
-    """Apply min_abundance, min_max_r, min_novel_combined_score filters."""
+    """Apply the min_abundance novel/fusion-exempt floor filter."""
     if config.min_abundance > 0.0:
         aggregated = {
             cid: qr
             for cid, qr in aggregated.items()
             if qr.source in ("gtf", "fusion") or qr.abundance >= config.min_abundance
-        }
-    if config.min_max_r > 0.0:
-        aggregated = {
-            cid: qr
-            for cid, qr in aggregated.items()
-            if qr.source in ("gtf", "fusion") or qr.max_R >= config.min_max_r
-        }
-    if config.min_novel_combined_score > 0.0:
-        aggregated = {
-            cid: qr
-            for cid, qr in aggregated.items()
-            if qr.source in ("gtf", "fusion")
-            or qr.combined_score >= config.min_novel_combined_score
         }
     return aggregated

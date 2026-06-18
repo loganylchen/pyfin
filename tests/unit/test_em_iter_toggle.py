@@ -146,8 +146,6 @@ class TestScoreFilterToggle:
             bam_path="/tmp/x.bam",
             enable_score_filter=False,
             min_abundance=1.0,
-            min_max_r=0.1,
-            min_novel_combined_score=0.3,
         )
         assert cfg.enable_score_filter is False
 

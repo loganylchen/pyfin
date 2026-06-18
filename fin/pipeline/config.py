@@ -29,9 +29,6 @@ class PipelineConfig:
     min_abundance: float = 0.0        # A4: drop quantified NOVEL transcripts with abundance < this. Field default stays 0 (programmatic/quantify/ablation callers unchanged); the `fin` CLI defaults it to 3 (NOVEL only).
     floor_gtf_abundance: bool = False  # A4: when True the GTF floor is raised to max(min_gtf_abundance, min_abundance) (i.e. up to the NOVEL floor, never below the explicit GTF floor); default False = GTF uses its own lighter min_gtf_abundance. The `fin` CLI exposes this as --floor-gtf-abundance (OFF). Fusion is always exempt. Ablation path is separate and keeps GTF exempt regardless.
     min_gtf_abundance: float = 0.0    # A4: own (lighter) abundance floor for GTF transcripts, on soft EM abundance. Field default stays 0 (programmatic/quantify/ablation callers unchanged); the `fin` CLI defaults it to 1, so a GTF candidate whose EM soft-mass is below 1 read is dropped (avoids echoing annotation as a copy-tool). When floor_gtf_abundance is set the effective GTF floor becomes max(min_gtf_abundance, min_abundance). Fusion always exempt.
-    min_max_r: float = 0.0            # Phase A T2: drop NOVEL transcripts whose max EM responsibility < this (Cohen's d=1.34)
-    min_novel_combined_score: float = 0.0  # Step 3: drop NOVEL transcripts whose combined_score < this (F1-optimal: 0.288 with-GTF, 0.428 no-GTF; Cohen's d=0.70)
-
     # Minimum isoform fraction (locus-relative abundance) FILTER. Drop a NOVEL
     # multi-exon transcript whose abundance is below this fraction of the
     # dominant OVERLAPPING novel isoform at its locus. This is the standard
@@ -164,8 +161,8 @@ class PipelineConfig:
 
     # R2 uses em_max_iter_override=1 for single-step EM; None = use em_max_iter.
     em_max_iter_override: Optional[int] = None
-    # R5 only: when False, min_abundance / min_max_r / min_novel_combined_score
-    # are treated as 0 (single-switch filter, AC7).
+    # R5 only: when False, the post-EM abundance/fraction filters are treated as 0
+    # (single-switch filter, AC7).
     enable_score_filter: bool = True
     # m4 (read-to-read distance) source. "whole_read" preserves legacy
     # production behavior. "diff_region" uses the new intron-chain-derived
@@ -257,7 +254,7 @@ class PipelineConfig:
     persist_R_matrix: bool = True  # write R.npy + R_meta.json per interval after EM
 
     # Diagnostic: write the per-candidate scoring TSV BEFORE the post-EM filters
-    # (min_abundance / min_max_r / min_novel_combined_score) so downstream
+    # (min_abundance / isoform-fraction / full-length / polyA) so downstream
     # FN-root-cause analysis can attribute drops to the correct filter rather
     # than mis-classifying filter drops as "missing_candidate". Path is
     # derived from output_tsv with the ".unfiltered.tsv" suffix.

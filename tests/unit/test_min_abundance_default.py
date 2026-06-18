@@ -72,8 +72,6 @@ class TestRunnerAbundanceFloor:
             min_gtf_abundance=min_gtf_ab,
             floor_gtf_abundance=floor_gtf,
             # Disable every other post-EM filter so we isolate A4 abundance.
-            min_max_r=0.0,
-            min_novel_combined_score=0.0,
             min_isoform_fraction=0.0,
             min_fulllen_fraction=0.0,
             min_polya5p_reads=0,

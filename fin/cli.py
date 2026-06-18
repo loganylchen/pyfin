@@ -33,8 +33,6 @@ import click
 @click.option("--min-abundance", default=3.0, show_default=True, type=float, help="Drop NOVEL transcripts whose EM-estimated abundance is below this threshold (GTF uses its own lighter floor --min-gtf-abundance unless --floor-gtf-abundance; fusion always exempt). Default 3 reproduces the SIRV gffcompare T>=3 NOVEL operating point. SIRV-tuned WARNING: a nonzero floor guts recall of genuine low-abundance isoforms — on real data set 0 to disable.")
 @click.option("--min-gtf-abundance", default=1.0, show_default=True, type=float, help="Abundance floor for GTF-annotated transcripts on soft EM abundance (default 1: a GTF candidate must accrue at least one read of EM soft-mass to be kept, so pyfin is not a copy-annotation tool). Independent of --min-abundance (which gates novel); fusion always exempt. With --floor-gtf-abundance the effective GTF floor becomes max(this, --min-abundance). Set 0 to disable and keep every GTF candidate in an expressed locus. SIRV-tuned: on real data a nonzero floor can drop genuine low-abundance annotated isoforms.")
 @click.option("--floor-gtf-abundance/--no-floor-gtf-abundance", "floor_gtf_abundance", default=False, show_default=True, help="Raise the GTF abundance floor to the NOVEL floor: GTF must clear max(--min-gtf-abundance, --min-abundance) (never lowers the explicit GTF floor). Default OFF: GTF uses its own lighter --min-gtf-abundance. Turn ON to reproduce the SIRV gffcompare T>=3 WITH-GTF operating point (e.g. T=3 -> Sn 43.2 / Pr 91.6). SIRV-tuned: on real data this drops genuine low-abundance annotated isoforms — leave OFF unless benchmarking. Fusion stays exempt regardless.")
-@click.option("--min-max-r", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose max_R is below this (GTF candidates are exempt). NOTE: max_R is a true EM responsibility (the d=1.34 FP discriminator, try 0.2) ONLY in --quant-mode m1_em/m2_em (m2_em is the default); under 'argmax' mode max_R is instead the max single-read mappy weight, so that calibration does not apply.")
-@click.option("--min-novel-combined-score", default=0.0, show_default=True, type=float, help="Drop NOVEL transcripts whose combined_score is below this (GTF candidates are exempt). WARNING: no code path populates combined_score anymore (the composite scorer was removed), so it stays 0.0 and a value > 0 is IGNORED (the runner skips the filter with a warning rather than dropping all novel transcripts). Retained for backward compatibility.")
 @click.option("--min-isoform-fraction", default=0.01, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose abundance is below this fraction of the dominant overlapping novel isoform at their locus (Cufflinks --min-isoform-fraction / StringTie -f minor-isoform suppression). GTF/fusion/mono exempt; 0.0 disables. Default 0.01 (StringTie-aligned, recall-safe). SIRV WARNING: F1-optimal ~0.4 is overfit — never use on real data.")
 @click.option("--min-fulllen-fraction", default=0.1, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose fraction of full-length assigned reads (read genomic 5' AND 3' both within --fulllen-window-bp of the candidate's ends) is below this (FLAIR/TALON-style full-length read support; signal-free). Orthogonal to --min-isoform-fraction. GTF/fusion/mono and unreachable candidates exempt; 0.0 disables. SIRV WARNING: default 0.1 is SIRV-tuned (drops most reachable novel-multi for free as SIRV lacks a 5'-truncated isoform tail) — re-tune or disable on real dRNA data.")
 @click.option("--fulllen-window-bp", default=25, show_default=True, type=int, help="bp tolerance for a read genomic end to count as full-length wrt a candidate's 5'/3' end (used by --min-fulllen-fraction).")
@@ -92,8 +90,6 @@ def main(
     min_abundance,
     min_gtf_abundance,
     floor_gtf_abundance,
-    min_max_r,
-    min_novel_combined_score,
     min_isoform_fraction,
     min_fulllen_fraction,
     fulllen_window_bp,
@@ -199,8 +195,6 @@ def main(
         min_abundance=min_abundance,
         min_gtf_abundance=min_gtf_abundance,
         floor_gtf_abundance=floor_gtf_abundance,
-        min_max_r=min_max_r,
-        min_novel_combined_score=min_novel_combined_score,
         min_isoform_fraction=min_isoform_fraction,
         min_fulllen_fraction=min_fulllen_fraction,
         fulllen_window_bp=fulllen_window_bp,
