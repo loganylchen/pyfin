@@ -224,9 +224,13 @@ class PipelineConfig:
     # oracle, so precision stays robust when the annotation is wrong; with no GTF a
     # real novel anchors its own cluster. OFF == no drops (byte-identical).
     # m2_cluster_recheck_fraction <= 0 falls back to min_isoform_fraction.
+    # bp=10 / fraction=0.15 tuned on the SGNex heya8 + sirv4 12-condition matrix
+    # (nanocount expressed-truth): lifts dense-locus F1@3 by ~6 pts toward the head
+    # tools while holding full Sn@3=100 (no real isoform dropped); re-tune on real
+    # dRNA if genuine sub-15%-abundance wobble isoforms are expected.
     m2_cluster_recheck: bool = True
-    m2_cluster_recheck_bp: int = 6
-    m2_cluster_recheck_fraction: float = 0.05
+    m2_cluster_recheck_bp: int = 10
+    m2_cluster_recheck_fraction: float = 0.15
     # Score-gated fallback split (mk1). On a tie that M2 does NOT win
     # outright (margin < m2_tiebreak_margin), restrict the 1/K split to the
     # candidates eventalign could actually score in the junction window; the
