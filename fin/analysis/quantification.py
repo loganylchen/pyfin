@@ -205,6 +205,53 @@ def isoform_fraction_drops(
     return drops
 
 
+def soft_mass_ratio_drops(
+    results: Dict[str, QuantResult],
+    max_ratio: float,
+) -> set:
+    """Return candidate_ids to drop by the soft-mass / hard-read ratio test.
+
+    For a NOVEL multi-exon candidate C, compare its EM SOFT abundance
+    (``R.sum`` = fractional probability mass) against its HARD read count
+    (``num_assigned_reads`` = number of reads whose argmax is C)::
+
+        ratio(C) = C.abundance / C.num_assigned_reads
+
+    and drop C when ``ratio >= max_ratio`` (a candidate with zero hard reads is
+    always dropped — it lives entirely on borrowed soft mass).
+
+    A genuine isoform's reads argmax to it AND deposit their full soft mass on
+    it, so ratio ~= 1. A wobble shadow steals little hard support but, being a
+    +-bp structural near-copy of a high-abundance anchor, accumulates fractional
+    soft crumbs from every one of the anchor's reads -> its soft abundance is
+    inflated far above its honest hard-read count (ratio >> 1). This catches the
+    HIGH-abundance shadows that the locus-relative ``isoform_fraction`` /
+    cluster-recheck levers cannot (a shadow at 32% of the anchor passes a
+    fraction gate but still shows an inflated soft/hard ratio). Pure EM evidence
+    — no GTF, no annotation oracle.
+
+    GTF-passthrough (``source="gtf"``), fusion (``source="fusion"``), and
+    single-exon (mono) candidates are EXEMPT. ``max_ratio <= 0`` disables the
+    filter (returns an empty set).
+
+    SIRV WARNING: the separating threshold is data-dependent (true isoforms
+    cluster at ratio ~1 but a few reach ~1.4-1.6 when their own reads are
+    genuinely ambiguous); tune on real data before trusting an aggressive value.
+    """
+    if max_ratio <= 0.0:
+        return set()
+    drops: set = set()
+    for qr in results.values():
+        if qr.source != "novel" or len(qr.exons) < 2:
+            continue
+        if qr.num_assigned_reads <= 0:
+            drops.add(qr.candidate_id)
+            continue
+        if (qr.abundance / qr.num_assigned_reads) >= max_ratio:
+            drops.add(qr.candidate_id)
+    return drops
+
+
 def _five_three(start: int, end: int, strand: str) -> Tuple[int, int]:
     """(genomic 5' end, genomic 3' end) for a span on the given strand."""
     if strand == "-":

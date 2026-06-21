@@ -45,6 +45,21 @@ class PipelineConfig:
     # transcriptomes.
     min_isoform_fraction: float = 0.01
 
+    # Soft-mass / hard-read ratio ceiling. Drop a NOVEL multi-exon candidate
+    # whose EM soft abundance (R.sum) divided by its hard argmax read count
+    # (num_assigned_reads) is >= this value (a candidate with 0 hard reads is
+    # always dropped). A real isoform deposits ~1 soft mass per hard read
+    # (ratio ~1); a wobble shadow borrows fractional soft crumbs from a
+    # high-abundance structural near-copy and shows an inflated ratio, so this
+    # catches the HIGH-relative-abundance shadows the locus-fraction /
+    # cluster-recheck levers miss. Pure EM evidence (no GTF). gtf/fusion/mono
+    # exempt. 0 disables. Default 2.0 tuned on the SGNex heya8+sirv4 12-condition
+    # nanocount matrix: ALL 24 cells F1@3 up-or-equal (mean +1.04), recall held
+    # on every cell (true isoforms cluster at ratio ~1, a few reach ~1.4-1.6, so
+    # 2.0 clears them); SIRV-tuned — re-tune on real dRNA if genuine isoforms
+    # there show inflated soft/hard ratios.
+    max_soft_mass_ratio: float = 2.0
+
     # Full-length end-coherence FILTER (FLAIR/TALON-style full-length read
     # support). Drop a NOVEL multi-exon (>=2 intron) transcript whose fraction
     # of full-length assigned reads is below `min_fulllen_fraction`. A read is

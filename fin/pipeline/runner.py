@@ -17,6 +17,7 @@ from fin.analysis.quantification import (
     compute_fulllen_frac,
     fulllen_fraction_drops,
     isoform_fraction_drops,
+    soft_mass_ratio_drops,
     polya5p_drops,
     quantify_transcripts,
 )
@@ -226,6 +227,30 @@ class PipelineRunner:
                     "Dropped %d novel transcripts with isoform fraction < %.3f",
                     len(drop_ids),
                     self.config.min_isoform_fraction,
+                )
+
+        # Soft-mass / hard-read ratio filter. Drops a NOVEL multi-exon candidate
+        # whose EM soft abundance is inflated far above its honest hard-read
+        # (argmax) count — the signature of a wobble shadow that steals little
+        # real read support but accumulates fractional soft crumbs from a
+        # high-abundance structural near-copy (anchor). Catches the HIGH-relative
+        # -abundance shadows that the isoform_fraction / cluster-recheck levers
+        # cannot (a shadow at 32% of its anchor passes a fraction gate). Pure EM
+        # evidence; gtf/fusion/mono exempt. max_soft_mass_ratio<=0 disables.
+        if _score_filter_on and self.config.max_soft_mass_ratio > 0.0:
+            drop_ids = soft_mass_ratio_drops(
+                aggregated, self.config.max_soft_mass_ratio
+            )
+            if drop_ids:
+                aggregated = {
+                    cid: qr
+                    for cid, qr in aggregated.items()
+                    if cid not in drop_ids
+                }
+                logger.info(
+                    "Dropped %d novel transcripts with soft/hard read ratio >= %.2f",
+                    len(drop_ids),
+                    self.config.max_soft_mass_ratio,
                 )
 
         # Full-length end-coherence filter (FLAIR/TALON-style full-length read
