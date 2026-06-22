@@ -335,6 +335,60 @@ def event_genomic_positions(res: dict, cand: TranscriptCandidate) -> List[int]:
     return gen[gen >= 0].tolist()
 
 
+def support_gate_drops(cands, ties_by_read, nlls_by_read, tie_ok: bool = True):
+    """Columns to drop by the M2/M1 read-support gate.
+
+    A multi-exon candidate (any source except fusion; mono-exon exempt) is KEPT
+    iff it earns >=1 read's support:
+      (a) it is some read's M1 SOLE best-AS — the read's AS tie set is exactly
+          this one candidate (unique mappy-AS winner), OR
+      (b) it is some read's M2-best — lowest junction-NLL among that read's
+          scored tie candidates (``tie_ok`` True counts ties for the min;
+          False requires a strict unique minimum).
+    Otherwise the candidate is dropped. A jitter-corrupted GTF junction wins
+    neither (it loses the M2 signal contest to the true-junction candidate and
+    never holds a read's sole AS), whereas a genuine isoform always earns one or
+    the other — so this drops corrupted-annotation shadows without an annotation
+    oracle.
+
+    Args:
+        cands: list of TranscriptCandidate (column order = list/index order).
+        ties_by_read: read index -> list of candidate columns in its AS tie set.
+        nlls_by_read: read index -> {candidate column -> junction NLL}.
+        tie_ok: count candidates tied for the lowest NLL as M2-best (recall-safe).
+
+    Returns:
+        set of candidate columns to drop.
+    """
+    # No support evidence at all (e.g. no signal backend AND the diff-cover gate
+    # off, so neither ties nor NLLs were populated): the gate has nothing to judge
+    # on, so it must NOT drop anything (dropping every candidate would be wrong).
+    if not ties_by_read and not nlls_by_read:
+        return set()
+    supported: set = set()
+    for tie in ties_by_read.values():
+        if tie is not None and len(tie) == 1:
+            supported.add(tie[0])
+    for nlls in nlls_by_read.values():
+        if not nlls:
+            continue
+        best = min(nlls.values())
+        winners = [j for j, v in nlls.items() if v <= best]
+        if tie_ok:
+            supported.update(winners)
+        elif len(winners) == 1:
+            supported.add(winners[0])
+    drops: set = set()
+    for j, c in enumerate(cands):
+        if c.source == "fusion":
+            continue
+        if len(c.intron_chain.introns) < 1:
+            continue  # mono-exon exempt (no junction to validate)
+        if j not in supported:
+            drops.add(j)
+    return drops
+
+
 def structural_wobble_clusters(cands, bp: int):
     """Union-find clusters of candidates that differ only by junction wobble.
 

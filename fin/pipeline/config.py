@@ -246,6 +246,24 @@ class PipelineConfig:
     m2_cluster_recheck: bool = True
     m2_cluster_recheck_bp: int = 10
     m2_cluster_recheck_fraction: float = 0.15
+    # M2/M1 read-support gate (quant_mode="m2_em" only). A multi-exon candidate
+    # (GTF or novel; fusion/mono exempt) is KEPT iff it earns >=1 read's support:
+    #   (a) it is some read's M1 SOLE best-AS (the read's tie set is exactly this
+    #       candidate -> unique mappy-AS winner), OR
+    #   (b) it is some read's M2 best (lowest junction-NLL among that read's tie).
+    # Otherwise it is dropped. Rationale: a jitter-corrupted GTF junction loses the
+    # M2 signal contest to the true-junction candidate AND never wins a read's sole
+    # M1-AS, so it earns no support; a genuine isoform always wins either its own
+    # sole-AS reads or the M2 contest. Catches corrupted-annotation shadows the
+    # abundance levers miss. OFF == no drops. m2_support_gate_tie: when True (default)
+    # a candidate tied for the lowest M2 NLL also counts as M2-best (recall-safer);
+    # False requires a strict unique M2 win.
+    # Default ON (tie-accept) tuned on the SGNex heya8+sirv4 12-condition matrix:
+    # lifts the corrupted-annotation (c_jitter) F1@3 with ZERO recall loss anywhere
+    # (full Sn@3 stays 100). The strict (tie=False) variant drops more shadows but
+    # costs full-condition recall (Sn@3 -> 98.8), so tie-accept is the default.
+    m2_support_gate: bool = True
+    m2_support_gate_tie: bool = True
     # Score-gated fallback split (mk1). On a tie that M2 does NOT win
     # outright (margin < m2_tiebreak_margin), restrict the 1/K split to the
     # candidates eventalign could actually score in the junction window; the

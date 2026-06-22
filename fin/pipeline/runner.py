@@ -1360,6 +1360,21 @@ class PipelineRunner:
                         if (em_ab[j] / anchor_ab) < frac:
                             drop_cols.add(j)
 
+        # --- M2/M1 read-support gate. A multi-exon candidate (GTF or novel;
+        #     fusion/mono exempt) must earn >=1 read's support: either it is some
+        #     read's M1 SOLE best-AS (tie set == just this candidate), or it is
+        #     some read's M2-best (lowest junction-NLL in that read's tie). A
+        #     jitter-corrupted GTF junction wins neither (loses the M2 contest to
+        #     the true-junction candidate and never holds a read's sole AS), so it
+        #     is dropped; a genuine isoform always earns one or the other. ---
+        if getattr(self.config, "m2_support_gate", False):
+            from fin.scoring.m2_junction_nll import support_gate_drops
+
+            drop_cols |= support_gate_drops(
+                cand_list, ties_by_read, nlls_by_read,
+                tie_ok=bool(getattr(self.config, "m2_support_gate_tie", True)),
+            )
+
         quant_results = quantify_transcripts(
             R, hard_assignments, cand_list, kept_read_ids
         )

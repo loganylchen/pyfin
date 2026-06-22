@@ -54,6 +54,8 @@ import click
 @click.option("--m2-cluster-recheck/--no-m2-cluster-recheck", "m2_cluster_recheck", default=True, show_default=True, help="(--quant-mode m2_em only) After EM, cluster ALL multi-exon candidates by structure (same intron count + every junction within --m2-cluster-recheck-bp); within a cluster the highest-abundance candidate anchors (often the true isoform / a GTF passthrough) and a NOVEL sibling whose abundance < --m2-cluster-recheck-fraction of the anchor is dropped as a wobble shadow (GTF/fusion never dropped). Pure abundance evidence — GTF only joins the abundance race, never used as a correctness oracle, so it stays robust on corrupted/absent annotation. Default ON; --no-m2-cluster-recheck disables (no drops).")
 @click.option("--m2-cluster-recheck-bp", default=10, show_default=True, type=int, help="(--m2-cluster-recheck) Per-junction wobble tolerance (bp): two candidates cluster iff same intron count and every donor/acceptor within this many bp. SIRV-tuned; sweep on real data.")
 @click.option("--m2-cluster-recheck-fraction", default=0.15, show_default=True, type=float, help="(--m2-cluster-recheck) Relative-abundance threshold; a novel cluster sibling is a shadow when its EM abundance is below this fraction of the cluster's highest-abundance anchor. 0 falls back to --min-isoform-fraction. SIRV-tuned; sweep on real data.")
+@click.option("--m2-support-gate/--no-m2-support-gate", "m2_support_gate", default=True, show_default=True, help="(--quant-mode m2_em only) Keep a multi-exon candidate (GTF or novel; fusion/mono exempt) only if it earns >=1 read's support: it is some read's M1 SOLE best-AS, OR some read's M2-best (lowest junction-NLL in its tie). Drops corrupted-annotation junctions that win neither. Default ON (tie-accept): lifts c_jitter F1@3 with zero recall loss; --no-m2-support-gate disables.")
+@click.option("--m2-support-gate-tie/--no-m2-support-gate-tie", "m2_support_gate_tie", default=True, show_default=True, help="(--m2-support-gate) Count a candidate tied for the lowest M2 NLL as M2-best (recall-safer). --no-... requires a strict unique M2 win.")
 @click.option(
     "--quant-mode",
     default="m2_em",
@@ -115,6 +117,8 @@ def main(
     m2_cluster_recheck,
     m2_cluster_recheck_bp,
     m2_cluster_recheck_fraction,
+    m2_support_gate,
+    m2_support_gate_tie,
     quant_mode,
     m3_coherence,
     abundance_feedback,
@@ -226,6 +230,8 @@ def main(
         m2_cluster_recheck=m2_cluster_recheck,
         m2_cluster_recheck_bp=m2_cluster_recheck_bp,
         m2_cluster_recheck_fraction=m2_cluster_recheck_fraction,
+        m2_support_gate=m2_support_gate,
+        m2_support_gate_tie=m2_support_gate_tie,
         quant_mode=quant_mode,
         m3_coherence=m3_coherence,
         abundance_feedback=abundance_feedback,
