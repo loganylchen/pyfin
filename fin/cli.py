@@ -52,8 +52,12 @@ import click
 @click.option("--m2-diff-cover-gate/--no-m2-diff-cover-gate", "m2_diff_cover_gate", default=True, show_default=True, help="(--quant-mode m2_em only) Diff-region coverage gate. For a read in a >=2 best-AS tie: if the M2 NLL margin >= --m2-diff-cover-margin hard-assign its full mass to the best candidate (and, if it straddles every wobbling junction donor->acceptor, contribute that vote to the locus isoform-ratio prior); otherwise (margin below threshold, whether or not it covers) the read is ambiguous and its tie mass is redistributed in proportion to the prior learned from covered+distinguishing reads (flat 1/K only when the tie has no covered prior). No read is dropped (recall-safe). Default ON; --no-m2-diff-cover-gate reverts to the soft NLL-graded d_tx. SIRV/dense-locus precision lever; re-tune the margin on real dRNA.")
 @click.option("--m2-diff-cover-margin", default=0.5, show_default=True, type=float, help="(--m2-diff-cover-gate) Minimum M2 NLL margin (runner-up - best) to HARD-assign a tied read to its lowest-NLL candidate. Below this the read is redistributed by the covered-read prior (flat 1/K when no prior exists). SIRV-tuned; sweep on real data.")
 @click.option("--m2-cluster-recheck/--no-m2-cluster-recheck", "m2_cluster_recheck", default=True, show_default=True, help="(--quant-mode m2_em only) After EM, cluster ALL multi-exon candidates by structure (same intron count + every junction within --m2-cluster-recheck-bp); within a cluster the highest-abundance candidate anchors (often the true isoform / a GTF passthrough) and a NOVEL sibling whose abundance < --m2-cluster-recheck-fraction of the anchor is dropped as a wobble shadow (GTF/fusion never dropped). Pure abundance evidence — GTF only joins the abundance race, never used as a correctness oracle, so it stays robust on corrupted/absent annotation. Default ON; --no-m2-cluster-recheck disables (no drops).")
-@click.option("--m2-cluster-recheck-bp", default=10, show_default=True, type=int, help="(--m2-cluster-recheck) Per-junction wobble tolerance (bp): two candidates cluster iff same intron count and every donor/acceptor within this many bp. SIRV-tuned; sweep on real data.")
+@click.option("--m2-cluster-recheck-bp", default=20, show_default=True, type=int, help="(--m2-cluster-recheck) Per-junction wobble tolerance (bp): two candidates cluster iff same intron count and every donor/acceptor within this many bp. Default 20 (validated on the 5-sample heya8 + sirv4 full sweep: 40/40 cells precision up vs bp=10).")
 @click.option("--m2-cluster-recheck-fraction", default=0.15, show_default=True, type=float, help="(--m2-cluster-recheck) Relative-abundance threshold; a novel cluster sibling is a shadow when its EM abundance is below this fraction of the cluster's highest-abundance anchor. 0 falls back to --min-isoform-fraction. SIRV-tuned; sweep on real data.")
+@click.option("--m2-cluster-recheck-cassette-max-exon-bp", default=70, show_default=True, type=int, help="(--m2-cluster-recheck) Extra cassette-skip equivalence: cluster a K-intron candidate with a (K-1)-intron candidate if they align with one extra exon shorter than this many bp on the K side, all other junctions within --m2-cluster-recheck-bp. Targets minimap2's small-exon-skip artifacts (one read pop got the exon, another collapsed it into one long intron). 0 disables. Default 70 (fires on heya8 p00 and c_jitter10bp where bp alone leaves cassette FPs).")
+@click.option("--m2-cluster-recheck-novel-displaces-gtf/--no-m2-cluster-recheck-novel-displaces-gtf", "m2_cluster_recheck_novel_displaces_gtf", default=True, show_default=True, help="(--m2-cluster-recheck) Allow a clustered low-support GTF sibling (below --m2-cluster-recheck-fraction of the anchor) to be dropped as a wobble shadow, gated by a direct read-support guard (see --m2-cluster-recheck-gtf-min-jct-reads). Targets jittered/mis-annotated GTF passthroughs whose junction no read traverses. Judged by the GTF's OWN read support, not the anchor source. Default ON; --no-... restores the legacy 'GTF never dropped' behaviour.")
+@click.option("--m2-cluster-recheck-gtf-min-jct-reads", default=1, show_default=True, type=int, help="(--m2-cluster-recheck) A clustered low-abundance GTF sibling is dropped only if its distinguishing junction has FEWER than this many reads splicing exactly there. 1 = drop only zero-exact-support (jittered/phantom) GTFs; a real annotated isoform keeps its own reads and survives.")
+@click.option("--m2-cluster-recheck-jct-tol", default=0, show_default=True, type=int, help="(--m2-cluster-recheck) bp tolerance matching a GTF candidate's junction to an observed read junction for the read-support guard. Default 0 (strict exact match): validated on heya8 c_jitter10bp — a loose tol lets 1-2bp jitters borrow read support from the true neighbouring junction.")
 @click.option("--m2-support-gate/--no-m2-support-gate", "m2_support_gate", default=True, show_default=True, help="(--quant-mode m2_em only) Keep a multi-exon candidate (GTF or novel; fusion/mono exempt) only if it earns >=1 read's support: it is some read's M1 SOLE best-AS, OR some read's M2-best (lowest junction-NLL in its tie). Drops corrupted-annotation junctions that win neither. Default ON (tie-accept): lifts c_jitter F1@3 with zero recall loss; --no-m2-support-gate disables.")
 @click.option("--m2-support-gate-tie/--no-m2-support-gate-tie", "m2_support_gate_tie", default=True, show_default=True, help="(--m2-support-gate) Count a candidate tied for the lowest M2 NLL as M2-best (recall-safer). --no-... requires a strict unique M2 win.")
 @click.option(
@@ -117,6 +121,10 @@ def main(
     m2_cluster_recheck,
     m2_cluster_recheck_bp,
     m2_cluster_recheck_fraction,
+    m2_cluster_recheck_cassette_max_exon_bp,
+    m2_cluster_recheck_novel_displaces_gtf,
+    m2_cluster_recheck_gtf_min_jct_reads,
+    m2_cluster_recheck_jct_tol,
     m2_support_gate,
     m2_support_gate_tie,
     quant_mode,
@@ -230,6 +238,10 @@ def main(
         m2_cluster_recheck=m2_cluster_recheck,
         m2_cluster_recheck_bp=m2_cluster_recheck_bp,
         m2_cluster_recheck_fraction=m2_cluster_recheck_fraction,
+        m2_cluster_recheck_cassette_max_exon_bp=m2_cluster_recheck_cassette_max_exon_bp,
+        m2_cluster_recheck_novel_displaces_gtf=m2_cluster_recheck_novel_displaces_gtf,
+        m2_cluster_recheck_gtf_min_jct_reads=m2_cluster_recheck_gtf_min_jct_reads,
+        m2_cluster_recheck_jct_tol=m2_cluster_recheck_jct_tol,
         m2_support_gate=m2_support_gate,
         m2_support_gate_tie=m2_support_gate_tie,
         quant_mode=quant_mode,

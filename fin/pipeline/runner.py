@@ -1347,18 +1347,60 @@ class PipelineRunner:
             if frac > 0.0:
                 em_ab = np.asarray(R).sum(axis=0)
                 bp = self.config.m2_cluster_recheck_bp
-                clusters = structural_wobble_clusters(cand_list, bp)
-                for cols in clusters.values():
-                    if len(cols) < 2:
-                        continue
-                    anchor_ab = max(em_ab[j] for j in cols)
-                    if anchor_ab <= 0.0:
-                        continue
-                    for j in cols:
-                        if cand_list[j].source != "novel":
-                            continue  # GTF/fusion never dropped (anchors only)
-                        if (em_ab[j] / anchor_ab) < frac:
-                            drop_cols.add(j)
+                cassette_bp = getattr(
+                    self.config, "m2_cluster_recheck_cassette_max_exon_bp", 0
+                )
+                clusters = structural_wobble_clusters(
+                    cand_list, bp, cassette_max_exon_bp=cassette_bp
+                )
+                from fin.scoring.m2_junction_nll import (
+                    gtf_guard_needed,
+                    wobble_shadow_drops,
+                )
+
+                gtf_drop = bool(getattr(
+                    self.config, "m2_cluster_recheck_novel_displaces_gtf", True
+                ))
+                # Build the directly-observed read junctions for the GTF read-support
+                # guard ONLY when a clustered low-abundance GTF sibling could actually
+                # be dropped — this reopens the BAM, so skip it for no-GTF intervals
+                # (and avoids touching the BAM for mocked/placeholder-path callers).
+                observed_jct = None
+                if gtf_drop and gtf_guard_needed(cand_list, em_ab, clusters, frac):
+                    from collections import Counter as _Counter
+                    from collections import defaultdict as _dd
+                    from fin.candidates.intron_chains import extract_intron_chain
+                    from fin.io.io_bam import BamReader
+                    # Strand-keyed: candidates/intervals are strand-separated, so an
+                    # antisense read at the same coordinates must NOT count as support.
+                    observed_jct = _dd(_Counter)
+                    # pysam region strings are 1-based; interval.start is 0-based, so
+                    # convert (start+1) and clamp to >=1. Using interval.region_string
+                    # directly would yield "chr:0-end" for contig-start intervals, which
+                    # pysam rejects (ValueError -> empty reads -> real GTFs wrongly seen
+                    # as zero-support and dropped).
+                    _region = f"{interval.chrom}:{max(interval.start + 1, 1)}-{interval.end}"
+                    with BamReader(self.config.bam_path) as _bam:
+                        for _rd in _bam.get_reads_in_region(_region):
+                            if (_rd.get("is_secondary") or _rd.get("is_supplementary")
+                                    or not _rd.get("is_mapped", True)):
+                                continue
+                            _ct = _rd.get("cigartuples")
+                            if not _ct:
+                                continue
+                            _strand = "-" if _rd.get("is_reverse") else "+"
+                            _ic = extract_intron_chain(_ct, _rd["reference_start"])
+                            for _intr in _ic.introns:
+                                observed_jct[_strand][_intr] += 1
+                drop_cols |= wobble_shadow_drops(
+                    cand_list, em_ab, clusters, frac,
+                    gtf_drop_enabled=gtf_drop,
+                    observed_jct=observed_jct,
+                    jct_tol=int(getattr(self.config, "m2_cluster_recheck_jct_tol", 2)),
+                    gtf_min_jct_reads=int(getattr(
+                        self.config, "m2_cluster_recheck_gtf_min_jct_reads", 1
+                    )),
+                )
 
         # --- M2/M1 read-support gate. A multi-exon candidate (GTF or novel;
         #     fusion/mono exempt) must earn >=1 read's support: either it is some

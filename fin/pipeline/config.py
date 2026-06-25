@@ -239,13 +239,34 @@ class PipelineConfig:
     # oracle, so precision stays robust when the annotation is wrong; with no GTF a
     # real novel anchors its own cluster. OFF == no drops (byte-identical).
     # m2_cluster_recheck_fraction <= 0 falls back to min_isoform_fraction.
-    # bp=10 / fraction=0.15 tuned on the SGNex heya8 + sirv4 12-condition matrix
-    # (nanocount expressed-truth): lifts dense-locus F1@3 by ~6 pts toward the head
-    # tools while holding full Sn@3=100 (no real isoform dropped); re-tune on real
-    # dRNA if genuine sub-15%-abundance wobble isoforms are expected.
+    # bp=20 / fraction=0.15 from the 5-sample heya8 + sirv4 full sweep:
+    # 40/40 cells precision up, 36/40 F1@3 up vs bp=10 (the prior SIRV-tuned default);
+    # full Sn@3=100 preserved everywhere it was already 100. cassette_max_exon_bp=70
+    # extends the cluster equivalence to K vs K-1 intron pairs differing by one small
+    # exon (<70bp), so minimap2's small-exon-skip artifacts cluster with their true
+    # sibling and the abundance-fraction filter drops the shadow; this lever fires
+    # exactly on p00 / c_jitter10bp where bp=20 alone leaves cassette FPs.
     m2_cluster_recheck: bool = True
-    m2_cluster_recheck_bp: int = 10
+    m2_cluster_recheck_bp: int = 20
     m2_cluster_recheck_fraction: float = 0.15
+    m2_cluster_recheck_cassette_max_exon_bp: int = 70
+    # Allow a clustered low-support GTF sibling (below fraction*anchor) to be dropped
+    # as a wobble shadow — BUT only when a direct read-support guard fires: the GTF's
+    # distinguishing junction (vs the anchor) carries fewer than
+    # m2_cluster_recheck_gtf_min_jct_reads reads splicing EXACTLY there
+    # (m2_cluster_recheck_jct_tol bp tolerance). Rationale: an annotated isoform is a
+    # documented hypothesis, so abundance alone must not delete it; only the data
+    # totally failing to traverse its specific junction (a jittered/phantom passthrough,
+    # 0 exact reads) justifies the drop. A genuine annotated isoform keeps its own reads
+    # (e.g. SIRV606: 419 reads on its exact donor) and survives. Symmetric in the
+    # anchor's source — a GTF is judged by its OWN read support. Default ON; set False
+    # for the legacy "GTF never dropped" behaviour. jct_tol=0 (strict exact match):
+    # validated on heya8 c_jitter10bp — all jittered-GTF FPs have 0 exact reads at their
+    # junction while real isoforms have many; a loose tol lets small (1-2bp) jitters
+    # borrow support from the true neighbouring junction.
+    m2_cluster_recheck_novel_displaces_gtf: bool = True
+    m2_cluster_recheck_gtf_min_jct_reads: int = 1
+    m2_cluster_recheck_jct_tol: int = 0
     # M2/M1 read-support gate (quant_mode="m2_em" only). A multi-exon candidate
     # (GTF or novel; fusion/mono exempt) is KEPT iff it earns >=1 read's support:
     #   (a) it is some read's M1 SOLE best-AS (the read's tie set is exactly this

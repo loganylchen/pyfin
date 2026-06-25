@@ -389,18 +389,29 @@ def support_gate_drops(cands, ties_by_read, nlls_by_read, tie_ok: bool = True):
     return drops
 
 
-def structural_wobble_clusters(cands, bp: int):
+def structural_wobble_clusters(cands, bp: int, cassette_max_exon_bp: int = 0):
     """Union-find clusters of candidates that differ only by junction wobble.
 
-    Two multi-exon candidates join iff same chrom/strand, same intron count, and
-    every intron boundary within ``bp`` of the other's. Single-exon candidates are
-    never clustered. ALL sources (gtf/novel/fusion) participate, so a high-abundance
-    true isoform (often a GTF passthrough) anchors its +-bp novel shadows. Pure
-    structure — no GTF "rightness" judgement.
+    Two multi-exon candidates join iff same chrom/strand and EITHER:
+      (a) same intron count and every intron boundary within ``bp`` of the other's
+          (classic wobble), OR
+      (b) intron counts differ by 1 AND the chains align as a CASSETTE-skip pair:
+          the longer chain has one extra exon (< ``cassette_max_exon_bp``) flanked
+          by two introns whose outer donor/acceptor match the shorter chain's
+          spanning intron within ``bp``, with every other intron matching within
+          ``bp``. Handles minimap2's small-exon-skip failure mode where one read
+          population aligned through the cassette exon and another collapsed it
+          into one long intron. Disabled when ``cassette_max_exon_bp <= 0``.
+
+    Single-exon candidates are never clustered. ALL sources (gtf/novel/fusion)
+    participate, so a high-abundance true isoform (often a GTF passthrough) anchors
+    its +-bp novel shadows. Pure structure — no GTF "rightness" judgement.
 
     Args:
         cands: list of TranscriptCandidate (column order = list order).
         bp: per-junction tolerance (each donor & acceptor within +-bp).
+        cassette_max_exon_bp: max length (bp) of an extra cassette exon that
+            triggers a K vs K-1 cluster join (0 disables the cassette extension).
 
     Returns:
         dict root_col -> [member cols] (only the connected-components map; callers
@@ -430,16 +441,180 @@ def structural_wobble_clusters(cands, bp: int):
         return all(abs(s1 - s2) <= bp and abs(e1 - e2) <= bp
                    for (s1, e1), (s2, e2) in zip(ia, ib))
 
+    def cassette(a_idx, b_idx):
+        """True iff ``a`` (K introns) is a cassette-skip sibling of ``b`` (K-1).
+
+        Aligns the chains: there must be exactly one position ``i`` in ``a``
+        where ``a[i]`` and ``a[i+1]`` together replace ``b[i]`` (the long span),
+        with the in-between exon shorter than ``cassette_max_exon_bp``, and
+        every other intron within ``bp``.
+        """
+        A, B = introns[a_idx], introns[b_idx]
+        for i in range(len(A) - 1):
+            # prefix [0..i): A[k] matches B[k] within wobble
+            if any(abs(A[k][0] - B[k][0]) > bp or abs(A[k][1] - B[k][1]) > bp
+                   for k in range(i)):
+                continue
+            # cassette pivot: outer ends of (A[i], A[i+1]) match B[i]
+            if abs(A[i][0] - B[i][0]) > bp:
+                continue
+            if abs(A[i+1][1] - B[i][1]) > bp:
+                continue
+            # suffix: A[i+2+k] matches B[i+1+k]
+            rest = len(B) - i - 1
+            if any(abs(A[i+2+k][0] - B[i+1+k][0]) > bp or
+                   abs(A[i+2+k][1] - B[i+1+k][1]) > bp
+                   for k in range(rest)):
+                continue
+            cas_size = A[i+1][0] - A[i][1]
+            if 0 < cas_size < cassette_max_exon_bp:
+                return True
+        return False
+
+    # (a) same-intron-count wobble within each bucket
     for cols in buckets.values():
         for i in range(len(cols)):
             for k in range(i + 1, len(cols)):
                 a, b = cols[i], cols[k]
                 if find(a) != find(b) and wobble(a, b):
                     parent[find(a)] = find(b)
+
+    # (b) cassette-skip across adjacent intron-count buckets at the same locus
+    if cassette_max_exon_bp > 0:
+        by_loc = defaultdict(dict)
+        for (chrom, strand, k), cols in buckets.items():
+            by_loc[(chrom, strand)][k] = cols
+        for counts in by_loc.values():
+            for k, A_cols in counts.items():
+                B_cols = counts.get(k - 1)
+                if not B_cols:
+                    continue
+                for a in A_cols:
+                    for b in B_cols:
+                        if find(a) != find(b) and cassette(a, b):
+                            parent[find(a)] = find(b)
+
     out = defaultdict(list)
     for col in {c for cols in buckets.values() for c in cols}:
         out[find(col)].append(col)
     return out
+
+
+def wobble_shadow_drops(cands, em_ab, clusters, frac, gtf_drop_enabled=True,
+                        observed_jct=None, jct_tol=2, gtf_min_jct_reads=1):
+    """Columns to drop as wobble shadows within structural clusters.
+
+    Within each cluster (>=2 members) the highest-EM-abundance candidate is the
+    anchor. A non-anchor sibling whose EM abundance is below ``frac`` * anchor is a
+    candidate shadow, resolved by SOURCE:
+
+      - NOVEL siblings are dropped on abundance alone (an unannotated low-support
+        near-duplicate of the anchor is a read-mapping artefact — the original
+        recheck behaviour).
+      - GTF siblings are dropped only when ``gtf_drop_enabled`` AND a direct
+        read-support guard fires: the sibling's DISTINGUISHING junction(s) — those
+        not within ``jct_tol`` bp of any anchor junction — carry fewer than
+        ``gtf_min_jct_reads`` directly-observed reads (``observed_jct``). Rationale:
+        an annotated isoform is a documented hypothesis, so abundance alone must NOT
+        delete it; only the data totally failing to traverse its specific junction
+        (a jittered / phantom passthrough) justifies the drop. A genuine annotated
+        isoform a few bp from a stronger neighbour (e.g. SIRV606: 419 reads on its
+        own donor) keeps its reads and survives. This is symmetric in the anchor's
+        source — a GTF is judged by ITS OWN read support, not by whether the anchor
+        is novel.
+      - FUSION siblings are never dropped.
+
+    When ``observed_jct`` is None the read-support guard cannot be evaluated, so GTF
+    siblings are conservatively KEPT (never dropped) — recall-safe fallback.
+
+    Args:
+        cands: list of TranscriptCandidate (column order = em_ab index order).
+        em_ab: per-candidate EM abundance (column sum of R), index-aligned to cands.
+        clusters: dict root_col -> [member cols] from structural_wobble_clusters.
+        frac: shadow threshold (sibling dropped when em_ab/anchor_ab < frac).
+        gtf_drop_enabled: allow GTF siblings to be dropped at all.
+        observed_jct: optional STRAND-KEYED dict {strand: {(donor, acceptor): n_reads}}
+            of intron junctions directly observed in the interval's read CIGARs.
+            Strand-keyed so an antisense read at the same coordinates cannot falsely
+            support a candidate on the other strand.
+        jct_tol: bp tolerance matching a candidate junction to an observed one.
+        gtf_min_jct_reads: a GTF sibling's distinguishing junction must have FEWER
+            than this many observed reads to be droppable (1 == drop only zero-support).
+
+    Returns:
+        set of candidate columns to drop.
+    """
+    def jct_support(j, strand):
+        counter = observed_jct.get(strand, {}) if observed_jct else {}
+        d, a = j
+        return sum(n for (dd, aa), n in counter.items()
+                   if abs(dd - d) <= jct_tol and abs(aa - a) <= jct_tol)
+
+    drops: set = set()
+    for cols in clusters.values():
+        if len(cols) < 2:
+            continue
+        anchor_j = max(cols, key=lambda j: em_ab[j])
+        anchor_ab = em_ab[anchor_j]
+        if anchor_ab <= 0.0:
+            continue
+        anchor_introns = cands[anchor_j].intron_chain.introns
+        for j in cols:
+            if j == anchor_j:
+                continue
+            src = cands[j].source
+            if src == "fusion":
+                continue
+            if (em_ab[j] / anchor_ab) >= frac:
+                continue
+            if src == "novel":
+                drops.add(j)
+                continue
+            # GTF sibling: needs the gate AND the direct read-support guard.
+            if not gtf_drop_enabled:
+                continue
+            if observed_jct is None:
+                continue  # cannot judge support -> keep (recall-safe)
+            cj = cands[j].intron_chain.introns
+            diff = [x for x in cj
+                    if not any(abs(x[0] - y[0]) <= jct_tol and abs(x[1] - y[1]) <= jct_tol
+                               for y in anchor_introns)]
+            if not diff:
+                # GTF shares every junction with the anchor (same intron chain,
+                # differing only in 5'/3' ends — a real alt-TSS/TES isoform whose
+                # junctions are all read-supported via the anchor). No distinguishing
+                # junction => no failed-support evidence => keep (recall-safe).
+                continue
+            strand = cands[j].strand
+            if min(jct_support(x, strand) for x in diff) < gtf_min_jct_reads:
+                drops.add(j)
+    return drops
+
+
+def gtf_guard_needed(cands, em_ab, clusters, frac):
+    """True iff any cluster has a non-anchor GTF sibling below ``frac`` * anchor.
+
+    Cheap pre-check (no read I/O) so the caller only builds the observed-junction
+    map — which reopens the BAM — when a clustered low-abundance GTF candidate
+    could actually be dropped by the read-support guard. Mirrors the anchor/frac
+    semantics of :func:`wobble_shadow_drops`.
+    """
+    for cols in clusters.values():
+        if len(cols) < 2:
+            continue
+        anchor_j = max(cols, key=lambda j: em_ab[j])
+        anchor_ab = em_ab[anchor_j]
+        if anchor_ab <= 0.0:
+            continue
+        for j in cols:
+            if j == anchor_j:
+                continue
+            src = cands[j].source
+            if src in ("novel", "fusion"):
+                continue
+            if (em_ab[j] / anchor_ab) < frac:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------

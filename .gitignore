@@ -127,9 +127,23 @@ cython_debug/
 *.fast5
 # *.pod5
 *.slow5
-# *.blow5
+*.blow5
+*.blow5.idx
 *.h5
 *.hdf5
+
+# Large alignment binaries — never commit
+*.bam
+*.bam.bai
+
+# heya8 wobble experiment: large staged inputs + matrix outputs + run logs.
+# Keep the analysis scripts (*.py/*.sh) and reports (*.md) trackable; ignore data.
+experiments/wobble_heya8/matrix/
+experiments/wobble_heya8/sirv4in/
+experiments/wobble_heya8/run_logs/
+experiments/wobble_heya8/stage_logs/
+experiments/wobble_heya8/probe_support.tsv
+experiments/wobble_heya8/tables/
 
 # Compressed files
 # *.gz
