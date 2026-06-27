@@ -591,6 +591,113 @@ def wobble_shadow_drops(cands, em_ab, clusters, frac, gtf_drop_enabled=True,
     return drops
 
 
+def containment_shadow_drops(cands, em_ab, *, tol_bp, min_ratio, exclude=None):
+    """Map NOVEL 5'-truncation containment shadows to the longer parent to fold into.
+
+    A candidate ``a`` is a 5'-truncation shadow of a longer candidate ``b`` iff
+    they share the same chrom/strand and ``a``'s intron chain is a STRICT, exact
+    3' SUFFIX of ``b``'s chain (i.e. ``a`` has fewer introns, all equal to ``b``'s
+    downstream-most introns), their 3' termini agree within ``tol_bp``, and ``a``'s
+    5' end is interior to ``b`` (``a`` starts downstream). Strand sets which genomic
+    end is "3'":
+
+      - "+" strand: 3' = high coordinate. Shared suffix = ``b``'s LAST introns;
+        3' terminus = ``end``; ``a.start > b.start``.
+      - "-" strand: 3' = low coordinate. Shared suffix = ``b``'s FIRST introns;
+        3' terminus = ``start``; ``a.end < b.end``.
+      - ".": unstranded -> never folded (conservative).
+
+    Only NOVEL candidates are foldable shadows; a parent may be gtf or novel (a gtf
+    parent absorbs a novel truncation, but a gtf candidate is never itself folded
+    away). A shadow is emitted only when ``em_ab[a] <= em_ab[b] * min_ratio`` (the
+    shadow is the minor member). Among eligible parents the highest-EM-abundance one
+    is chosen, ties broken by a RUN-STABLE structural key (start, end, intron chain,
+    source: gtf<novel) -- NEVER by ``candidate_id`` (novel ids are random uuids).
+
+    The match is exact on the shared suffix introns (no per-junction wobble), so a
+    genuine exon-skipping or alternative-internal-splicing isoform -- whose chain is
+    NOT an exact suffix -- is never folded. NOTE (recall caveat): an exact 3'-suffix
+    match also fits a genuine low-abundance alternative-TSS isoform that begins at a
+    downstream exon; this function cannot distinguish that from a 5'-truncation
+    artifact. It is therefore a precision heuristic, not recall-safe by construction
+    -- the caller keeps it default-off.
+
+    Chained containment (a in b in c) is resolved to the TERMINAL longest parent, so
+    every returned value is a candidate that is not itself a shadow. Candidates in
+    ``exclude`` (already dropped by another lever) are eligible neither as shadow nor
+    as parent, so a fold never targets a doomed candidate.
+
+    Args:
+        cands: list of TranscriptCandidate (column order = em_ab index order).
+        em_ab: per-candidate EM abundance (column sum of R), index-aligned to cands.
+        tol_bp: bp tolerance for matching the shadow's 3' terminus to the parent's.
+        min_ratio: fold only when em_ab[shadow] <= em_ab[parent] * min_ratio.
+        exclude: optional set of columns to skip entirely (e.g. already dropped).
+
+    Returns:
+        dict {shadow_col: parent_col}, parent_col resolved to the terminal longest
+        parent. Empty when nothing folds.
+    """
+    exclude = exclude or set()
+    from collections import defaultdict
+
+    chains = [tuple(sorted(c.intron_chain.introns)) for c in cands]
+    buckets = defaultdict(list)
+    for j, c in enumerate(cands):
+        if j in exclude:
+            continue
+        if len(chains[j]) >= 1:  # multi-exon only
+            buckets[(c.chrom, c.strand)].append(j)
+
+    def is_trunc(a, b):
+        """True iff ``a`` is a pure 5'-truncation strictly contained in ``b``."""
+        ca, cb = chains[a], chains[b]
+        if len(ca) >= len(cb):
+            return False
+        strand = cands[a].strand
+        if strand == "+":
+            if ca != cb[-len(ca):]:
+                return False
+            if abs(cands[a].end - cands[b].end) > tol_bp:
+                return False
+            return cands[a].start > cands[b].start
+        if strand == "-":
+            if ca != cb[:len(ca)]:
+                return False
+            if abs(cands[a].start - cands[b].start) > tol_bp:
+                return False
+            return cands[a].end < cands[b].end
+        return False  # unstranded: never fold
+
+    def pkey(j):
+        c = cands[j]
+        return (c.start, c.end, chains[j], 0 if c.source == "gtf" else 1)
+
+    raw: dict = {}  # shadow -> immediate parent
+    for cols in buckets.values():
+        for a in cols:
+            if cands[a].source != "novel":
+                continue  # only novels are foldable shadows
+            parents = [
+                b for b in cols
+                if b != a and is_trunc(a, b) and em_ab[a] <= em_ab[b] * min_ratio
+            ]
+            if not parents:
+                continue
+            # highest EM abundance wins; ties -> smallest structural key.
+            raw[a] = min(parents, key=lambda b: (-em_ab[b], pkey(b)))
+
+    # Resolve chains (a->b->c) to the terminal longest parent.
+    def terminal(x):
+        seen = set()
+        while x in raw and x not in seen:
+            seen.add(x)
+            x = raw[x]
+        return x
+
+    return {s: terminal(p) for s, p in raw.items() if terminal(p) != s}
+
+
 def gtf_guard_needed(cands, em_ab, clusters, frac):
     """True iff any cluster has a non-anchor GTF sibling below ``frac`` * anchor.
 

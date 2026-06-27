@@ -60,6 +60,9 @@ import click
 @click.option("--m2-cluster-recheck-jct-tol", default=0, show_default=True, type=int, help="(--m2-cluster-recheck) bp tolerance matching a GTF candidate's junction to an observed read junction for the read-support guard. Default 0 (strict exact match): validated on heya8 c_jitter10bp — a loose tol lets 1-2bp jitters borrow read support from the true neighbouring junction.")
 @click.option("--m2-support-gate/--no-m2-support-gate", "m2_support_gate", default=True, show_default=True, help="(--quant-mode m2_em only) Keep a multi-exon candidate (GTF or novel; fusion/mono exempt) only if it earns >=1 read's support: it is some read's M1 SOLE best-AS, OR some read's M2-best (lowest junction-NLL in its tie). Drops corrupted-annotation junctions that win neither. Default ON (tie-accept): lifts c_jitter F1@3 with zero recall loss; --no-m2-support-gate disables.")
 @click.option("--m2-support-gate-tie/--no-m2-support-gate-tie", "m2_support_gate_tie", default=True, show_default=True, help="(--m2-support-gate) Count a candidate tied for the lowest M2 NLL as M2-best (recall-safer). --no-... requires a strict unique M2 win.")
+@click.option("--containment-collapse/--no-containment-collapse", "containment_collapse", default=False, show_default=True, help="(--quant-mode m2_em only) Lever 1: after EM, fold a NOVEL candidate whose intron chain is a pure 3' SUFFIX of a longer candidate (a 5'-truncation shadow: same downstream junctions, 3' terminus within --containment-3p-tol-bp, 5' end interior, EM abundance <= parent * --containment-min-abundance-ratio) into that longer parent (reads + soft mass reassigned, shadow dropped). gtf candidates are never folded away. STRICT suffix match -> exon-skip/alt-3'-end isoforms never folded. WARNING: cannot distinguish 5'-truncation from a genuine low-abundance alt-TSS isoform -> NOT recall-safe; default OFF, enable only after real-data validation.")
+@click.option("--containment-3p-tol-bp", default=20, show_default=True, type=int, help="(--containment-collapse) bp tolerance for the shadow's 3' terminus matching the parent's 3' terminus.")
+@click.option("--containment-min-abundance-ratio", default=1.0, show_default=True, type=float, help="(--containment-collapse) Fold a shadow only when its EM abundance <= parent's * this ratio (shadow must be the minor member). 1.0 = fold any shadow at or below the parent.")
 @click.option(
     "--quant-mode",
     default="m2_em",
@@ -127,6 +130,9 @@ def main(
     m2_cluster_recheck_jct_tol,
     m2_support_gate,
     m2_support_gate_tie,
+    containment_collapse,
+    containment_3p_tol_bp,
+    containment_min_abundance_ratio,
     quant_mode,
     m3_coherence,
     abundance_feedback,
@@ -244,6 +250,9 @@ def main(
         m2_cluster_recheck_jct_tol=m2_cluster_recheck_jct_tol,
         m2_support_gate=m2_support_gate,
         m2_support_gate_tie=m2_support_gate_tie,
+        containment_collapse=containment_collapse,
+        containment_3p_tol_bp=containment_3p_tol_bp,
+        containment_min_abundance_ratio=containment_min_abundance_ratio,
         quant_mode=quant_mode,
         m3_coherence=m3_coherence,
         abundance_feedback=abundance_feedback,

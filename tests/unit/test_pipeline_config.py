@@ -29,6 +29,13 @@ def test_config_dtw_subsampling_default():
     assert c.max_reads_per_interval_for_dtw == 2000
 
 
+def test_config_containment_collapse_defaults_off():
+    c = PipelineConfig(bam_path="/tmp/x.bam")
+    assert c.containment_collapse is False
+    assert c.containment_3p_tol_bp == 20
+    assert c.containment_min_abundance_ratio == 1.0
+
+
 def test_config_output_paths_default_none():
     c = PipelineConfig(bam_path="/tmp/x.bam")
     assert c.output_gtf is None

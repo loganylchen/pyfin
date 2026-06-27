@@ -267,6 +267,24 @@ class PipelineConfig:
     m2_cluster_recheck_novel_displaces_gtf: bool = True
     m2_cluster_recheck_gtf_min_jct_reads: int = 1
     m2_cluster_recheck_jct_tol: int = 0
+    # Lever 1 — containment / 5'-truncation collapse (quant_mode="m2_em" only).
+    # Post-EM, fold a NOVEL candidate whose intron chain is a pure 3' SUFFIX of a
+    # longer candidate (a 5'-truncation shadow: same downstream junctions, 3'
+    # terminus within containment_3p_tol_bp, 5' end interior) into that longer
+    # parent: the shadow's reads + soft mass are reassigned to the parent and the
+    # shadow is dropped. Parent may be gtf or novel; a gtf candidate is NEVER
+    # folded away (only novels are droppable). The suffix match is STRICT (exact
+    # intron equality on the shared suffix) so genuine exon-skipping / alt-3'-end
+    # isoforms (different splicing) are never folded. WARNING: this rule cannot
+    # distinguish a dRNA 5'-truncation artifact from a genuine low-abundance
+    # alt-TSS isoform that starts at a downstream exon and shares the 3' end, so it
+    # is NOT recall-safe by construction; default OFF, enable only after real-truth
+    # honest-F1 validation. OFF (default) -> no folds (byte-identical).
+    containment_collapse: bool = False
+    containment_3p_tol_bp: int = 20
+    # Fold the shadow only when its EM abundance <= parent's * this ratio (shadow
+    # must be the minor member). 1.0 = fold any shadow at or below the parent.
+    containment_min_abundance_ratio: float = 1.0
     # M2/M1 read-support gate (quant_mode="m2_em" only). A multi-exon candidate
     # (GTF or novel; fusion/mono exempt) is KEPT iff it earns >=1 read's support:
     #   (a) it is some read's M1 SOLE best-AS (the read's tie set is exactly this

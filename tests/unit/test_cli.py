@@ -44,6 +44,17 @@ def test_default_help_shows_fusion_flags():
         assert flag in r.stdout, f"Missing fusion flag in fin --help: {flag}"
 
 
+def test_default_help_shows_containment_flags():
+    r = run_cli("--help")
+    assert r.returncode == 0
+    for flag in [
+        "--containment-collapse",
+        "--containment-3p-tol-bp",
+        "--containment-min-abundance-ratio",
+    ]:
+        assert flag in r.stdout, f"Missing containment flag in fin --help: {flag}"
+
+
 def test_default_help_shows_description():
     r = run_cli("--help")
     assert r.returncode == 0

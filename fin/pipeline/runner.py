@@ -1424,6 +1424,57 @@ class PipelineRunner:
         # here (enumerate index == R column). Filtering would break that alignment.
         for j, qr in enumerate(quant_results):
             qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
+        # --- Lever 1: containment / 5'-truncation collapse (post-EM mass-fold).
+        #     Fold a NOVEL candidate whose intron chain is a pure 3' suffix of a
+        #     longer candidate (a 5'-truncation shadow) INTO that parent: the
+        #     shadow's hard reads (read-id union) + soft EM mass move to the parent,
+        #     then the shadow joins drop_cols. Parents already in drop_cols
+        #     (wobble/support) are EXCLUDED, so a fold never targets an
+        #     ALREADY-dropped interval candidate; a folded parent CAN still be
+        #     removed by a later _finalize_and_write filter (isoform-fraction /
+        #     soft-mass / fulllen / polyA), which would lose the absorbed reads --
+        #     an accepted limitation given this lever is default-off. Chained
+        #     containment resolves to the terminal longest parent. OFF (default)
+        #     -> no folds (byte-identical). NOT recall-safe by
+        #     construction (a 3'-suffix also fits a real alt-TSS isoform); see
+        #     containment_shadow_drops -> kept default-off pending real-data tuning.
+        if getattr(self.config, "containment_collapse", False):
+            from fin.scoring.m2_junction_nll import containment_shadow_drops
+
+            em_ab_c = np.asarray(R).sum(axis=0)
+            fold = containment_shadow_drops(
+                cand_list, em_ab_c,
+                tol_bp=int(self.config.containment_3p_tol_bp),
+                min_ratio=float(self.config.containment_min_abundance_ratio),
+                exclude=drop_cols,
+            )
+            if fold:
+                qr_by_id = {q.candidate_id: q for q in quant_results}
+                n_folded = 0
+                for shadow_col, parent_col in fold.items():
+                    sq = qr_by_id.get(cand_list[shadow_col].candidate_id)
+                    pq = qr_by_id.get(cand_list[parent_col].candidate_id)
+                    if sq is None or pq is None:
+                        continue
+                    # Hard reads are disjoint by construction (EM argmax mask), so
+                    # the union count == sum, but union is robust either way. Soft
+                    # mass is added so aggregate_across_intervals (single interval:
+                    # unique/weight ratio == 1) reports parent + shadow abundance.
+                    union = set(pq.assigned_read_ids) | set(sq.assigned_read_ids)
+                    pq.assigned_read_ids = tuple(sorted(union))
+                    pq.num_assigned_reads = len(union)
+                    pq.abundance += sq.abundance
+                    # Keep the parent's max EM responsibility consistent with the
+                    # absorbed reads (max_R is a reporting/FP-analysis metric, not a
+                    # filter input; confidence is left as the parent's own mean).
+                    pq.max_R = max(pq.max_R, sq.max_R)
+                    drop_cols.add(shadow_col)
+                    n_folded += 1
+                if n_folded:
+                    logger.info(
+                        "m2_em interval %s: containment folded %d "
+                        "5'-truncation shadows", interval.region_string, n_folded,
+                    )
         if drop_cols:
             drop_ids = {cand_list[j].candidate_id for j in drop_cols}
             quant_results = [q for q in quant_results if q.candidate_id not in drop_ids]
