@@ -1135,6 +1135,36 @@ class PipelineRunner:
         # to covered=True (recall-safe: never drops on the rare fallback path).
         return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
 
+    def _observed_junctions(self, interval: GenomicInterval):
+        """Strand-keyed {strand: Counter{(donor, acceptor): n_reads}} of intron
+        junctions directly observed in the interval's primary-read CIGARs.
+
+        Reopens the BAM (skips secondary/supplementary/unmapped). Shared by the
+        cluster-recheck GTF read-support guard and the Lever-2 per-junction
+        support gate. pysam region strings are 1-based; interval.start is 0-based,
+        so use (start+1) clamped to >=1 (interval.region_string would yield
+        "chr:0-end" for contig-start intervals, which pysam rejects).
+        """
+        from collections import Counter, defaultdict
+        from fin.candidates.intron_chains import extract_intron_chain
+        from fin.io.io_bam import BamReader
+
+        observed: dict = defaultdict(Counter)
+        region = f"{interval.chrom}:{max(interval.start + 1, 1)}-{interval.end}"
+        with BamReader(self.config.bam_path) as bam:
+            for rd in bam.get_reads_in_region(region):
+                if (rd.get("is_secondary") or rd.get("is_supplementary")
+                        or not rd.get("is_mapped", True)):
+                    continue
+                ct = rd.get("cigartuples")
+                if not ct:
+                    continue
+                strand = "-" if rd.get("is_reverse") else "+"
+                ic = extract_intron_chain(ct, rd["reference_start"])
+                for intr in ic.introns:
+                    observed[strand][intr] += 1
+        return observed
+
     def _quant_m2_em(
         self,
         candidate_set: CandidateSet,
@@ -1373,6 +1403,10 @@ class PipelineRunner:
         #     annotation is wrong (and self-disables with no GTF: a real novel
         #     anchors its own cluster). OFF -> no drops (byte-identical). ---
         drop_cols: set = set()
+        # Strand-keyed {strand: Counter{(donor,acceptor): n_reads}} of directly-
+        # observed read junctions; built lazily (reopens BAM) and shared by the
+        # cluster-recheck GTF guard and the Lever-2 junction-support gate.
+        observed_jct = None
         if getattr(self.config, "m2_cluster_recheck", False):
             from fin.scoring.m2_junction_nll import structural_wobble_clusters
 
@@ -1400,33 +1434,8 @@ class PipelineRunner:
                 # guard ONLY when a clustered low-abundance GTF sibling could actually
                 # be dropped — this reopens the BAM, so skip it for no-GTF intervals
                 # (and avoids touching the BAM for mocked/placeholder-path callers).
-                observed_jct = None
                 if gtf_drop and gtf_guard_needed(cand_list, em_ab, clusters, frac):
-                    from collections import Counter as _Counter
-                    from collections import defaultdict as _dd
-                    from fin.candidates.intron_chains import extract_intron_chain
-                    from fin.io.io_bam import BamReader
-                    # Strand-keyed: candidates/intervals are strand-separated, so an
-                    # antisense read at the same coordinates must NOT count as support.
-                    observed_jct = _dd(_Counter)
-                    # pysam region strings are 1-based; interval.start is 0-based, so
-                    # convert (start+1) and clamp to >=1. Using interval.region_string
-                    # directly would yield "chr:0-end" for contig-start intervals, which
-                    # pysam rejects (ValueError -> empty reads -> real GTFs wrongly seen
-                    # as zero-support and dropped).
-                    _region = f"{interval.chrom}:{max(interval.start + 1, 1)}-{interval.end}"
-                    with BamReader(self.config.bam_path) as _bam:
-                        for _rd in _bam.get_reads_in_region(_region):
-                            if (_rd.get("is_secondary") or _rd.get("is_supplementary")
-                                    or not _rd.get("is_mapped", True)):
-                                continue
-                            _ct = _rd.get("cigartuples")
-                            if not _ct:
-                                continue
-                            _strand = "-" if _rd.get("is_reverse") else "+"
-                            _ic = extract_intron_chain(_ct, _rd["reference_start"])
-                            for _intr in _ic.introns:
-                                observed_jct[_strand][_intr] += 1
+                    observed_jct = self._observed_junctions(interval)
                 drop_cols |= wobble_shadow_drops(
                     cand_list, em_ab, clusters, frac,
                     gtf_drop_enabled=gtf_drop,
@@ -1436,6 +1445,23 @@ class PipelineRunner:
                         self.config, "m2_cluster_recheck_gtf_min_jct_reads", 1
                     )),
                 )
+
+        # --- Lever 2: per-junction read-support gate. Drop a NOVEL multi-exon
+        #     candidate if ANY of its junctions is spliced by fewer than
+        #     novel_junction_min_reads directly-observed reads (CIGAR introns,
+        #     strand-keyed, matched within novel_junction_reads_tol bp) — a novel
+        #     junction must be carried by >= N reads, not just 1. gtf/fusion/mono
+        #     exempt. <=1 disables (byte-identical). Reuses observed_jct if the
+        #     cluster-recheck already built it; otherwise builds it here. ---
+        _njmr = int(getattr(self.config, "novel_junction_min_reads", 0))
+        if _njmr > 1:
+            from fin.scoring.m2_junction_nll import junction_support_drops
+            if observed_jct is None:
+                observed_jct = self._observed_junctions(interval)
+            drop_cols |= junction_support_drops(
+                cand_list, observed_jct, min_reads=_njmr,
+                tol=int(getattr(self.config, "novel_junction_reads_tol", 2)),
+            )
 
         # --- M2/M1 read-support gate. A multi-exon candidate (GTF or novel;
         #     fusion/mono exempt) must earn >=1 read's support: either it is some

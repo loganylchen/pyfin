@@ -297,6 +297,16 @@ class PipelineConfig:
     drop_mono_exon_novel: bool = False
     min_mono_exon_reads: int = 0
     min_mono_exon_length: int = 0
+    # Lever 2 — per-junction read-support gate (quant_mode="m2_em" only). Drop a
+    # NOVEL multi-exon candidate if ANY of its junctions is spliced by fewer than
+    # novel_junction_min_reads directly-observed reads (intron junctions extracted
+    # from primary-read CIGARs, strand-keyed, matched within novel_junction_reads
+    # _tol bp). I.e. a novel junction must be carried by >= N independent reads,
+    # not just 1. gtf/fusion/mono are EXEMPT (only novel multi-exon are gated).
+    # <= 1 disables (every assembled junction trivially has >=1 read) -> no drops
+    # (byte-identical). Default OFF; set 2 to require >=2 reads per novel junction.
+    novel_junction_min_reads: int = 0
+    novel_junction_reads_tol: int = 2
     # M2/M1 read-support gate (quant_mode="m2_em" only). A multi-exon candidate
     # (GTF or novel; fusion/mono exempt) is KEPT iff it earns >=1 read's support:
     #   (a) it is some read's M1 SOLE best-AS (the read's tie set is exactly this

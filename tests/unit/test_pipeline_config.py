@@ -43,6 +43,12 @@ def test_config_mono_exon_gate_defaults_off():
     assert c.min_mono_exon_length == 0
 
 
+def test_config_junction_support_gate_defaults_off():
+    c = PipelineConfig(bam_path="/tmp/x.bam")
+    assert c.novel_junction_min_reads == 0
+    assert c.novel_junction_reads_tol == 2
+
+
 def test_config_output_paths_default_none():
     c = PipelineConfig(bam_path="/tmp/x.bam")
     assert c.output_gtf is None

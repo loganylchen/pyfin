@@ -66,6 +66,8 @@ import click
 @click.option("--drop-mono-exon-novel/--no-drop-mono-exon-novel", "drop_mono_exon_novel", default=False, show_default=True, help="Lever 3: drop NOVEL single-exon (mono) candidates with weak support — hard read count < --min-mono-exon-reads OR genomic length < --min-mono-exon-length. Suppresses single-exon de novo noise (like IsoQuant's ONT default) WITHOUT a blanket drop: a high-support/long real intronless gene survives. gtf/fusion/multi-exon exempt. Needs at least one threshold > 0 to fire. Default OFF.")
 @click.option("--min-mono-exon-reads", default=0, show_default=True, type=int, help="(--drop-mono-exon-novel) Min hard reads for a novel mono candidate to survive. 0 disables this threshold.")
 @click.option("--min-mono-exon-length", default=0, show_default=True, type=int, help="(--drop-mono-exon-novel) Min genomic length (bp) for a novel mono candidate to survive. 0 disables this threshold.")
+@click.option("--novel-junction-min-reads", default=0, show_default=True, type=int, help="(--quant-mode m2_em only) Lever 2: drop a NOVEL multi-exon candidate if ANY of its junctions is spliced by fewer than N directly-observed reads (primary-read CIGAR introns, strand-keyed, within --novel-junction-reads-tol bp). I.e. a novel junction must be carried by >= N reads, not just 1. gtf/fusion/mono exempt. <=1 disables (byte-identical). Default 0; set 2 to require >=2 reads/junction.")
+@click.option("--novel-junction-reads-tol", default=2, show_default=True, type=int, help="(--novel-junction-min-reads) bp tolerance matching a candidate junction to an observed read junction.")
 @click.option(
     "--quant-mode",
     default="m2_em",
@@ -139,6 +141,8 @@ def main(
     drop_mono_exon_novel,
     min_mono_exon_reads,
     min_mono_exon_length,
+    novel_junction_min_reads,
+    novel_junction_reads_tol,
     quant_mode,
     m3_coherence,
     abundance_feedback,
@@ -262,6 +266,8 @@ def main(
         drop_mono_exon_novel=drop_mono_exon_novel,
         min_mono_exon_reads=min_mono_exon_reads,
         min_mono_exon_length=min_mono_exon_length,
+        novel_junction_min_reads=novel_junction_min_reads,
+        novel_junction_reads_tol=novel_junction_reads_tol,
         quant_mode=quant_mode,
         m3_coherence=m3_coherence,
         abundance_feedback=abundance_feedback,

@@ -698,6 +698,48 @@ def containment_shadow_drops(cands, em_ab, *, tol_bp, min_ratio, exclude=None):
     return {s: terminal(p) for s, p in raw.items() if terminal(p) != s}
 
 
+def junction_support_drops(cands, observed_jct, *, min_reads, tol):
+    """Columns to drop: NOVEL multi-exon candidates with an under-supported junction.
+
+    Every junction (intron) of a NOVEL multi-exon candidate must be directly
+    spliced by ``>= min_reads`` reads observed in the interval — i.e. a novel
+    junction has to be carried by at least N independent reads, not just one. The
+    support count for a junction (donor, acceptor) is the number of observed read
+    introns within ``tol`` bp of BOTH boundaries (``observed_jct`` is the
+    STRAND-KEYED ``{strand: {(donor, acceptor): n_reads}}`` map built from primary
+    -read CIGARs). If ANY of a candidate's junctions falls below ``min_reads`` the
+    whole candidate is dropped.
+
+    GTF-passthrough (``source="gtf"``), fusion, and single-exon (mono, no
+    junctions) candidates are EXEMPT. ``min_reads <= 1`` (a junction trivially has
+    >= 1 read once assembled) or an empty/None ``observed_jct`` disables the gate
+    (returns an empty set — byte-identical / recall-safe).
+
+    RECALL NOTE: a genuine low-abundance novel isoform whose junction is seen by a
+    single read is dropped — this is the intended precision/recall trade ("a novel
+    junction needs >= 2 reads"). Keep ``min_reads`` small and tune on real data.
+    """
+    if min_reads <= 1 or not observed_jct:
+        return set()
+
+    def support(d, a, strand):
+        counter = observed_jct.get(strand, {})
+        return sum(n for (dd, aa), n in counter.items()
+                   if abs(dd - d) <= tol and abs(aa - a) <= tol)
+
+    drops: set = set()
+    for j, c in enumerate(cands):
+        if c.source != "novel":
+            continue
+        introns = c.intron_chain.introns
+        if len(introns) < 1:
+            continue  # mono: no junctions to support
+        strand = c.strand
+        if any(support(d, a, strand) < min_reads for (d, a) in introns):
+            drops.add(j)
+    return drops
+
+
 def gtf_guard_needed(cands, em_ab, clusters, frac):
     """True iff any cluster has a non-anchor GTF sibling below ``frac`` * anchor.
 
