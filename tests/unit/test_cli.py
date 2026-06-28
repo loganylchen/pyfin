@@ -55,6 +55,17 @@ def test_default_help_shows_containment_flags():
         assert flag in r.stdout, f"Missing containment flag in fin --help: {flag}"
 
 
+def test_default_help_shows_mono_exon_flags():
+    r = run_cli("--help")
+    assert r.returncode == 0
+    for flag in [
+        "--drop-mono-exon-novel",
+        "--min-mono-exon-reads",
+        "--min-mono-exon-length",
+    ]:
+        assert flag in r.stdout, f"Missing mono-exon flag in fin --help: {flag}"
+
+
 def test_default_help_shows_description():
     r = run_cli("--help")
     assert r.returncode == 0

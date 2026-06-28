@@ -285,6 +285,18 @@ class PipelineConfig:
     # Fold the shadow only when its EM abundance <= parent's * this ratio (shadow
     # must be the minor member). 1.0 = fold any shadow at or below the parent.
     containment_min_abundance_ratio: float = 1.0
+    # Lever 3 — mono-exon (single-exon) read-support gate (post-aggregate, in
+    # _finalize_and_write). Drop a NOVEL single-exon candidate whose hard read
+    # count < min_mono_exon_reads OR genomic length < min_mono_exon_length.
+    # Suppresses single-exon de novo noise (IsoQuant drops novel unspliced by
+    # default for ONT) WITHOUT a blanket hard drop: a high-support / long real
+    # intronless gene (histone, many ncRNAs) survives. gtf/fusion/multi-exon are
+    # EXEMPT (only novel mono are gated). Master switch drop_mono_exon_novel must
+    # be True AND at least one threshold > 0 to fire; otherwise no drops
+    # (byte-identical). Defaults OFF.
+    drop_mono_exon_novel: bool = False
+    min_mono_exon_reads: int = 0
+    min_mono_exon_length: int = 0
     # M2/M1 read-support gate (quant_mode="m2_em" only). A multi-exon candidate
     # (GTF or novel; fusion/mono exempt) is KEPT iff it earns >=1 read's support:
     #   (a) it is some read's M1 SOLE best-AS (the read's tie set is exactly this

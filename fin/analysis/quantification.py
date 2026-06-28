@@ -252,6 +252,53 @@ def soft_mass_ratio_drops(
     return drops
 
 
+def mono_exon_drops(
+    results: Dict[str, QuantResult],
+    *,
+    min_reads: int,
+    min_len: int,
+) -> set:
+    """Return candidate_ids to drop by the mono-exon (single-exon) support gate.
+
+    A NOVEL single-exon candidate is dropped iff its hard read count
+    (``num_assigned_reads``) < ``min_reads`` OR its genomic length
+    (``end - start``) < ``min_len``. Multi-exon, GTF-passthrough
+    (``source="gtf"``) and fusion candidates are EXEMPT — only novel mono
+    candidates are gated.
+
+    Rationale: single-exon de novo transcripts are enriched for transcriptional
+    / alignment noise (IsoQuant suppresses novel unspliced models by default for
+    ONT; gffcompare treats mono models as noise). This applies that suppression
+    WITHOUT a blanket hard drop, so a high-support / long single-exon transcript
+    — a real intronless gene (histone, many ncRNAs) — survives. Both thresholds
+    default 0 (disabled): when ``min_reads <= 0 AND min_len <= 0`` the filter
+    returns an empty set (no drops / byte-identical).
+
+    REAL-DATA WARNING: a blanket single-exon drop hurts genuine intronless genes;
+    keep the thresholds conservative and tune against real expressed-truth.
+
+    INTERACTION: this gate is INDEPENDENT of the locus-relative novel filters
+    (isoform_fraction / soft_mass_ratio / fulllen), which all exempt mono. It is
+    NOT, however, the only filter touching mono: the polyA+5' retention filter
+    (``polya5p_drops``, default ON with signal) gates ALL novel candidates incl.
+    mono (only gtf/fusion exempt). So when polyA is active a mono must pass BOTH
+    gates to survive, and much weak single-exon noise is already removed by polyA
+    before this lever adds value — account for that when tuning / ablating.
+    """
+    if min_reads <= 0 and min_len <= 0:
+        return set()
+    drops: set = set()
+    for qr in results.values():
+        if qr.source != "novel" or len(qr.exons) != 1:
+            continue
+        length = qr.end - qr.start
+        if (min_reads > 0 and qr.num_assigned_reads < min_reads) or (
+            min_len > 0 and length < min_len
+        ):
+            drops.add(qr.candidate_id)
+    return drops
+
+
 def _five_three(start: int, end: int, strand: str) -> Tuple[int, int]:
     """(genomic 5' end, genomic 3' end) for a span on the given strand."""
     if strand == "-":

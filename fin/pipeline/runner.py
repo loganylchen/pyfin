@@ -17,6 +17,7 @@ from fin.analysis.quantification import (
     compute_fulllen_frac,
     fulllen_fraction_drops,
     isoform_fraction_drops,
+    mono_exon_drops,
     soft_mass_ratio_drops,
     polya5p_drops,
     quantify_transcripts,
@@ -251,6 +252,40 @@ class PipelineRunner:
                     "Dropped %d novel transcripts with soft/hard read ratio >= %.2f",
                     len(drop_ids),
                     self.config.max_soft_mass_ratio,
+                )
+
+        # Lever 3 — mono-exon (single-exon) read-support gate. Drop a NOVEL
+        # single-exon candidate whose hard read count < min_mono_exon_reads OR
+        # genomic length < min_mono_exon_length. Suppresses single-exon de novo
+        # noise (IsoQuant drops novel unspliced by default for ONT) WITHOUT a
+        # blanket drop — a high-support/long real intronless gene survives.
+        # gtf/fusion/multi-exon exempt. Needs the master switch AND >=1 threshold
+        # > 0; otherwise no drops (byte-identical).
+        if (
+            _score_filter_on
+            and getattr(self.config, "drop_mono_exon_novel", False)
+            and (
+                self.config.min_mono_exon_reads > 0
+                or self.config.min_mono_exon_length > 0
+            )
+        ):
+            drop_ids = mono_exon_drops(
+                aggregated,
+                min_reads=self.config.min_mono_exon_reads,
+                min_len=self.config.min_mono_exon_length,
+            )
+            if drop_ids:
+                aggregated = {
+                    cid: qr
+                    for cid, qr in aggregated.items()
+                    if cid not in drop_ids
+                }
+                logger.info(
+                    "Dropped %d novel single-exon transcripts (mono gate: "
+                    "min_reads=%d min_len=%d)",
+                    len(drop_ids),
+                    self.config.min_mono_exon_reads,
+                    self.config.min_mono_exon_length,
                 )
 
         # Full-length end-coherence filter (FLAIR/TALON-style full-length read

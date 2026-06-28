@@ -63,6 +63,9 @@ import click
 @click.option("--containment-collapse/--no-containment-collapse", "containment_collapse", default=False, show_default=True, help="(--quant-mode m2_em only) Lever 1: after EM, fold a NOVEL candidate whose intron chain is a pure 3' SUFFIX of a longer candidate (a 5'-truncation shadow: same downstream junctions, 3' terminus within --containment-3p-tol-bp, 5' end interior, EM abundance <= parent * --containment-min-abundance-ratio) into that longer parent (reads + soft mass reassigned, shadow dropped). gtf candidates are never folded away. STRICT suffix match -> exon-skip/alt-3'-end isoforms never folded. WARNING: cannot distinguish 5'-truncation from a genuine low-abundance alt-TSS isoform -> NOT recall-safe; default OFF, enable only after real-data validation.")
 @click.option("--containment-3p-tol-bp", default=20, show_default=True, type=int, help="(--containment-collapse) bp tolerance for the shadow's 3' terminus matching the parent's 3' terminus.")
 @click.option("--containment-min-abundance-ratio", default=1.0, show_default=True, type=float, help="(--containment-collapse) Fold a shadow only when its EM abundance <= parent's * this ratio (shadow must be the minor member). 1.0 = fold any shadow at or below the parent.")
+@click.option("--drop-mono-exon-novel/--no-drop-mono-exon-novel", "drop_mono_exon_novel", default=False, show_default=True, help="Lever 3: drop NOVEL single-exon (mono) candidates with weak support — hard read count < --min-mono-exon-reads OR genomic length < --min-mono-exon-length. Suppresses single-exon de novo noise (like IsoQuant's ONT default) WITHOUT a blanket drop: a high-support/long real intronless gene survives. gtf/fusion/multi-exon exempt. Needs at least one threshold > 0 to fire. Default OFF.")
+@click.option("--min-mono-exon-reads", default=0, show_default=True, type=int, help="(--drop-mono-exon-novel) Min hard reads for a novel mono candidate to survive. 0 disables this threshold.")
+@click.option("--min-mono-exon-length", default=0, show_default=True, type=int, help="(--drop-mono-exon-novel) Min genomic length (bp) for a novel mono candidate to survive. 0 disables this threshold.")
 @click.option(
     "--quant-mode",
     default="m2_em",
@@ -133,6 +136,9 @@ def main(
     containment_collapse,
     containment_3p_tol_bp,
     containment_min_abundance_ratio,
+    drop_mono_exon_novel,
+    min_mono_exon_reads,
+    min_mono_exon_length,
     quant_mode,
     m3_coherence,
     abundance_feedback,
@@ -253,6 +259,9 @@ def main(
         containment_collapse=containment_collapse,
         containment_3p_tol_bp=containment_3p_tol_bp,
         containment_min_abundance_ratio=containment_min_abundance_ratio,
+        drop_mono_exon_novel=drop_mono_exon_novel,
+        min_mono_exon_reads=min_mono_exon_reads,
+        min_mono_exon_length=min_mono_exon_length,
         quant_mode=quant_mode,
         m3_coherence=m3_coherence,
         abundance_feedback=abundance_feedback,

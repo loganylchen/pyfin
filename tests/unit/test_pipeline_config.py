@@ -36,6 +36,13 @@ def test_config_containment_collapse_defaults_off():
     assert c.containment_min_abundance_ratio == 1.0
 
 
+def test_config_mono_exon_gate_defaults_off():
+    c = PipelineConfig(bam_path="/tmp/x.bam")
+    assert c.drop_mono_exon_novel is False
+    assert c.min_mono_exon_reads == 0
+    assert c.min_mono_exon_length == 0
+
+
 def test_config_output_paths_default_none():
     c = PipelineConfig(bam_path="/tmp/x.bam")
     assert c.output_gtf is None
