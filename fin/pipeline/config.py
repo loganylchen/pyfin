@@ -307,6 +307,21 @@ class PipelineConfig:
     # (byte-identical). Default OFF; set 2 to require >=2 reads per novel junction.
     novel_junction_min_reads: int = 0
     novel_junction_reads_tol: int = 2
+    # Junction-dominance gate (PRE-EM, in process_interval after the canonical
+    # gate). The "junction-first" idea: before quantification, drop a NOVEL
+    # multi-exon candidate if ANY of its junctions is either (a) supported by
+    # fewer than junction_dominance_min_reads directly-observed reads, OR (b) NOT
+    # locally dominant — i.e. a DIFFERENT observed junction within
+    # junction_dominance_window_bp (beyond junction_dominance_tol_bp) carries
+    # strictly more reads. Unlike a pure read-count gate this also removes
+    # multi-read wobble shadows (they lose to the stronger true junction a few bp
+    # away). Pure mapping evidence (CIGAR introns, strand-keyed), no snap; runs
+    # before EM so shadows never compete for reads. gtf/fusion/mono exempt.
+    # OFF (default) -> no drops (byte-identical).
+    junction_dominance_filter: bool = False
+    junction_dominance_min_reads: int = 2
+    junction_dominance_window_bp: int = 20
+    junction_dominance_tol_bp: int = 2
     # M2/M1 read-support gate (quant_mode="m2_em" only). A multi-exon candidate
     # (GTF or novel; fusion/mono exempt) is KEPT iff it earns >=1 read's support:
     #   (a) it is some read's M1 SOLE best-AS (the read's tie set is exactly this

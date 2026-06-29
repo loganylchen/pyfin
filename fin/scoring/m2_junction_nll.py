@@ -740,6 +740,63 @@ def junction_support_drops(cands, observed_jct, *, min_reads, tol):
     return drops
 
 
+def dominant_junction_drops(cands, observed_jct, *, min_reads, window, tol=2):
+    """Columns to drop: NOVEL candidates with a weak OR non-dominant junction.
+
+    The "junction-first" gate: a candidate junction (donor, acceptor) is VALID
+    iff BOTH
+      - it has ``>= min_reads`` directly-observed reads within ``tol`` bp
+        (``observed_jct`` = strand-keyed ``{strand: {(d,a): n}}`` from CIGARs), AND
+      - it is LOCALLY DOMINANT: no DIFFERENT observed junction within ``window`` bp
+        (beyond the ``tol`` "same-junction" zone) carries STRICTLY more reads.
+    A NOVEL multi-exon candidate is dropped if ANY of its junctions is invalid.
+
+    The dominance clause is what a pure read-count gate lacks: a multi-read wobble
+    shadow (its junction mis-placed a few bp off the true site) has read support
+    but LOSES to the stronger true junction a few bp away -> dropped. A genuine
+    alternative splice site that is the local winner (or ties) survives.
+
+    GTF/fusion/mono exempt. ``min_reads <= 0`` or empty ``observed_jct`` disables
+    (returns an empty set — byte-identical).
+
+    RECALL NOTE: two genuine, comparably-supported alternative splice sites closer
+    than ``window`` bp could demote the weaker real one. Keep ``window`` modest and
+    tune on real data; this is the precision/recall knob.
+    """
+    if min_reads <= 0 or not observed_jct:
+        return set()
+
+    def support(d, a, strand):
+        c = observed_jct.get(strand, {})
+        return sum(n for (dd, aa), n in c.items()
+                   if abs(dd - d) <= tol and abs(aa - a) <= tol)
+
+    def competitor(d, a, strand):
+        c = observed_jct.get(strand, {})
+        best = 0
+        for (dd, aa), n in c.items():
+            near = abs(dd - d) <= window and abs(aa - a) <= window
+            same = abs(dd - d) <= tol and abs(aa - a) <= tol
+            if near and not same and n > best:
+                best = n
+        return best
+
+    drops: set = set()
+    for j, c in enumerate(cands):
+        if c.source != "novel":
+            continue
+        introns = c.intron_chain.introns
+        if len(introns) < 1:
+            continue
+        strand = c.strand
+        for (d, a) in introns:
+            s = support(d, a, strand)
+            if s < min_reads or s < competitor(d, a, strand):
+                drops.add(j)
+                break
+    return drops
+
+
 def gtf_guard_needed(cands, em_ab, clusters, frac):
     """True iff any cluster has a non-anchor GTF sibling below ``frac`` * anchor.
 

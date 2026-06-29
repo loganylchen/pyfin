@@ -73,6 +73,18 @@ def test_default_help_shows_junction_support_flags():
         assert flag in r.stdout, f"Missing junction-support flag in fin --help: {flag}"
 
 
+def test_default_help_shows_junction_dominance_flags():
+    r = run_cli("--help")
+    assert r.returncode == 0
+    for flag in [
+        "--junction-dominance-filter",
+        "--junction-dominance-min-reads",
+        "--junction-dominance-window-bp",
+        "--junction-dominance-tol-bp",
+    ]:
+        assert flag in r.stdout, f"Missing junction-dominance flag in fin --help: {flag}"
+
+
 def test_default_help_shows_description():
     r = run_cli("--help")
     assert r.returncode == 0

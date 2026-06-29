@@ -68,6 +68,10 @@ import click
 @click.option("--min-mono-exon-length", default=0, show_default=True, type=int, help="(--drop-mono-exon-novel) Min genomic length (bp) for a novel mono candidate to survive. 0 disables this threshold.")
 @click.option("--novel-junction-min-reads", default=0, show_default=True, type=int, help="(--quant-mode m2_em only) Lever 2: drop a NOVEL multi-exon candidate if ANY of its junctions is spliced by fewer than N directly-observed reads (primary-read CIGAR introns, strand-keyed, within --novel-junction-reads-tol bp). I.e. a novel junction must be carried by >= N reads, not just 1. gtf/fusion/mono exempt. <=1 disables (byte-identical). Default 0; set 2 to require >=2 reads/junction.")
 @click.option("--novel-junction-reads-tol", default=2, show_default=True, type=int, help="(--novel-junction-min-reads) bp tolerance matching a candidate junction to an observed read junction.")
+@click.option("--junction-dominance-filter/--no-junction-dominance-filter", "junction_dominance_filter", default=False, show_default=True, help="(--quant-mode m2_em only) Junction-first PRE-EM gate: drop a NOVEL multi-exon candidate if ANY junction has < --junction-dominance-min-reads observed reads OR is not locally dominant (a different observed junction within --junction-dominance-window-bp carries strictly more reads). Removes multi-read wobble shadows (they lose to the stronger true junction nearby) BEFORE EM, so shadows never compete for reads. Pure mapping evidence, no snap. gtf/fusion/mono exempt. Default OFF.")
+@click.option("--junction-dominance-min-reads", default=2, show_default=True, type=int, help="(--junction-dominance-filter) Min observed reads for a novel junction to survive.")
+@click.option("--junction-dominance-window-bp", default=20, show_default=True, type=int, help="(--junction-dominance-filter) Neighborhood (bp) within which a stronger DIFFERENT junction dominates/demotes this one.")
+@click.option("--junction-dominance-tol-bp", default=2, show_default=True, type=int, help="(--junction-dominance-filter) bp tolerance treating an observed junction as the SAME as the candidate junction (vs a competing neighbor).")
 @click.option(
     "--quant-mode",
     default="m2_em",
@@ -143,6 +147,10 @@ def main(
     min_mono_exon_length,
     novel_junction_min_reads,
     novel_junction_reads_tol,
+    junction_dominance_filter,
+    junction_dominance_min_reads,
+    junction_dominance_window_bp,
+    junction_dominance_tol_bp,
     quant_mode,
     m3_coherence,
     abundance_feedback,
@@ -268,6 +276,10 @@ def main(
         min_mono_exon_length=min_mono_exon_length,
         novel_junction_min_reads=novel_junction_min_reads,
         novel_junction_reads_tol=novel_junction_reads_tol,
+        junction_dominance_filter=junction_dominance_filter,
+        junction_dominance_min_reads=junction_dominance_min_reads,
+        junction_dominance_window_bp=junction_dominance_window_bp,
+        junction_dominance_tol_bp=junction_dominance_tol_bp,
         quant_mode=quant_mode,
         m3_coherence=m3_coherence,
         abundance_feedback=abundance_feedback,

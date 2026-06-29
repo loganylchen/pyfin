@@ -49,6 +49,14 @@ def test_config_junction_support_gate_defaults_off():
     assert c.novel_junction_reads_tol == 2
 
 
+def test_config_junction_dominance_gate_defaults_off():
+    c = PipelineConfig(bam_path="/tmp/x.bam")
+    assert c.junction_dominance_filter is False
+    assert c.junction_dominance_min_reads == 2
+    assert c.junction_dominance_window_bp == 20
+    assert c.junction_dominance_tol_bp == 2
+
+
 def test_config_output_paths_default_none():
     c = PipelineConfig(bam_path="/tmp/x.bam")
     assert c.output_gtf is None

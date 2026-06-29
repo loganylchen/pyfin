@@ -412,6 +412,15 @@ class PipelineRunner:
         if getattr(self.config, "canonical_gate", False):
             self._apply_canonical_gate(candidate_set, chrom_seq)
 
+        # --- Phase 1.7: Junction-dominance gate (PRE-EM, junction-first) ---
+        # Drop NOVEL multi-exon candidates with a junction that is weak
+        # (< min_reads observed) or non-dominant (a different observed junction
+        # within window bp carries strictly more reads). Removes multi-read wobble
+        # shadows before EM so they never compete for reads. gtf/fusion/mono
+        # exempt. OFF (default) -> no drops (byte-identical).
+        if getattr(self.config, "junction_dominance_filter", False):
+            self._apply_junction_dominance_gate(candidate_set, interval)
+
         if candidate_set.num_candidates == 0:
             logger.info("No candidates for interval %s", interval.region_string)
             return None
@@ -1643,6 +1652,36 @@ class PipelineRunner:
                 candidate_set.interval.region_string,
             )
         candidate_set.candidates = kept
+
+    def _apply_junction_dominance_gate(
+        self, candidate_set: CandidateSet, interval: GenomicInterval
+    ) -> None:
+        """Pre-EM junction-first gate: drop NOVEL candidates with a weak or
+        non-dominant junction (mutates candidate_set.candidates in place).
+
+        Builds the directly-observed read junctions (reopens BAM) and drops a
+        novel multi-exon candidate if any junction has < min_reads reads or is
+        dominated by a stronger DIFFERENT junction within the window. read_ids is
+        left untouched (reads off a dropped candidate re-compete in quant).
+        """
+        from fin.scoring.m2_junction_nll import dominant_junction_drops
+
+        observed = self._observed_junctions(interval)
+        drops = dominant_junction_drops(
+            candidate_set.candidates, observed,
+            min_reads=int(self.config.junction_dominance_min_reads),
+            window=int(self.config.junction_dominance_window_bp),
+            tol=int(getattr(self.config, "junction_dominance_tol_bp", 2)),
+        )
+        if drops:
+            kept = [c for i, c in enumerate(candidate_set.candidates)
+                    if i not in drops]
+            logger.info(
+                "Junction-dominance gate: dropped %d/%d novel candidates "
+                "(interval %s)", len(drops), len(candidate_set.candidates),
+                interval.region_string,
+            )
+            candidate_set.candidates = kept
 
     def cleanup(self):
         """Close file handles."""
