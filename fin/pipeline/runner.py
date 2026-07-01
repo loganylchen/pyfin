@@ -1158,21 +1158,41 @@ class PipelineRunner:
         from fin.candidates.intron_chains import extract_intron_chain
         from fin.io.io_bam import BamReader
 
+        # No/unreadable BAM (mocked or placeholder callers, e.g. /dev/null,
+        # truncated/invalid files) -> return None so support gates self-disable
+        # (recall-safe), rather than raising. Cheap path-exists check first, then
+        # catch any open/fetch failure from BamReader/pysam.
+        if not self.config.bam_path or not Path(self.config.bam_path).exists():
+            return None
         observed: dict = defaultdict(Counter)
         region = f"{interval.chrom}:{max(interval.start + 1, 1)}-{interval.end}"
-        with BamReader(self.config.bam_path) as bam:
-            for rd in bam.get_reads_in_region(region):
-                if (rd.get("is_secondary") or rd.get("is_supplementary")
-                        or not rd.get("is_mapped", True)):
-                    continue
-                ct = rd.get("cigartuples")
-                if not ct:
-                    continue
-                strand = "-" if rd.get("is_reverse") else "+"
-                ic = extract_intron_chain(ct, rd["reference_start"])
-                for intr in ic.introns:
-                    observed[strand][intr] += 1
-        return observed
+        try:
+            with BamReader(self.config.bam_path) as bam:
+                for rd in bam.get_reads_in_region(region):
+                    if (rd.get("is_secondary") or rd.get("is_supplementary")
+                            or not rd.get("is_mapped", True)):
+                        continue
+                    ct = rd.get("cigartuples")
+                    if not ct:
+                        continue
+                    strand = "-" if rd.get("is_reverse") else "+"
+                    ic = extract_intron_chain(ct, rd["reference_start"])
+                    for intr in ic.introns:
+                        observed[strand][intr] += 1
+        except Exception as exc:  # unreadable/invalid BAM -> recall-safe no-op
+            logger.warning(
+                "observed-junction build failed for %s (%s); support gates "
+                "self-disable for this interval", interval.region_string, exc,
+            )
+            return None
+        # Empty -> None (NOT an empty map). get_reads_in_region() swallows a fetch
+        # failure into [], which would otherwise yield an empty dict that the GTF
+        # wobble guard reads as "zero support" and could use to drop a low-abundance
+        # GTF sibling; None makes it keep siblings (recall-safe). A real interval
+        # with novel multi-exon candidates always has >=1 observed junction (its
+        # candidates came from spliced reads), so empty only means no spliced reads
+        # / a swallowed fetch error -> either way, self-disable the gates.
+        return observed if observed else None
 
     def _quant_m2_em(
         self,

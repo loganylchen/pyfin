@@ -43,9 +43,10 @@ def test_config_mono_exon_gate_defaults_off():
     assert c.min_mono_exon_length == 0
 
 
-def test_config_junction_support_gate_defaults_off():
+def test_config_junction_support_gate_default_on():
+    # Lever 2 promoted to production default (>=2 reads per novel junction).
     c = PipelineConfig(bam_path="/tmp/x.bam")
-    assert c.novel_junction_min_reads == 0
+    assert c.novel_junction_min_reads == 2
     assert c.novel_junction_reads_tol == 2
 
 

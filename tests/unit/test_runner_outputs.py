@@ -274,3 +274,30 @@ class TestMaxRInScoringTsv:
         row = lines[1].strip().split("\t")
         max_r_idx = header.index("max_R")
         assert float(row[max_r_idx]) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# _observed_junctions: recall-safe self-disable on missing/unreadable BAM
+# (Lever 2 is default-on, so this runs on every m2_em interval).
+# ---------------------------------------------------------------------------
+
+import types  # noqa: E402
+
+
+def _stub_interval():
+    return types.SimpleNamespace(
+        chrom="chr1", start=0, end=100, region_string="chr1:1-100"
+    )
+
+
+def test_observed_junctions_none_on_missing_bam():
+    r = PipelineRunner.__new__(PipelineRunner)
+    r.config = PipelineConfig(bam_path="/nonexistent/does_not_exist.bam")
+    assert r._observed_junctions(_stub_interval()) is None
+
+
+def test_observed_junctions_none_on_unreadable_bam():
+    # An existing-but-invalid BAM (e.g. /dev/null) must self-disable, not raise.
+    r = PipelineRunner.__new__(PipelineRunner)
+    r.config = PipelineConfig(bam_path="/dev/null")
+    assert r._observed_junctions(_stub_interval()) is None

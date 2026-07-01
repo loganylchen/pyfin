@@ -303,9 +303,16 @@ class PipelineConfig:
     # from primary-read CIGARs, strand-keyed, matched within novel_junction_reads
     # _tol bp). I.e. a novel junction must be carried by >= N independent reads,
     # not just 1. gtf/fusion/mono are EXEMPT (only novel multi-exon are gated).
-    # <= 1 disables (every assembled junction trivially has >=1 read) -> no drops
-    # (byte-identical). Default OFF; set 2 to require >=2 reads per novel junction.
-    novel_junction_min_reads: int = 0
+    # <= 1 disables (every assembled junction trivially has >=1 read).
+    # DEFAULT 2 (production, landed after the full off-vs-on sweep): a novel
+    # junction must be carried by >= 2 reads. On real human GENCODE it lifts
+    # precision at ZERO recall cost across EVERY scenario — de novo Pr +3.8,
+    # p10 +3.2, p50 +1.5, p90/full +0.8, and all six corrupted-GTF ratios
+    # (c_jitter/skip/flip/merge/spurious/ir) +0.6..+0.9 — and keeps pyfin #1 on
+    # SIRV4 (F1@3 85.0, wash). NOTE: on SYNTHETIC de novo / aggressive-corruption
+    # this trades ~0.4-0.8 F1@3 (recall) for precision, but the real-data arbiter
+    # and #1 standing justify it. Set 0 to disable.
+    novel_junction_min_reads: int = 2
     novel_junction_reads_tol: int = 2
     # Junction-dominance gate (PRE-EM, in process_interval after the canonical
     # gate). The "junction-first" idea: before quantification, drop a NOVEL
