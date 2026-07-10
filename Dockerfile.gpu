@@ -9,11 +9,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install krill signal backend (in-memory eventalign + DTW) plus signal IO deps.
-# krill ships CPU-only manylinux wheels (pip picks cp310 for ubuntu22.04's python
-# 3.10), so DTW (fin._dtw delegates to krill) runs on CPU here — GPU-accelerated
-# DTW would need a CUDA krill build, which the index does not yet publish. The EM
-# step is still GPU-accelerated via cupy below. --no-deps keeps the custom index
-# from resolving numpy/etc (those arrive with pyfin).
+# We install the CPU-only krill wheel ON PURPOSE: a GPU (cu122) krill build EXISTS
+# (`.../krill-dist/cu122/simple/`, `krill==<ver>+cu122`), but measurement showed it
+# is NOT faster for pyfin — the DTW compute is break-even (many SMALL per-interval
+# DTW calls) and, with N interval-worker processes on a many-core host, CPU krill
+# parallelises across cores while GPU krill funnels every small call through one
+# device (+ a one-time CUDA/JIT warmup). GPU only wins on few LARGE batched DTW
+# calls, so a real GPU-DTW speedup needs pyfin-side DTW batching first. The EM step
+# is still GPU-accelerated via cupy below. --no-deps keeps the custom index from
+# resolving numpy/etc (those arrive with pyfin).
 RUN pip3 install --no-cache-dir pyslow5 pyfastx \
     && pip3 install --no-cache-dir "krill==0.1.5" --no-deps \
         --index-url https://loganylchen.github.io/krill-dist/simple/
