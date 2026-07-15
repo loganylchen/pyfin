@@ -63,6 +63,11 @@ import click
 @click.option("--containment-collapse/--no-containment-collapse", "containment_collapse", default=False, show_default=True, help="(--quant-mode m2_em only) Lever 1: after EM, fold a NOVEL candidate whose intron chain is a pure 3' SUFFIX of a longer candidate (a 5'-truncation shadow: same downstream junctions, 3' terminus within --containment-3p-tol-bp, 5' end interior, EM abundance <= parent * --containment-min-abundance-ratio) into that longer parent (reads + soft mass reassigned, shadow dropped). gtf candidates are never folded away. STRICT suffix match -> exon-skip/alt-3'-end isoforms never folded. WARNING: cannot distinguish 5'-truncation from a genuine low-abundance alt-TSS isoform -> NOT recall-safe; default OFF, enable only after real-data validation.")
 @click.option("--containment-3p-tol-bp", default=20, show_default=True, type=int, help="(--containment-collapse) bp tolerance for the shadow's 3' terminus matching the parent's 3' terminus.")
 @click.option("--containment-min-abundance-ratio", default=1.0, show_default=True, type=float, help="(--containment-collapse) Fold a shadow only when its EM abundance <= parent's * this ratio (shadow must be the minor member). 1.0 = fold any shadow at or below the parent.")
+@click.option("--containment-cluster/--no-containment-cluster", "containment_cluster", default=True, show_default=True, help="(--quant-mode m2_em only, DEFAULT ON) Recall-SAFER generalisation of --containment-collapse (runs AFTER all structural/support gates, so a shadow is never folded into an already-dropped parent). Drop a NOVEL candidate whose intron chain is a contiguous SUB-CHAIN (within --containment-cluster-wobble-bp per junction) of a longer candidate — a truncation/exon-skip shadow the same-intron-count wobble cluster never groups — ONLY when it is a low-support shadow by BOTH EM abundance (<= parent * --containment-cluster-min-ab-ratio) AND supporting-read count (<= parent * --containment-cluster-min-read-ratio). The read-support guard keeps MOST genuine short/alt-TSS isoforms (on p00 a truncation shadow carries ~1 read vs a real short isoform's ~13), but a genuine low-fraction minor isoform can still be dropped — hence recall-safER not recall-safe. gtf/fusion never dropped. DEFAULT ON; --no-containment-cluster disables.")
+@click.option("--containment-cluster-wobble-bp", default=6, show_default=True, type=int, help="(--containment-cluster) per-junction bp tolerance matching the sub-chain to the parent's window.")
+@click.option("--containment-cluster-min-ab-ratio", default=0.3, show_default=True, type=float, help="(--containment-cluster) drop only when shadow EM abundance <= parent's * this ratio.")
+@click.option("--containment-cluster-min-read-ratio", default=0.3, show_default=True, type=float, help="(--containment-cluster) drop only when shadow supporting-read count <= parent's * this ratio (the recall-safER guard: keeps most genuine short isoforms, but a real low-fraction minor isoform can still fall below the ratio).")
+@click.option("--containment-cluster-max-shadow-reads", default=10, show_default=True, type=int, help="(--containment-cluster) absolute cap: never drop a shadow carrying more than N supporting reads regardless of the ratio (protects a genuine low-fraction isoform of a very-high-support parent). 0 disables (ratio-only).")
 @click.option("--drop-mono-exon-novel/--no-drop-mono-exon-novel", "drop_mono_exon_novel", default=False, show_default=True, help="Lever 3: drop NOVEL single-exon (mono) candidates with weak support — hard read count < --min-mono-exon-reads OR genomic length < --min-mono-exon-length. Suppresses single-exon de novo noise (like IsoQuant's ONT default) WITHOUT a blanket drop: a high-support/long real intronless gene survives. gtf/fusion/multi-exon exempt. Needs at least one threshold > 0 to fire. Default OFF.")
 @click.option("--min-mono-exon-reads", default=0, show_default=True, type=int, help="(--drop-mono-exon-novel) Min hard reads for a novel mono candidate to survive. 0 disables this threshold.")
 @click.option("--min-mono-exon-length", default=0, show_default=True, type=int, help="(--drop-mono-exon-novel) Min genomic length (bp) for a novel mono candidate to survive. 0 disables this threshold.")
@@ -154,6 +159,11 @@ def main(
     quant_mode,
     m3_coherence,
     abundance_feedback,
+    containment_cluster,
+    containment_cluster_wobble_bp,
+    containment_cluster_min_ab_ratio,
+    containment_cluster_min_read_ratio,
+    containment_cluster_max_shadow_reads,
     abundance_length_norm,
     threads,
     gpu_workers,
@@ -295,6 +305,11 @@ def main(
     finally:
         runner.cleanup()
 
+        containment_cluster=containment_cluster,
+        containment_cluster_wobble_bp=containment_cluster_wobble_bp,
+        containment_cluster_min_ab_ratio=containment_cluster_min_ab_ratio,
+        containment_cluster_min_read_ratio=containment_cluster_min_read_ratio,
+        containment_cluster_max_shadow_reads=containment_cluster_max_shadow_reads,
     click.echo(f"Assembly output written to {output_dir}/")
 
 

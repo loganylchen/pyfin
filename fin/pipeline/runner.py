@@ -1550,6 +1550,31 @@ class PipelineRunner:
                     # the union count == sum, but union is robust either way. Soft
                     # mass is added so aggregate_across_intervals (single interval:
                     # unique/weight ratio == 1) reports parent + shadow abundance.
+        # --- Containment-cluster drop: drop a NOVEL candidate whose intron chain is a
+        #     contiguous SUB-CHAIN of a longer candidate (a truncation / exon-skip shadow
+        #     the same-intron-count wobble cluster never groups) when it is a low-support
+        #     shadow by BOTH EM abundance AND supporting-read count. Runs AFTER all the
+        #     structural/support gates so ``exclude=drop_cols`` covers every already-doomed
+        #     parent — a shadow is never folded into a parent that is itself dropped. The
+        #     read-support guard keeps most genuine low-abundance short/alt-TSS isoforms;
+        #     gtf/fusion never dropped. DEFAULT-ON (--no-containment-cluster disables). ---
+        if getattr(self.config, "containment_cluster", False):
+            from fin.scoring.m2_junction_nll import containment_cluster_drops
+            em_ab_c = np.asarray(R).sum(axis=0)
+            read_counts = [len(getattr(c, "supporting_read_ids", ()) or ())
+                           for c in cand_list]
+            drop_cols |= containment_cluster_drops(
+                cand_list, em_ab_c, read_counts,
+                wobble_bp=int(getattr(self.config, "containment_cluster_wobble_bp", 6)),
+                min_ab_ratio=float(getattr(
+                    self.config, "containment_cluster_min_ab_ratio", 0.3)),
+                min_read_ratio=float(getattr(
+                    self.config, "containment_cluster_min_read_ratio", 0.3)),
+                max_shadow_reads=int(getattr(
+                    self.config, "containment_cluster_max_shadow_reads", 0)),
+                exclude=set(drop_cols),
+            )
+
                     union = set(pq.assigned_read_ids) | set(sq.assigned_read_ids)
                     pq.assigned_read_ids = tuple(sorted(union))
                     pq.num_assigned_reads = len(union)
@@ -1569,7 +1594,8 @@ class PipelineRunner:
             drop_ids = {cand_list[j].candidate_id for j in drop_cols}
             quant_results = [q for q in quant_results if q.candidate_id not in drop_ids]
             logger.info(
-                "m2_em interval %s: cluster recheck dropped %d wobble shadows",
+                "m2_em interval %s: post-EM gates dropped %d candidates "
+                "(cluster-recheck / support / containment)",
                 interval.region_string, len(drop_ids),
             )
         logger.info(

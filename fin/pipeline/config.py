@@ -285,6 +285,31 @@ class PipelineConfig:
     # Fold the shadow only when its EM abundance <= parent's * this ratio (shadow
     # must be the minor member). 1.0 = fold any shadow at or below the parent.
     containment_min_abundance_ratio: float = 1.0
+    # Containment-CLUSTER drop (recall-SAFER generalisation of containment_collapse):
+    # drop a NOVEL candidate whose intron chain is a contiguous SUB-CHAIN (within
+    # containment_cluster_wobble_bp per junction) of a longer candidate — the
+    # truncation / exon-skip shadow the same-intron-count wobble cluster never groups
+    # — ONLY when it is a low-support shadow by BOTH EM abundance (<= parent *
+    # min_ab_ratio) AND supporting-read count (<= parent * min_read_ratio). The
+    # read-support guard is what containment_collapse lacked: measured on p00 a
+    # truncation shadow carries ~1 read while a genuine short/alt-TSS isoform carries
+    # reads comparable to the parent (median 13), so requiring BOTH keeps MOST real short
+    # isoforms — but a genuine low-fraction minor isoform (e.g. parent 100 reads, real
+    # 20-read isoform <30% abundance) can still be dropped, so this is recall-safER, not
+    # recall-safe. DEFAULT-ON (production): a targeted, read-guarded precision lever that
+    # drops truncation/exon-skip mapping shadows the wobble cluster misses. Validated on
+    # the gencode sweep (p00 honestF1 +1.0 at <=0.5 corrRec cost; c_jitter/full
+    # non-regressing in the containment-only ablation). The absolute cap
+    # (containment_cluster_max_shadow_reads) bounds the residual recall risk.
+    containment_cluster: bool = True
+    containment_cluster_wobble_bp: int = 6
+    containment_cluster_min_ab_ratio: float = 0.3
+    containment_cluster_min_read_ratio: float = 0.3
+    # absolute cap: never drop a shadow carrying more than this many supporting reads,
+    # regardless of the ratio (a real low-fraction isoform of a very-high-support parent
+    # can exceed min_read_ratio*parent). 0 disables (ratio-only). 10 keeps the validated
+    # benefit (shadows are ~1-3 reads) while never folding a >10-read candidate.
+    containment_cluster_max_shadow_reads: int = 10
     # Lever 3 — mono-exon (single-exon) read-support gate (post-aggregate, in
     # _finalize_and_write). Drop a NOVEL single-exon candidate whose hard read
     # count < min_mono_exon_reads OR genomic length < min_mono_exon_length.

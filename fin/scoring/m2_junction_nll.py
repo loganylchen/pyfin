@@ -698,6 +698,103 @@ def containment_shadow_drops(cands, em_ab, *, tol_bp, min_ratio, exclude=None):
     return {s: terminal(p) for s, p in raw.items() if terminal(p) != s}
 
 
+def containment_cluster_drops(cands, em_ab, read_counts, *, wobble_bp,
+                              min_ab_ratio, min_read_ratio, max_shadow_reads=0,
+                              exclude=None):
+    """Drop a NOVEL candidate whose intron chain is a contiguous SUB-CHAIN of a longer
+    candidate, when it is a low-support shadow.
+
+    Extends the same-intron-count wobble clustering (:func:`structural_wobble_clusters`)
+    to the case the cluster step misses: a SHORTER candidate whose chain is a contiguous
+    sub-sequence (within ``wobble_bp`` per junction) of a longer candidate never joins
+    the same-count buckets, so a truncation / exon-skip shadow survives as its own
+    output. Here candidate ``a`` folds into a longer ``b`` iff ``a``'s chain is a
+    contiguous sub-chain of ``b`` (suffix = 5'/3' truncation, prefix, or internal) and
+    ``a`` is a low-support shadow of ``b``:
+
+        em_ab[a] <= em_ab[b] * min_ab_ratio  AND  read_counts[a] <= read_counts[b] * min_read_ratio
+
+    The READ-SUPPORT guard is the recall-SAFER discriminator that pure-abundance
+    containment (:func:`containment_shadow_drops`) lacked: measured on p00, a truncation/
+    degradation shadow carries ~1 supporting read while a GENUINE short isoform carries
+    reads comparable to the parent (median 13). Requiring BOTH low abundance AND low read
+    support keeps MOST real alt-TSS/short isoforms while dropping read-mapping shadows.
+    NOT strictly recall-safe: a genuine low-fraction short isoform (e.g. parent 100 reads,
+    a real 20-read minor isoform at <30% abundance) can still be dropped by the ratios —
+    hence the conservative ratios AND the absolute ``max_shadow_reads`` cap. Empirically
+    (p00/p10/full/corruption) corrRec moved <=0.5 with the production defaults, which is
+    why the feature ships DEFAULT-ON.
+
+    Only NOVEL candidates are foldable shadows; FUSION candidates are excluded as BOTH
+    shadow and parent (their intron chains are decorative); a parent may be gtf or novel.
+    Chained containment (a in b in c) drops every non-terminal member.
+
+    Args:
+        cands: list of TranscriptCandidate (column order = em_ab index order).
+        em_ab: per-candidate EM abundance, index-aligned to cands.
+        read_counts: per-candidate supporting-read count, index-aligned to cands.
+        wobble_bp: per-junction bp tolerance matching the sub-chain to the parent window.
+        min_ab_ratio: fold only when em_ab[shadow] <= em_ab[parent] * min_ab_ratio.
+        min_read_ratio: fold only when read_counts[shadow] <= read_counts[parent] * min_read_ratio.
+        max_shadow_reads: absolute cap — never fold a shadow with MORE than this many
+            reads, regardless of the ratio (protects a genuine low-fraction minor isoform
+            of a very-high-support parent). 0 disables the cap (ratio-only).
+        exclude: optional set of columns to skip entirely (already dropped elsewhere).
+
+    Returns:
+        set of candidate columns to drop.
+    """
+    exclude = exclude or set()
+    from collections import defaultdict
+
+    chains = [tuple(sorted(c.intron_chain.introns)) for c in cands]
+    buckets = defaultdict(list)
+    for j, c in enumerate(cands):
+        if j in exclude:
+            continue
+        if c.source == "fusion":
+            continue  # fusion is never a shadow NOR a parent (chains are decorative)
+        if len(chains[j]) >= 1:  # multi-exon only
+            buckets[(c.chrom, c.strand)].append(j)
+
+    def sub_of(a, b):
+        """True iff chain ``a`` is a contiguous sub-sequence of chain ``b`` within
+        ``wobble_bp`` on every junction (a strictly shorter)."""
+        ca, cb = chains[a], chains[b]
+        if len(ca) >= len(cb):
+            return False
+        for off in range(len(cb) - len(ca) + 1):
+            if all(abs(ca[k][0] - cb[off + k][0]) <= wobble_bp and
+                   abs(ca[k][1] - cb[off + k][1]) <= wobble_bp
+                   for k in range(len(ca))):
+                return True
+        return False
+
+    # A shadow is dropped iff it is a strict sub-chain of SOME longer candidate and a
+    # low-support minor member of it (both guards). The specific parent is irrelevant
+    # to the drop set (the shadow is removed regardless of which parent it folds to),
+    # so we return the drop columns directly. Chained containment (a in b in c) drops
+    # every non-terminal member: each of a,b is a low-support sub-chain of a longer one.
+    drops: set = set()
+    for cols in buckets.values():
+        for a in cols:
+            if cands[a].source != "novel":
+                continue
+            # absolute cap: never fold a shadow carrying more than max_shadow_reads
+            # reads, regardless of the ratio (a real low-fraction minor isoform of a
+            # very-high-support parent can exceed min_read_ratio*parent yet still be a
+            # genuine transcript). 0 disables the cap (ratio-only). Bounds the recall
+            # risk that makes default-ON safe.
+            if max_shadow_reads and read_counts[a] > max_shadow_reads:
+                continue
+            if any(b != a and sub_of(a, b)
+                   and em_ab[a] <= em_ab[b] * min_ab_ratio
+                   and read_counts[a] <= read_counts[b] * min_read_ratio
+                   for b in cols):
+                drops.add(a)
+    return drops
+
+
 def junction_support_drops(cands, observed_jct, *, min_reads, tol):
     """Columns to drop: NOVEL multi-exon candidates with an under-supported junction.
 
