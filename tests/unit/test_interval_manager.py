@@ -278,19 +278,20 @@ class TestIsFusionRead:
         assert is_fusion_read(read_dict) is False
 
     def test_is_fusion_read_long_soft_clip_start(self):
-        """Test reads with long soft-clip at start are fusion."""
+        """Test reads with long soft-clip at start are fusion (threshold 250)."""
         # CIGAR operation 4 is soft-clip
-        read_dict = {"is_supplementary": False, "cigartuples": [(4, 60), (0, 100)]}
+        read_dict = {"is_supplementary": False, "cigartuples": [(4, 260), (0, 100)]}
         assert is_fusion_read(read_dict) is True
 
     def test_is_fusion_read_long_soft_clip_end(self):
-        """Test reads with long soft-clip at end are fusion."""
-        read_dict = {"is_supplementary": False, "cigartuples": [(0, 100), (4, 60)]}
+        """Test reads with long soft-clip at end are fusion (threshold 250)."""
+        read_dict = {"is_supplementary": False, "cigartuples": [(0, 100), (4, 260)]}
         assert is_fusion_read(read_dict) is True
 
     def test_is_fusion_read_short_soft_clip(self):
-        """Test reads with short soft-clips are not fusion."""
-        read_dict = {"is_supplementary": False, "cigartuples": [(4, 30), (0, 100)]}
+        """Test reads with sub-threshold soft-clips are not fusion (dRNA poly-A/adapter
+        tails run to ~200bp; only a >= 250bp terminal soft-clip flags a chimera)."""
+        read_dict = {"is_supplementary": False, "cigartuples": [(4, 200), (0, 100)]}
         assert is_fusion_read(read_dict) is False
 
     def test_is_fusion_read_no_cigar(self):

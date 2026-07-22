@@ -20,8 +20,8 @@ def _write_synthetic_bam(tmp_path):
             ("read_norm_3", 1200, [(0, 100)], False, None, "100"),
             # Fusion-by-supplementary: supplementary flag set
             ("read_fus_1", 1500, [(0, 80)], True, "chr2,5000,+,80M,60,0;", "80"),
-            # Fusion-by-soft-clip: 60bp soft clip at start (>= 50 threshold)
-            ("read_fus_2", 2000, [(4, 60), (0, 100)], False, None, "100"),
+            # Fusion-by-soft-clip: 260bp soft clip at start (>= 250 threshold)
+            ("read_fus_2", 2000, [(4, 260), (0, 100)], False, None, "100"),
         ]):
             a = pysam.AlignedSegment(pysam.AlignmentHeader.from_dict(header))
             a.query_name = qn

@@ -128,7 +128,7 @@ def test_internal_gap_front_with_adapter():
 # collect_chimeric_reads
 # --------------------------------------------------------------------------
 def test_collect_emits_clean_back_clip_fusion():
-    r = _read(qname="f1", chrom="chr1", ref_start=1000, ref_end=1100, back_clip=80)
+    r = _read(qname="f1", chrom="chr1", ref_start=1000, ref_end=1100, back_clip=260)
     aligner = _FakeAligner([_FakeHit("chr2", 5000, 5080, 1, 0, 80, mlen=80)])
     out = collect_chimeric_reads([r], aligner, max_internal_gap_bp=30)
     assert len(out) == 1
@@ -141,7 +141,7 @@ def test_collect_emits_clean_back_clip_fusion():
 
 
 def test_collect_drops_adapter_chimera():
-    r = _read(qname="art", ref_end=1100, back_clip=120)
+    r = _read(qname="art", ref_end=1100, back_clip=260)
     # partner aligns only after a 50 bp unmapped prefix in the clip -> gap 50
     aligner = _FakeAligner([_FakeHit("chr2", 5000, 5070, 1, 50, 120, mlen=70)])
     out = collect_chimeric_reads([r], aligner, max_internal_gap_bp=30)
@@ -149,14 +149,14 @@ def test_collect_drops_adapter_chimera():
 
 
 def test_collect_keeps_when_gap_below_threshold():
-    r = _read(qname="ok", ref_end=1100, back_clip=120)
+    r = _read(qname="ok", ref_end=1100, back_clip=260)
     aligner = _FakeAligner([_FakeHit("chr2", 5000, 5090, 1, 20, 110, mlen=90)])
     out = collect_chimeric_reads([r], aligner, max_internal_gap_bp=30)
     assert len(out) == 1 and out[0].internal_gap == 20
 
 
 def test_collect_gap_guard_disabled_when_zero():
-    r = _read(qname="big", ref_end=1100, back_clip=200)
+    r = _read(qname="big", ref_end=1100, back_clip=260)
     aligner = _FakeAligner([_FakeHit("chr2", 5000, 5100, 1, 100, 200, mlen=100)])
     out = collect_chimeric_reads([r], aligner, max_internal_gap_bp=0)
     assert len(out) == 1 and out[0].internal_gap == 100
@@ -169,7 +169,7 @@ def test_collect_skips_non_fusion_reads():
 
 
 def test_collect_skips_when_segment_unmapped():
-    r = _read(qname="nohit", back_clip=80)
+    r = _read(qname="nohit", back_clip=260)
     aligner = _FakeAligner([])  # partner segment maps nowhere
     assert collect_chimeric_reads([r], aligner) == []
 
@@ -181,7 +181,7 @@ def test_collect_none_aligner_returns_empty():
 
 def test_collect_minus_strand_partner_back_clip():
     # back clip + '-' partner: junction edge is the partner's HIGH genomic end.
-    r = _read(qname="rev", ref_end=1100, back_clip=80)
+    r = _read(qname="rev", ref_end=1100, back_clip=260)
     aligner = _FakeAligner([_FakeHit("chr3", 200, 280, -1, 0, 80, mlen=80)])
     out = collect_chimeric_reads([r], aligner, max_internal_gap_bp=30)
     assert len(out) == 1
@@ -192,7 +192,7 @@ def test_collect_minus_strand_partner_back_clip():
 def test_collect_minus_strand_primary_back_clip():
     # pysam normalizes the primary cigar to genome-forward regardless of
     # is_reverse, so a back clip's junction is ref_end even on a '-' read.
-    r = _read(qname="rp", ref_start=1000, ref_end=1100, is_reverse=True, back_clip=80)
+    r = _read(qname="rp", ref_start=1000, ref_end=1100, is_reverse=True, back_clip=260)
     aligner = _FakeAligner([_FakeHit("chr2", 5000, 5080, 1, 0, 80, mlen=80)])
     out = collect_chimeric_reads([r], aligner, max_internal_gap_bp=30)
     assert len(out) == 1
@@ -203,8 +203,9 @@ def test_collect_minus_strand_primary_back_clip():
 def test_collect_front_clip_plus_strands():
     # front clip on '+' primary with '+' partner: arm A junction = ref_start,
     # arm B junction = partner r_en.
-    r = _read(qname="fc", ref_start=1000, ref_end=1100, front_clip=70, aln_len=100)
-    aligner = _FakeAligner([_FakeHit("chr2", 5000, 5070, 1, 0, 70, mlen=70)])
+    r = _read(qname="fc", ref_start=1000, ref_end=1100, front_clip=260, aln_len=100)
+    # partner maps the full 260bp front clip -> r_en 5070 (junction edge), gap 0
+    aligner = _FakeAligner([_FakeHit("chr2", 4810, 5070, 1, 0, 260, mlen=260)])
     out = collect_chimeric_reads([r], aligner, max_internal_gap_bp=30)
     assert len(out) == 1
     assert out[0].breakpoint_a == ("chr1", 1000, "+")   # front -> ref_start on '+'

@@ -146,7 +146,7 @@ def is_fusion_read(read_dict: Dict) -> bool:
     if read_dict.get('is_supplementary'):
         return True
     
-    SOFT_CLIP_THRESHOLD = 50
+    SOFT_CLIP_THRESHOLD = 250
     # logger.debug(f'Checking Fusion reads:{read_dict.get("cigartuples")}')
     if not read_dict.get('cigartuples'):
         return False
