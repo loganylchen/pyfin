@@ -23,9 +23,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+
+from fin.analysis.quantification import (
+    fulllen_fraction_drops,
+    isoform_fraction_drops,
+    mono_exon_drops,
+    soft_mass_ratio_drops,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -311,3 +319,207 @@ def select_m2_interval(
         )
 
     return quant_results, outcomes
+
+
+def select_global(
+    config,
+    aggregated: Dict[str, "object"],
+    apply_polya5p_fn: Callable,
+) -> Tuple[Dict[str, "object"], List[SelectionOutcome]]:
+    """Run the GLOBAL post-aggregate selection cascade over the aggregated transcript dict.
+
+    Byte-identical move of the filter section of the runner's ``_finalize_and_write``: the A4
+    per-source abundance floor, then isoform-fraction / soft-mass / mono-exon / full-length /
+    polyA drops, each gated (as before) by ``enable_score_filter`` and its own threshold, over the
+    survivors of the earlier filters (sequential, locus-relative). ``apply_polya5p_fn`` is the
+    runner's ``_apply_polya5p_filter`` bound method (needs the signal reader), passed at call time.
+    Returns ``(filtered_aggregated, outcomes)``. Diagnostic dumps, gene-id resolution, and the
+    GTF/TSV/BEDPE writers stay in the runner (M4 splits the writers).
+    """
+    outcomes: List[SelectionOutcome] = []
+
+    def _record(cids, reason: str) -> None:
+        for cid in cids:
+            outcomes.append(SelectionOutcome(cid, "drop", reason, scope="global"))
+
+    # R5 ablation: enable_score_filter=False disables all post-EM filters so
+    # the ablation row sees unfiltered EM output (AC7).
+    _score_filter_on = getattr(config, "enable_score_filter", True)
+
+    # A4: post-EM abundance floor with per-source thresholds (on soft EM
+    # abundance). NOVEL transcripts face min_abundance (the `fin` CLI defaults
+    # it to 3). GTF transcripts face their own lighter floor min_gtf_abundance
+    # (CLI default 1) so a GTF candidate whose EM soft-mass is below 1 read is
+    # dropped — pyfin is not a copy-annotation tool — while genuine annotated
+    # transcripts with real EM support are kept. When floor_gtf_abundance is
+    # set (--floor-gtf-abundance) GTF is raised to the NOVEL floor — precisely
+    # max(min_gtf_abundance, min_abundance) so the toggle never LOWERS an
+    # explicit GTF floor — reproducing the SIRV gffcompare T>=3 with-GTF
+    # operating point. Fusion is ALWAYS exempt so opt-in fusion calls are
+    # never silently dropped. SIRV-tuned: these floors are overfit and gut
+    # genuine low-abundance isoform recall on real data; disable via
+    # --min-abundance 0 / --min-gtf-abundance 0.
+    # NOTE: the separate ablation harness (fin/ablation/runner.py) keeps GTF
+    # exempt regardless — that divergence is intentional (no-GTF de novo).
+    floor_gtf = config.floor_gtf_abundance
+    gtf_floor = (
+        max(config.min_gtf_abundance, config.min_abundance)
+        if floor_gtf
+        else config.min_gtf_abundance
+    )
+    if _score_filter_on and (config.min_abundance > 0.0 or gtf_floor > 0.0):
+        before = len(aggregated)
+        kept = {
+            cid: qr
+            for cid, qr in aggregated.items()
+            if qr.source == "fusion"
+            or (
+                qr.abundance >= gtf_floor
+                if qr.source == "gtf"
+                else qr.abundance >= config.min_abundance
+            )
+        }
+        dropped = before - len(kept)
+        if dropped:
+            _record(set(aggregated) - set(kept), "min_abundance")
+            logger.info(
+                "Dropped %d transcripts with abundance < floor "
+                "(novel < %.3f, gtf < %.3f)",
+                dropped,
+                config.min_abundance,
+                gtf_floor,
+            )
+        aggregated = kept
+
+    # Minimum isoform fraction (locus-relative abundance) filter. Drops
+    # NOVEL multi-exon transcripts whose abundance is below
+    # `min_isoform_fraction` of the dominant overlapping novel isoform at
+    # the same locus — the standard Cufflinks --min-isoform-fraction /
+    # StringTie -f heuristic (the low-fraction tail is enriched for
+    # incompletely-spliced precursors and assembly artifacts).
+    # gtf/fusion/mono candidates are EXEMPT. SIRV WARNING: the conservative
+    # literature default (0.01) is used; SIRV's F1-optimal ~0.4 is overfit.
+    if _score_filter_on and config.min_isoform_fraction > 0.0:
+        drop_ids = isoform_fraction_drops(
+            aggregated, config.min_isoform_fraction
+        )
+        if drop_ids:
+            aggregated = {
+                cid: qr
+                for cid, qr in aggregated.items()
+                if cid not in drop_ids
+            }
+            _record(drop_ids, "isoform_fraction")
+            logger.info(
+                "Dropped %d novel transcripts with isoform fraction < %.3f",
+                len(drop_ids),
+                config.min_isoform_fraction,
+            )
+
+    # Soft-mass / hard-read ratio filter. Drops a NOVEL multi-exon candidate
+    # whose EM soft abundance is inflated far above its honest hard-read
+    # (argmax) count — the signature of a wobble shadow that steals little
+    # real read support but accumulates fractional soft crumbs from a
+    # high-abundance structural near-copy (anchor). Catches the HIGH-relative
+    # -abundance shadows that the isoform_fraction / cluster-recheck levers
+    # cannot (a shadow at 32% of its anchor passes a fraction gate). Pure EM
+    # evidence; gtf/fusion/mono exempt. max_soft_mass_ratio<=0 disables.
+    if _score_filter_on and config.max_soft_mass_ratio > 0.0:
+        drop_ids = soft_mass_ratio_drops(
+            aggregated, config.max_soft_mass_ratio
+        )
+        if drop_ids:
+            aggregated = {
+                cid: qr
+                for cid, qr in aggregated.items()
+                if cid not in drop_ids
+            }
+            _record(drop_ids, "soft_mass_ratio")
+            logger.info(
+                "Dropped %d novel transcripts with soft/hard read ratio >= %.2f",
+                len(drop_ids),
+                config.max_soft_mass_ratio,
+            )
+
+    # Lever 3 — mono-exon (single-exon) read-support gate. Drop a NOVEL
+    # single-exon candidate whose hard read count < min_mono_exon_reads OR
+    # genomic length < min_mono_exon_length. Suppresses single-exon de novo
+    # noise (IsoQuant drops novel unspliced by default for ONT) WITHOUT a
+    # blanket drop — a high-support/long real intronless gene survives.
+    # gtf/fusion/multi-exon exempt. Needs the master switch AND >=1 threshold
+    # > 0; otherwise no drops (byte-identical).
+    if (
+        _score_filter_on
+        and getattr(config, "drop_mono_exon_novel", False)
+        and (
+            config.min_mono_exon_reads > 0
+            or config.min_mono_exon_length > 0
+        )
+    ):
+        drop_ids = mono_exon_drops(
+            aggregated,
+            min_reads=config.min_mono_exon_reads,
+            min_len=config.min_mono_exon_length,
+        )
+        if drop_ids:
+            aggregated = {
+                cid: qr
+                for cid, qr in aggregated.items()
+                if cid not in drop_ids
+            }
+            _record(drop_ids, "mono_exon")
+            logger.info(
+                "Dropped %d novel single-exon transcripts (mono gate: "
+                "min_reads=%d min_len=%d)",
+                len(drop_ids),
+                config.min_mono_exon_reads,
+                config.min_mono_exon_length,
+            )
+
+    # Full-length end-coherence filter (FLAIR/TALON-style full-length read
+    # support). Drops NOVEL multi-exon (>=2 intron) transcripts whose
+    # fraction of full-length assigned reads (read genomic 5' AND 3' both
+    # within fulllen_window_bp of the candidate's ends) is below
+    # min_fulllen_fraction. The fulllen_frac METRIC itself is signal-free
+    # (BAM primary-alignment spans only), but it is computed per-interval
+    # over the quant assignment population (the m2_em/m1_em EM hard
+    # assignments or, under argmax, the M2-tiebreak picks); candidates with
+    # fulllen_frac < 0 (unreachable or never scored) are EXEMPT and never
+    # dropped. gtf/fusion/mono exempt. ORTHOGONAL to the isoform-fraction
+    # filter above (the two stack on the competitor metric). SIRV WARNING:
+    # the default 0.1 is SIRV-tuned; re-tune or disable on real data.
+    if _score_filter_on and config.min_fulllen_fraction > 0.0:
+        drop_ids = fulllen_fraction_drops(
+            aggregated, config.min_fulllen_fraction
+        )
+        if drop_ids:
+            aggregated = {
+                cid: qr
+                for cid, qr in aggregated.items()
+                if cid not in drop_ids
+            }
+            _record(drop_ids, "fulllen_fraction")
+            logger.info(
+                "Dropped %d novel transcripts with full-length fraction < %.3f",
+                len(drop_ids),
+                config.min_fulllen_fraction,
+            )
+
+    # polyA + 5'-proximity candidate-retention filter. Drop a candidate
+    # unless >= min_polya5p_reads of its assigned reads BOTH have a krill
+    # whole-read polyA tail (qc PASS & length > min_polya_length) AND map
+    # with their genomic 5' end within polya5p_window_bp of the candidate's
+    # 5' end. GTF candidates are exempt by default (polya5p_exempt_gtf=True,
+    # like fusion); only novel candidates are gated. Requires signal; no-ops
+    # when absent.
+    if (
+        _score_filter_on
+        and getattr(config, "min_polya5p_reads", 0) > 0
+        and config.signal_path
+        and Path(config.signal_path).exists()
+    ):
+        before_keys = set(aggregated)
+        aggregated = apply_polya5p_fn(aggregated)
+        _record(before_keys - set(aggregated), "polya5p")
+
+    return aggregated, outcomes
