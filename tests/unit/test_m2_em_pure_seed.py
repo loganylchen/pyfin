@@ -118,9 +118,9 @@ def _run(cfg, captured, m3_matrix=None, tie_nll_fn=_fake_tie_nll):
     ), patch.object(PipelineRunner, "_tie_nll", tie_nll_fn), patch.object(
         PipelineRunner, "_eff_lengths", return_value=None
     ), patch(
-        "fin.pipeline.runner.em_with_coherence", side_effect=_fake_em
+        "fin.pipeline.assignment.em_with_coherence", side_effect=_fake_em
     ), patch(
-        "fin.pipeline.runner.quantify_transcripts", return_value=[]
+        "fin.pipeline.assignment.quantify_transcripts", return_value=[]
     ), patch(
         "fin.scoring.m3_junction_coherence.build_m3_coherence",
         return_value=(m3_matrix if m3_matrix is not None

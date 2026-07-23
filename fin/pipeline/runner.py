@@ -26,6 +26,7 @@ from fin.candidates.canonical import chain_all_canonical, parse_motifs
 from fin.candidates.dataclasses import CandidateSet
 from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
 from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+from fin.pipeline.assignment import Assigner
 from fin.pipeline.config import PipelineConfig
 from fin.scoring.em_inputs import build_em_matrices
 from fin.scoring.krill_tiebreak import krill_tiebreak
@@ -53,6 +54,8 @@ class PipelineRunner:
         # lazily on first fusion interval and cached (indexing is expensive).
         self._fusion_genome_aligner = None
         self._fusion_aligner_built = False
+        # m2_em assignment layer (mappy AS -> tie_nll -> d_tx -> EM -> quantify).
+        self._assigner = Assigner(config)
 
     def setup(self):
         """Open file handles and load references.
@@ -1372,215 +1375,20 @@ class PipelineRunner:
         signal scoring is in-memory krill — no f5c CLI. (``m4_source`` does not
         affect this path.)
         """
-        import mappy
-
-        from fin.scoring.m2_junction_nll import MISSING
-        from fin.scoring.mappy_preset import get_m1_preset
-        from fin.scoring.mappy_score import score_hit
-
-        cand_list = list(candidate_set.candidates)
-        read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
-        reads_iter = [(rid, read_sequences.get(rid, "")) for rid in read_ids]
-        reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
-        if not reads_iter:
+        qo = self._assigner.assign(
+            candidate_set, read_ids,
+            tie_nll_fn=self._tie_nll, eff_lengths_fn=self._eff_lengths,
+        )
+        if qo is None:
             return []
-
-        read_seqs = {rid: seq for rid, seq in reads_iter}
-        n_c = len(cand_list)
-        max_iter_em = (
-            self.config.em_max_iter_override
-            if self.config.em_max_iter_override is not None
-            else self.config.em_max_iter
-        )
-
-        # --- Per-candidate mappy aligners + raw AS matrix (tie detection). This
-        #     single AS pass also yields the kept-read set, so the previously
-        #     separate mappy_multimap_responsibilities pass (which recomputed the
-        #     identical AS only to derive kept reads, never feeding the EM) is
-        #     removed: ~40% of the per-interval cost on dense loci. ---
-        preset = get_m1_preset()
-        aligners = [
-            mappy.Aligner(seq=c.sequence, preset=preset) if c.sequence else None
-            for c in cand_list
-        ]
-        all_ids = [rid for rid, _ in reads_iter]
-        raw_all = np.full((len(all_ids), n_c), -np.inf, dtype=np.float64)
-        for i, rid in enumerate(all_ids):
-            seq = read_seqs[rid]
-            for j, aln in enumerate(aligners):
-                if aln is None:
-                    continue
-                best = None
-                for h in aln.map(seq):
-                    v = score_hit(h)
-                    if v is None:
-                        continue
-                    if best is None or v > best:
-                        best = v
-                if best is not None:
-                    raw_all[i, j] = best
-
-        # Keep reads with >=1 candidate at AS>0 (matches the removed
-        # mappy_multimap_responsibilities keep rule: row.sum()>0 over best>=0 AS).
-        # Mirror its MAPPY_R1_MIN_AS env knob so the kept set stays identical when
-        # that R1 tuning threshold is set.
-        import os as _os
-        _min_as = float(_os.environ.get("MAPPY_R1_MIN_AS", "0") or "0")
-        keep_rows = ((raw_all > 0.0) & (raw_all >= _min_as)).any(axis=1)
-        if not keep_rows.any():
-            return []
-        kept_read_ids = [rid for rid, k in zip(all_ids, keep_rows) if k]
-        raw = raw_all[keep_rows]
-        n_r = len(kept_read_ids)
-
-        # --- Junction NLL on the per-read AS-tie cells only. ---
-        nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read = self._tie_nll(
-            kept_read_ids, read_seqs, cand_list, aligners, raw
-        )
-
-        # --- d_tx skeleton. Gate OFF: the pure soft NLL-graded skeleton (M1/AS
-        #     picks the tie set; junction-NLL is the only graded distance; cells
-        #     outside the tie stay MISSING). Gate ON: the diff-region coverage
-        #     decision matrix with proportional redistribution of ambiguous reads
-        #     (no read is ever dropped -> recall-safe). ---
-        gate = bool(getattr(self.config, "m2_diff_cover_gate", False))
-        d_tx = np.full((n_r, n_c), MISSING, dtype=np.float64)
-        if not gate:
-            for i in range(n_r):
-                tie = ties_by_read.get(i)
-                if not tie:
-                    continue
-                if len(tie) < 2:
-                    d_tx[i, tie[0]] = 0.0
-                    continue
-                nlls = nlls_by_read.get(i)
-                if not nlls:
-                    # nothing scorable -> flat tie (EM 1/K split among ties)
-                    for j in tie:
-                        d_tx[i, j] = 0.0
-                    continue
-                lo = min(nlls.values())
-                hi = max(nlls.values())
-                miss = (hi - lo) + _M2_EM_PAD
-                for j in tie:
-                    d_tx[i, j] = (nlls[j] - lo) if j in nlls else miss
-            small = (d_tx > 0) & (d_tx < 1e5)
-            diffs = d_tx[small]
-            sigma2 = max(float(np.median(diffs)) if diffs.size else 1.0, 1e-3)
-            d_tx[small] = d_tx[small] / sigma2
-        else:
-            # Diff-region coverage gate. margin = runner-up NLL - best NLL.
-            #
-            # Pass A: classify each tied read and accumulate a per-candidate prior
-            # (covered_vote) from ONLY the covered + distinguishing reads -- the
-            # gold-standard evidence of the locus isoform ratio. Ambiguous reads
-            # (no junction signal, or covered-but-indistinguishable that did not
-            # straddle every diff span) are deferred to Pass B.
-            margin_thr = float(getattr(self.config, "m2_diff_cover_margin", 0.0))
-            covered_vote = np.zeros(n_c, dtype=np.float64)
-            fuzzy: List[int] = []
-            for i in range(n_r):
-                tie = ties_by_read.get(i)
-                if not tie:
-                    continue
-                if len(tie) < 2:
-                    d_tx[i, tie[0]] = 0.0
-                    continue
-                nlls = nlls_by_read.get(i)
-                if not nlls:
-                    fuzzy.append(i)  # no junction signal -> defer (was: drop)
-                    continue
-                ordered = sorted(nlls.items(), key=lambda kv: kv[1])
-                best_j = ordered[0][0]
-                margin = (ordered[1][1] - ordered[0][1]) if len(ordered) > 1 else float("inf")
-                # The redistribution PRIOR (covered_vote) must be fed only by reads
-                # with EXPLICIT coverage: the per-read _tie_nll fallback leaves
-                # cover_by_read empty (coverage uncomputable), so a missing entry
-                # must NOT seed covered_vote (else the fallback path biases fuzzy
-                # reads off unverified coverage).
-                covered_for_vote = cover_by_read.get(i) is True
-                if margin >= margin_thr:
-                    # M2 distinguishes -> hard assign to the lowest-NLL candidate.
-                    d_tx[i, best_j] = 0.0  # every other tie cell stays MISSING
-                    if covered_for_vote:
-                        # Only covered+distinguishing reads define the locus ratio.
-                        covered_vote[best_j] += 1.0
-                else:
-                    # Indistinguishable (margin < thr), whether or not covered:
-                    # defer to Pass B and redistribute by the covered-read ratio
-                    # (flat 1/K only when the tie has no covered prior). The margin
-                    # is thus the SOLE decider of hard-assign vs ratio-follow.
-                    fuzzy.append(i)
-
-            # Pass B: redistribute each ambiguous read across its tie in proportion
-            # to the covered_vote ratio of those candidates (one-shot prior, not an
-            # EM feedback loop). d_tx = -log(p) so softmax(-d_tx) reproduces p at
-            # sigma=1; a zero-prior candidate stays MISSING. If NONE of the tie
-            # candidates earned covered votes, fall back to the flat 1/K split
-            # (== legacy behavior -> signal-dead loci are never starved).
-            for i in fuzzy:
-                tie = ties_by_read[i]
-                masses = np.array([covered_vote[j] for j in tie], dtype=np.float64)
-                s = masses.sum()
-                if s > 0:
-                    p = masses / s
-                    for idx, j in enumerate(tie):
-                        if p[idx] > 0:
-                            d_tx[i, j] = -float(np.log(p[idx]))
-                        # p==0 -> leave MISSING (no covered support for this cand)
-                else:
-                    for j in tie:
-                        d_tx[i, j] = 0.0  # flat 1/K (recall-safe fallback)
-            # ON-path d_tx values are already calibrated (0 / -log(p) / MISSING) for
-            # sigma=1; no sigma2 normalization (that is the OFF skeleton's step).
-        d_tx = d_tx.astype(np.float32)
-
-        # --- M3 read×read junction-window DTW coherence (opt-in; DTW is costly).
-        #     Each read anchored to its d_tx-argmin (best) candidate; σ3 (median
-        #     non-zero DTW) calibrates it to O(1) so β mixes cleanly. ---
-        if self.config.m3_coherence:
-            from fin.scoring.m3_junction_coherence import build_m3_coherence
-
-            winner_col = np.asarray(d_tx).argmin(axis=1).astype(np.int64)
-            no_data = np.asarray(d_tx).min(axis=1) >= 1e5  # all-MISSING rows
-            winner_col[no_data] = -1
-            dist_read_to_read = build_m3_coherence(
-                kept_read_ids, read_seqs, cand_list, winner_col,
-                self.config.signal_path, pore=self.config.krill_pore,
-                junction_k=self.config.m2_tiebreak_junction_k, flank=_M2_EM_FLANK,
-                use_gpu=self.config.use_gpu,
-            )
-            nz = dist_read_to_read[dist_read_to_read > 0]
-            sigma3 = max(float(np.median(nz)) if nz.size else 1.0, 1e-3)
-            dist_read_to_read = (dist_read_to_read / sigma3).astype(np.float32)
-            beta_use = self.config.em_beta
-        else:
-            dist_read_to_read = np.zeros((n_r, n_r), dtype=np.float32)
-            beta_use = 0.0
-
-        R, hard_assignments, _ = em_with_coherence(
-            dist_read_to_tx=d_tx,
-            dist_read_to_read=dist_read_to_read,
-            sigma=1.0,
-            beta=beta_use,
-            max_iter=max_iter_em,
-            tol=self.config.em_tol,
-            verbose=False,
-            use_gpu=self.config.use_gpu,
-            abundance_feedback=self.config.abundance_feedback,
-            abundance_length_norm=self.config.abundance_length_norm,
-            eff_lengths=self._eff_lengths(cand_list),
-        )
-
-        if self.config.krill_tiebreak:
-            R = krill_tiebreak(
-                R=R, read_ids=kept_read_ids, read_seqs=read_seqs,
-                candidates=cand_list, signal_path=self.config.signal_path,
-                pore=self.config.krill_pore,
-                ambig_threshold=self.config.tiebreak_ambig_threshold,
-                use_gpu=self.config.use_gpu,
-            )
-            hard_assignments = R.argmax(axis=1)
+        R = qo.R
+        cand_list = qo.cand_list
+        ties_by_read = qo.ties_by_read
+        nlls_by_read = qo.nlls_by_read
+        quant_results = qo.quant_results
+        n_ties = qo.n_ties
+        n_refined = qo.n_refined
+        beta_use = qo.beta_use
 
         # --- Cluster-internal wobble recheck (post-EM, data-layer shadow kill).
         #     Cluster ALL multi-exon candidates by structure (same intron count +
@@ -1714,13 +1522,6 @@ class PipelineRunner:
                 exclude=set(drop_cols),
             )
 
-        quant_results = quantify_transcripts(
-            R, hard_assignments, cand_list, kept_read_ids
-        )
-        # Stamp max_R BEFORE any filtering: quant_results is column-aligned to R
-        # here (enumerate index == R column). Filtering would break that alignment.
-        for j, qr in enumerate(quant_results):
-            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
         # --- Lever 1: containment / 5'-truncation collapse (post-EM mass-fold).
         #     Fold a NOVEL candidate whose intron chain is a pure 3' suffix of a
         #     longer candidate (a 5'-truncation shadow) INTO that parent: the

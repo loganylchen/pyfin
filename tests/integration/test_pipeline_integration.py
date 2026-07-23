@@ -169,11 +169,11 @@ def _patch_m2_phases(num_reads: int = 10, num_cands: int = 2, candidates=None):
             return_value=dist_rr,
         ),
         "em_with_coherence": patch(
-            "fin.pipeline.runner.em_with_coherence",
+            "fin.pipeline.assignment.em_with_coherence",
             return_value=(R, hard, []),
         ),
         "quantify_transcripts": patch(
-            "fin.pipeline.runner.quantify_transcripts",
+            "fin.pipeline.assignment.quantify_transcripts",
             return_value=quant_results,
         ),
     }
