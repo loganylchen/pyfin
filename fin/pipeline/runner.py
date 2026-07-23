@@ -18,13 +18,17 @@ from fin.analysis.quantification import (
     polya5p_drops,
     quantify_transcripts,
 )
-from fin.candidates.canonical import chain_all_canonical, parse_motifs
 from fin.candidates.dataclasses import CandidateSet
 from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
 from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
 from fin.pipeline.assignment import Assigner
-from fin.pipeline.selection import select_global, select_m2_interval
 from fin.pipeline.config import PipelineConfig
+from fin.pipeline.selection import (
+    canonical_gate_select,
+    junction_dominance_select,
+    select_global,
+    select_m2_interval,
+)
 from fin.scoring.em_inputs import build_em_matrices
 from fin.scoring.krill_tiebreak import krill_tiebreak
 from fin.scoring.mappy_distance import compute_mappy_distance
@@ -1277,74 +1281,20 @@ class PipelineRunner:
     def _apply_canonical_gate(
         self, candidate_set: CandidateSet, chrom_seq: str
     ) -> None:
-        """Stage B: drop NOVEL multi-exon candidates with non-canonical junctions.
-
-        Mutates ``candidate_set.candidates`` in place, keeping a candidate iff:
-          - it is GTF-passthrough (source="gtf") or fusion (source="fusion") — EXEMPT;
-          - it is single-exon (empty intron chain) — trivially canonical;
-          - every internal junction's (donor,acceptor) motif is in canonical_motifs.
-
-        ``candidate_set.read_ids`` is left untouched so reads off a dropped
-        candidate are simply re-competed in quantification (they will land on a
-        surviving candidate by argmin).
-        """
-        if not chrom_seq:
-            # No genome sequence → cannot evaluate motifs; skip the gate rather
-            # than drop everything.
-            return
-        motif_set = parse_motifs(self.config.canonical_motifs)
-        kept: List = []
-        dropped = 0
-        for c in candidate_set.candidates:
-            if c.source in ("gtf", "fusion"):
-                kept.append(c)
-                continue
-            introns = c.intron_chain.introns
-            if not introns:
-                kept.append(c)  # mono: no internal junction
-                continue
-            if chain_all_canonical(introns, chrom_seq, c.strand, motif_set):
-                kept.append(c)
-            else:
-                dropped += 1
-        if dropped:
-            logger.info(
-                "Canonical gate: dropped %d/%d novel candidates (interval %s)",
-                dropped,
-                len(candidate_set.candidates),
-                candidate_set.interval.region_string,
-            )
-        candidate_set.candidates = kept
+        """Stage B canonical-junction gate. Delegates to the selection layer
+        (fin.pipeline.selection.canonical_gate_select); kept as a method so tests can
+        call this seam directly. Mutates ``candidate_set.candidates`` in place."""
+        canonical_gate_select(self.config, candidate_set, chrom_seq)
 
     def _apply_junction_dominance_gate(
         self, candidate_set: CandidateSet, interval: GenomicInterval
     ) -> None:
-        """Pre-EM junction-first gate: drop NOVEL candidates with a weak or
-        non-dominant junction (mutates candidate_set.candidates in place).
-
-        Builds the directly-observed read junctions (reopens BAM) and drops a
-        novel multi-exon candidate if any junction has < min_reads reads or is
-        dominated by a stronger DIFFERENT junction within the window. read_ids is
-        left untouched (reads off a dropped candidate re-compete in quant).
-        """
-        from fin.scoring.m2_junction_nll import dominant_junction_drops
-
-        observed = self._observed_junctions(interval)
-        drops = dominant_junction_drops(
-            candidate_set.candidates, observed,
-            min_reads=int(self.config.junction_dominance_min_reads),
-            window=int(self.config.junction_dominance_window_bp),
-            tol=int(getattr(self.config, "junction_dominance_tol_bp", 2)),
+        """Pre-EM junction-dominance gate. Delegates to the selection layer
+        (fin.pipeline.selection.junction_dominance_select); kept as a method so tests can
+        call this seam directly. Mutates ``candidate_set.candidates`` in place."""
+        junction_dominance_select(
+            self.config, candidate_set, interval, self._observed_junctions
         )
-        if drops:
-            kept = [c for i, c in enumerate(candidate_set.candidates)
-                    if i not in drops]
-            logger.info(
-                "Junction-dominance gate: dropped %d/%d novel candidates "
-                "(interval %s)", len(drops), len(candidate_set.candidates),
-                interval.region_string,
-            )
-            candidate_set.candidates = kept
 
     def cleanup(self):
         """Close file handles."""

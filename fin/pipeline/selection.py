@@ -523,3 +523,85 @@ def select_global(
         _record(before_keys - set(aggregated), "polya5p")
 
     return aggregated, outcomes
+
+
+def canonical_gate_select(config, candidate_set, chrom_seq: str) -> List[SelectionOutcome]:
+    """PRE_ASSIGN Stage B: drop NOVEL multi-exon candidates with non-canonical junctions.
+
+    Byte-identical move of the runner's former ``_apply_canonical_gate`` body. Mutates
+    ``candidate_set.candidates`` in place, keeping a candidate iff it is GTF/fusion (EXEMPT),
+    single-exon (trivially canonical), or every internal junction motif is canonical. ``read_ids``
+    is left untouched (reads off a dropped candidate re-compete in quant). Returns the drop outcomes.
+    """
+    from fin.candidates.canonical import chain_all_canonical, parse_motifs
+
+    outcomes: List[SelectionOutcome] = []
+    if not chrom_seq:
+        # No genome sequence → cannot evaluate motifs; skip the gate rather
+        # than drop everything.
+        return outcomes
+    motif_set = parse_motifs(config.canonical_motifs)
+    kept: List = []
+    dropped = 0
+    for c in candidate_set.candidates:
+        if c.source in ("gtf", "fusion"):
+            kept.append(c)
+            continue
+        introns = c.intron_chain.introns
+        if not introns:
+            kept.append(c)  # mono: no internal junction
+            continue
+        if chain_all_canonical(introns, chrom_seq, c.strand, motif_set):
+            kept.append(c)
+        else:
+            dropped += 1
+            outcomes.append(SelectionOutcome(
+                c.candidate_id, "drop", "canonical_gate", scope="pre_assign",
+            ))
+    if dropped:
+        logger.info(
+            "Canonical gate: dropped %d/%d novel candidates (interval %s)",
+            dropped,
+            len(candidate_set.candidates),
+            candidate_set.interval.region_string,
+        )
+    candidate_set.candidates = kept
+    return outcomes
+
+
+def junction_dominance_select(
+    config, candidate_set, interval, observed_junctions_fn: Callable
+) -> List[SelectionOutcome]:
+    """PRE_ASSIGN junction-first gate: drop NOVEL candidates with a weak or non-dominant junction.
+
+    Byte-identical move of the runner's former ``_apply_junction_dominance_gate`` body. Builds the
+    directly-observed read junctions (via ``observed_junctions_fn``, passed at call time so the test
+    seam survives) and drops a novel multi-exon candidate whose junction has < min_reads reads or is
+    dominated by a stronger DIFFERENT junction within the window. Mutates ``candidate_set.candidates``
+    in place; ``read_ids`` untouched. Returns the drop outcomes.
+    """
+    from fin.scoring.m2_junction_nll import dominant_junction_drops
+
+    outcomes: List[SelectionOutcome] = []
+    observed = observed_junctions_fn(interval)
+    drops = dominant_junction_drops(
+        candidate_set.candidates, observed,
+        min_reads=int(config.junction_dominance_min_reads),
+        window=int(config.junction_dominance_window_bp),
+        tol=int(getattr(config, "junction_dominance_tol_bp", 2)),
+    )
+    if drops:
+        kept = [c for i, c in enumerate(candidate_set.candidates)
+                if i not in drops]
+        for i, c in enumerate(candidate_set.candidates):
+            if i in drops:
+                outcomes.append(SelectionOutcome(
+                    c.candidate_id, "drop", "junction_dominance", scope="pre_assign",
+                ))
+        logger.info(
+            "Junction-dominance gate: dropped %d/%d novel candidates "
+            "(interval %s)", len(drops), len(candidate_set.candidates),
+            interval.region_string,
+        )
+        candidate_set.candidates = kept
+    return outcomes
