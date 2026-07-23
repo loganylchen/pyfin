@@ -23,6 +23,7 @@ from fin.candidates.discovery import discover_candidates, merge_fusion_candidate
 from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
 from fin.pipeline.assignment import Assigner
 from fin.pipeline.config import PipelineConfig
+from fin.pipeline.finalize import finalize_outputs, write_unfiltered_diagnostic
 from fin.pipeline.selection import (
     canonical_gate_select,
     junction_dominance_select,
@@ -135,77 +136,20 @@ class PipelineRunner:
         output_gtf: Optional[str],
         output_tsv: Optional[str],
     ) -> Dict[str, QuantResult]:
-        """Apply post-EM filters, resolve gene_ids, optionally write GTF/TSV."""
-        # Diagnostic: write unfiltered scores TSV BEFORE the post-EM filter
-        # cascade so downstream FN-root-cause analysis can distinguish
-        # "candidate never reached EM" from "candidate dropped by a filter".
-        if getattr(self.config, "write_unfiltered_scores", False) and output_tsv:
-            from fin.io.io_tsv import write_scoring_tsv
+        """Finalize: diagnostic dump -> GLOBAL selection -> gene-id resolution + writers.
 
-            unfiltered_path = str(Path(output_tsv).with_suffix(".unfiltered.tsv"))
-            transcript_lengths_uf = {
-                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
-                for cid, qr in aggregated.items()
-            }
-            # Resolve gene_ids on the unfiltered snapshot too so downstream
-            # consumers don't see empty gene_id columns.
-            for cid, qr in aggregated.items():
-                if qr.source == "gtf" and self._gtf_reader:
-                    tx = self._gtf_reader.get_transcript(cid)
-                    if tx and not qr.gene_id:
-                        qr.gene_id = tx.gene_id
-                if not qr.gene_id:
-                    qr.gene_id = qr.candidate_id
-            write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
-            logger.info(
-                "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
-                unfiltered_path,
-                len(aggregated),
-            )
-
-        # GLOBAL post-aggregate selection cascade (abundance floor / isoform-fraction /
-        # soft-mass / mono / full-length / polyA). Lives in fin.pipeline.selection.
+        Thin orchestrator wiring three independent layers: the pre-filter diagnostic and the
+        output writers live in fin.pipeline.finalize; the GLOBAL selection cascade lives in
+        fin.pipeline.selection. Kept as a method so tests can call this seam directly."""
+        write_unfiltered_diagnostic(
+            self.config, aggregated, output_tsv, self._gtf_reader
+        )
         aggregated, _global_outcomes = select_global(
             self.config, aggregated, self._apply_polya5p_filter,
         )
-
-        # Resolve gene_ids from GTF annotation
-        for cid, qr in aggregated.items():
-            if qr.source == "gtf" and self._gtf_reader:
-                tx = self._gtf_reader.get_transcript(cid)
-                if tx:
-                    qr.gene_id = tx.gene_id
-            if not qr.gene_id:
-                qr.gene_id = qr.candidate_id
-
-        # Write GTF output
-        if output_gtf:
-            from fin.io.io_gtf import write_gtf
-
-            write_gtf(aggregated, output_gtf)
-            logger.info("Wrote GTF output: %s", output_gtf)
-
-        # US-013: Additional output writers
-        if output_tsv:
-            from fin.io.io_tsv import write_scoring_tsv
-
-            transcript_lengths = {
-                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
-                for cid, qr in aggregated.items()
-            }
-            write_scoring_tsv(aggregated, transcript_lengths, output_tsv)
-            logger.info("Wrote TSV output: %s", output_tsv)
-
-        if self.config.fusion_enabled and self.config.output_bedpe:
-            from fin.io.io_bedpe import write_fusion_bedpe
-
-            write_fusion_bedpe(aggregated, self.config.output_bedpe)
-            logger.info("Wrote BEDPE output: %s", self.config.output_bedpe)
-
-        logger.info(
-            "Pipeline complete: %d transcripts quantified", len(aggregated)
+        return finalize_outputs(
+            self.config, aggregated, output_gtf, output_tsv, self._gtf_reader,
         )
-        return aggregated
 
     def process_interval(
         self, interval: GenomicInterval
