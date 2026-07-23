@@ -12,7 +12,10 @@ from fin.candidates.dataclasses import IntronChain, TranscriptCandidate
 from fin.scoring.m2_junction_nll import (
     _build_exons,
     _internal_bounds,
+    _mean_nll_in_gset,
+    _mean_nll_in_window,
     _tx2genome,
+    diff_junction_windows,
     internal_diff_regions,
     tx2genome_array,
 )
@@ -102,3 +105,67 @@ def test_terminal_differences_excluded():
 def test_internal_diff_region_singleton_empty():
     a = _cand("a", [(200, 300), (400, 500)], 100, 600)
     assert internal_diff_regions([a], flank=2) == []
+
+
+# --- diff_junction_windows: tight +-flank windows around DIFFERING boundaries ----
+def test_diff_junction_windows_acceptor_wobble():
+    # acceptor shifts 300 -> 304; donor 200 shared. As whole-intron tuples both the
+    # shared donor (200) and the two acceptors (300,304) are collected; +-6 merges
+    # the two nearby acceptor windows.
+    a = _cand("a", [(200, 300)], 100, 400)
+    b = _cand("b", [(200, 304)], 100, 400)
+    assert diff_junction_windows([a, b], flank=6) == [(194, 206), (294, 310)]
+
+
+def test_diff_junction_windows_unanimous_empty():
+    a = _cand("a", [(200, 300)], 100, 400)
+    b = _cand("b", [(200, 300)], 100, 500)  # identical chain, only 3' end differs
+    assert diff_junction_windows([a, b], flank=6) == []
+
+
+def test_diff_junction_windows_singleton_empty():
+    a = _cand("a", [(200, 300)], 100, 400)
+    assert diff_junction_windows([a], flank=6) == []
+
+
+# --- reduce="sum" is exactly n * mean (summed-LLR building block) ----------------
+def _res(positions, event_means, model_mean=100.0, model_stdv=1.0, kmer="AAAAA"):
+    n = len(positions)
+    return {
+        "position": list(positions),
+        "reference_kmer": [kmer] * n,
+        "model_kmer": [kmer] * n,
+        "event_level_mean": list(event_means),
+        "model_mean": [model_mean] * n,
+        "model_stdv": [model_stdv] * n,
+        "status": 0,
+    }
+
+
+def test_reduce_sum_is_n_times_mean_gset():
+    # cand exons (100,200),(300,400); tx 10->g110, 20->g120, 150->g350.
+    c = _cand("a", [(200, 300)], 100, 400, seq="A" * 200)
+    res = _res([10, 20, 150], [101.0, 102.0, 103.0])  # z=1,2,3 -> NLL 0.5,2.0,4.5
+    gset = {110, 120}  # excludes g350
+    mean, n_m = _mean_nll_in_gset(res, c, gset, reduce="mean")
+    total, n_s = _mean_nll_in_gset(res, c, gset, reduce="sum")
+    assert n_m == n_s == 2
+    assert total == mean * 2
+    assert abs(total - (0.5 + 2.0)) < 1e-9  # only the two in-window events
+
+
+def test_reduce_sum_is_n_times_mean_window():
+    c = _cand("a", [(200, 300)], 100, 400, seq="A" * 200)
+    res = _res([10, 20, 150], [101.0, 102.0, 103.0])
+    windows = [(105, 125)]  # genomic; captures g110,g120, not g350
+    mean, n_m = _mean_nll_in_window(res, c, windows, reduce="mean")
+    total, n_s = _mean_nll_in_window(res, c, windows, reduce="sum")
+    assert n_m == n_s == 2
+    assert total == mean * 2
+
+
+def test_reduce_default_is_mean():
+    c = _cand("a", [(200, 300)], 100, 400, seq="A" * 200)
+    res = _res([10, 20], [101.0, 103.0])  # z=1,3 -> NLL 0.5,4.5 -> mean 2.5
+    mean_default, _ = _mean_nll_in_gset(res, c, {110, 120})
+    assert abs(mean_default - 2.5) < 1e-9

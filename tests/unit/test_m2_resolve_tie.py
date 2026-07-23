@@ -79,10 +79,36 @@ def _patch_scores(monkeypatch, scores):
     """scores: dict candidate_id -> (nll, n_events)."""
 
     def fake(read_id, read_seq, cand, windows, krill_aligner, mappy_aligner,
-             sig_path, pore, gset=None, use_gpu=True, num_thread=0):
+             sig_path, pore, gset=None, use_gpu=True, num_thread=0, reduce="mean"):
         return scores.get(cand.candidate_id, (float("nan"), 0))
 
     monkeypatch.setattr(m2, "read_cand_mean_nll", fake)
+
+
+def test_summed_llr_metric_uses_tight_window_and_picks_lower(monkeypatch):
+    # metric="summed_llr" builds diff_junction_windows (non-empty for a wobble pair)
+    # and returns the lower-score candidate; margin is the summed gap.
+    a, b = _wobble_pair()
+    _patch_scores(monkeypatch, {"a": (3.0, 8), "b": (9.0, 8)})
+    idx, margin = m2.m2_resolve_tie(
+        "r0", "ACGT", [a, b], "/x.blow5",
+        krill_aligner=object(), mappy_aligners=[object(), object()],
+        metric="summed_llr",
+    )
+    assert idx == 0
+    assert margin == 6.0
+
+
+def test_summed_llr_unanimous_returns_none(monkeypatch):
+    # No differing junction boundary -> diff_junction_windows empty -> abstain.
+    a = _cand("a", [(200, 300), (400, 500)], 100, 600)
+    d = _cand("d", [(200, 300), (400, 500)], 120, 650)
+    _patch_scores(monkeypatch, {"a": (3.0, 8), "d": (9.0, 8)})
+    assert m2.m2_resolve_tie(
+        "r0", "ACGT", [a, d], "/x.blow5",
+        krill_aligner=object(), mappy_aligners=[object(), object()],
+        metric="summed_llr",
+    ) == (None, 0.0)
 
 
 def test_two_way_picks_lower_nll_with_margin(monkeypatch):

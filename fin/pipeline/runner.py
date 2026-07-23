@@ -394,9 +394,33 @@ class PipelineRunner:
             genome_fasta=chrom_seq,
             threshold=self.config.three_prime_threshold,
             min_novel_reads=self.config.min_novel_reads,
+            chain_cluster=getattr(self.config, "chain_cluster_discovery", False),
+            chain_cluster_wobble_bp=getattr(self.config, "chain_cluster_wobble_bp", 6),
+            chain_cluster_cassette_max_exon_bp=getattr(
+                self.config, "chain_cluster_cassette_max_exon_bp", 70),
+            chain_cluster_fold_monoexon=(
+                getattr(self.config, "chain_cluster_fold_monoexon", False)
+                # defer the mono fold to post-EM when mono_resolve_post_em is on
+                and not getattr(self.config, "mono_resolve_post_em", False)),
+            chain_cluster_fold_span_guard=getattr(
+                self.config, "chain_cluster_fold_span_guard", False),
             canonical_search_bp=self.config.canonical_search_bp,
             max_chains_per_read=self.config.max_chains_per_read,
             canonical_motifs=self.config.canonical_motifs,
+            denovo_wobble_tol=getattr(self.config, "denovo_wobble_tol", 0),
+            denovo_wobble_shadow_ratio=getattr(
+                self.config, "denovo_wobble_shadow_ratio", 1.0),
+            denovo_graph=getattr(self.config, "denovo_graph", False),
+            denovo_graph_tol=getattr(self.config, "denovo_graph_tol", 6),
+            denovo_graph_min_edge_reads=getattr(
+                self.config, "denovo_graph_min_edge_reads", 2),
+            denovo_graph_tss_brake=getattr(
+                self.config, "denovo_graph_tss_brake", True),
+            denovo_graph_tss_tol=getattr(self.config, "denovo_graph_tss_tol", 20),
+            denovo_graph_tss_min_reads=getattr(
+                self.config, "denovo_graph_tss_min_reads", 3),
+            denovo_graph_tss_frac=getattr(
+                self.config, "denovo_graph_tss_frac", 0.4),
         )
 
         # --- Phase 1.5: Fusion candidate augmentation (optional) ---
@@ -442,6 +466,8 @@ class PipelineRunner:
             results = self._quant_m1_em(candidate_set, read_ids, interval)
         elif quant_mode == "m2_em":
             results = self._quant_m2_em(candidate_set, read_ids, interval)
+        elif quant_mode == "cluster":
+            results = self._quant_cluster(candidate_set, read_ids, interval)
         else:
             raise ValueError(f"unknown quant_mode: {quant_mode!r}")
         # Full-length end-coherence: compute fulllen_frac per candidate over its
@@ -711,6 +737,359 @@ class PipelineRunner:
             "R1 M1-keep(split) interval %s: %d reads -> %d candidates "
             "(M2 overrides=%d)",
             interval.region_string, len(read_ids), len(cand_list), n_m2_override,
+        )
+        return quant_results
+
+    def _quant_cluster(
+        self,
+        candidate_set: CandidateSet,
+        read_ids: List[str],
+        interval: GenomicInterval,
+    ) -> List[QuantResult]:
+        """Within-cluster read assignment (quant_mode="cluster").
+
+        Each generation cluster (``CandidateSet.clusters``) is scored in isolation:
+        a read is aligned ONLY against that cluster's members (M1), straddling ties
+        are resolved by the summed-LLR junction signal (M2), and containment/
+        truncation ties fall to the cluster's main peak. Per-cluster assignment is
+        delegated to :func:`fin.pipeline.cluster_quant.assign_cluster_reads` (pure/
+        signal-agnostic); the M2 tiebreak is injected via ``m2_resolve_tie``. Cluster
+        results are folded back into per-candidate abundance/survival and emitted as
+        QuantResults (mirrors ``_quant_argmax_keep``).
+        """
+        import mappy
+
+        from fin.pipeline.cluster_quant import assign_cluster_reads
+        from fin.scoring.m2_junction_nll import m2_resolve_tie
+        from fin.scoring.mappy_preset import get_m1_preset
+        from fin.scoring.mappy_score import score_hit
+
+        cand_list = list(candidate_set.candidates)
+        read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
+        n_c = len(cand_list)
+
+        # candidate_set.clusters holds candidate_ids per generation cluster. Translate
+        # to CURRENT list indices (ids dropped by post-discovery gates are skipped).
+        idx_of = {c.candidate_id: j for j, c in enumerate(cand_list)}
+        if candidate_set.clusters is None:
+            # Not chain-cluster mode: run unscoped over the whole candidate list.
+            logger.warning(
+                "quant_mode=cluster: interval %s has no cluster grouping "
+                "(clusters=None); treating all %d candidates as one cluster",
+                interval.region_string, n_c,
+            )
+            clusters = [list(range(n_c))]
+        else:
+            clusters = [
+                [idx_of[cid] for cid in ids if cid in idx_of]
+                for ids in candidate_set.clusters
+            ]
+            # Candidates added AFTER discovery (e.g. fusion augmentation) are in
+            # cand_list but not in any generation cluster; group them into ONE extra
+            # cluster so they are scored (never silently zero) AND a read shared by
+            # several of them competes once (one singleton each would let the same
+            # read take weight 1.0 in every singleton -> inflated abundance).
+            referenced = {j for ml in clusters for j in ml}
+            extra = [j for j in range(n_c) if j not in referenced]
+            if extra:
+                clusters.append(extra)
+
+        # Read genomic spans over the interval (primary mapped alignments only;
+        # first occurrence per read id wins). Mirrors _annotate_fulllen_frac.
+        spans: Dict[str, Tuple[int, int]] = {}
+        with pysam.AlignmentFile(self.config.bam_path, "rb") as bam:
+            for r in bam.fetch(interval.chrom, interval.start, interval.end):
+                if r.is_unmapped or r.is_secondary or r.is_supplementary:
+                    continue
+                rid = r.query_name
+                if rid is None or rid in spans:
+                    continue
+                rs = r.reference_start
+                re = r.reference_end
+                if rs is None or re is None:
+                    continue
+                spans[rid] = (int(rs), int(re))
+
+        # One shared non-HMM krill aligner for the whole interval; when signal is
+        # absent m2_resolve stays None (straddling ties defer, which is fine).
+        krill_aligner = None
+        eff_gpu = False
+        krill_threads = 0
+        if self.config.signal_path and getattr(self.config, "cluster_use_m2", True):
+            try:
+                import krill
+
+                from fin.scoring.krill_aligner import (
+                    krill_thread_count,
+                    make_krill_aligner,
+                )
+
+                krill_threads = krill_thread_count()
+                krill_aligner, eff_gpu = make_krill_aligner(
+                    krill, self.config.krill_pore, self.config.use_gpu,
+                    hmm_confidence=False, num_thread=krill_threads,
+                )
+            except Exception as exc:  # krill unavailable -> defer straddling ties
+                logger.warning(
+                    "quant_mode=cluster: krill unavailable, M2 tiebreak off: %s", exc)
+                krill_aligner = None
+
+        preset = get_m1_preset()
+        read_id_set = set(read_ids)
+
+        # Accumulators over ALL candidates (global index j).
+        counts = [0.0] * n_c
+        assigned: List[List[str]] = [[] for _ in range(n_c)]
+        max_weight = [0.0] * n_c
+        survivor = [False] * n_c
+
+        # Genome chromosome sequence for 5'-TSS short-isoform recovery (empty ->
+        # recovery skipped for this interval).
+        genome_seq = (
+            self._genome_fasta[interval.chrom]
+            if self._genome_fasta and interval.chrom in self._genome_fasta
+            else ""
+        )
+        shadows_map = candidate_set.shadows or {}
+
+        tot_unique = tot_containment = tot_m2_confident = tot_deferred = 0
+        recovered_total = 0
+        for members_idx in clusters:
+            if not members_idx:
+                continue
+            member_candidates = [cand_list[i] for i in members_idx]
+            local_aligners = [
+                mappy.Aligner(seq=c.sequence, preset=preset) if c.sequence else None
+                for c in member_candidates
+            ]
+            member_chains = [
+                tuple(cand_list[i].intron_chain.introns) for i in members_idx
+            ]
+
+            # Cluster reads = union of members' supporting reads, restricted to this
+            # interval's read set and reads that carry a sequence.
+            cluster_read_ids: set = set()
+            for i in members_idx:
+                cluster_read_ids.update(cand_list[i].supporting_read_ids)
+            cluster_read_ids &= read_id_set
+            cluster_read_ids = {
+                rid for rid in cluster_read_ids if read_sequences.get(rid)
+            }
+
+            # M1 within-cluster: best AS per (read, member), local member index.
+            as_rows: Dict[str, Dict[int, float]] = {}
+            for rid in cluster_read_ids:
+                seq = read_sequences.get(rid)
+                if not seq:
+                    continue
+                row: Dict[int, float] = {}
+                for local_j, aln in enumerate(local_aligners):
+                    if aln is None:
+                        continue
+                    cell = None
+                    for h in aln.map(seq):
+                        v = score_hit(h)
+                        if v is None:
+                            continue
+                        if cell is None or v > cell:
+                            cell = v
+                    if cell is not None:
+                        row[local_j] = cell
+                if row:
+                    as_rows[rid] = row
+
+            # M2 resolver for straddling ties (summed-LLR); None when no krill.
+            m2_resolve = None
+            if krill_aligner is not None:
+                def m2_resolve(rid, tie_local, _mc=member_candidates,
+                               _la=local_aligners):
+                    tied_cands = [_mc[j] for j in tie_local]
+                    tied_aligners = [_la[j] for j in tie_local]
+                    out = m2_resolve_tie(
+                        rid, read_sequences[rid], tied_cands,
+                        self.config.signal_path, pore=self.config.krill_pore,
+                        krill_aligner=krill_aligner, mappy_aligners=tied_aligners,
+                        use_gpu=eff_gpu, num_thread=krill_threads,
+                        metric="summed_llr",
+                    )
+                    best, margin = out
+                    if best is None:
+                        return None
+                    return (tie_local[best], margin)
+
+            a = assign_cluster_reads(
+                member_chains, as_rows,
+                {rid: spans[rid] for rid in as_rows if rid in spans},
+                m2_resolve=m2_resolve,
+                min_support=self.config.cluster_min_support,
+                m1_tie_margin=self.config.cluster_m1_tie_margin,
+            )
+
+            # Fold local results back to GLOBAL candidate indices.
+            for rid, row in a.weights.items():
+                for local_j, w in row.items():
+                    gi = members_idx[local_j]
+                    counts[gi] += w
+                    assigned[gi].append(rid)
+                    if w > max_weight[gi]:
+                        max_weight[gi] = w
+            for local_j in a.survivors:
+                survivor[members_idx[local_j]] = True
+
+            tot_unique += a.n_unique
+            tot_containment += a.n_containment
+            tot_m2_confident += a.n_m2_confident
+            tot_deferred += a.n_deferred
+
+            # 5'-TSS short-isoform recovery: each EM-confirmed survivor member may
+            # have folded SHADOW sub-chains (exact 5'-truncations pooled into it at
+            # generation). Re-test each shadow's truncation boundary against the
+            # member's read-5'-end pileup; a SHARP peak (real TSS, not a degradation
+            # ramp) re-activates the short isoform as a novel candidate. Mass is
+            # conserved: the recovered peak-excess is subtracted from the parent.
+            if genome_seq:
+                for lj in sorted(a.survivors):
+                    gj = members_idx[lj]
+                    cand = cand_list[gj]
+                    cid = cand.candidate_id
+                    strand = cand.strand
+                    shadows = shadows_map.get(cid)
+                    if not shadows:
+                        continue
+
+                    # 5' end of a read (strand-aware): ref_start for +, ref_end for -.
+                    def _p5(rid, _s=strand):
+                        rs, re = spans[rid]
+                        return rs if _s == "+" else re
+
+                    # Member's EM-weighted assigned reads (this member's column).
+                    member_reads = {
+                        rid: row[lj]
+                        for rid, row in a.weights.items()
+                        if lj in row
+                    }
+                    ends = [
+                        (_p5(rid), w)
+                        for rid, w in member_reads.items()
+                        if rid in spans
+                    ]
+                    if len(ends) < 8:
+                        continue
+
+                    # Build TSS proposals (median 5' end of each shadow's reads).
+                    proposals: List[int] = []
+                    prop_shadow: Dict[int, Tuple[tuple, tuple]] = {}
+                    for schain, sreads in shadows:
+                        s_ends = sorted(_p5(rid) for rid in sreads if rid in spans)
+                        if not s_ends:
+                            continue
+                        tss = s_ends[len(s_ends) // 2]
+                        prev = prop_shadow.get(tss)
+                        if prev is None or len(sreads) > len(prev[1]):
+                            prop_shadow[tss] = (schain, sreads)
+                            if prev is None:
+                                proposals.append(tss)
+
+                    if not proposals:
+                        continue
+
+                    from fin.candidates.isoform_recovery import recover_5p_peaks
+
+                    peaks = recover_5p_peaks(ends, list(proposals))
+                    for peak in peaks:
+                        # Nearest proposal within 20 bp.
+                        near = min(
+                            prop_shadow.keys(),
+                            key=lambda p: abs(p - peak.pos),
+                        )
+                        if abs(near - peak.pos) > 20:
+                            continue
+                        schain, sreads = prop_shadow[near]
+
+                        # Short-isoform genomic span: 5' end -> TSS, 3' end = parent's.
+                        if strand == "+":
+                            start, end = peak.pos, cand.end
+                        else:
+                            start, end = cand.start, peak.pos
+                        if end <= start:
+                            continue
+
+                        from fin.candidates.discovery import (
+                            _build_spliced_sequence,
+                            _generate_novel_id,
+                        )
+                        from fin.candidates.dataclasses import (
+                            IntronChain,
+                            TranscriptCandidate,
+                        )
+
+                        seq = _build_spliced_sequence(
+                            genome_seq, start, end,
+                            IntronChain(introns=schain), strand,
+                        )
+                        if not seq:
+                            continue
+
+                        new_id = _generate_novel_id()
+                        new_cand = TranscriptCandidate(
+                            candidate_id=new_id,
+                            intron_chain=IntronChain(introns=schain),
+                            three_prime_pos=(end if strand == "+" else start),
+                            sequence=seq,
+                            source="novel",
+                            supporting_read_ids=set(sreads),
+                            chrom=cand.chrom,
+                            strand=strand,
+                            start=start,
+                            end=end,
+                        )
+                        # Append in lockstep with the parallel accumulators so the
+                        # emission loop (which enumerates cand_list) picks it up.
+                        cand_list.append(new_cand)
+                        counts.append(peak.excess)
+                        assigned.append(list(sreads))
+                        max_weight.append(1.0)
+                        survivor.append(True)
+                        # Conserve mass: remove the recovered excess from the parent.
+                        counts[gj] = max(0.0, counts[gj] - peak.excess)
+                        recovered_total += 1
+
+        if recovered_total:
+            logger.info(
+                "R1 cluster interval %s: recovered %d 5'-TSS short isoforms",
+                interval.region_string, recovered_total,
+            )
+
+        quant_results: List[QuantResult] = []
+        for j, cand in enumerate(cand_list):
+            # Honor the per-cluster survival gate: a member whose total assigned
+            # weight is below cluster_min_support is NOT a survivor -> zero it so the
+            # threshold is a real gate (not overridden here to confidence 1.0).
+            kept = survivor[j]
+            qr = QuantResult(
+                candidate_id=cand.candidate_id,
+                abundance=float(counts[j]) if kept else 0.0,
+                confidence=1.0 if kept else 0.0,
+                num_assigned_reads=len(assigned[j]) if kept else 0,
+                source=cand.source,
+                chrom=cand.chrom,
+                strand=cand.strand,
+                start=cand.start,
+                end=cand.end,
+                exons=_exons_from_candidate(cand),
+                assigned_read_ids=tuple(assigned[j]) if kept else (),
+                breakpoint_left=cand.breakpoint_left,
+                breakpoint_right=cand.breakpoint_right,
+                fusion_junction=cand.fusion_junction,
+            )
+            qr.max_R = max_weight[j]
+            quant_results.append(qr)
+
+        logger.info(
+            "R1 cluster interval %s: %d clusters, %d reads -> %d candidates "
+            "(unique=%d containment=%d m2_confident=%d deferred=%d)",
+            interval.region_string, len(clusters), len(read_ids), len(cand_list),
+            tot_unique, tot_containment, tot_m2_confident, tot_deferred,
         )
         return quant_results
 
@@ -1148,51 +1527,25 @@ class PipelineRunner:
         """Strand-keyed {strand: Counter{(donor, acceptor): n_reads}} of intron
         junctions directly observed in the interval's primary-read CIGARs.
 
-        Reopens the BAM (skips secondary/supplementary/unmapped). Shared by the
-        cluster-recheck GTF read-support guard and the Lever-2 per-junction
-        support gate. pysam region strings are 1-based; interval.start is 0-based,
-        so use (start+1) clamped to >=1 (interval.region_string would yield
-        "chr:0-end" for contig-start intervals, which pysam rejects).
+        Delegates to ``evidence.compute_observed_junctions`` (the Evidence layer) with a
+        single-entry per-interval memo: this map is consumed by up to three gates within one
+        interval (cluster-recheck GTF guard, Lever-2 per-junction support gate,
+        junction-dominance / guided support gate), which used to each re-open the BAM;
+        computing it once here is byte-identical. Returns None on empty/unreadable BAM so every
+        support gate self-disables (fail-open). See fin/pipeline/evidence.py for the caveat.
         """
-        from collections import Counter, defaultdict
-        from fin.candidates.intron_chains import extract_intron_chain
-        from fin.io.io_bam import BamReader
+        from fin.pipeline.evidence import compute_observed_junctions
 
-        # No/unreadable BAM (mocked or placeholder callers, e.g. /dev/null,
-        # truncated/invalid files) -> return None so support gates self-disable
-        # (recall-safe), rather than raising. Cheap path-exists check first, then
-        # catch any open/fetch failure from BamReader/pysam.
-        if not self.config.bam_path or not Path(self.config.bam_path).exists():
-            return None
-        observed: dict = defaultdict(Counter)
-        region = f"{interval.chrom}:{max(interval.start + 1, 1)}-{interval.end}"
-        try:
-            with BamReader(self.config.bam_path) as bam:
-                for rd in bam.get_reads_in_region(region):
-                    if (rd.get("is_secondary") or rd.get("is_supplementary")
-                            or not rd.get("is_mapped", True)):
-                        continue
-                    ct = rd.get("cigartuples")
-                    if not ct:
-                        continue
-                    strand = "-" if rd.get("is_reverse") else "+"
-                    ic = extract_intron_chain(ct, rd["reference_start"])
-                    for intr in ic.introns:
-                        observed[strand][intr] += 1
-        except Exception as exc:  # unreadable/invalid BAM -> recall-safe no-op
-            logger.warning(
-                "observed-junction build failed for %s (%s); support gates "
-                "self-disable for this interval", interval.region_string, exc,
-            )
-            return None
-        # Empty -> None (NOT an empty map). get_reads_in_region() swallows a fetch
-        # failure into [], which would otherwise yield an empty dict that the GTF
-        # wobble guard reads as "zero support" and could use to drop a low-abundance
-        # GTF sibling; None makes it keep siblings (recall-safe). A real interval
-        # with novel multi-exon candidates always has >=1 observed junction (its
-        # candidates came from spliced reads), so empty only means no spliced reads
-        # / a swallowed fetch error -> either way, self-disable the gates.
-        return observed if observed else None
+        # Memo key = region only: the map fetches chrom:start-end and buckets by READ
+        # strand, so it is independent of the interval's own strand (two same-region
+        # intervals share it). region_string is present on every interval incl. test stubs.
+        key = interval.region_string
+        memo = getattr(self, "_obs_junc_memo", None)
+        if memo is not None and memo[0] == key:
+            return memo[1]
+        value = compute_observed_junctions(self.config.bam_path, interval)
+        self._obs_junc_memo = (key, value)
+        return value
 
     def _quant_m2_em(
         self,
@@ -1492,6 +1845,27 @@ class PipelineRunner:
                 tol=int(getattr(self.config, "novel_junction_reads_tol", 2)),
             )
 
+        # --- GUIDED junction-support gate (EXPERIMENT, default-off). Mirror of
+        #     Lever 2 for GTF-passthrough candidates: drop a guided multi-exon
+        #     candidate if ANY of its junctions lacks >= guided_junction_min_reads
+        #     directly-observed reads (CIGAR introns within guided_junction_reads
+        #     _tol bp). Extends the coordinate-EXACT read-support check — which
+        #     Lever 2 applies only to novel candidates — to GTF junctions, so a
+        #     jitter-corrupted annotation junction (coords > tol from the true
+        #     site, thus zero exact support) is dropped instead of surviving the
+        #     coordinate-inexact M2/M1 gate. Reuses observed_jct. 0 disables
+        #     (byte-identical). NOT recall-safe (also drops low-coverage annotated
+        #     junctions); default-off pending real-data validation. ---
+        _gjmr = int(getattr(self.config, "guided_junction_min_reads", 0))
+        if _gjmr > 0:
+            from fin.scoring.m2_junction_nll import guided_junction_support_drops
+            if observed_jct is None:
+                observed_jct = self._observed_junctions(interval)
+            drop_cols |= guided_junction_support_drops(
+                cand_list, observed_jct, min_reads=_gjmr,
+                tol=int(getattr(self.config, "guided_junction_reads_tol", 2)),
+            )
+
         # --- M2/M1 read-support gate. A multi-exon candidate (GTF or novel;
         #     fusion/mono exempt) must earn >=1 read's support: either it is some
         #     read's M1 SOLE best-AS (tie set == just this candidate), or it is
@@ -1505,6 +1879,31 @@ class PipelineRunner:
             drop_cols |= support_gate_drops(
                 cand_list, ties_by_read, nlls_by_read,
                 tie_ok=bool(getattr(self.config, "m2_support_gate_tie", True)),
+            )
+
+        # --- Containment-cluster drop: drop a NOVEL candidate whose intron chain is a
+        #     contiguous SUB-CHAIN of a longer candidate (a truncation / exon-skip shadow
+        #     the same-intron-count wobble cluster never groups) when it is a low-support
+        #     shadow by BOTH EM abundance AND supporting-read count. Runs AFTER all the
+        #     structural/support gates so ``exclude=drop_cols`` covers every already-doomed
+        #     parent — a shadow is never folded into a parent that is itself dropped. The
+        #     read-support guard keeps most genuine low-abundance short/alt-TSS isoforms;
+        #     gtf/fusion never dropped. DEFAULT-ON (--no-containment-cluster disables). ---
+        if getattr(self.config, "containment_cluster", False):
+            from fin.scoring.m2_junction_nll import containment_cluster_drops
+            em_ab_c = np.asarray(R).sum(axis=0)
+            read_counts = [len(getattr(c, "supporting_read_ids", ()) or ())
+                           for c in cand_list]
+            drop_cols |= containment_cluster_drops(
+                cand_list, em_ab_c, read_counts,
+                wobble_bp=int(getattr(self.config, "containment_cluster_wobble_bp", 6)),
+                min_ab_ratio=float(getattr(
+                    self.config, "containment_cluster_min_ab_ratio", 0.3)),
+                min_read_ratio=float(getattr(
+                    self.config, "containment_cluster_min_read_ratio", 0.3)),
+                max_shadow_reads=int(getattr(
+                    self.config, "containment_cluster_max_shadow_reads", 0)),
+                exclude=set(drop_cols),
             )
 
         quant_results = quantify_transcripts(
@@ -1550,31 +1949,6 @@ class PipelineRunner:
                     # the union count == sum, but union is robust either way. Soft
                     # mass is added so aggregate_across_intervals (single interval:
                     # unique/weight ratio == 1) reports parent + shadow abundance.
-        # --- Containment-cluster drop: drop a NOVEL candidate whose intron chain is a
-        #     contiguous SUB-CHAIN of a longer candidate (a truncation / exon-skip shadow
-        #     the same-intron-count wobble cluster never groups) when it is a low-support
-        #     shadow by BOTH EM abundance AND supporting-read count. Runs AFTER all the
-        #     structural/support gates so ``exclude=drop_cols`` covers every already-doomed
-        #     parent — a shadow is never folded into a parent that is itself dropped. The
-        #     read-support guard keeps most genuine low-abundance short/alt-TSS isoforms;
-        #     gtf/fusion never dropped. DEFAULT-ON (--no-containment-cluster disables). ---
-        if getattr(self.config, "containment_cluster", False):
-            from fin.scoring.m2_junction_nll import containment_cluster_drops
-            em_ab_c = np.asarray(R).sum(axis=0)
-            read_counts = [len(getattr(c, "supporting_read_ids", ()) or ())
-                           for c in cand_list]
-            drop_cols |= containment_cluster_drops(
-                cand_list, em_ab_c, read_counts,
-                wobble_bp=int(getattr(self.config, "containment_cluster_wobble_bp", 6)),
-                min_ab_ratio=float(getattr(
-                    self.config, "containment_cluster_min_ab_ratio", 0.3)),
-                min_read_ratio=float(getattr(
-                    self.config, "containment_cluster_min_read_ratio", 0.3)),
-                max_shadow_reads=int(getattr(
-                    self.config, "containment_cluster_max_shadow_reads", 0)),
-                exclude=set(drop_cols),
-            )
-
                     union = set(pq.assigned_read_ids) | set(sq.assigned_read_ids)
                     pq.assigned_read_ids = tuple(sorted(union))
                     pq.num_assigned_reads = len(union)
@@ -1590,6 +1964,33 @@ class PipelineRunner:
                         "m2_em interval %s: containment folded %d "
                         "5'-truncation shadows", interval.region_string, n_folded,
                     )
+
+        # --- Post-EM mono-exon resolution (mono_resolve_post_em). Re-resolve each
+        #     SURVIVING single-exon candidate's reads against the SURVIVING multi-exon
+        #     candidates by strict strand-aware exonic containment: a read wholly inside
+        #     one exon of exactly one surviving multi folds into it (a degradation
+        #     fragment); inside several -> the highest-EM-abundance one; uncovered reads
+        #     stay on the mono candidate, which is dropped if it retains fewer than
+        #     mono_resolve_min_reads. Runs AFTER every structural gate, so it can only
+        #     target survivors (guard 1: never fold into a doomed candidate). Containment
+        #     is strict + strand-aware with terminal slop (guard 2). Multi-cover assigns
+        #     the whole hard read to the top-abundance candidate, not a fractional split
+        #     (guard 3); the uncovered read-support floor gates genuine mono calls. ---
+        if getattr(self.config, "mono_resolve_post_em", False):
+            from fin.scoring.m2_junction_nll import mono_resolve_drops
+            mono_drops = mono_resolve_drops(
+                cand_list, quant_results, np.asarray(R).sum(axis=0),
+                getattr(candidate_set, "read_spans", None) or {},
+                exclude=drop_cols,
+                slop_bp=int(getattr(self.config, "mono_resolve_slop_bp", 10)),
+                min_reads=int(getattr(self.config, "mono_resolve_min_reads", 2)),
+            )
+            if mono_drops:
+                drop_cols |= mono_drops
+                logger.info(
+                    "m2_em interval %s: mono-resolve dropped %d under-supported "
+                    "single-exon candidates", interval.region_string, len(mono_drops),
+                )
         if drop_cols:
             drop_ids = {cand_list[j].candidate_id for j in drop_cols}
             quant_results = [q for q in quant_results if q.candidate_id not in drop_ids]

@@ -65,6 +65,19 @@ class TestClustering:
         assert _member_chains(cl[0]) == {(J1, J2, J3)}   # sub-chain folded away
         assert cl[0].read_ids == {"a1", "a2", "b1", "b2"}  # its reads pooled in
 
+    def test_folded_subchain_retained_as_shadow(self):
+        # The folded sub-chain is kept as a SHADOW (provenance) on its container:
+        # its own chain + its own reads, for the downstream recovery step.
+        cl = cluster_read_chains(_rc(
+            [("a1", (J1, J2, J3)), ("a2", (J1, J2, J3)),
+             ("b1", (J2, J3)), ("b2", (J2, J3))]))
+        (m,) = cl[0].members
+        assert m.chain.introns == (J1, J2, J3)
+        assert len(m.folded) == 1
+        assert m.folded[0].chain.introns == (J2, J3)
+        assert m.folded[0].read_ids == {"b1", "b2"}      # shadow's own reads
+        assert m.read_ids == {"a1", "a2", "b1", "b2"}    # container still pools all
+
     def test_wobble_variants_same_cluster_kept(self):
         # 2bp-wobbled sibling: NOT an exact subchain -> both KEPT, one cluster.
         cl = cluster_read_chains(
@@ -112,3 +125,73 @@ class TestClustering:
         cl = cluster_read_chains(
             _rc([("a", (J1, J2, J3)), ("b", ((302, 398), J3))]))
         assert cl[0].representative.chain.introns == (J1, J2, J3)
+
+
+def _rcs(entries):
+    """entries: (rid, introns, ref_start, ref_end) -> read_chains with spans."""
+    return [({"query_name": rid, "reference_start": s, "reference_end": e},
+             IntronChain(introns=introns)) for rid, introns, s, e in entries]
+
+
+class TestMonoexonFold:
+    """fold_monoexon_contained: single-exon reads inside a multi-exon candidate's exon
+    are folded into it; intronic / uncontained / junction-crossing mono reads stay."""
+
+    # multi candidate (J1,J2): exons [50,100) [200,300) [400,500); introns [100,200) [300,400)
+    def _rc(self, mono):
+        return _rcs([("m1", (J1, J2), 50, 500), ("m2", (J1, J2), 50, 500)] + mono)
+
+    def test_monoexon_in_exon_folds(self):
+        cl = cluster_read_chains(self._rc([("s1", (), 210, 290)]),
+                                 fold_monoexon_contained=True)
+        assert len(cl) == 1                                   # no standalone mono
+        assert _member_chains(cl[0]) == {(J1, J2)}
+        assert "s1" in cl[0].read_ids                         # folded into the multi
+
+    def test_monoexon_in_intron_stays(self):
+        cl = cluster_read_chains(self._rc([("s1", (), 120, 180)]),  # inside intron J1
+                                 fold_monoexon_contained=True)
+        assert any(m.chain.introns == () for c in cl for m in c.members)
+
+    def test_monoexon_outside_span_stays(self):
+        cl = cluster_read_chains(self._rc([("s1", (), 600, 700)]),
+                                 fold_monoexon_contained=True)
+        assert any(m.chain.introns == () for c in cl for m in c.members)
+
+    def test_monoexon_crossing_junction_stays(self):
+        cl = cluster_read_chains(self._rc([("s1", (), 250, 350)]),  # spans intron J2
+                                 fold_monoexon_contained=True)
+        assert any(m.chain.introns == () for c in cl for m in c.members)
+
+    def test_default_off_emits_standalone_mono(self):
+        cl = cluster_read_chains(self._rc([("s1", (), 210, 290)]))  # flag off
+        assert any(m.chain.introns == () for c in cl for m in c.members)
+
+
+class TestFoldSpanGuard:
+    """fold_span_guard: a read whose span runs exonically across a container's EXTRA
+    intron (retained-intron / alt isoform) is kept as its own candidate, not folded."""
+
+    # container (J1,J2,J3): extra intron vs (J1,J2) is J3=(500,600).
+    def _rc(self):
+        return _rcs([
+            ("big1", (J1, J2, J3), 50, 650),
+            ("big2", (J1, J2, J3), 50, 650),
+            ("trunc", (J1, J2), 50, 450),     # ends before J3 -> truncation (fold)
+            ("retain", (J1, J2), 50, 650),    # spans across J3 -> retained (keep)
+        ])
+
+    def test_guard_keeps_retained_intron_folds_truncation(self):
+        cl = cluster_read_chains(self._rc(), fold_span_guard=True)
+        members = {m.chain.introns: m for c in cl for m in c.members}
+        assert (J1, J2, J3) in members
+        assert (J1, J2) in members                          # retained-intron kept
+        assert "retain" in members[(J1, J2)].read_ids
+        assert "trunc" in members[(J1, J2, J3)].read_ids     # truncation folded in
+        assert "retain" not in members[(J1, J2, J3)].read_ids
+
+    def test_default_off_folds_everything(self):
+        cl = cluster_read_chains(self._rc())                # guard off (default)
+        members = {m.chain.introns for c in cl for m in c.members}
+        assert (J1, J2) not in members                       # unconditional fold
+        assert (J1, J2, J3) in members

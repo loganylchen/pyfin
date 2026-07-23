@@ -26,6 +26,31 @@ class PipelineConfig:
     three_prime_threshold: int = 24
     max_gap: int = 0
     min_novel_reads: int = 1          # A2: min supporting reads for a novel candidate (after collapsing)
+    # NEW generation-side clustering (PRODUCTION DEFAULT). Group reads by intron chain
+    # (3' ignored), collapse EXACT sub-chains, cluster wobble/cassette/containment
+    # keeping members; NO canonical-search shadow generation. Replaces the legacy
+    # 3'+exact-chain grouping + canonical expansion. On p00 (no gates, candidates = the
+    # result) this cut raw candidates 175k->37k, c -73%, j -88%, structural precision
+    # 10.1%->26.4% (2.6x), at a ~20% distinct-truth recall cost that is 92% attributable
+    # to the exact sub-chain collapse (recoverable later by guarding the collapse).
+    chain_cluster_discovery: bool = True
+    chain_cluster_wobble_bp: int = 6
+    chain_cluster_cassette_max_exon_bp: int = 70
+    chain_cluster_fold_monoexon: bool = True  # fold single-exon reads wholly inside a multi-exon candidate's exon into that candidate (5'/3' degradation fragments) instead of emitting standalone mono candidates; intronic/uncontained mono reads stay separate. PRODUCTION DEFAULT (p00 m2_em: out 9581->9181, `=` 6323->6414, Pr 66.0->69.9 -- de-fragmentation both-axes win). --no- reverts to legacy standalone mono candidates.
+    chain_cluster_fold_span_guard: bool = True  # only fold a read into an exact-sub-chain container if its aligned span does NOT run exonically across one of the container's EXTRA introns; a read spanning such an intron (retained-intron / alternative isoform) is kept as its own candidate instead of being absorbed. PRODUCTION DEFAULT. --no- reverts to unconditional exact-sub-chain fold.
+    # Post-EM mono-exon resolution (quant_mode="m2_em" only). When True, single-exon
+    # reads are NOT folded into multi-exon candidates at generation (chain_cluster_fold_
+    # monoexon is forced off); instead, AFTER the multi-exon EM + structural gates, each
+    # surviving mono candidate's reads are re-resolved against the SURVIVING multi-exon
+    # candidates by strict strand-aware exonic containment: a read wholly inside one
+    # exon of exactly one surviving multi folds into it; inside several -> folds into the
+    # highest-EM-abundance one; uncovered reads stay on the mono candidate, which is kept
+    # only if it retains >= mono_resolve_min_reads (else dropped). Fragment reads follow
+    # inferred multi-isoform abundance instead of a static generation-time container.
+    # Default OFF (byte-identical). Codex-vetted; validate on p00 before any default flip.
+    mono_resolve_post_em: bool = False
+    mono_resolve_min_reads: int = 2   # uncovered reads a mono candidate must retain to survive
+    mono_resolve_slop_bp: int = 10    # terminal boundary slop for the exonic-containment test
     min_abundance: float = 0.0        # A4: drop quantified NOVEL transcripts with abundance < this. Field default stays 0 (programmatic/quantify/ablation callers unchanged); the `fin` CLI defaults it to 3 (NOVEL only).
     floor_gtf_abundance: bool = False  # A4: when True the GTF floor is raised to max(min_gtf_abundance, min_abundance) (i.e. up to the NOVEL floor, never below the explicit GTF floor); default False = GTF uses its own lighter min_gtf_abundance. The `fin` CLI exposes this as --floor-gtf-abundance (OFF). Fusion is always exempt. Ablation path is separate and keeps GTF exempt regardless.
     min_gtf_abundance: float = 0.0    # A4: own (lighter) abundance floor for GTF transcripts, on soft EM abundance. Field default stays 0 (programmatic/quantify/ablation callers unchanged); the `fin` CLI defaults it to 1, so a GTF candidate whose EM soft-mass is below 1 read is dropped (avoids echoing annotation as a copy-tool). When floor_gtf_abundance is set the effective GTF floor becomes max(min_gtf_abundance, min_abundance). Fusion always exempt.
@@ -172,7 +197,25 @@ class PipelineConfig:
     #              59.2 with-GTF, M3 off) just under argmax.
     # All signal scoring is krill (in-memory eventalign); the legacy f5c CLI
     # path is gone. SIRV WARNING: tuned on synthetic SIRV; revisit for real data.
-    quant_mode: Literal["argmax", "m1_em", "m2_em"] = "m2_em"
+    quant_mode: Literal["argmax", "m1_em", "m2_em", "cluster"] = "m2_em"
+
+    # quant_mode="cluster" only: assign reads to candidates WITHIN each generation
+    # cluster (CandidateSet.clusters) using fin.pipeline.cluster_quant. A straddling
+    # M1 tie is resolved by the summed-LLR junction signal only when |LLR| >=
+    # cluster_llr_threshold; a member survives iff its total assigned weight >=
+    # cluster_min_support. Defaults leave every other mode unchanged.
+    cluster_llr_threshold: float = 2.0
+    cluster_min_support: float = 1.0
+    # M1 best-AS tie margin (AS points): a read is unique-best only when its top
+    # member beats the runner-up by more than this; within it the members tie (-> M2 /
+    # ambiguous 1/k -> EM). Stops a 2-3 bp wobble near-tie from anchoring a shadow
+    # (measured: wobble AS-gaps concentrate <=20, real differences differ by hundreds).
+    cluster_m1_tie_margin: float = 20.0
+    # cluster mode: run the summed-LLR M2 signal tiebreak on straddling ties. With a
+    # wide m1_tie_margin this fires on many ties (expensive eventalign) for little
+    # end-to-end gain, so it can be turned off (near-ties then fall straight to the
+    # ambiguous 1/k -> EM path). Signal is still used by the polyA finalize gate.
+    cluster_use_m2: bool = True
 
     # R2 uses em_max_iter_override=1 for single-step EM; None = use em_max_iter.
     em_max_iter_override: Optional[int] = None
@@ -339,6 +382,70 @@ class PipelineConfig:
     # and #1 standing justify it. Set 0 to disable.
     novel_junction_min_reads: int = 2
     novel_junction_reads_tol: int = 2
+    # DE-NOVO wobble-tolerant collapse (EXPERIMENT default-OFF). At discovery,
+    # novel candidates are bucketed by EXACT intron chain, so a junction at
+    # (1000,2000) and a minimap-wobbled (1002,1998) become SEPARATE candidates
+    # (wobble shadows) — the measured cause of pyfin's low de-novo structural
+    # precision (p00 65.6% vs isoquant 91.3%). When > 0, _collapse_candidates
+    # merges novel candidates whose intron chains match within this many bp per
+    # junction (AND 3' within three_prime_threshold) into the highest-read-support
+    # representative (consensus of the reads' OWN mode — NOT annotation-snap). 0
+    # disables (byte-identical). isoquant uses Δ=6 for ONT.
+    denovo_wobble_tol: int = 0
+    # Shadow-ratio guard for the wobble merge: absorb a wobble-matching novel
+    # candidate into a rep ONLY if it is a true SHADOW — len(cand.reads) <=
+    # ratio * len(rep.reads). Protects genuine CLOSE isoforms (real alt
+    # donor/acceptor a few bp apart, e.g. NAGNAG) from being merged: a minimap
+    # shadow has few reads, a real close isoform has comparable support. 1.0
+    # merges any wobble-match (naive; measured to eat correct transcripts at
+    # tol=6). isoquant's ½-support bulge criterion ≈ 0.5. Only used when
+    # denovo_wobble_tol > 0.
+    denovo_wobble_shadow_ratio: float = 0.5
+    # DE-NOVO intron-graph assembly (EXPERIMENT default-OFF). Attacks the measured
+    # #1 de-novo error: truncation (dRNA 3'-bias -> reads cover only 3' junctions
+    # -> pyfin emits truncated candidates, gffcompare class 'c'). When ON, pool all
+    # reads' junctions, cluster wobbles to a read-count consensus (denovo_graph_tol
+    # bp), build a read-adjacency graph, and EXTEND each read's chain through
+    # UNAMBIGUOUSLY-supported edges (>= denovo_graph_min_edge_reads) to a maximal
+    # chain — assembling truncated partials into full-length transcripts, stopping
+    # at genuine branch points (no fabricated wrong combos). Reads are then grouped
+    # by the extended chain; the candidate span is the union of its reads' extents
+    # (5'/3' ends) and its sequence is built from the genome. NOT annotation-snap
+    # (consensus + edges from reads only). OFF => byte-identical.
+    denovo_graph: bool = False
+    denovo_graph_tol: int = 6
+    denovo_graph_min_edge_reads: int = 2
+    # 5'-TSS brake for --denovo-graph. dRNA truncation is 5'-ward, so a truncated
+    # read of a LONG transcript stops at a random 5' position while a COMPLETE read
+    # of a genuine short isoform stops at that isoform's real TSS. A chain whose
+    # 5'-terminal junction sits at a TSS peak (>= tss_frac of its reads pile their
+    # 5'-end within tss_tol bp, and >= tss_min_reads reads) is NOT extended 5'-ward,
+    # so short isoforms contained inside a longer transcript survive instead of
+    # being merged away. Validated on p00: real short-isoform TSS carry 40-90% of a
+    # locus's read-5'-ends; degradation-only starts scatter and never cross frac.
+    denovo_graph_tss_brake: bool = True
+    denovo_graph_tss_tol: int = 20
+    denovo_graph_tss_min_reads: int = 3
+    denovo_graph_tss_frac: float = 0.4
+    # The mirror of Lever 2 for GTF-passthrough (source="gtf") candidates: drop a
+    # guided multi-exon candidate if ANY of its junctions is spliced by fewer than
+    # guided_junction_min_reads directly-observed reads (primary-read CIGAR introns,
+    # strand-keyed, within guided_junction_reads_tol bp of BOTH boundaries). Novel
+    # candidates keep going through Lever 2; fusion/mono are exempt.
+    # WHY: Lever 2 + the coordinate-EXACT gates are novel-only, so a jitter-corrupted
+    # GTF junction (coords shifted >tol from the true site) is never checked against
+    # read CIGARs — it only faces the coordinate-INEXACT M2/M1 support gate, which a
+    # ±10bp shift survives (it still holds reads' mappy sole-AS / ties the NLL). That
+    # is the measured c_jitter precision collapse (94.8→41.3). Requiring exact read
+    # support for GTF junctions attacks that directly; it also trims GTF echo
+    # (orphan) in loci with observed splicing — but a FULLY read-sparse locus fails
+    # open (observed map is None -> no drop), so echo there is unaffected.
+    # RECALL RISK: this also drops genuine but low-coverage annotated junctions —
+    # the classic real-vs-synthetic sign-flip knob. Keep min_reads small, tol tight,
+    # and validate on real data across samples before any default flip. 0 disables
+    # (byte-identical / recall-safe).
+    guided_junction_min_reads: int = 0
+    guided_junction_reads_tol: int = 2
     # Junction-dominance gate (PRE-EM, in process_interval after the canonical
     # gate). The "junction-first" idea: before quantification, drop a NOVEL
     # multi-exon candidate if ANY of its junctions is either (a) supported by
@@ -409,8 +516,10 @@ class PipelineConfig:
     # Limits
     max_reads: Optional[int] = None
 
-    # R-matrix persistence (T8: FP-by-EM data infrastructure)
-    persist_R_matrix: bool = True  # write R.npy + R_meta.json per interval after EM
+    # R-matrix persistence (T8: FP-by-EM data infrastructure). INERT: no writer path
+    # exists under fin/ (the R.npy/R_meta.json dump was never wired into the assembly
+    # runner); retained for CLI/constructor back-compat. Do not delete.
+    persist_R_matrix: bool = True  # (inert) no per-interval R dump is written
 
     # Diagnostic: write the per-candidate scoring TSV BEFORE the post-EM filters
     # (min_abundance / isoform-fraction / full-length / polyA) so downstream

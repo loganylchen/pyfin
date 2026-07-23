@@ -83,6 +83,28 @@ class CandidateSet:
     # within this interval. Populated by discover_candidates(); used by R1
     # ablation (mappy argmax bypass) and any path that needs read FASTA.
     read_sequences: Dict[str, str] = field(default_factory=dict)
+    # Generation-cluster grouping for quant_mode="cluster": each inner list holds
+    # the candidate_ids that belong to one generation cluster. Ids (not indices)
+    # survive post-discovery gate drops/reorders (canonical/dominance/fusion), which
+    # would invalidate positional indices. Populated only by the chain-cluster
+    # discovery path; None means "not chain-cluster mode" (the quant-cluster dispatch
+    # then treats the whole candidate list as one unscoped cluster).
+    clusters: Optional[List[List[str]]] = None
+    # 5'-TSS short-isoform recovery provenance (chain-cluster path only). Maps a
+    # container candidate_id to the SHADOW sub-chains folded into it during
+    # generation: each shadow is (intron_chain_tuple, sorted_read_id_tuple). The
+    # quant-cluster recovery step re-tests these folded truncations against the
+    # container's read-5'-end pileup and re-activates real TSS peaks as short
+    # isoforms. None means "not chain-cluster mode" (no recovery).
+    shadows: Optional[
+        Dict[str, List[Tuple[Tuple[Tuple[int, int], ...], Tuple[str, ...]]]]
+    ] = None
+    # read_id -> (genomic reference_start, reference_end) for reads fetched in this
+    # interval. Populated by the chain-cluster discovery path; used by the post-EM
+    # mono-exon resolution (quant_mode="m2_em", mono_resolve_post_em) to test whether a
+    # single-exon read's genomic span lies inside a surviving multi-exon candidate's
+    # exon. None means "not chain-cluster mode" (mono-resolution no-ops).
+    read_spans: Optional[Dict[str, Tuple[int, int]]] = None
 
     @property
     def num_candidates(self) -> int:

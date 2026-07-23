@@ -34,9 +34,16 @@ Chain = Tuple[Tuple[int, int], ...]
 
 @dataclass
 class GenCandidate:
-    """One candidate inside a cluster: a distinct intron chain + its pooled reads."""
+    """One candidate inside a cluster: a distinct intron chain + its pooled reads.
+
+    ``folded`` holds the SHADOW sub-chains folded into this candidate (each an exact
+    contiguous sub-chain, with its OWN reads). They are dormant provenance for the
+    downstream short-isoform recovery step: their truncation boundary is a proposed
+    TSS/polyA site and their reads are the direct endpoint evidence. ``read_ids``
+    already INCLUDES every shadow's reads (pooled), so shadows never add read mass."""
     chain: IntronChain
     read_ids: Set[str] = field(default_factory=set)
+    folded: List["GenCandidate"] = field(default_factory=list)
 
     @property
     def num_introns(self) -> int:
@@ -68,6 +75,19 @@ def _exact_subchain(short: Chain, long_: Chain) -> bool:
     if m == 0 or m >= n:
         return False
     return any(long_[off:off + m] == short for off in range(n - m + 1))
+
+
+def _subchain_offset(short: Chain, long_: Chain) -> int:
+    """Offset of the first exact ``short`` occurrence in ``long_`` (-1 if none). The
+    introns of ``long_`` outside ``[off, off+len(short))`` are the container's EXTRA
+    introns relative to ``short`` -- positions where ``short`` splices differently."""
+    n, m = len(long_), len(short)
+    if m == 0 or m >= n:
+        return -1
+    for off in range(n - m + 1):
+        if long_[off:off + m] == short:
+            return off
+    return -1
 
 
 def _wobble(a: Chain, b: Chain, bp: int) -> bool:
@@ -126,11 +146,27 @@ def _related(a: Chain, b: Chain, wobble_bp: int, cassette_max_exon_bp: int) -> b
     return False
 
 
+def _monoexon_in_exon(s: int, e: int, chain: Chain, lo: int, hi: int) -> bool:
+    """``[s, e)`` (a single-exon read) lies wholly inside ONE exon of a multi-exon
+    candidate whose exonic footprint is ``[lo, hi)`` and whose introns are ``chain``
+    (each ``[d, a)`` half-open). True iff the read is within the footprint AND overlaps
+    no intron -- i.e. it is a fragment of that candidate's exonic sequence, not an
+    intronic feature (a different gene) and not something that crosses a junction."""
+    if s < lo or e > hi:
+        return False
+    for d, a in chain:                       # overlap of [s,e) and intron [d,a)
+        if s < a and d < e:
+            return False
+    return True
+
+
 def cluster_read_chains(
     read_chains: List[Tuple[Dict, IntronChain]],
     *,
     wobble_bp: int = 6,
     cassette_max_exon_bp: int = 70,
+    fold_monoexon_contained: bool = False,
+    fold_span_guard: bool = False,
 ) -> List[ChainCluster]:
     """Build generation-side clusters from per-read chains (NO snap, 3' ignored).
 
@@ -139,6 +175,19 @@ def cluster_read_chains(
             "query_name"; CIGAR-derived chains, used as-is).
         wobble_bp: per-junction tolerance for wobble / cassette / containment joins.
         cassette_max_exon_bp: max skipped-exon length for a cassette join (0 off).
+        fold_monoexon_contained: when True, a single-exon (chain-less) read whose
+            aligned span lies wholly inside one exon of a multi-exon candidate is folded
+            into that candidate (its read joins the candidate's support) instead of
+            emitting a standalone mono candidate. This absorbs 5'/3' degradation
+            fragments of a spliced transcript. Reads inside an INTRON (a different gene)
+            or not contained in any multi-exon candidate stay as mono candidates. Off by
+            default (byte-identical legacy behaviour).
+        fold_span_guard: when True, a read only folds into an exact-sub-chain container
+            if its aligned span does NOT run exonically across one of the container's
+            EXTRA introns (introns present in the container but absent from the read's
+            chain). A read that spans such an intron contradicts it (retained-intron or
+            alternative isoform) and is kept as its own candidate instead of being
+            absorbed. Off by default (byte-identical legacy behaviour).
 
     Returns:
         List of :class:`ChainCluster`. EVERY exact contiguous sub-chain is folded
@@ -157,24 +206,91 @@ def cluster_read_chains(
             continue
         by_chain.setdefault(tuple(chain.introns), set()).add(rid)
 
-    # 2. collapse EVERY exact contiguous sub-chain into its longest exact container,
-    #    UNCONDITIONALLY (no read-support guard). Whether a folded sub-chain is a
-    #    genuine short isoform is decided later by a dedicated recovery step, never
-    #    guessed here from read counts.
+    # Read spans (0-based [start, end)) -- needed by the span-guarded fold and the
+    # mono-exon fold. Built once, only when a span-aware step is enabled.
+    read_span: Dict[str, Tuple[int, int]] = {}
+    if fold_span_guard or fold_monoexon_contained:
+        for rd, _chain in read_chains:
+            rid = rd.get("query_name")
+            rs = rd.get("reference_start")
+            re_ = rd.get("reference_end")
+            if rid is not None and rs is not None and re_ is not None:
+                read_span[rid] = (rs, re_)
+
+    # 2. collapse every exact contiguous sub-chain into its longest exact container.
+    #    Default: UNCONDITIONAL (no read-support guard). With fold_span_guard, a read
+    #    folds ONLY if its aligned span does not run exonically across one of the
+    #    container's EXTRA introns (retained-intron / alternative isoform reads are kept
+    #    as their own candidate instead of being absorbed). Whether a *consistent*
+    #    folded sub-chain is a genuine short isoform is still a SEPARATE downstream
+    #    recovery step (read-end pileup), never guessed here from read counts.
     chains_sorted = sorted(by_chain, key=lambda c: (-len(c), -len(by_chain[c]), c))
     kept: List[Chain] = []
     reads: Dict[Chain, Set[str]] = {}
+    folded_of: Dict[Chain, List[Tuple[Chain, Set[str]]]] = {}  # container -> shadows
     for c in chains_sorted:
         container = next((k for k in kept if _exact_subchain(c, k)), None)
         if container is None:
             kept.append(c)
             reads[c] = set(by_chain[c])
-        else:
+            continue
+        if not fold_span_guard:
             reads[container] |= by_chain[c]
+            folded_of.setdefault(container, []).append((c, set(by_chain[c])))
+            continue
+        # span guard: split c's reads into those consistent with the container (fold)
+        # and those exonic across one of the container's extra introns (keep as c).
+        off = _subchain_offset(c, container)
+        extra = container[:off] + container[off + len(c):]
+        fold_r: Set[str] = set()
+        keep_r: Set[str] = set()
+        for rid in by_chain[c]:
+            sp = read_span.get(rid)
+            if sp is not None and any(sp[0] <= d and sp[1] >= a for d, a in extra):
+                keep_r.add(rid)            # exonic across an extra intron -> distinct
+            else:
+                fold_r.add(rid)
+        if fold_r:
+            reads[container] |= fold_r
+            folded_of.setdefault(container, []).append((c, fold_r))
+        if keep_r:
+            kept.append(c)
+            reads[c] = keep_r
 
     # 3. union-find the survivors by wobble / cassette / containment (multi-exon only).
     multi = [c for c in kept if len(c) >= 1]
     mono = [c for c in kept if len(c) == 0]
+
+    # 3b. (optional) fold single-exon reads that are wholly inside a multi-exon
+    #     candidate's exon into that candidate -- 5'/3' degradation fragments of a
+    #     spliced transcript, otherwise emitted as standalone mono FPs. Per-read (the
+    #     mono chain pools every chain-less read), deterministic container choice.
+    if fold_monoexon_contained and mono and multi:
+        multi_span: Dict[Chain, Tuple[int, int]] = {}
+        for c in multi:
+            pts = [read_span[r] for r in reads[c] if r in read_span]
+            if pts:
+                multi_span[c] = (min(p[0] for p in pts), max(p[1] for p in pts))
+        containers = [c for c in multi if c in multi_span]
+        for mc in mono:
+            remaining: Set[str] = set()
+            for rid in reads[mc]:
+                sp = read_span.get(rid)
+                if sp is None:
+                    remaining.add(rid)
+                    continue
+                s, e = sp
+                hits = [c for c in containers
+                        if _monoexon_in_exon(s, e, c, *multi_span[c])]
+                if not hits:
+                    remaining.add(rid)
+                    continue
+                best = max(hits, key=lambda c: (len(reads[c]), len(c), c))
+                reads[best].add(rid)
+                folded_of.setdefault(best, []).append(((), {rid}))
+            reads[mc] = remaining
+        mono = [c for c in mono if reads[c]]
+
     parent = {c: c for c in multi}
 
     def find(x: Chain) -> Chain:
@@ -193,17 +309,22 @@ def cluster_read_chains(
     for c in multi:
         comps.setdefault(find(c), []).append(c)
 
+    def _mk(c: Chain) -> GenCandidate:
+        """Member candidate with its folded exact-sub-chain shadows attached."""
+        return GenCandidate(
+            IntronChain(introns=c), set(reads[c]),
+            folded=[GenCandidate(IntronChain(introns=fc), set(fr))
+                    for fc, fr in folded_of.get(c, [])])
+
     clusters: List[ChainCluster] = []
     for comp in comps.values():
-        members = [GenCandidate(IntronChain(introns=c), set(reads[c])) for c in comp]
+        members = [_mk(c) for c in comp]
         union: Set[str] = set()
         for c in comp:
             union |= reads[c]
         clusters.append(ChainCluster(members=members, read_ids=union))
 
     for c in mono:  # mono singletons
-        clusters.append(ChainCluster(
-            members=[GenCandidate(IntronChain(introns=c), set(reads[c]))],
-            read_ids=set(reads[c])))
+        clusters.append(ChainCluster(members=[_mk(c)], read_ids=set(reads[c])))
 
     return clusters

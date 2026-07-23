@@ -312,6 +312,34 @@ def wobble_diff_spans(
     return _merge(spans)
 
 
+def diff_junction_windows(
+    class_cands: List[TranscriptCandidate],
+    flank: int = 6,
+) -> List[Tuple[int, int]]:
+    """Tight genomic windows (``+-flank`` bp) around each DIFFERING junction boundary.
+
+    A donor/acceptor coordinate that is not shared by every candidate in the tie is a
+    discriminating boundary; the k-mers straddling it are the only events that carry
+    signal about which candidate the read supports. Returns a merged ``+-flank`` window
+    per such coordinate -- the scoring footprint for the summed-LLR metric (see
+    :func:`m2_resolve_tie`). Empty when the tie is unanimous (no differing boundary).
+    """
+    if len(class_cands) < 2:
+        return []
+    per = [set(c.intron_chain.introns) for c in class_cands]
+    common: set = set(per[0])
+    for s in per[1:]:
+        common &= s
+    coords: set = set()
+    for s in per:
+        for (a, b) in (s - common):
+            coords.add(a)
+            coords.add(b)
+    if not coords:
+        return []
+    return _merge([(c - flank, c + flank) for c in sorted(coords)])
+
+
 def read_straddles(event_gpos: Sequence[int], lo: int, hi: int) -> bool:
     """True iff the read's genomic event positions bracket the span ``[lo, hi]``.
 
@@ -698,6 +726,89 @@ def containment_shadow_drops(cands, em_ab, *, tol_bp, min_ratio, exclude=None):
     return {s: terminal(p) for s, p in raw.items() if terminal(p) != s}
 
 
+def _mono_read_in_exon(s, e, introns, lo, hi):
+    """``[s, e)`` lies wholly inside ONE exon of a candidate with footprint ``[lo, hi)``
+    and half-open introns ``[d, a)``: within the (slop-expanded) footprint and
+    overlapping no intron. Same geometry as chain_cluster._monoexon_in_exon."""
+    if s < lo or e > hi:
+        return False
+    for d, a in introns:
+        if s < a and d < e:                 # [s,e) overlaps intron [d,a)
+            return False
+    return True
+
+
+def mono_resolve_drops(cands, quant_results, em_ab, read_spans, *,
+                       exclude, slop_bp, min_reads):
+    """Post-EM mono-exon resolution (quant_mode="m2_em", mono_resolve_post_em).
+
+    Re-resolve each SURVIVING single-exon (empty-chain) candidate's hard reads against
+    the SURVIVING multi-exon candidates by strict strand-aware exonic containment:
+      * a read wholly inside one exon of exactly one surviving multi -> fold into it;
+      * inside several -> fold into the highest-``em_ab`` one (det. tie-break by id);
+      * uncovered reads (no span, or not exon-contained) stay on the mono candidate.
+    Mutates ``quant_results`` in place: a folded read joins the target multi's
+    ``assigned_read_ids`` and adds ~1 to its ``abundance``; the mono candidate keeps only
+    its uncovered reads (abundance reset to that hard count).
+
+    Args:
+        cands: candidate list (column order == em_ab index order).
+        quant_results: QuantResult list (looked up by candidate_id; mutated).
+        em_ab: per-candidate EM soft abundance (R column sums), index-aligned to cands.
+        read_spans: read_id -> (genomic start, end); reads absent here stay uncovered.
+        exclude: columns already dropped (never resolved into / from) -- guard 1.
+        slop_bp: terminal boundary slop on the multi footprint -- guard 2.
+        min_reads: a mono candidate is dropped if it keeps fewer uncovered reads.
+
+    Returns:
+        set of mono candidate columns to drop (kept-read count < ``min_reads``).
+    """
+    exclude = set(exclude or ())
+    multi = [(j, c) for j, c in enumerate(cands)
+             if c.intron_chain.introns and j not in exclude]
+    mono = [(j, c) for j, c in enumerate(cands)
+            if not c.intron_chain.introns and j not in exclude]
+    drops = set()
+    if not (multi and mono):
+        return drops
+    qr_by_id = {q.candidate_id: q for q in quant_results}
+    for jm, cm in mono:
+        mq = qr_by_id.get(cm.candidate_id)
+        if mq is None:
+            continue
+        kept = []
+        for rid in mq.assigned_read_ids:
+            sp = read_spans.get(rid)
+            if sp is None:
+                kept.append(rid)
+                continue
+            s, e = sp
+            covering = [
+                jc for jc, cc in multi
+                if cc.strand == cm.strand
+                and _mono_read_in_exon(s, e, cc.intron_chain.introns,
+                                       cc.start - slop_bp, cc.end + slop_bp)
+            ]
+            if not covering:
+                kept.append(rid)
+                continue
+            best = max(covering, key=lambda jc: (em_ab[jc], cands[jc].candidate_id))
+            pq = qr_by_id.get(cands[best].candidate_id)
+            if pq is None or rid in pq.assigned_read_ids:
+                kept.append(rid)
+                continue
+            pq.assigned_read_ids = tuple(sorted(set(pq.assigned_read_ids) | {rid}))
+            pq.num_assigned_reads = len(pq.assigned_read_ids)
+            pq.abundance += 1.0                     # one fragment read, mass ~1
+        if len(kept) < min_reads:
+            drops.add(jm)
+        else:
+            mq.assigned_read_ids = tuple(sorted(kept))
+            mq.num_assigned_reads = len(kept)
+            mq.abundance = float(len(kept))
+    return drops
+
+
 def containment_cluster_drops(cands, em_ab, read_counts, *, wobble_bp,
                               min_ab_ratio, min_read_ratio, max_shadow_reads=0,
                               exclude=None):
@@ -827,6 +938,69 @@ def junction_support_drops(cands, observed_jct, *, min_reads, tol):
     drops: set = set()
     for j, c in enumerate(cands):
         if c.source != "novel":
+            continue
+        introns = c.intron_chain.introns
+        if len(introns) < 1:
+            continue  # mono: no junctions to support
+        strand = c.strand
+        if any(support(d, a, strand) < min_reads for (d, a) in introns):
+            drops.add(j)
+    return drops
+
+
+def guided_junction_support_drops(cands, observed_jct, *, min_reads, tol):
+    """Columns to drop: GTF-guided multi-exon candidates with an under-supported junction.
+
+    The mirror of :func:`junction_support_drops` for ``source == "gtf"`` (guided)
+    candidates: every junction (intron) of a guided multi-exon candidate must be
+    directly spliced by ``>= min_reads`` reads observed in the interval, i.e.
+    within ``tol`` bp of BOTH boundaries of some observed read CIGAR intron
+    (``observed_jct`` is the STRAND-KEYED ``{strand: {(donor, acceptor): n_reads}}``
+    map built from primary-read CIGARs). If ANY junction falls below ``min_reads``
+    the whole guided candidate is dropped.
+
+    This is the coordinate-EXACT check that Lever 2 applies only to NOVEL
+    candidates. A jitter-corrupted GTF junction (coordinates shifted > ``tol`` bp
+    from the true site) has ZERO exact read support and is dropped here, whereas
+    the coordinate-inexact M2/M1 support gate lets it survive (a ±10bp shift still
+    holds reads' mappy sole-AS and ties the signal-NLL contest). Residual GTF echo
+    (annotated transcripts reads never splice) is dropped for the same reason.
+
+    NOVEL, fusion, and single-exon (mono) candidates are EXEMPT here (novel go
+    through :func:`junction_support_drops`; fusion/mono have no gated junction).
+    ``min_reads <= 0`` or an empty/None ``observed_jct`` disables the gate and
+    returns an empty set (fail-open, byte-identical).
+
+    FAIL-OPEN on empty is deliberate and recall-safe. ``_observed_junctions``
+    returns None for an interval with no observed spliced junctions, and an
+    immediate fetch failure is indistinguishable from a genuinely read-sparse
+    interval (``BamReader.get_reads_in_region`` returns ``[]`` for both), so empty
+    is treated as "no evidence" not "zero support". CONSEQUENCE / LIMITATION:
+    residual GTF echo in a FULLY read-sparse interval is NOT dropped here — only
+    intervals carrying >= 1 observed junction are gated. The primary target (a
+    jitter-corrupted junction whose true site is spliced by reads) always sits in
+    such a non-empty interval, so it is gated. (A mid-iteration fetch failure that
+    yields an INCOMPLETE non-empty map can still undercount support and over-drop
+    — a caveat shared with :func:`junction_support_drops`,
+    :func:`dominant_junction_drops`, and the cluster-recheck guard, inherent to
+    the shared observed-junction source, not specific here.)
+
+    RECALL NOTE: a genuine but low-coverage ANNOTATED isoform whose junction is
+    seen by fewer than ``min_reads`` reads is also dropped — the real-vs-synthetic
+    sign-flip knob. Keep ``min_reads`` small and ``tol`` tight; validate on real
+    data across samples before flipping the default.
+    """
+    if min_reads <= 0 or not observed_jct:
+        return set()
+
+    def support(d, a, strand):
+        counter = observed_jct.get(strand, {})
+        return sum(n for (dd, aa), n in counter.items()
+                   if abs(dd - d) <= tol and abs(aa - a) <= tol)
+
+    drops: set = set()
+    for j, c in enumerate(cands):
+        if c.source != "gtf":
             continue
         introns = c.intron_chain.introns
         if len(introns) < 1:
@@ -998,8 +1172,15 @@ def _mean_nll_in_gset(
     res: dict,
     cand: TranscriptCandidate,
     gset: set,
+    reduce: str = "mean",
 ) -> Tuple[float, int]:
-    """Mean per-event NLL over events whose genomic position is in ``gset``."""
+    """Per-event NLL over events whose genomic position is in ``gset``.
+
+    ``reduce="mean"`` (default) returns ``total / n`` -- the legacy per-event mean.
+    ``reduce="sum"`` returns the un-divided total: used by the summed-LLR tie metric
+    (see :func:`m2_resolve_tie`), where dividing by ``n`` would dilute the few
+    discriminating events with the many shared ones.
+    """
     pos = res["position"]
     z, sd = _zrecords(res)
     if len(pos) == 0:
@@ -1017,7 +1198,7 @@ def _mean_nll_in_gset(
         n += 1
     if n == 0:
         return float("nan"), 0
-    return total / n, n
+    return (total if reduce == "sum" else total / n), n
 
 
 def _zrecords(res: dict) -> Tuple[np.ndarray, np.ndarray]:
@@ -1058,8 +1239,13 @@ def _mean_nll_in_window(
     res: dict,
     cand: TranscriptCandidate,
     windows: List[Tuple[int, int]],
+    reduce: str = "mean",
 ) -> Tuple[float, int]:
-    """Mean per-event NLL over events whose genomic position falls in any window."""
+    """Per-event NLL over events whose genomic position falls in any window.
+
+    ``reduce="sum"`` returns the un-divided total (summed-LLR metric); ``"mean"``
+    (default) returns the legacy per-event mean.
+    """
     pos = res["position"]
     z, sd = _zrecords(res)
     total = 0.0
@@ -1076,7 +1262,7 @@ def _mean_nll_in_window(
         n += 1
     if n == 0:
         return float("nan"), 0
-    return total / n, n
+    return (total if reduce == "sum" else total / n), n
 
 
 def read_cand_mean_nll(
@@ -1091,6 +1277,7 @@ def read_cand_mean_nll(
     gset: Optional[set] = None,
     use_gpu: bool = True,
     num_thread: int = 0,
+    reduce: str = "mean",
 ) -> Tuple[float, int]:
     """Per-event mean NLL of one read against one candidate over ``windows``.
 
@@ -1136,8 +1323,8 @@ def read_cand_mean_nll(
     if res is None or res.get("status", -1) != 0:
         return float("nan"), 0
     if gset is not None:
-        return _mean_nll_in_gset(res, cand, gset)
-    return _mean_nll_in_window(res, cand, windows)
+        return _mean_nll_in_gset(res, cand, gset, reduce=reduce)
+    return _mean_nll_in_window(res, cand, windows, reduce=reduce)
 
 
 # ---------------------------------------------------------------------------
@@ -1162,8 +1349,20 @@ def m2_resolve_tie(
     return_scored: bool = False,
     use_gpu: bool = True,
     num_thread: int = 0,
+    metric: str = "mean",
+    llr_flank: int = 6,
 ) -> Tuple:
-    """Resolve an M1 tie with the validated junction-window mean-NLL metric.
+    """Resolve an M1 tie with a per-event junction-signal metric.
+
+    ``metric="mean"`` (default, legacy): mean per-event NLL over the wide
+    ``+-junction_k`` window; ``margin`` is the mean-NLL gap (small, ~0.01-0.1 --
+    the window averages the few discriminating events with many shared ones).
+
+    ``metric="summed_llr"``: sum per-event NLL over only the TIGHT
+    ``+-llr_flank`` windows around the DIFFERING junction boundaries
+    (:func:`diff_junction_windows`); ``margin`` is then the summed log-likelihood
+    ratio between the two best candidates (undivided, so it does not dilute) --
+    typically ~2-6 for a genuinely-spanning read, ``>= 2`` = a confident call.
 
     Builds the transcript-frame two-sided junction discrimination window for the
     (small) tie set, scores each tied candidate's per-event mean NLL (non-HMM
@@ -1207,9 +1406,17 @@ def m2_resolve_tie(
     if len(tied_cands) < 2 or not read_seq:
         return (None, 0.0, []) if return_scored else (None, 0.0)
 
-    gset = class_junction_window_set(tied_cands, flank=flank, k=junction_k)
-    if not gset:
-        return (None, 0.0, []) if return_scored else (None, 0.0)
+    summed = metric == "summed_llr"
+    windows: List[Tuple[int, int]] = []
+    gset: Optional[set] = None
+    if summed:
+        windows = diff_junction_windows(tied_cands, flank=llr_flank)
+        if not windows:
+            return (None, 0.0, []) if return_scored else (None, 0.0)
+    else:
+        gset = class_junction_window_set(tied_cands, flank=flank, k=junction_k)
+        if not gset:
+            return (None, 0.0, []) if return_scored else (None, 0.0)
 
     if krill_aligner is None:
         try:
@@ -1240,8 +1447,9 @@ def m2_resolve_tie(
         if aln is None:
             continue
         nll, n_ev = read_cand_mean_nll(
-            read_id, read_seq, cand, [], krill_aligner, aln, sig_path, pore,
+            read_id, read_seq, cand, windows, krill_aligner, aln, sig_path, pore,
             gset=gset, use_gpu=use_gpu, num_thread=num_thread,
+            reduce="sum" if summed else "mean",
         )
         if n_ev > 0 and math.isfinite(nll):
             scored.append((idx, nll))

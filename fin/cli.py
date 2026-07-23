@@ -45,7 +45,15 @@ import click
 @click.option("--persist-R/--no-persist-R", "persist_R_matrix", default=True, show_default=True, help="Enable/disable R-matrix (R.npy) persistence per interval.")
 @click.option("--canonical-gate/--no-canonical-gate", "canonical_gate", default=True, show_default=True, help="Drop NOVEL multi-exon candidates whose junctions aren't all canonical (GTF/fusion/mono exempt). SIRV-tuned default ON.")
 @click.option("--canonical-motifs", default="GT-AG,GC-AG,AT-AC", show_default=True, help="Comma-separated donor-acceptor motifs accepted by the canonical gate AND search.")
-@click.option("--canonical-search-bp", default=4, show_default=True, type=int, help="ea extended search: scan ±N bp around each read-derived NOVEL junction for canonical motifs and emit paired alternatives (GTF transcripts not extended). 0 disables. SIRV-tuned default 4.")
+@click.option("--chain-cluster-discovery/--no-chain-cluster-discovery", "chain_cluster_discovery", default=True, show_default=True, help="PRODUCTION DEFAULT generation. Group reads by intron chain (3' IGNORED), collapse EXACT sub-chains, cluster wobble/cassette/containment keeping members; NO canonical-search shadows. Replaces the legacy 3'+exact-chain grouping + canonical expansion. p00 no-gates: raw candidates 175k->37k, c -73%, j -88%, structural precision 10->26%, at ~20% distinct-truth recall cost (92% from the exact sub-chain collapse). --no- reverts to the legacy discovery.")
+@click.option("--chain-cluster-wobble-bp", default=6, show_default=True, type=int, help="(--chain-cluster-discovery) per-junction bp tolerance for the wobble/cassette/containment cluster joins.")
+@click.option("--chain-cluster-cassette-max-exon-bp", default=70, show_default=True, type=int, help="(--chain-cluster-discovery) max skipped-exon length (bp) for a cassette (K vs K-1) cluster join. 0 disables cassette joins.")
+@click.option("--chain-cluster-fold-monoexon/--no-chain-cluster-fold-monoexon", "chain_cluster_fold_monoexon", default=True, show_default=True, help="(--chain-cluster-discovery) PRODUCTION DEFAULT. Fold a single-exon read whose aligned span lies wholly inside one exon of a multi-exon candidate INTO that candidate (a 5'/3' degradation fragment) instead of emitting a standalone single-exon candidate. Reads inside an intron (a different gene) or contained in no multi-exon candidate stay separate. Suppresses single-exon truncation FPs (p00 m2_em: out -400, `=` +91, Pr 66.0->69.9). --no- reverts to standalone mono candidates.")
+@click.option("--chain-cluster-fold-span-guard/--no-chain-cluster-fold-span-guard", "chain_cluster_fold_span_guard", default=True, show_default=True, help="(--chain-cluster-discovery) PRODUCTION DEFAULT. Only fold a read into an exact-sub-chain container if its aligned span does NOT run exonically across one of the container's EXTRA introns. A read that spans such an intron (retained-intron / alternative isoform) contradicts it and is kept as its own candidate instead of being absorbed. --no- reverts to the unconditional exact-sub-chain fold.")
+@click.option("--mono-resolve-post-em/--no-mono-resolve-post-em", "mono_resolve_post_em", default=False, show_default=True, help="(quant_mode=m2_em) EXPERIMENT. Defer single-exon read resolution to AFTER the multi-exon EM: generation stops folding mono reads into multi (chain-cluster-fold-monoexon forced off); post-EM each surviving mono candidate's reads are re-resolved against SURVIVING multi candidates by strict strand-aware exonic containment (1 cover -> fold; several -> highest-EM-abundance; uncovered kept, mono dropped if < --mono-resolve-min-reads). Default OFF.")
+@click.option("--mono-resolve-min-reads", default=2, show_default=True, type=int, help="(--mono-resolve-post-em) uncovered reads a mono candidate must retain to survive as a single-exon transcript.")
+@click.option("--mono-resolve-slop-bp", default=10, show_default=True, type=int, help="(--mono-resolve-post-em) terminal boundary slop (bp) for the mono read exonic-containment test.")
+@click.option("--canonical-search-bp", default=4, show_default=True, type=int, help="ea extended search: scan ±N bp around each read-derived NOVEL junction for canonical motifs and emit paired alternatives (GTF transcripts not extended). 0 disables. SIRV-tuned default 4. NOTE: ignored when --chain-cluster-discovery is on.")
 @click.option("--m2-tiebreak/--no-m2-tiebreak", "m2_tiebreak", default=True, show_default=True, help="Resolve argmax_keep ties with the junction-window mean-NLL signal metric: give a read's full mass to the M2-best tied candidate when the NLL margin >= --m2-tiebreak-margin, else keep the 1/K split. Needs --signal (auto-skips if absent). Default ON + aggressive (margin 1e-9): SIRV gffcompare Tx-F1 45.4 vs OFF 44.7, beats all tools + ablation champion 45.2.")
 @click.option("--m2-tiebreak-margin", default=1e-9, show_default=True, type=float, help="Minimum M2 NLL margin (runner-up - best) required to override the 1/K split with the M2 single winner. Default 1e-9 (aggressive: take M2's pick whenever it can discriminate at all).")
 @click.option("--m2-tiebreak-junction-k", default=10, show_default=True, type=int, help="Transcript-frame bp on each side of the wobbling junction for the M2 discrimination window (SIRV sweet spot 10).")
@@ -73,6 +81,17 @@ import click
 @click.option("--min-mono-exon-length", default=0, show_default=True, type=int, help="(--drop-mono-exon-novel) Min genomic length (bp) for a novel mono candidate to survive. 0 disables this threshold.")
 @click.option("--novel-junction-min-reads", default=2, show_default=True, type=int, help="(--quant-mode m2_em only) Lever 2: drop a NOVEL multi-exon candidate if ANY of its junctions is spliced by fewer than N directly-observed reads (primary-read CIGAR introns, strand-keyed, within --novel-junction-reads-tol bp). I.e. a novel junction must be carried by >= N reads, not just 1. gtf/fusion/mono exempt. <=1 disables. DEFAULT 2 (production): on real human GENCODE it lifts precision at zero recall cost across every scenario (de novo Pr +3.8, ratios +0.8..+3.2, all corrupted-GTF +0.6..+0.9) and keeps pyfin #1 on SIRV4. Set 0 to disable.")
 @click.option("--novel-junction-reads-tol", default=2, show_default=True, type=int, help="(--novel-junction-min-reads) bp tolerance matching a candidate junction to an observed read junction.")
+@click.option("--guided-junction-min-reads", default=0, show_default=True, type=int, help="(--quant-mode m2_em only, EXPERIMENT) GUIDED junction-support gate: mirror of Lever 2 for GTF-passthrough candidates — drop a guided multi-exon candidate if ANY of its junctions is spliced by fewer than N directly-observed reads (primary-read CIGAR introns, within --guided-junction-reads-tol bp). Extends the coordinate-EXACT read-support check (Lever 2 is novel-only) to GTF junctions, so a jitter-corrupted annotation junction (coords > tol from the true site) is dropped instead of surviving the coordinate-inexact M2/M1 gate. Targets the c_jitter precision collapse, and trims GTF echo in loci that DO show observed splicing (a FULLY read-sparse locus fails open — echo there is unaffected). NOT recall-safe (also drops low-coverage annotated junctions). Default 0 (OFF) pending real-data validation.")
+@click.option("--guided-junction-reads-tol", default=2, show_default=True, type=int, help="(--guided-junction-min-reads) bp tolerance matching a guided candidate junction to an observed read junction.")
+@click.option("--denovo-wobble-tol", default=0, show_default=True, type=int, help="(EXPERIMENT) De-novo wobble-tolerant collapse: merge NOVEL candidates whose intron chains match within N bp per junction (and 3' within --three-prime-threshold) into the highest-read-support consensus, BEFORE they become separate candidates. Attacks pyfin's low de-novo structural precision (wobble shadows: a junction and its ±few-bp minimap variant currently survive as separate novel transcripts). Consensus = the reads' own mode, NOT annotation (no snap). 0 disables (byte-identical). isoquant uses ~6 for ONT.")
+@click.option("--denovo-wobble-shadow-ratio", default=0.5, show_default=True, type=float, help="(--denovo-wobble-tol) Absorb a wobble-matching candidate into a rep only if it is a true SHADOW: len(cand.reads) <= ratio * len(rep.reads). Protects genuine close isoforms (real alt donor/acceptor a few bp apart) from being merged. 1.0 = merge any wobble-match. isoquant's ½-support bulge criterion ≈ 0.5.")
+@click.option("--denovo-graph/--no-denovo-graph", "denovo_graph", default=False, show_default=True, help="(EXPERIMENT) De-novo intron-graph assembly: pool all reads' junctions, cluster wobbles to a read-count consensus (--denovo-graph-tol), build a read-adjacency graph, and EXTEND each read's chain through UNAMBIGUOUSLY-supported edges (>= --denovo-graph-min-edge-reads) into a maximal full-length chain — assembling truncated 3'-biased dRNA reads into full transcripts (attacks the measured #1 de-novo error: 'c' contained/truncated). Stops at genuine branch points (no fabricated combos). Reads grouped by extended chain; candidate span = union of its reads' extents, sequence from genome. NOT annotation-snap. Default OFF (byte-identical).")
+@click.option("--denovo-graph-tol", default=6, show_default=True, type=int, help="(--denovo-graph) bp tolerance clustering wobbled junctions to a read-count consensus before building the graph. isoquant uses ~6 for ONT.")
+@click.option("--denovo-graph-min-edge-reads", default=2, show_default=True, type=int, help="(--denovo-graph) Minimum reads supporting a junction->junction adjacency edge for it to be used when extending a chain. Higher = more conservative assembly.")
+@click.option("--denovo-graph-tss-brake/--no-denovo-graph-tss-brake", "denovo_graph_tss_brake", default=True, show_default=True, help="(--denovo-graph) 5'-TSS brake: don't extend a chain 5'-ward past a real transcription start. dRNA truncation is 5'-ward, so a truncated read of a LONG transcript stops at a random 5' position while a COMPLETE read of a genuine short isoform stops at its real TSS. If >= --denovo-graph-tss-frac of the reads starting at a chain's 5' junction pile their 5'-end within --denovo-graph-tss-tol bp (and >= --denovo-graph-tss-min-reads), that's a real TSS and the short isoform is kept instead of merged into the longer one. Validated on p00: real short-isoform TSS carry 40-90% of read-5'-ends; degradation scatters. --no- disables (pure assembly, over-merges).")
+@click.option("--denovo-graph-tss-tol", default=20, show_default=True, type=int, help="(--denovo-graph-tss-brake) bp window for clustering read-5'-ends into a TSS peak.")
+@click.option("--denovo-graph-tss-min-reads", default=3, show_default=True, type=int, help="(--denovo-graph-tss-brake) Minimum reads piled at a 5' position to call it a real TSS.")
+@click.option("--denovo-graph-tss-frac", default=0.4, show_default=True, type=float, help="(--denovo-graph-tss-brake) Minimum fraction of a chain's 5'-starting reads that must pile at one 5' position to call it a real TSS (peak vs degradation background).")
 @click.option("--junction-dominance-filter/--no-junction-dominance-filter", "junction_dominance_filter", default=False, show_default=True, help="(--quant-mode m2_em only) Junction-first PRE-EM gate: drop a NOVEL multi-exon candidate if ANY junction has < --junction-dominance-min-reads observed reads OR is not locally dominant (a different observed junction within --junction-dominance-window-bp carries strictly more reads). Removes multi-read wobble shadows (they lose to the stronger true junction nearby) BEFORE EM, so shadows never compete for reads. Pure mapping evidence, no snap. gtf/fusion/mono exempt. Default OFF.")
 @click.option("--junction-dominance-min-reads", default=2, show_default=True, type=int, help="(--junction-dominance-filter) Min observed reads for a novel junction to survive.")
 @click.option("--junction-dominance-window-bp", default=20, show_default=True, type=int, help="(--junction-dominance-filter) Neighborhood (bp) within which a stronger DIFFERENT junction dominates/demotes this one.")
@@ -80,10 +99,17 @@ import click
 @click.option(
     "--quant-mode",
     default="m2_em",
-    type=click.Choice(["argmax", "m1_em", "m2_em"]),
+    type=click.Choice(["argmax", "m1_em", "m2_em", "cluster"]),
     show_default=True,
-    help="Quantification engine. 'm2_em' (production default): EM seeded by the PURE tie-break junction-NLL M2 distance (M1/AS selects each read's best-AS tie set + mappability mask; per-event junction NLL is the sole graded distance over that tie set), no M3 unless --m3-coherence. 'argmax': mappy AS argmax + M2 krill junction tiebreak, hard counts, no EM. 'm1_em': EM seeded by M1 mappy distance (beta=0). All signal scoring is in-memory krill.",
+    help="Quantification engine. 'm2_em' (production default): EM seeded by the PURE tie-break junction-NLL M2 distance (M1/AS selects each read's best-AS tie set + mappability mask; per-event junction NLL is the sole graded distance over that tie set), no M3 unless --m3-coherence. 'argmax': mappy AS argmax + M2 krill junction tiebreak, hard counts, no EM. 'm1_em': EM seeded by M1 mappy distance (beta=0). 'cluster': assign reads to candidates WITHIN each generation cluster only (CandidateSet.clusters), M1 within-cluster + summed-LLR M2 tiebreak + main-peak containment (fin.pipeline.cluster_quant). All signal scoring is in-memory krill.",
 )
+@click.option(
+    "--cluster-use-m2/--no-cluster-use-m2", "cluster_use_m2", default=True,
+    show_default=True,
+    help="(--quant-mode cluster) Run the summed-LLR M2 signal tiebreak on straddling M1 ties. With a wide --cluster-m1-tie-margin this fires on many ties (expensive eventalign) for little end-to-end gain; --no-cluster-use-m2 sends near-ties straight to the ambiguous 1/K -> EM path (much faster). Signal is still used by the polyA finalize gate.")
+@click.option(
+    "--cluster-m1-tie-margin", "cluster_m1_tie_margin", default=20.0, show_default=True, type=float,
+    help="(--quant-mode cluster) AS margin for the within-cluster M1 best tie: a read is unique-best only when its top member beats the runner-up by MORE than this many AS points; within it the members tie (-> ambiguous 1/K -> EM). A 2-3bp wobble shifts AS by <=~20. Larger => more wobble near-ties merged by EM (fewer wobble FPs but risks merging the exact-coordinate variant); smaller => keep wobble variants separate.")
 @click.option(
     "--m3-coherence/--no-m3-coherence",
     "m3_coherence",
@@ -95,6 +121,7 @@ import click
 @click.option("--abundance-length-norm/--no-abundance-length-norm", default=False, show_default=True, help="With --abundance-feedback, divide abundance counts by per-transcript spliced effective length before forming theta (Salmon effective-length normalization). Experimental; OFF by default.")
 @click.option("--threads", default=1, show_default=True, type=int, help="Interval-level worker processes. The pipeline is CPU-bound serial Python, so prefer many light workers; each worker is pinned to 1 BLAS/krill thread so total threads stay ~N. NOTE: the genome FASTA is loaded per worker (N× memory). 1 keeps the serial path.")
 @click.option("--gpu-workers", default=0, show_default=True, type=int, help="Of --threads workers, how many hold a GPU context (live CUDA contexts <= G; VRAM bound = G× per-context). 0 = all workers CPU-only. Forced to 0 with --no-gpu. Over-provisioned GPU workers auto-fall back to CPU on OOM.")
+@click.option("--write-unfiltered-scores/--no-write-unfiltered-scores", "write_unfiltered_scores", default=False, show_default=True, help="Diagnostic: also write scores.unfiltered.tsv (post-EM, PRE post-EM-filter snapshot of every candidate) alongside scores.tsv. Lets FN root-cause analysis split 'candidate dropped by a post-EM filter' (present in unfiltered, absent in final) from 'never reached EM / not generated' (absent in both). No effect on the emitted GTF. OFF by default.")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 @click.pass_context
 def main(
@@ -129,6 +156,14 @@ def main(
     persist_R_matrix,
     canonical_gate,
     canonical_motifs,
+    chain_cluster_discovery,
+    chain_cluster_wobble_bp,
+    chain_cluster_cassette_max_exon_bp,
+    chain_cluster_fold_monoexon,
+    chain_cluster_fold_span_guard,
+    mono_resolve_post_em,
+    mono_resolve_min_reads,
+    mono_resolve_slop_bp,
     canonical_search_bp,
     m2_tiebreak,
     m2_tiebreak_margin,
@@ -147,26 +182,40 @@ def main(
     containment_collapse,
     containment_3p_tol_bp,
     containment_min_abundance_ratio,
-    drop_mono_exon_novel,
-    min_mono_exon_reads,
-    min_mono_exon_length,
-    novel_junction_min_reads,
-    novel_junction_reads_tol,
-    junction_dominance_filter,
-    junction_dominance_min_reads,
-    junction_dominance_window_bp,
-    junction_dominance_tol_bp,
-    quant_mode,
-    m3_coherence,
-    abundance_feedback,
     containment_cluster,
     containment_cluster_wobble_bp,
     containment_cluster_min_ab_ratio,
     containment_cluster_min_read_ratio,
     containment_cluster_max_shadow_reads,
+    drop_mono_exon_novel,
+    min_mono_exon_reads,
+    min_mono_exon_length,
+    novel_junction_min_reads,
+    novel_junction_reads_tol,
+    guided_junction_min_reads,
+    guided_junction_reads_tol,
+    denovo_wobble_tol,
+    denovo_wobble_shadow_ratio,
+    denovo_graph,
+    denovo_graph_tol,
+    denovo_graph_min_edge_reads,
+    denovo_graph_tss_brake,
+    denovo_graph_tss_tol,
+    denovo_graph_tss_min_reads,
+    denovo_graph_tss_frac,
+    junction_dominance_filter,
+    junction_dominance_min_reads,
+    junction_dominance_window_bp,
+    junction_dominance_tol_bp,
+    quant_mode,
+    cluster_use_m2,
+    cluster_m1_tie_margin,
+    m3_coherence,
+    abundance_feedback,
     abundance_length_norm,
     threads,
     gpu_workers,
+    write_unfiltered_scores,
     verbose,
 ):
     """pyfin: nanopore signal-based transcriptome assembly.
@@ -263,6 +312,14 @@ def main(
         canonical_motifs=tuple(
             m.strip() for m in canonical_motifs.split(",") if m.strip()
         ),
+        chain_cluster_discovery=chain_cluster_discovery,
+        chain_cluster_wobble_bp=chain_cluster_wobble_bp,
+        chain_cluster_cassette_max_exon_bp=chain_cluster_cassette_max_exon_bp,
+        chain_cluster_fold_monoexon=chain_cluster_fold_monoexon,
+        chain_cluster_fold_span_guard=chain_cluster_fold_span_guard,
+        mono_resolve_post_em=mono_resolve_post_em,
+        mono_resolve_min_reads=mono_resolve_min_reads,
+        mono_resolve_slop_bp=mono_resolve_slop_bp,
         canonical_search_bp=canonical_search_bp,
         m2_tiebreak=m2_tiebreak,
         m2_tiebreak_margin=m2_tiebreak_margin,
@@ -281,21 +338,40 @@ def main(
         containment_collapse=containment_collapse,
         containment_3p_tol_bp=containment_3p_tol_bp,
         containment_min_abundance_ratio=containment_min_abundance_ratio,
+        containment_cluster=containment_cluster,
+        containment_cluster_wobble_bp=containment_cluster_wobble_bp,
+        containment_cluster_min_ab_ratio=containment_cluster_min_ab_ratio,
+        containment_cluster_min_read_ratio=containment_cluster_min_read_ratio,
+        containment_cluster_max_shadow_reads=containment_cluster_max_shadow_reads,
         drop_mono_exon_novel=drop_mono_exon_novel,
         min_mono_exon_reads=min_mono_exon_reads,
         min_mono_exon_length=min_mono_exon_length,
         novel_junction_min_reads=novel_junction_min_reads,
         novel_junction_reads_tol=novel_junction_reads_tol,
+        guided_junction_min_reads=guided_junction_min_reads,
+        guided_junction_reads_tol=guided_junction_reads_tol,
+        denovo_wobble_tol=denovo_wobble_tol,
+        denovo_wobble_shadow_ratio=denovo_wobble_shadow_ratio,
+        denovo_graph=denovo_graph,
+        denovo_graph_tol=denovo_graph_tol,
+        denovo_graph_min_edge_reads=denovo_graph_min_edge_reads,
+        denovo_graph_tss_brake=denovo_graph_tss_brake,
+        denovo_graph_tss_tol=denovo_graph_tss_tol,
+        denovo_graph_tss_min_reads=denovo_graph_tss_min_reads,
+        denovo_graph_tss_frac=denovo_graph_tss_frac,
         junction_dominance_filter=junction_dominance_filter,
         junction_dominance_min_reads=junction_dominance_min_reads,
         junction_dominance_window_bp=junction_dominance_window_bp,
         junction_dominance_tol_bp=junction_dominance_tol_bp,
         quant_mode=quant_mode,
+        cluster_use_m2=cluster_use_m2,
+        cluster_m1_tie_margin=cluster_m1_tie_margin,
         m3_coherence=m3_coherence,
         abundance_feedback=abundance_feedback,
         abundance_length_norm=abundance_length_norm,
         threads=threads,
         gpu_workers=gpu_workers,
+        write_unfiltered_scores=write_unfiltered_scores,
     )
 
     runner = PipelineRunner(cfg)
@@ -305,11 +381,6 @@ def main(
     finally:
         runner.cleanup()
 
-        containment_cluster=containment_cluster,
-        containment_cluster_wobble_bp=containment_cluster_wobble_bp,
-        containment_cluster_min_ab_ratio=containment_cluster_min_ab_ratio,
-        containment_cluster_min_read_ratio=containment_cluster_min_read_ratio,
-        containment_cluster_max_shadow_reads=containment_cluster_max_shadow_reads,
     click.echo(f"Assembly output written to {output_dir}/")
 
 
