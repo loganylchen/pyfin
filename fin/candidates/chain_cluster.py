@@ -66,6 +66,46 @@ class ChainCluster:
                    key=lambda m: (m.num_introns, len(m.read_ids), m.chain.introns))
 
 
+@dataclass
+class ChainFamily:
+    """A clustering-only family of related MULTI-EXON structural variants.
+
+    ``variants`` are the distinct exact intron chains (structures) grouped together by
+    wobble / cassette / containment -- NO coordinates are merged or snapped, and every
+    variant is KEPT (no fold). ``read_pool`` is the union of all reads whose exact chain is
+    in this family: once a family forms, reads belong to the FAMILY, not to an individual
+    variant -- which variant a read truly supports is re-decided later, by evidence, in the
+    per-cluster assignment. ``variant_reads`` is the per-variant discovery provenance (which
+    exact chain each read produced), kept only for choosing a representative and for the
+    later path-completion step; it is NOT the final read ownership.
+    """
+    variants: List[Chain]
+    read_pool: Set[str] = field(default_factory=set)
+    variant_reads: Dict[Chain, Set[str]] = field(default_factory=dict)
+
+    @property
+    def representative(self) -> Chain:
+        """Longest variant, tie-broken by discovery read support then coords.
+
+        A convenience pick, NOT a snapped consensus -- coordinates are never rewritten.
+        """
+        return max(self.variants,
+                   key=lambda c: (len(c), len(self.variant_reads.get(c, ())), c))
+
+
+@dataclass
+class ClusterResult:
+    """Output of the clustering-only step: multi-exon families + the interval mono bucket.
+
+    ``mono_reads`` is the holding bucket of every single-exon (chain-less) read in the
+    interval -- deliberately UNPROCESSED here (not folded, not locus-split). Whether each is
+    a genuine intronless transcript or a fragment of a surviving multi-exon candidate is a
+    later decision, made after multi-exon resolution (see the clustering redesign).
+    """
+    families: List[ChainFamily]
+    mono_reads: Set[str] = field(default_factory=set)
+
+
 # ---------------------------------------------------------------------------
 # chain-relation predicates (single interval/strand: no chrom/strand bucketing)
 # ---------------------------------------------------------------------------
@@ -328,3 +368,88 @@ def cluster_read_chains(
         clusters.append(ChainCluster(members=[_mk(c)], read_ids=set(reads[c])))
 
     return clusters
+
+
+def cluster_families(
+    read_chains: List[Tuple[Dict, IntronChain]],
+    *,
+    wobble_bp: int = 6,
+    cassette_max_exon_bp: int = 70,
+) -> ClusterResult:
+    """Clustering ONLY: group an interval's reads into multi-exon structural families.
+
+    The clean, single-responsibility clustering step (see the clustering redesign). Unlike
+    :func:`cluster_read_chains`, it does NOT fold exact sub-chains, does NOT fold or spatially
+    split mono reads, and never rewrites coordinates. It ONLY:
+
+      1. groups reads by their EXACT intron chain (3' ignored, no snap),
+      2. buckets every single-exon (chain-less) read into ``mono_reads`` UNTOUCHED,
+      3. union-finds the distinct multi-exon chains into families by wobble / cassette /
+         containment (single-linkage; see :func:`_related`),
+      4. returns each family's variant chains + a POOLED read set (reads belong to the
+         family, not a member) + the per-variant discovery provenance.
+
+    Deterministic: families and their variants are coordinate-sorted; ``mono_reads`` is a
+    plain set. Fold, path-completion, and mono resolution are SEPARATE later per-cluster
+    steps -- this function makes no structural-collapse or read-ownership decision.
+
+    Args:
+        read_chains: per-read ``(read_dict, IntronChain)`` (read_dict needs "query_name";
+            CIGAR-derived chains, used as-is).
+        wobble_bp: per-junction tolerance for wobble / cassette / containment joins.
+        cassette_max_exon_bp: max skipped-exon length for a cassette join (0 disables).
+
+    Returns:
+        A :class:`ClusterResult` (multi-exon families + the interval mono bucket).
+    """
+    # 1. group reads by EXACT chain; single-exon (chain-less) reads -> the mono bucket.
+    by_chain: Dict[Chain, Set[str]] = {}
+    mono_reads: Set[str] = set()
+    for rd, chain in read_chains:
+        rid = rd.get("query_name")
+        if rid is None:
+            continue
+        introns = tuple(chain.introns)
+        if not introns:
+            mono_reads.add(rid)
+        else:
+            by_chain.setdefault(introns, set()).add(rid)
+
+    # 2. union-find the distinct multi-exon chains by wobble / cassette / containment.
+    #    Sorted vertex order -> deterministic; the resulting partition (connected
+    #    components of the symmetric _related graph) is order-independent regardless.
+    multi = sorted(by_chain)
+    parent: Dict[Chain, Chain] = {c: c for c in multi}
+
+    def find(x: Chain) -> Chain:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(len(multi)):
+        for j in range(i + 1, len(multi)):
+            a, b = multi[i], multi[j]
+            if find(a) != find(b) and _related(a, b, wobble_bp, cassette_max_exon_bp):
+                parent[find(a)] = find(b)
+
+    comps: Dict[Chain, List[Chain]] = {}
+    for c in multi:
+        comps.setdefault(find(c), []).append(c)
+
+    # 3. build families: variants coord-sorted, read pool = union of members' reads,
+    #    per-variant discovery reads kept as provenance (not final ownership).
+    families: List[ChainFamily] = []
+    for comp in comps.values():
+        variants = sorted(comp)
+        pool: Set[str] = set()
+        for c in comp:
+            pool |= by_chain[c]
+        families.append(ChainFamily(
+            variants=variants,
+            read_pool=pool,
+            variant_reads={c: set(by_chain[c]) for c in comp},
+        ))
+    families.sort(key=lambda f: f.variants[0])   # stable family order
+
+    return ClusterResult(families=families, mono_reads=mono_reads)
