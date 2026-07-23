@@ -25,7 +25,7 @@ Mono-exon chains never join a structural cluster; each unique mono chain is a si
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from fin.candidates.dataclasses import IntronChain
 
@@ -78,17 +78,28 @@ class ChainFamily:
     per-cluster assignment. ``variant_reads`` is the per-variant discovery provenance (which
     exact chain each read produced), kept only for choosing a representative and for the
     later path-completion step; it is NOT the final read ownership.
+
+    ``gtf_members`` are annotation transcripts attached to this family as source-tagged, ZERO-read
+    structural hypotheses: each is ``(gtf_id, intron_chain)``. They carry NO reads (never in
+    ``read_pool`` / ``variant_reads``) and get read mass ONLY if their exact model wins the downstream
+    evidence assignment -- annotation is another competitor, never a snap target or a read-pool source.
+    A family with empty ``variants`` but non-empty ``gtf_members`` is a GTF-only family (an annotated
+    transcript that matched no read-derived structure; kept so it survives to the abundance filters).
     """
     variants: List[Chain]
     read_pool: Set[str] = field(default_factory=set)
     variant_reads: Dict[Chain, Set[str]] = field(default_factory=dict)
+    gtf_members: List[Tuple[str, Chain]] = field(default_factory=list)
 
     @property
-    def representative(self) -> Chain:
-        """Longest variant, tie-broken by discovery read support then coords.
+    def representative(self) -> Optional[Chain]:
+        """Longest read variant (tie-broken by discovery support then coords), or None for a
+        GTF-only family.
 
         A convenience pick, NOT a snapped consensus -- coordinates are never rewritten.
         """
+        if not self.variants:
+            return None
         return max(self.variants,
                    key=lambda c: (len(c), len(self.variant_reads.get(c, ())), c))
 
@@ -370,11 +381,59 @@ def cluster_read_chains(
     return clusters
 
 
+def _family_sort_key(fam: ChainFamily):
+    """Total, deterministic ordering key over a family's chains (read variants + GTF members).
+
+    Every family has >=1 chain, so ``min`` is well-defined even for a GTF-only family (empty
+    ``variants``). The extra components make the order total under any (near-impossible) min tie.
+    """
+    chains = list(fam.variants) + [c for _, c in fam.gtf_members]
+    return (min(chains), tuple(fam.variants), tuple(sorted(g for g, _ in fam.gtf_members)))
+
+
+def _attach_gtf_variants(
+    families: List[ChainFamily],
+    gtf_variants: List[Tuple[str, Chain]],
+    wobble_bp: int,
+    cassette_max_exon_bp: int,
+) -> None:
+    """Attach each GTF hypothesis to the single most-related read family (in place).
+
+    NON-BRIDGING: a GTF is added to at most ONE family and never merges two read families. A GTF
+    related to no read family becomes its own GTF-only family (empty read pool). Mono (empty-chain)
+    GTF entries are skipped (handled by the later mono finalizer). Deterministic: GTF entries are
+    processed in sorted order and the best family is chosen by (most related variants, then smallest
+    first-variant coords). GTF is a zero-read hypothesis: it is NEVER added to any ``read_pool`` or
+    ``variant_reads``.
+    """
+    read_families = [f for f in families if f.variants]   # snapshot: a GTF-only family never attracts GTF
+    gtf_only: List[ChainFamily] = []
+    for gid, gchain in sorted(gtf_variants, key=lambda gv: (gv[1], gv[0])):
+        if not gchain:                     # mono / empty-chain GTF -> deferred to the mono finalizer
+            continue
+        best = None                        # (n_related, first_variant, family)
+        for fam in read_families:
+            n = sum(1 for v in fam.variants
+                    if _related(gchain, v, wobble_bp, cassette_max_exon_bp))
+            if n == 0:
+                continue
+            if best is None or n > best[0] or (n == best[0] and fam.variants[0] < best[1]):
+                best = (n, fam.variants[0], fam)
+        if best is not None:
+            best[2].gtf_members.append((gid, gchain))
+        else:
+            gtf_only.append(ChainFamily(
+                variants=[], read_pool=set(), variant_reads={},
+                gtf_members=[(gid, gchain)]))
+    families.extend(gtf_only)
+
+
 def cluster_families(
     read_chains: List[Tuple[Dict, IntronChain]],
     *,
     wobble_bp: int = 6,
     cassette_max_exon_bp: int = 70,
+    gtf_variants: Optional[List[Tuple[str, Chain]]] = None,
 ) -> ClusterResult:
     """Clustering ONLY: group an interval's reads into multi-exon structural families.
 
@@ -387,7 +446,10 @@ def cluster_families(
       3. union-finds the distinct multi-exon chains into families by wobble / cassette /
          containment (single-linkage; see :func:`_related`),
       4. returns each family's variant chains + a POOLED read set (reads belong to the
-         family, not a member) + the per-variant discovery provenance.
+         family, not a member) + the per-variant discovery provenance,
+      5. (optional) attaches each GTF hypothesis to the single best-related read family as a
+         ZERO-read ``gtf_member`` -- NON-BRIDGING (a GTF never merges two read families) and
+         never a read-pool source; a GTF matching no read family becomes a GTF-only family.
 
     Deterministic: families and their variants are coordinate-sorted; ``mono_reads`` is a
     plain set. Fold, path-completion, and mono resolution are SEPARATE later per-cluster
@@ -398,6 +460,12 @@ def cluster_families(
             CIGAR-derived chains, used as-is).
         wobble_bp: per-junction tolerance for wobble / cassette / containment joins.
         cassette_max_exon_bp: max skipped-exon length for a cassette join (0 disables).
+        gtf_variants: optional annotation hypotheses as ``(gtf_id, intron_chain)`` pairs. Each is
+            attached to the single most-related read family (by the same ``_related`` predicate) as a
+            zero-read ``gtf_member``; it NEVER bridges two read families and NEVER contributes to a
+            ``read_pool``. Mono (empty-chain) GTF entries are ignored here (annotation of single-exon
+            transcripts is handled by the later mono finalizer). The read families are formed BEFORE
+            attachment, so annotation cannot change read-derived family structure.
 
     Returns:
         A :class:`ClusterResult` (multi-exon families + the interval mono bucket).
@@ -450,6 +518,13 @@ def cluster_families(
             read_pool=pool,
             variant_reads={c: set(by_chain[c]) for c in comp},
         ))
-    families.sort(key=lambda f: f.variants[0])   # stable family order
+
+    # 4. (optional) attach GTF hypotheses to read families -- NON-BRIDGING, zero-read.
+    if gtf_variants:
+        _attach_gtf_variants(families, gtf_variants, wobble_bp, cassette_max_exon_bp)
+
+    # Stable, total family order over every family's chains (read variants + gtf members),
+    # so GTF-only families (empty ``variants``) also sort deterministically.
+    families.sort(key=_family_sort_key)
 
     return ClusterResult(families=families, mono_reads=mono_reads)

@@ -180,3 +180,115 @@ class TestEmptyAndRepresentative:
         ], wobble_bp=6)
         assert len(res.families) == 1
         assert res.families[0].representative == ((1000, 2000),)
+
+
+class TestGtfAttach:
+    def _one(self, res):
+        assert len(res.families) == 1
+        return res.families[0]
+
+    def test_gtf_wobble_attaches_zero_read(self):
+        # GTF wobble-matches the read family -> attached as a zero-read gtf_member; the read
+        # pool / variants are UNCHANGED (GTF adds no read mass, no structure).
+        gtf = [("gA", ((1002, 1998), (3000, 4000)))]
+        res = cluster_families([
+            _rc("r1", [(1000, 2000), (3000, 4000)]),
+            _rc("r2", [(1000, 2000), (3000, 4000)]),
+        ], gtf_variants=gtf)
+        fam = self._one(res)
+        assert fam.variants == [((1000, 2000), (3000, 4000))]     # read structure unchanged
+        assert fam.read_pool == {"r1", "r2"}                      # GTF added no reads
+        assert fam.gtf_members == [("gA", ((1002, 1998), (3000, 4000)))]
+
+    def test_gtf_unmatched_becomes_gtf_only_family(self):
+        gtf = [("gFar", ((90000, 91000),))]
+        res = cluster_families([
+            _rc("r1", [(1000, 2000)]),
+        ], gtf_variants=gtf)
+        assert len(res.families) == 2
+        read_fam = [f for f in res.families if f.variants]
+        gtf_fam = [f for f in res.families if not f.variants]
+        assert len(read_fam) == 1 and len(gtf_fam) == 1
+        assert gtf_fam[0].read_pool == set()                     # GTF-only: empty pool
+        assert gtf_fam[0].gtf_members == [("gFar", ((90000, 91000),))]
+        assert gtf_fam[0].representative is None                 # no read variant
+
+    def test_gtf_does_not_bridge_two_read_families(self):
+        # GTF (1000,2000)+(8000,9000) is containment-related to BOTH single-intron read
+        # families, which are NOT related to each other. It must attach to exactly ONE and
+        # NEVER merge the two families.
+        gtf = [("gBridge", ((1000, 2000), (8000, 9000)))]
+        res = cluster_families([
+            _rc("rA", [(1000, 2000)]),
+            _rc("rB", [(8000, 9000)]),
+        ], gtf_variants=gtf)
+        assert len(res.families) == 2                            # NOT merged
+        total_gtf = sum(len(f.gtf_members) for f in res.families)
+        assert total_gtf == 1                                    # attached once, not duplicated
+        # read families keep their own single reads
+        pools = sorted((tuple(sorted(f.read_pool)) for f in res.families))
+        assert pools == [("rA",), ("rB",)]
+
+    def test_gtf_none_is_backward_compatible(self):
+        res = cluster_families([_rc("r1", [(1000, 2000), (3000, 4000)])], gtf_variants=None)
+        assert res.families[0].gtf_members == []
+
+    def test_mono_gtf_is_skipped(self):
+        # empty-chain (single-exon) GTF is deferred to the mono finalizer, not attached here.
+        res = cluster_families(
+            [_rc("r1", [(1000, 2000)])],
+            gtf_variants=[("gMono", ())],
+        )
+        assert len(res.families) == 1
+        assert res.families[0].gtf_members == []
+
+    def test_exact_match_gtf_attaches_not_merges_reads(self):
+        # a GTF whose chain EXACTLY equals the read chain attaches as a 0-read member (the new
+        # design: GTF competes on evidence) -- it does NOT silently absorb the reads at generation.
+        gtf = [("gExact", ((1000, 2000), (3000, 4000)))]
+        res = cluster_families([
+            _rc("r1", [(1000, 2000), (3000, 4000)]),
+        ], gtf_variants=gtf)
+        fam = self._one(res)
+        assert fam.read_pool == {"r1"}
+        assert fam.variant_reads == {((1000, 2000), (3000, 4000)): {"r1"}}
+        assert fam.gtf_members == [("gExact", ((1000, 2000), (3000, 4000)))]
+
+    def test_deterministic_with_gtf(self):
+        reads = [
+            _rc("r1", [(1000, 2000), (3000, 4000)]),
+            _rc("r2", [(5000, 6000)]),
+        ]
+        gtf = [("gA", ((1002, 1998), (3000, 4000))), ("gFar", ((90000, 91000),))]
+        ra = cluster_families(list(reads), gtf_variants=list(gtf))
+        rb = cluster_families(list(reversed(reads)), gtf_variants=list(reversed(gtf)))
+        norm = lambda res: [(f.variants, sorted(f.gtf_members)) for f in res.families]
+        assert norm(ra) == norm(rb)
+
+    def test_two_gtf_attach_to_same_family(self):
+        # two annotation isoforms both wobble the one read family -> both attach as members.
+        gtf = [
+            ("gA", ((1002, 1998), (3000, 4000))),
+            ("gB", ((999, 2001), (3000, 4000))),
+        ]
+        res = cluster_families([
+            _rc("r1", [(1000, 2000), (3000, 4000)]),
+        ], gtf_variants=gtf)
+        fam = self._one(res)
+        assert sorted(fam.gtf_members) == sorted(gtf)
+        assert fam.read_pool == {"r1"}
+
+    def test_gtf_only_family_does_not_attract_later_gtf(self):
+        # g1 matches no read -> GTF-only family. g2 is a wobble sibling of g1 but ALSO matches
+        # no read family; it must NOT attach to g1's GTF-only family -> two GTF-only families.
+        gtf = [
+            ("g1", ((50000, 51000),)),
+            ("g2", ((50002, 50998),)),   # wobble of g1, unrelated to the read
+        ]
+        res = cluster_families([
+            _rc("r1", [(1000, 2000)]),
+        ], gtf_variants=gtf)
+        assert len(res.families) == 3                      # 1 read family + 2 GTF-only
+        gtf_only = [f for f in res.families if not f.variants]
+        assert len(gtf_only) == 2
+        assert all(len(f.gtf_members) == 1 for f in gtf_only)
