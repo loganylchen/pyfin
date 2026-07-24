@@ -528,3 +528,72 @@ def cluster_families(
     families.sort(key=_family_sort_key)
 
     return ClusterResult(families=families, mono_reads=mono_reads)
+
+
+def collapse(family: ChainFamily) -> ChainCluster:
+    """Collapse a single (post-explore) family into a :class:`ChainCluster`, folding EXACT
+    contiguous sub-chains into their longest exact container.
+
+    The explicit, single-family FOLD step of the clustering redesign (replaces the fold that
+    the old :func:`cluster_read_chains` did inline). Design (locked with the user + Codex
+    gpt-5.6-sol xhigh):
+
+    - **fold-all** (philosophy A): every variant that is an EXACT contiguous sub-chain of a
+      longer variant folds into its LONGEST exact container, UNCONDITIONALLY (no read-support
+      guard). dRNA 5' degradation ladders (same 3' end, successively shorter 5') are exactly
+      these exact sub-chains; whether a folded sub-chain is a genuine short isoform is decided
+      LATER by the post-EM 5'-TSS read-end recovery -- never guessed here.
+    - **exact only**: wobble / cassette / non-exact-containment siblings are NOT folded (they
+      are not exact sub-chains); they stay as separate members and compete in EM, where the
+      abundance-based selection decides (Codex's pre-EM=canonicalisation / post-EM=biological
+      boundary).
+    - **absorb-only**: a fold target is always an existing longer variant; no chain is
+      synthesised (synthesis is :func:`explore`'s job).
+    - reads are pooled: a survivor's ``read_ids`` already includes every folded shadow's reads
+      (shadows add no mass); folded shadows are kept as dormant provenance (``GenCandidate.folded``)
+      that feeds the downstream 5'-TSS recovery.
+
+    The PER-MEMBER fold/shadow structure matches the old inline fold, so the discovery emission
+    loop, ``shadow_map`` and TSS recovery consume it unchanged. EM SCOPING may differ, though:
+    :func:`cluster_families` groups by single-linkage over ``_related`` (wobble/cassette/containment
+    within ``wobble_bp``), so an exact sub-chain can BRIDGE two otherwise-unrelated maximal chains
+    into one family (e.g. ``(I1,I2)``–``(I2,)``–``(I2,I3)``). The old path folded that sub-chain away
+    BEFORE clustering, so it produced two clusters; here the two maximal chains stay co-scoped in one
+    cluster. This is an INTENDED consequence of doing clustering once (in ``cluster_families``) and
+    fold second -- a behavior change validated by metrics, not a byte-identical reproduction. collapse
+    does NOT re-cluster the survivors.
+
+    Precondition (guaranteed by ``cluster_families`` output): ``variant_reads`` PARTITIONS
+    ``read_pool`` (each read is in exactly one variant's set), so no read is lost or double-counted
+    and ``cluster.read_ids == family.read_pool``. A variant missing from ``variant_reads`` contributes
+    no reads (defensive; e.g. a future explore-assembled variant whose read ownership the adapter must
+    register before calling collapse). A GTF-only family (empty ``variants``) yields an empty cluster.
+    Deterministic (coordinate-sorted); never mutates ``family``.
+    """
+    vr = family.variant_reads
+    # longest-first: `next(exact-subchain of a kept chain)` then picks the LONGEST container.
+    chains_sorted = sorted(family.variants, key=lambda c: (-len(c), -len(vr.get(c, ())), c))
+    kept: List[Chain] = []
+    reads: Dict[Chain, Set[str]] = {}
+    folded_of: Dict[Chain, List[Tuple[Chain, Set[str]]]] = {}  # container -> shadow (chain, reads)
+    for c in chains_sorted:
+        container = next((k for k in kept if _exact_subchain(c, k)), None)
+        if container is None:
+            kept.append(c)
+            reads[c] = set(vr.get(c, ()))
+        else:
+            cr = vr.get(c, set())
+            reads[container] |= cr
+            folded_of.setdefault(container, []).append((c, set(cr)))
+
+    def _mk(c: Chain) -> GenCandidate:
+        return GenCandidate(
+            IntronChain(introns=c), set(reads[c]),
+            folded=[GenCandidate(IntronChain(introns=fc), set(fr))
+                    for fc, fr in folded_of.get(c, [])])
+
+    members = [_mk(c) for c in sorted(kept)]          # coord-sorted -> deterministic
+    union: Set[str] = set()
+    for c in kept:
+        union |= reads[c]
+    return ChainCluster(members=members, read_ids=union)
