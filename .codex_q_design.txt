@@ -1,0 +1,45 @@
+Design discussion (read-only, no code changes; use a PTY if non-PTY shell returns blank stdout).
+Context: pyfin de-novo candidate pipeline. We are redefining the CLUSTERING step (within one interval)
+to be a clean standalone step. Relevant code you can re-read: fin/candidates/chain_cluster.py
+(cluster_read_chains + _wobble/_cassette/_contains/_related + the mono handling + fold), and the
+existing post-EM mono resolver fin/scoring/m2_junction_nll.py (mono_resolve_drops) + its wiring
+(fin/pipeline/selection.py select_m2_interval, config mono_resolve_post_em default False).
+
+The user has decided three things about the clustering step. Give your independent take on each —
+agree / disagree / better proposal — with concrete reasoning and any risks. Be decisive.
+
+DECISION 1: Do NOT fold in the clustering step. Clustering should ONLY group reads/structures into
+families. The exact-sub-chain fold (and span-guard, and mono-fold) currently done inside
+cluster_read_chains should move to a LATER per-cluster step. Agree? Any reason fold must stay at
+cluster time?
+
+DECISION 2: Accept the current single-linkage (transitive) union-find for now (A~B, B~C merges A,B,C
+even if A not~ C). Rationale: in the target design a cluster is only a scoping unit for a shared read
+pool; the distinct structural variants are KEPT as separate candidates and the final weighted
+assignment decides read ownership, so an over-wide cluster is low-harm. Do you agree single-linkage is
+acceptable here, or is there a cheap materially-better option (complete-linkage / representative-
+centroid / merge-only-if-within-tol-of-cluster-rep)? When would single-linkage actually bite given
+variants are kept + reads assigned by evidence?
+
+DECISION 3 (the main one — critique this): mono-exon (single-exon, chain-less) reads should get NO
+processing during clustering. They all become ONE separate "mono-cluster" for the interval (a holding
+bucket). Only AFTER the multi-exon candidates are fully resolved (through EM + selection, i.e. we know
+the FINAL surviving multi candidates) do we decide, per mono read: is it a genuine intronless
+transcript, or just a 5'/3' fragment lying inside some surviving multi-exon candidate's exon?
+Evaluate:
+  (a) Is deferring mono resolution to AFTER multi-exon finalization correct in principle (you cannot
+      classify a mono fragment without the final multi exon coordinates)? Does it align with the
+      existing mono_resolve_post_em?
+  (b) Risks: real intronless genes (histones, some lncRNAs) must survive — how to protect recall?
+      One interval can span multiple loci, so the single mono-bucket pools unrelated single-exon reads
+      — is that OK as a holding bucket, and what does the final decision step need (locus split?
+      containment test vs surviving multi exons? read-support/length floor? weighting for a mono read
+      contained in several multi candidates)?
+  (c) EM interaction: if mono reads are held OUT of the multi-exon EM entirely, is that better or worse
+      than including them? (A single-exon fragment inside a shared exon cannot discriminate between
+      multi isoforms, so does holding it out remove noise or lose signal?) When a mono fragment is
+      later folded into a surviving multi candidate, its reads/abundance are added post-hoc — is that
+      sound for counting and for the reported abundance?
+  (d) Any better structuring of the mono lifecycle than "one bucket now, decide at the very end"?
+
+Keep it structured, decisive, concrete. Do not modify code.

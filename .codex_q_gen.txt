@@ -1,0 +1,41 @@
+Deep-dive ONE pipeline step in the pyfin repo (read-only; use a PTY if the non-PTY shell returns
+blank stdout). Focus: CANDIDATE GENERATION (Phase 1), i.e. fin/candidates/discovery.py
+`discover_candidates` and the chain-cluster machinery it calls (fin/candidates/chain_cluster.py,
+fin/candidates/intron_chains.py). Also skim fin/candidates/dataclasses.py (CandidateSet,
+TranscriptCandidate, IntronChain).
+
+Produce a precise, code-cited analysis for a user who is walking the algorithm step-by-step to then
+IMPROVE de-novo (annotation-free, p00) quality. Cover:
+
+1. MECHANISM: what exactly does discover_candidates produce? Trace both paths:
+   (a) GTF-passthrough candidates (when annotation present) — how an annotated transcript becomes a
+       candidate, source tag, ids.
+   (b) NOVEL de-novo candidates — the DEFAULT path. Is it the chain-cluster path
+       (config.chain_cluster_discovery) or a legacy per-read path? What is the default value of
+       chain_cluster_discovery? Trace: read CIGAR -> IntronChain (exact coords?), grouping key
+       (exact intron chain? 3' handling?), folding (exact sub-chain fold, mono-fold, span-guard),
+       wobble/cassette/containment clustering, what becomes one candidate, id assignment, and how
+       supporting_read_ids / read_spans / read_sequences are populated.
+
+2. DEFAULTS: which generation features are ON by default vs behind flags (chain_cluster_discovery,
+   chain_cluster_wobble_bp, chain_cluster_fold_monoexon, chain_cluster_fold_span_guard,
+   chain_cluster_cassette_max_exon_bp, min_novel_reads, three_prime_threshold, denovo_graph*). Give
+   the actual default values from config.py.
+
+3. SOUNDNESS / CORRECTNESS: is the generation logic sound? Any bug, edge case, non-determinism, or
+   leak (e.g. reads double-counted, candidates on wrong strand, empty-chain handling, off-by-one in
+   intron extraction)?
+
+4. THE DE-NOVO QUALITY ROOT CAUSE: it is believed p00 structural precision (~65% vs isoquant ~91%)
+   stems from EXACT IntronChain equality — a minimap-wobbled junction (1000,2000) vs (1002,1998)
+   becomes TWO different candidates, so wobble shadows proliferate. Confirm or refute from the code:
+   is intron-chain grouping/collapse EXACT-coordinate, and does the wobble/cassette clustering merge
+   them or keep both as separate candidates? Where precisely does a wobble shadow survive as its own
+   candidate?
+
+5. TUNING TARGETS: for the perf phase, what in THIS step is the highest-leverage thing to change to
+   raise de-novo precision without losing recall, and what are the risks (esp. the read-reassignment
+   trap: dropping/merging shadows post-hoc reshuffles their reads).
+
+Be concrete with file:line cites. Do not modify anything. This is analysis for a decision, keep it
+structured but complete.

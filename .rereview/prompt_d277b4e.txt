@@ -1,0 +1,302 @@
+Re-review a git commit in the pyfin repo with fresh, skeptical eyes. A PRIOR review by a weaker model (gpt-5.5) marked it CLEAN. Independently re-verify with the stronger model and catch anything it may have missed. Read the embedded diff (git show); use a PTY if the non-PTY shell returns blank stdout, but the diff below is self-contained.
+
+Commit: d277b4e — feat(candidates): attach GTF hypotheses to cluster_families (0-read, non-bridging)
+Nature: ADDITIVE FEATURE (not wired into production)
+
+Verify: correctness, DETERMINISM, no shared-state mutation, and that it CANNOT change existing production behaviour (cluster_read_chains + discovery path untouched; new symbols only). For the GTF-attach commit specifically: non-bridging (a GTF never merges two read families), zero-read pool integrity (read_pool/variant_reads never get GTF), GTF-only families for unmatched GTF.
+
+Give a clear verdict for THIS commit: CLEAN or ISSUES (list them with line cites). Be concrete and skeptical. Review only; do not modify code.
+
+===== git show d277b4e =====
+commit d277b4ee5812ece475191ac520634f7cd19dac3b
+Author: loganylchen <yuelong.chen.btr@gmail.com>
+Date:   Thu Jul 23 23:42:25 2026 +0800
+
+    feat(candidates): attach GTF hypotheses to cluster_families (0-read, non-bridging)
+    
+    Extend the clustering-only primitive so annotation competes on evidence instead of being a
+    separate exact-match track (GTF-in-cluster design). cluster_families() gains an optional
+    gtf_variants=[(gtf_id, intron_chain)]; ChainFamily gains gtf_members. Each GTF is attached to
+    the SINGLE most-related read family via the same _related predicate (most related variants,
+    then smallest first-variant coords), as a source-tagged ZERO-read hypothesis:
+    
+      - NON-BRIDGING: a GTF attaches to at most one family and never merges two read families
+        (read families are unioned BEFORE attachment; GTF-only families are excluded as targets);
+      - GTF is never a read-pool source: read_pool / variant_reads stay read-derived only;
+      - a GTF matching no read family becomes its own GTF-only family (empty pool) so annotated
+        candidates survive to the abundance filters;
+      - mono (empty-chain) GTF entries are skipped (deferred to the mono finalizer);
+      - deterministic (GTF processed in sorted order; _family_sort_key totally orders families
+        incl. GTF-only). ChainFamily.representative is now Optional (None for GTF-only).
+    
+    GTF joins by the SAME wobble/cassette/containment relation as reads; the truncation/subset/
+    intron-retention 3-way refinement is a separate future step that will apply uniformly. Exact-
+    match GTF attaches as a competitor (does NOT silently absorb reads at generation).
+    
+    ADDITIVE and NOT wired into production (cluster_read_chains + discovery untouched); full suite
+    932 passed = 911 + 21, +2 edge tests (23 in the file). Codex review CLEAN.
+
+diff --git a/fin/candidates/chain_cluster.py b/fin/candidates/chain_cluster.py
+index c019c78..33fb336 100644
+--- a/fin/candidates/chain_cluster.py
++++ b/fin/candidates/chain_cluster.py
+@@ -25,7 +25,7 @@ Mono-exon chains never join a structural cluster; each unique mono chain is a si
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass, field
+-from typing import Dict, List, Set, Tuple
++from typing import Dict, List, Optional, Set, Tuple
+ 
+ from fin.candidates.dataclasses import IntronChain
+ 
+@@ -78,17 +78,28 @@ class ChainFamily:
+     per-cluster assignment. ``variant_reads`` is the per-variant discovery provenance (which
+     exact chain each read produced), kept only for choosing a representative and for the
+     later path-completion step; it is NOT the final read ownership.
++
++    ``gtf_members`` are annotation transcripts attached to this family as source-tagged, ZERO-read
++    structural hypotheses: each is ``(gtf_id, intron_chain)``. They carry NO reads (never in
++    ``read_pool`` / ``variant_reads``) and get read mass ONLY if their exact model wins the downstream
++    evidence assignment -- annotation is another competitor, never a snap target or a read-pool source.
++    A family with empty ``variants`` but non-empty ``gtf_members`` is a GTF-only family (an annotated
++    transcript that matched no read-derived structure; kept so it survives to the abundance filters).
+     """
+     variants: List[Chain]
+     read_pool: Set[str] = field(default_factory=set)
+     variant_reads: Dict[Chain, Set[str]] = field(default_factory=dict)
++    gtf_members: List[Tuple[str, Chain]] = field(default_factory=list)
+ 
+     @property
+-    def representative(self) -> Chain:
+-        """Longest variant, tie-broken by discovery read support then coords.
++    def representative(self) -> Optional[Chain]:
++        """Longest read variant (tie-broken by discovery support then coords), or None for a
++        GTF-only family.
+ 
+         A convenience pick, NOT a snapped consensus -- coordinates are never rewritten.
+         """
++        if not self.variants:
++            return None
+         return max(self.variants,
+                    key=lambda c: (len(c), len(self.variant_reads.get(c, ())), c))
+ 
+@@ -370,11 +381,59 @@ def cluster_read_chains(
+     return clusters
+ 
+ 
++def _family_sort_key(fam: ChainFamily):
++    """Total, deterministic ordering key over a family's chains (read variants + GTF members).
++
++    Every family has >=1 chain, so ``min`` is well-defined even for a GTF-only family (empty
++    ``variants``). The extra components make the order total under any (near-impossible) min tie.
++    """
++    chains = list(fam.variants) + [c for _, c in fam.gtf_members]
++    return (min(chains), tuple(fam.variants), tuple(sorted(g for g, _ in fam.gtf_members)))
++
++
++def _attach_gtf_variants(
++    families: List[ChainFamily],
++    gtf_variants: List[Tuple[str, Chain]],
++    wobble_bp: int,
++    cassette_max_exon_bp: int,
++) -> None:
++    """Attach each GTF hypothesis to the single most-related read family (in place).
++
++    NON-BRIDGING: a GTF is added to at most ONE family and never merges two read families. A GTF
++    related to no read family becomes its own GTF-only family (empty read pool). Mono (empty-chain)
++    GTF entries are skipped (handled by the later mono finalizer). Deterministic: GTF entries are
++    processed in sorted order and the best family is chosen by (most related variants, then smallest
++    first-variant coords). GTF is a zero-read hypothesis: it is NEVER added to any ``read_pool`` or
++    ``variant_reads``.
++    """
++    read_families = [f for f in families if f.variants]   # snapshot: a GTF-only family never attracts GTF
++    gtf_only: List[ChainFamily] = []
++    for gid, gchain in sorted(gtf_variants, key=lambda gv: (gv[1], gv[0])):
++        if not gchain:                     # mono / empty-chain GTF -> deferred to the mono finalizer
++            continue
++        best = None                        # (n_related, first_variant, family)
++        for fam in read_families:
++            n = sum(1 for v in fam.variants
++                    if _related(gchain, v, wobble_bp, cassette_max_exon_bp))
++            if n == 0:
++                continue
++            if best is None or n > best[0] or (n == best[0] and fam.variants[0] < best[1]):
++                best = (n, fam.variants[0], fam)
++        if best is not None:
++            best[2].gtf_members.append((gid, gchain))
++        else:
++            gtf_only.append(ChainFamily(
++                variants=[], read_pool=set(), variant_reads={},
++                gtf_members=[(gid, gchain)]))
++    families.extend(gtf_only)
++
++
+ def cluster_families(
+     read_chains: List[Tuple[Dict, IntronChain]],
+     *,
+     wobble_bp: int = 6,
+     cassette_max_exon_bp: int = 70,
++    gtf_variants: Optional[List[Tuple[str, Chain]]] = None,
+ ) -> ClusterResult:
+     """Clustering ONLY: group an interval's reads into multi-exon structural families.
+ 
+@@ -387,7 +446,10 @@ def cluster_families(
+       3. union-finds the distinct multi-exon chains into families by wobble / cassette /
+          containment (single-linkage; see :func:`_related`),
+       4. returns each family's variant chains + a POOLED read set (reads belong to the
+-         family, not a member) + the per-variant discovery provenance.
++         family, not a member) + the per-variant discovery provenance,
++      5. (optional) attaches each GTF hypothesis to the single best-related read family as a
++         ZERO-read ``gtf_member`` -- NON-BRIDGING (a GTF never merges two read families) and
++         never a read-pool source; a GTF matching no read family becomes a GTF-only family.
+ 
+     Deterministic: families and their variants are coordinate-sorted; ``mono_reads`` is a
+     plain set. Fold, path-completion, and mono resolution are SEPARATE later per-cluster
+@@ -398,6 +460,12 @@ def cluster_families(
+             CIGAR-derived chains, used as-is).
+         wobble_bp: per-junction tolerance for wobble / cassette / containment joins.
+         cassette_max_exon_bp: max skipped-exon length for a cassette join (0 disables).
++        gtf_variants: optional annotation hypotheses as ``(gtf_id, intron_chain)`` pairs. Each is
++            attached to the single most-related read family (by the same ``_related`` predicate) as a
++            zero-read ``gtf_member``; it NEVER bridges two read families and NEVER contributes to a
++            ``read_pool``. Mono (empty-chain) GTF entries are ignored here (annotation of single-exon
++            transcripts is handled by the later mono finalizer). The read families are formed BEFORE
++            attachment, so annotation cannot change read-derived family structure.
+ 
+     Returns:
+         A :class:`ClusterResult` (multi-exon families + the interval mono bucket).
+@@ -450,6 +518,13 @@ def cluster_families(
+             read_pool=pool,
+             variant_reads={c: set(by_chain[c]) for c in comp},
+         ))
+-    families.sort(key=lambda f: f.variants[0])   # stable family order
++
++    # 4. (optional) attach GTF hypotheses to read families -- NON-BRIDGING, zero-read.
++    if gtf_variants:
++        _attach_gtf_variants(families, gtf_variants, wobble_bp, cassette_max_exon_bp)
++
++    # Stable, total family order over every family's chains (read variants + gtf members),
++    # so GTF-only families (empty ``variants``) also sort deterministically.
++    families.sort(key=_family_sort_key)
+ 
+     return ClusterResult(families=families, mono_reads=mono_reads)
+diff --git a/tests/unit/test_cluster_families.py b/tests/unit/test_cluster_families.py
+index 22d457f..23d134e 100644
+--- a/tests/unit/test_cluster_families.py
++++ b/tests/unit/test_cluster_families.py
+@@ -180,3 +180,115 @@ class TestEmptyAndRepresentative:
+         ], wobble_bp=6)
+         assert len(res.families) == 1
+         assert res.families[0].representative == ((1000, 2000),)
++
++
++class TestGtfAttach:
++    def _one(self, res):
++        assert len(res.families) == 1
++        return res.families[0]
++
++    def test_gtf_wobble_attaches_zero_read(self):
++        # GTF wobble-matches the read family -> attached as a zero-read gtf_member; the read
++        # pool / variants are UNCHANGED (GTF adds no read mass, no structure).
++        gtf = [("gA", ((1002, 1998), (3000, 4000)))]
++        res = cluster_families([
++            _rc("r1", [(1000, 2000), (3000, 4000)]),
++            _rc("r2", [(1000, 2000), (3000, 4000)]),
++        ], gtf_variants=gtf)
++        fam = self._one(res)
++        assert fam.variants == [((1000, 2000), (3000, 4000))]     # read structure unchanged
++        assert fam.read_pool == {"r1", "r2"}                      # GTF added no reads
++        assert fam.gtf_members == [("gA", ((1002, 1998), (3000, 4000)))]
++
++    def test_gtf_unmatched_becomes_gtf_only_family(self):
++        gtf = [("gFar", ((90000, 91000),))]
++        res = cluster_families([
++            _rc("r1", [(1000, 2000)]),
++        ], gtf_variants=gtf)
++        assert len(res.families) == 2
++        read_fam = [f for f in res.families if f.variants]
++        gtf_fam = [f for f in res.families if not f.variants]
++        assert len(read_fam) == 1 and len(gtf_fam) == 1
++        assert gtf_fam[0].read_pool == set()                     # GTF-only: empty pool
++        assert gtf_fam[0].gtf_members == [("gFar", ((90000, 91000),))]
++        assert gtf_fam[0].representative is None                 # no read variant
++
++    def test_gtf_does_not_bridge_two_read_families(self):
++        # GTF (1000,2000)+(8000,9000) is containment-related to BOTH single-intron read
++        # families, which are NOT related to each other. It must attach to exactly ONE and
++        # NEVER merge the two families.
++        gtf = [("gBridge", ((1000, 2000), (8000, 9000)))]
++        res = cluster_families([
++            _rc("rA", [(1000, 2000)]),
++            _rc("rB", [(8000, 9000)]),
++        ], gtf_variants=gtf)
++        assert len(res.families) == 2                            # NOT merged
++        total_gtf = sum(len(f.gtf_members) for f in res.families)
++        assert total_gtf == 1                                    # attached once, not duplicated
++        # read families keep their own single reads
++        pools = sorted((tuple(sorted(f.read_pool)) for f in res.families))
++        assert pools == [("rA",), ("rB",)]
++
++    def test_gtf_none_is_backward_compatible(self):
++        res = cluster_families([_rc("r1", [(1000, 2000), (3000, 4000)])], gtf_variants=None)
++        assert res.families[0].gtf_members == []
++
++    def test_mono_gtf_is_skipped(self):
++        # empty-chain (single-exon) GTF is deferred to the mono finalizer, not attached here.
++        res = cluster_families(
++            [_rc("r1", [(1000, 2000)])],
++            gtf_variants=[("gMono", ())],
++        )
++        assert len(res.families) == 1
++        assert res.families[0].gtf_members == []
++
++    def test_exact_match_gtf_attaches_not_merges_reads(self):
++        # a GTF whose chain EXACTLY equals the read chain attaches as a 0-read member (the new
++        # design: GTF competes on evidence) -- it does NOT silently absorb the reads at generation.
++        gtf = [("gExact", ((1000, 2000), (3000, 4000)))]
++        res = cluster_families([
++            _rc("r1", [(1000, 2000), (3000, 4000)]),
++        ], gtf_variants=gtf)
++        fam = self._one(res)
++        assert fam.read_pool == {"r1"}
++        assert fam.variant_reads == {((1000, 2000), (3000, 4000)): {"r1"}}
++        assert fam.gtf_members == [("gExact", ((1000, 2000), (3000, 4000)))]
++
++    def test_deterministic_with_gtf(self):
++        reads = [
++            _rc("r1", [(1000, 2000), (3000, 4000)]),
++            _rc("r2", [(5000, 6000)]),
++        ]
++        gtf = [("gA", ((1002, 1998), (3000, 4000))), ("gFar", ((90000, 91000),))]
++        ra = cluster_families(list(reads), gtf_variants=list(gtf))
++        rb = cluster_families(list(reversed(reads)), gtf_variants=list(reversed(gtf)))
++        norm = lambda res: [(f.variants, sorted(f.gtf_members)) for f in res.families]
++        assert norm(ra) == norm(rb)
++
++    def test_two_gtf_attach_to_same_family(self):
++        # two annotation isoforms both wobble the one read family -> both attach as members.
++        gtf = [
++            ("gA", ((1002, 1998), (3000, 4000))),
++            ("gB", ((999, 2001), (3000, 4000))),
++        ]
++        res = cluster_families([
++            _rc("r1", [(1000, 2000), (3000, 4000)]),
++        ], gtf_variants=gtf)
++        fam = self._one(res)
++        assert sorted(fam.gtf_members) == sorted(gtf)
++        assert fam.read_pool == {"r1"}
++
++    def test_gtf_only_family_does_not_attract_later_gtf(self):
++        # g1 matches no read -> GTF-only family. g2 is a wobble sibling of g1 but ALSO matches
++        # no read family; it must NOT attach to g1's GTF-only family -> two GTF-only families.
++        gtf = [
++            ("g1", ((50000, 51000),)),
++            ("g2", ((50002, 50998),)),   # wobble of g1, unrelated to the read
++        ]
++        res = cluster_families([
++            _rc("r1", [(1000, 2000)]),
++        ], gtf_variants=gtf)
++        assert len(res.families) == 3                      # 1 read family + 2 GTF-only
++        gtf_only = [f for f in res.families if not f.variants]
++        assert len(gtf_only) == 2
++        assert all(len(f.gtf_members) == 1 for f in gtf_only)

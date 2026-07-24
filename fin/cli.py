@@ -46,6 +46,7 @@ import click
 @click.option("--canonical-gate/--no-canonical-gate", "canonical_gate", default=True, show_default=True, help="Drop NOVEL multi-exon candidates whose junctions aren't all canonical (GTF/fusion/mono exempt). SIRV-tuned default ON.")
 @click.option("--canonical-motifs", default="GT-AG,GC-AG,AT-AC", show_default=True, help="Comma-separated donor-acceptor motifs accepted by the canonical gate AND search.")
 @click.option("--chain-cluster-discovery/--no-chain-cluster-discovery", "chain_cluster_discovery", default=True, show_default=True, help="PRODUCTION DEFAULT generation. Group reads by intron chain (3' IGNORED), collapse EXACT sub-chains, cluster wobble/cassette/containment keeping members; NO canonical-search shadows. Replaces the legacy 3'+exact-chain grouping + canonical expansion. p00 no-gates: raw candidates 175k->37k, c -73%, j -88%, structural precision 10->26%, at ~20% distinct-truth recall cost (92% from the exact sub-chain collapse). --no- reverts to the legacy discovery.")
+@click.option("--clustering", type=click.Choice(["read_chains", "families"]), default="read_chains", show_default=True, help="(--chain-cluster-discovery) generation clustering primitive. 'read_chains' = legacy cluster_read_chains (fold+cluster inline, PRODUCTION DEFAULT). 'families' = clustering redesign: cluster_families (grouping only, single-linkage) + collapse (explicit exact-subchain fold); mono reads deferred to a holding bucket (pair with --mono-resolve-post-em). Behavior change (NOT byte-identical); metric-validated before any default flip.")
 @click.option("--chain-cluster-wobble-bp", default=6, show_default=True, type=int, help="(--chain-cluster-discovery) per-junction bp tolerance for the wobble/cassette/containment cluster joins.")
 @click.option("--chain-cluster-cassette-max-exon-bp", default=70, show_default=True, type=int, help="(--chain-cluster-discovery) max skipped-exon length (bp) for a cassette (K vs K-1) cluster join. 0 disables cassette joins.")
 @click.option("--chain-cluster-fold-monoexon/--no-chain-cluster-fold-monoexon", "chain_cluster_fold_monoexon", default=True, show_default=True, help="(--chain-cluster-discovery) PRODUCTION DEFAULT. Fold a single-exon read whose aligned span lies wholly inside one exon of a multi-exon candidate INTO that candidate (a 5'/3' degradation fragment) instead of emitting a standalone single-exon candidate. Reads inside an intron (a different gene) or contained in no multi-exon candidate stay separate. Suppresses single-exon truncation FPs (p00 m2_em: out -400, `=` +91, Pr 66.0->69.9). --no- reverts to standalone mono candidates.")
@@ -157,6 +158,7 @@ def main(
     canonical_gate,
     canonical_motifs,
     chain_cluster_discovery,
+    clustering,
     chain_cluster_wobble_bp,
     chain_cluster_cassette_max_exon_bp,
     chain_cluster_fold_monoexon,
@@ -313,6 +315,7 @@ def main(
             m.strip() for m in canonical_motifs.split(",") if m.strip()
         ),
         chain_cluster_discovery=chain_cluster_discovery,
+        clustering=clustering,
         chain_cluster_wobble_bp=chain_cluster_wobble_bp,
         chain_cluster_cassette_max_exon_bp=chain_cluster_cassette_max_exon_bp,
         chain_cluster_fold_monoexon=chain_cluster_fold_monoexon,

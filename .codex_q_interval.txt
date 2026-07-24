@@ -1,0 +1,22 @@
+Answer one focused factual question about the pyfin repo by reading the code (use a PTY if the
+non-PTY shell returns blank stdout). Read fin/io/interval_manager.py, in particular is_fusion_read()
+(~line 135), generate_intervals_from_reads() (~line 207), cluster_intervals(), and the fusion-read
+handling near line 608.
+
+QUESTION (from the user, verbatim): "现在interval的detection没有问题,是不是,默认就是250bp,把可用的
+reads和fusion reads区分开了。" i.e. is interval detection sound, is the default 250bp, and does it
+separate usable reads from fusion reads?
+
+Confirm or correct, precisely:
+1. Is the soft-clip threshold default 250 bp? Where, and what exactly triggers the fusion flag
+   (supplementary flag? terminal soft-clip op==4 >= 250 at read start OR end?).
+2. Are fusion reads (is_supplementary OR >=250bp terminal soft-clip) SEPARATED from the normal read
+   pool that forms intervals (i.e. removed from read_alignments, tracked in fusion_read_ids/fusion_reads),
+   and excluded from the per-interval quant read set?
+3. Is the interval detection itself sound: unmapped+secondary skipped, primary reads partitioned by
+   clustering (max_gap), non-overlapping, each read in exactly one interval?
+4. Any caveats/edge cases the user should know before treating interval detection as "no problem" —
+   e.g. what happens to a >=250bp-soft-clip read when fusion is DISABLED; multi-gene intervals; whether
+   a genuine (non-fusion) long-soft-clip read could be wrongly excluded.
+
+Be concrete with line cites. Read-only; do not modify anything. Keep it tight.

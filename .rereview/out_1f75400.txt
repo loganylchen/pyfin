@@ -1,0 +1,2688 @@
+Reading prompt from stdin...
+OpenAI Codex v0.142.0
+--------
+workdir: /SSD/logan/dev/pyfin
+model: gpt-5.6-sol
+provider: OpenAI
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019f9241-018c-7472-9818-1e102cea8a35
+--------
+user
+Re-review a git commit in the pyfin repo with fresh, skeptical eyes. A PRIOR review by a weaker model (gpt-5.5) marked it CLEAN. Independently re-verify with the stronger model and catch anything it may have missed. Read the embedded diff (git show); use a PTY if the non-PTY shell returns blank stdout, but the diff below is self-contained.
+
+Commit: 1f75400 — refactor(pipeline): split finalize/writers into finalize.py (M4)
+Nature: BEHAVIOR-PRESERVING REFACTOR (byte-identical bar)
+
+Acceptance bar: BYTE-IDENTICAL behaviour. Verify the move/extraction changed NO behaviour: no reordered statements that matter, no changed default/threshold, no altered condition or control flow, preserved test/mock seams (patch.object / module-level patch targets), no import cycle, no lost local variable or import, sequential-survivor / lazy-build / fold semantics preserved. Flag ANY line that could shift output.
+
+Give a clear verdict for THIS commit: CLEAN or ISSUES (list them with line cites). Be concrete and skeptical. Review only; do not modify code.
+
+===== git show 1f75400 =====
+commit 1f75400707cc76185e21b4351555372b81a60cb1
+Author: loganylchen <yuelong.chen.btr@gmail.com>
+Date:   Thu Jul 23 15:45:23 2026 +0800
+
+    refactor(pipeline): split finalize/writers into finalize.py (M4)
+    
+    Move the pre-filter unfiltered-TSV diagnostic and the post-selection gene-id
+    resolution + GTF/TSV/BEDPE writers out of the runner into fin/pipeline/finalize.py
+    (write_unfiltered_diagnostic, finalize_outputs). The GLOBAL selection call
+    (select_global, M3) stays in the runner's orchestration, so _finalize_and_write is now
+    a 3-line wiring of three independent layers:
+      write_unfiltered_diagnostic(...) -> select_global(...) -> finalize_outputs(...)
+    
+    Byte-identical (Codex-verified): the a->h step order is preserved, both moves are
+    verbatim, and the two DIFFERENT gene-id loops are each kept intact (the diagnostic path
+    keeps an existing gene_id via `if tx and not qr.gene_id`; the final path overwrites from
+    the annotation via `if tx: qr.gene_id = tx.gene_id`). _finalize_and_write stays a runner
+    method (test_min_abundance_default calls it) passing _gtf_reader / _apply_polya5p_filter
+    at call time; finalize.py imports no runner (no cycle). 911 tests pass (unchanged).
+    
+    Completes the pipeline layer split: Evidence (evidence.py) / Generation (candidates/) /
+    Assignment (assignment.py) / Selection (selection.py, all 3 scopes) / Finalize
+    (finalize.py). runner.py 1971 -> 1266 lines.
+
+diff --git a/fin/pipeline/finalize.py b/fin/pipeline/finalize.py
+new file mode 100644
+index 0000000..0bc2f94
+--- /dev/null
++++ b/fin/pipeline/finalize.py
+@@ -0,0 +1,109 @@
++"""Finalize layer: gene-id resolution and output writers.
++
++The last stage of the pipeline, after GLOBAL selection (fin.pipeline.selection.select_global). This
++module is intentionally PURE-ish: it resolves gene_ids from the annotation and writes the GTF / TSV /
++BEDPE outputs, plus the optional pre-filter diagnostic TSV. No candidate is dropped here — selection
++is done by the time these run. Writers are the existing standalone ``fin.io`` functions; this module
++just wires them to the aggregated result and the config.
++
++Kept separate from selection so "which candidates survive" (selection.py) and "how survivors are
++written out" (finalize.py) are independent concerns — a change to a writer cannot change the result
++set, and a change to a filter cannot change output formatting. ``EndpointRefine`` (5'/3'-endpoint
++polishing) is the natural future hook here; it is a no-op stub for now.
++"""
++from __future__ import annotations
++
++import logging
++from pathlib import Path
++from typing import Dict, Optional
++
++logger = logging.getLogger(__name__)
++
++
++def write_unfiltered_diagnostic(
++    config, aggregated: Dict[str, "object"], output_tsv: Optional[str], gtf_reader
++) -> None:
++    """Write the pre-filter scoring TSV (diagnostic) when ``write_unfiltered_scores`` is set.
++
++    Runs BEFORE the GLOBAL selection cascade so downstream FN-root-cause analysis can distinguish
++    "candidate never reached EM" from "candidate dropped by a filter". Resolves gene_ids on the
++    unfiltered snapshot too (so the diagnostic TSV has no empty gene_id column). No-op unless both
++    ``write_unfiltered_scores`` and ``output_tsv`` are set. Byte-identical move of the former
++    ``_finalize_and_write`` diagnostic block.
++    """
++    if not (getattr(config, "write_unfiltered_scores", False) and output_tsv):
++        return
++    from fin.io.io_tsv import write_scoring_tsv
++
++    unfiltered_path = str(Path(output_tsv).with_suffix(".unfiltered.tsv"))
++    transcript_lengths_uf = {
++        cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
++        for cid, qr in aggregated.items()
++    }
++    # Resolve gene_ids on the unfiltered snapshot too so downstream
++    # consumers don't see empty gene_id columns.
++    for cid, qr in aggregated.items():
++        if qr.source == "gtf" and gtf_reader:
++            tx = gtf_reader.get_transcript(cid)
++            if tx and not qr.gene_id:
++                qr.gene_id = tx.gene_id
++        if not qr.gene_id:
++            qr.gene_id = qr.candidate_id
++    write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
++    logger.info(
++        "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
++        unfiltered_path,
++        len(aggregated),
++    )
++
++
++def finalize_outputs(
++    config,
++    aggregated: Dict[str, "object"],
++    output_gtf: Optional[str],
++    output_tsv: Optional[str],
++    gtf_reader,
++) -> Dict[str, "object"]:
++    """Resolve gene_ids and write the GTF / TSV / BEDPE outputs; return ``aggregated`` unchanged.
++
++    Byte-identical move of the runner's former ``_finalize_and_write`` tail (post-selection): the
++    gene-id resolution loop, the three optional writers, and the final "Pipeline complete" log. No
++    candidate is dropped here.
++    """
++    # Resolve gene_ids from GTF annotation
++    for cid, qr in aggregated.items():
++        if qr.source == "gtf" and gtf_reader:
++            tx = gtf_reader.get_transcript(cid)
++            if tx:
++                qr.gene_id = tx.gene_id
++        if not qr.gene_id:
++            qr.gene_id = qr.candidate_id
++
++    # Write GTF output
++    if output_gtf:
++        from fin.io.io_gtf import write_gtf
++
++        write_gtf(aggregated, output_gtf)
++        logger.info("Wrote GTF output: %s", output_gtf)
++
++    # US-013: Additional output writers
++    if output_tsv:
++        from fin.io.io_tsv import write_scoring_tsv
++
++        transcript_lengths = {
++            cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
++            for cid, qr in aggregated.items()
++        }
++        write_scoring_tsv(aggregated, transcript_lengths, output_tsv)
++        logger.info("Wrote TSV output: %s", output_tsv)
++
++    if config.fusion_enabled and config.output_bedpe:
++        from fin.io.io_bedpe import write_fusion_bedpe
++
++        write_fusion_bedpe(aggregated, config.output_bedpe)
++        logger.info("Wrote BEDPE output: %s", config.output_bedpe)
++
++    logger.info(
++        "Pipeline complete: %d transcripts quantified", len(aggregated)
++    )
++    return aggregated
+diff --git a/fin/pipeline/runner.py b/fin/pipeline/runner.py
+index 28b1849..186696f 100644
+--- a/fin/pipeline/runner.py
++++ b/fin/pipeline/runner.py
+@@ -23,6 +23,7 @@ from fin.candidates.discovery import discover_candidates, merge_fusion_candidate
+ from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+ from fin.pipeline.assignment import Assigner
+ from fin.pipeline.config import PipelineConfig
++from fin.pipeline.finalize import finalize_outputs, write_unfiltered_diagnostic
+ from fin.pipeline.selection import (
+     canonical_gate_select,
+     junction_dominance_select,
+@@ -135,77 +136,20 @@ class PipelineRunner:
+         output_gtf: Optional[str],
+         output_tsv: Optional[str],
+     ) -> Dict[str, QuantResult]:
+-        """Apply post-EM filters, resolve gene_ids, optionally write GTF/TSV."""
+-        # Diagnostic: write unfiltered scores TSV BEFORE the post-EM filter
+-        # cascade so downstream FN-root-cause analysis can distinguish
+-        # "candidate never reached EM" from "candidate dropped by a filter".
+-        if getattr(self.config, "write_unfiltered_scores", False) and output_tsv:
+-            from fin.io.io_tsv import write_scoring_tsv
+-
+-            unfiltered_path = str(Path(output_tsv).with_suffix(".unfiltered.tsv"))
+-            transcript_lengths_uf = {
+-                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+-                for cid, qr in aggregated.items()
+-            }
+-            # Resolve gene_ids on the unfiltered snapshot too so downstream
+-            # consumers don't see empty gene_id columns.
+-            for cid, qr in aggregated.items():
+-                if qr.source == "gtf" and self._gtf_reader:
+-                    tx = self._gtf_reader.get_transcript(cid)
+-                    if tx and not qr.gene_id:
+-                        qr.gene_id = tx.gene_id
+-                if not qr.gene_id:
+-                    qr.gene_id = qr.candidate_id
+-            write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
+-            logger.info(
+-                "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
+-                unfiltered_path,
+-                len(aggregated),
+-            )
++        """Finalize: diagnostic dump -> GLOBAL selection -> gene-id resolution + writers.
+ 
+-        # GLOBAL post-aggregate selection cascade (abundance floor / isoform-fraction /
+-        # soft-mass / mono / full-length / polyA). Lives in fin.pipeline.selection.
++        Thin orchestrator wiring three independent layers: the pre-filter diagnostic and the
++        output writers live in fin.pipeline.finalize; the GLOBAL selection cascade lives in
++        fin.pipeline.selection. Kept as a method so tests can call this seam directly."""
++        write_unfiltered_diagnostic(
++            self.config, aggregated, output_tsv, self._gtf_reader
++        )
+         aggregated, _global_outcomes = select_global(
+             self.config, aggregated, self._apply_polya5p_filter,
+         )
+-
+-        # Resolve gene_ids from GTF annotation
+-        for cid, qr in aggregated.items():
+-            if qr.source == "gtf" and self._gtf_reader:
+-                tx = self._gtf_reader.get_transcript(cid)
+-                if tx:
+-                    qr.gene_id = tx.gene_id
+-            if not qr.gene_id:
+-                qr.gene_id = qr.candidate_id
+-
+-        # Write GTF output
+-        if output_gtf:
+-            from fin.io.io_gtf import write_gtf
+-
+-            write_gtf(aggregated, output_gtf)
+-            logger.info("Wrote GTF output: %s", output_gtf)
+-
+-        # US-013: Additional output writers
+-        if output_tsv:
+-            from fin.io.io_tsv import write_scoring_tsv
+-
+-            transcript_lengths = {
+-                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+-                for cid, qr in aggregated.items()
+-            }
+-            write_scoring_tsv(aggregated, transcript_lengths, output_tsv)
+-            logger.info("Wrote TSV output: %s", output_tsv)
+-
+-        if self.config.fusion_enabled and self.config.output_bedpe:
+-            from fin.io.io_bedpe import write_fusion_bedpe
+-
+-            write_fusion_bedpe(aggregated, self.config.output_bedpe)
+-            logger.info("Wrote BEDPE output: %s", self.config.output_bedpe)
+-
+-        logger.info(
+-            "Pipeline complete: %d transcripts quantified", len(aggregated)
++        return finalize_outputs(
++            self.config, aggregated, output_gtf, output_tsv, self._gtf_reader,
+         )
+-        return aggregated
+ 
+     def process_interval(
+         self, interval: GenomicInterval
+
+warning: Model metadata for `gpt-5.6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+codex
+I’ll independently compare the parent and commit, then audit call sites, mocks, imports, and focused tests for byte-level drift.
+  → Inspect commit and repository guidance
+  • Compare moved code against parent
+  • Audit seams imports and semantics
+  • Run focused regression tests
+  • Deliver skeptical commit verdict
+exec
+/bin/bash -lc "pwd; printf '\\n-- guidance --\\n'; find .. -name AGENTS.md -print; printf '\\n-- status --\\n'; git status --short; printf '\\n-- commit --\\n'; git show --stat --oneline --decorate --no-renames 1f75400; printf '\\n-- files --\\n'; git diff-tree --no-commit-id --name-status -r 1f75400" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+codex
+The non-PTY shell returned blank as anticipated; I’m rerunning the inspection through a PTY.
+exec
+/bin/bash -lc "pwd; printf '\\n-- guidance --\\n'; find .. -name AGENTS.md -print; printf '\\n-- status --\\n'; git status --short; printf '\\n-- commit --\\n'; git show --stat --oneline --decorate --no-renames 1f75400; printf '\\n-- files --\\n'; git diff-tree --no-commit-id --name-status -r 1f75400" in /SSD/logan/dev/pyfin
+ succeeded in 13596ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/18[30m)[36m─┐
+[36m└[34m─([33m11:52:59[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/18[30m)[36m─┐
+[36m└[34m─([33m11:52:59[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/18[30m)[36m─┐
+[36m└[34m─([33m11:52:59[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> exit[?2004l
+
+exec
+/bin/bash -c "pwd; printf '\\n-- guidance --\\n'; find .. -name AGENTS.md -print; printf '\\n-- status --\\n'; git status --short; printf '\\n-- commit --\\n'; git show --stat --oneline --decorate --no-renames 1f75400; printf '\\n-- files --\\n'; git diff-tree --no-commit-id --name-status -r 1f75400" in /SSD/logan/dev/pyfin
+ succeeded in 35811ms:
+../krill/docs/AGENTS.md
+../krill/benchmarks/AGENTS.md
+../krill/scripts/AGENTS.md
+../krill/AGENTS.md
+../krill/test/AGENTS.md
+../krill/python/AGENTS.md
+../krill/python/krill/AGENTS.md
+../krill/src/AGENTS.md
+../krill/src/dtw/AGENTS.md
+../krill/tools/polya_rna004/AGENTS.md
+../krill/tools/AGENTS.md
+
+-- status --
+?? .codex_holistic_out.txt
+?? .codex_holistic_prompt.txt
+?? .codex_q_cluster.txt
+?? .codex_q_cluster_out.txt
+?? .codex_q_design.txt
+?? .codex_q_design_out.txt
+?? .codex_q_gen.txt
+?? .codex_q_gen_out.txt
+?? .codex_q_gtf.txt
+?? .codex_q_gtf_out.txt
+?? .codex_q_interval.txt
+?? .codex_q_interval_out.txt
+?? .rereview/
+?? experiments/prod_validation/
+?? experiments/wobble_heya8/FINAL_REPORT_v3.md
+?? experiments/wobble_heya8/analyze_tpfp.py
+?? experiments/wobble_heya8/build_tables.py
+?? experiments/wobble_heya8/cassette_scan.py
+?? experiments/wobble_heya8/cf_measure/
+?? experiments/wobble_heya8/compute_fl.py
+?? experiments/wobble_heya8/diagnose_missed.py
+?? experiments/wobble_heya8/drop_attrib.py
+?? experiments/wobble_heya8/extract_subset_reads.py
+?? experiments/wobble_heya8/fl_missed_diagnose.py
+?? experiments/wobble_heya8/fp_phasing.py
+?? experiments/wobble_heya8/gffcmp.sh
+?? experiments/wobble_heya8/measure_cf.py
+?? experiments/wobble_heya8/pipeline_after_matrix.sh
+?? experiments/wobble_heya8/run_cassette_ablation.sh
+?? experiments/wobble_heya8/run_cf_measure.sbatch
+?? experiments/wobble_heya8/run_final.sh
+?? experiments/wobble_heya8/run_fl.sbatch
+?? experiments/wobble_heya8/run_fl_missed.sbatch
+?? experiments/wobble_heya8/run_matrix.sh
+?? experiments/wobble_heya8/run_prodfinal.sh
+?? experiments/wobble_heya8/run_v3.sh
+?? experiments/wobble_heya8/score_matrix.sh
+?? experiments/wobble_heya8/tpm_sweep.py
+?? scripts/
+
+-- commit --
+1f75400 refactor(pipeline): split finalize/writers into finalize.py (M4)
+ fin/pipeline/finalize.py | 109 +++++++++++++++++++++++++++++++++++++++++++++++
+ fin/pipeline/runner.py   |  76 +++++----------------------------
+ 2 files changed, 119 insertions(+), 66 deletions(-)
+
+-- files --
+A	fin/pipeline/finalize.py
+M	fin/pipeline/runner.py
+
+codex
+The commit is isolated to two files. Next I’m checking exact parent equivalence and every test/patch target touching this seam.
+  ✓ Inspect commit and repository guidance
+  → Compare moved code against parent
+  • Audit seams imports and semantics
+  • Run focused regression tests
+  • Deliver skeptical commit verdict
+exec
+/bin/bash -c "set -o pipefail
+printf '%s\\n' '-- parent method --'
+git show 1f75400"'^:fin/pipeline/runner.py | nl -ba | sed -n '"'115,235p'
+printf '%s\\n' '-- commit method --'
+git show 1f75400:fin/pipeline/runner.py | nl -ba | sed -n '115,180p'
+printf '%s\\n' '-- finalize file --'
+git show 1f75400:fin/pipeline/finalize.py | nl -ba
+printf '%s\\n' '-- runner Path uses parent/commit --'
+for rev in 1f75400"'^ 1f75400; do echo "REV $rev"; git show "$rev":fin/pipeline/runner.py | rg -n '"'\\bPath\\b'; done
+printf '%s\\n' '-- relevant references at commit --'
+git grep -n -E '_finalize_and_write|write_unfiltered_diagnostic|finalize_outputs|write_scoring_tsv|write_gtf|write_fusion_bedpe' 1f75400 -- ':"'!fin/pipeline/finalize.py'"' ':"'!fin/pipeline/runner.py'"' | head -300" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+-- parent method --
+   115	            log_level = logging.getLevelName(logging.getLogger("fin").getEffectiveLevel())
+   116	            all_quant_results = run_parallel(
+   117	                self.config,
+   118	                intervals,
+   119	                self.config.threads,
+   120	                self.config.gpu_workers,
+   121	                log_level,
+   122	            )
+   123	
+   124	        # Aggregate across intervals
+   125	        aggregated = aggregate_across_intervals(all_quant_results)
+   126	        return self._finalize_and_write(
+   127	            aggregated,
+   128	            output_gtf=self.config.output_gtf,
+   129	            output_tsv=self.config.output_tsv,
+   130	        )
+   131	
+   132	    def _finalize_and_write(
+   133	        self,
+   134	        aggregated: Dict[str, QuantResult],
+   135	        output_gtf: Optional[str],
+   136	        output_tsv: Optional[str],
+   137	    ) -> Dict[str, QuantResult]:
+   138	        """Apply post-EM filters, resolve gene_ids, optionally write GTF/TSV."""
+   139	        # Diagnostic: write unfiltered scores TSV BEFORE the post-EM filter
+   140	        # cascade so downstream FN-root-cause analysis can distinguish
+   141	        # "candidate never reached EM" from "candidate dropped by a filter".
+   142	        if getattr(self.config, "write_unfiltered_scores", False) and output_tsv:
+   143	            from fin.io.io_tsv import write_scoring_tsv
+   144	
+   145	            unfiltered_path = str(Path(output_tsv).with_suffix(".unfiltered.tsv"))
+   146	            transcript_lengths_uf = {
+   147	                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+   148	                for cid, qr in aggregated.items()
+   149	            }
+   150	            # Resolve gene_ids on the unfiltered snapshot too so downstream
+   151	            # consumers don't see empty gene_id columns.
+   152	            for cid, qr in aggregated.items():
+   153	                if qr.source == "gtf" and self._gtf_reader:
+   154	                    tx = self._gtf_reader.get_transcript(cid)
+   155	                    if tx and not qr.gene_id:
+   156	                        qr.gene_id = tx.gene_id
+   157	                if not qr.gene_id:
+   158	                    qr.gene_id = qr.candidate_id
+   159	            write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
+   160	            logger.info(
+   161	                "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
+   162	                unfiltered_path,
+   163	                len(aggregated),
+   164	            )
+   165	
+   166	        # GLOBAL post-aggregate selection cascade (abundance floor / isoform-fraction /
+   167	        # soft-mass / mono / full-length / polyA). Lives in fin.pipeline.selection.
+   168	        aggregated, _global_outcomes = select_global(
+   169	            self.config, aggregated, self._apply_polya5p_filter,
+   170	        )
+   171	
+   172	        # Resolve gene_ids from GTF annotation
+   173	        for cid, qr in aggregated.items():
+   174	            if qr.source == "gtf" and self._gtf_reader:
+   175	                tx = self._gtf_reader.get_transcript(cid)
+   176	                if tx:
+   177	                    qr.gene_id = tx.gene_id
+   178	            if not qr.gene_id:
+   179	                qr.gene_id = qr.candidate_id
+   180	
+   181	        # Write GTF output
+   182	        if output_gtf:
+   183	            from fin.io.io_gtf import write_gtf
+   184	
+   185	            write_gtf(aggregated, output_gtf)
+   186	            logger.info("Wrote GTF output: %s", output_gtf)
+   187	
+   188	        # US-013: Additional output writers
+   189	        if output_tsv:
+   190	            from fin.io.io_tsv import write_scoring_tsv
+   191	
+   192	            transcript_lengths = {
+   193	                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+   194	                for cid, qr in aggregated.items()
+   195	            }
+   196	            write_scoring_tsv(aggregated, transcript_lengths, output_tsv)
+   197	            logger.info("Wrote TSV output: %s", output_tsv)
+   198	
+   199	        if self.config.fusion_enabled and self.config.output_bedpe:
+   200	            from fin.io.io_bedpe import write_fusion_bedpe
+   201	
+   202	            write_fusion_bedpe(aggregated, self.config.output_bedpe)
+   203	            logger.info("Wrote BEDPE output: %s", self.config.output_bedpe)
+   204	
+   205	        logger.info(
+   206	            "Pipeline complete: %d transcripts quantified", len(aggregated)
+   207	        )
+   208	        return aggregated
+   209	
+   210	    def process_interval(
+   211	        self, interval: GenomicInterval
+   212	    ) -> Optional[List[QuantResult]]:
+   213	        """Discover candidates and quantify a single interval via ``quant_mode``.
+   214	
+   215	        Returns:
+   216	            - List[QuantResult] from the dispatched quant_mode engine.
+   217	            - None when the interval has no candidates or no reads.
+   218	        """
+   219	        work_dir = Path(self.config.work_dir) / interval.region_string.replace(":", "_").replace("-", "_")
+   220	        work_dir.mkdir(parents=True, exist_ok=True)
+   221	
+   222	        # Get genome sequence for this chromosome
+   223	        chrom_seq = ""
+   224	        if self._genome_fasta and interval.chrom in self._genome_fasta:
+   225	            chrom_seq = self._genome_fasta[interval.chrom]
+   226	
+   227	        # --- Phase 1: Candidate discovery ---
+   228	        candidate_set = discover_candidates(
+   229	            interval=interval,
+   230	            bam_path=self.config.bam_path,
+   231	            gtf_reader=self._gtf_reader,
+   232	            genome_fasta=chrom_seq,
+   233	            threshold=self.config.three_prime_threshold,
+   234	            min_novel_reads=self.config.min_novel_reads,
+   235	            chain_cluster=getattr(self.config, "chain_cluster_discovery", False),
+-- commit method --
+   115	
+   116	            log_level = logging.getLevelName(logging.getLogger("fin").getEffectiveLevel())
+   117	            all_quant_results = run_parallel(
+   118	                self.config,
+   119	                intervals,
+   120	                self.config.threads,
+   121	                self.config.gpu_workers,
+   122	                log_level,
+   123	            )
+   124	
+   125	        # Aggregate across intervals
+   126	        aggregated = aggregate_across_intervals(all_quant_results)
+   127	        return self._finalize_and_write(
+   128	            aggregated,
+   129	            output_gtf=self.config.output_gtf,
+   130	            output_tsv=self.config.output_tsv,
+   131	        )
+   132	
+   133	    def _finalize_and_write(
+   134	        self,
+   135	        aggregated: Dict[str, QuantResult],
+   136	        output_gtf: Optional[str],
+   137	        output_tsv: Optional[str],
+   138	    ) -> Dict[str, QuantResult]:
+   139	        """Finalize: diagnostic dump -> GLOBAL selection -> gene-id resolution + writers.
+   140	
+   141	        Thin orchestrator wiring three independent layers: the pre-filter diagnostic and the
+   142	        output writers live in fin.pipeline.finalize; the GLOBAL selection cascade lives in
+   143	        fin.pipeline.selection. Kept as a method so tests can call this seam directly."""
+   144	        write_unfiltered_diagnostic(
+   145	            self.config, aggregated, output_tsv, self._gtf_reader
+   146	        )
+   147	        aggregated, _global_outcomes = select_global(
+   148	            self.config, aggregated, self._apply_polya5p_filter,
+   149	        )
+   150	        return finalize_outputs(
+   151	            self.config, aggregated, output_gtf, output_tsv, self._gtf_reader,
+   152	        )
+   153	
+   154	    def process_interval(
+   155	        self, interval: GenomicInterval
+   156	    ) -> Optional[List[QuantResult]]:
+   157	        """Discover candidates and quantify a single interval via ``quant_mode``.
+   158	
+   159	        Returns:
+   160	            - List[QuantResult] from the dispatched quant_mode engine.
+   161	            - None when the interval has no candidates or no reads.
+   162	        """
+   163	        work_dir = Path(self.config.work_dir) / interval.region_string.replace(":", "_").replace("-", "_")
+   164	        work_dir.mkdir(parents=True, exist_ok=True)
+   165	
+   166	        # Get genome sequence for this chromosome
+   167	        chrom_seq = ""
+   168	        if self._genome_fasta and interval.chrom in self._genome_fasta:
+   169	            chrom_seq = self._genome_fasta[interval.chrom]
+   170	
+   171	        # --- Phase 1: Candidate discovery ---
+   172	        candidate_set = discover_candidates(
+   173	            interval=interval,
+   174	            bam_path=self.config.bam_path,
+   175	            gtf_reader=self._gtf_reader,
+   176	            genome_fasta=chrom_seq,
+   177	            threshold=self.config.three_prime_threshold,
+   178	            min_novel_reads=self.config.min_novel_reads,
+   179	            chain_cluster=getattr(self.config, "chain_cluster_discovery", False),
+   180	            chain_cluster_wobble_bp=getattr(self.config, "chain_cluster_wobble_bp", 6),
+-- finalize file --
+     1	"""Finalize layer: gene-id resolution and output writers.
+     2	
+     3	The last stage of the pipeline, after GLOBAL selection (fin.pipeline.selection.select_global). This
+     4	module is intentionally PURE-ish: it resolves gene_ids from the annotation and writes the GTF / TSV /
+     5	BEDPE outputs, plus the optional pre-filter diagnostic TSV. No candidate is dropped here — selection
+     6	is done by the time these run. Writers are the existing standalone ``fin.io`` functions; this module
+     7	just wires them to the aggregated result and the config.
+     8	
+     9	Kept separate from selection so "which candidates survive" (selection.py) and "how survivors are
+    10	written out" (finalize.py) are independent concerns — a change to a writer cannot change the result
+    11	set, and a change to a filter cannot change output formatting. ``EndpointRefine`` (5'/3'-endpoint
+    12	polishing) is the natural future hook here; it is a no-op stub for now.
+    13	"""
+    14	from __future__ import annotations
+    15	
+    16	import logging
+    17	from pathlib import Path
+    18	from typing import Dict, Optional
+    19	
+    20	logger = logging.getLogger(__name__)
+    21	
+    22	
+    23	def write_unfiltered_diagnostic(
+    24	    config, aggregated: Dict[str, "object"], output_tsv: Optional[str], gtf_reader
+    25	) -> None:
+    26	    """Write the pre-filter scoring TSV (diagnostic) when ``write_unfiltered_scores`` is set.
+    27	
+    28	    Runs BEFORE the GLOBAL selection cascade so downstream FN-root-cause analysis can distinguish
+    29	    "candidate never reached EM" from "candidate dropped by a filter". Resolves gene_ids on the
+    30	    unfiltered snapshot too (so the diagnostic TSV has no empty gene_id column). No-op unless both
+    31	    ``write_unfiltered_scores`` and ``output_tsv`` are set. Byte-identical move of the former
+    32	    ``_finalize_and_write`` diagnostic block.
+    33	    """
+    34	    if not (getattr(config, "write_unfiltered_scores", False) and output_tsv):
+    35	        return
+    36	    from fin.io.io_tsv import write_scoring_tsv
+    37	
+    38	    unfiltered_path = str(Path(output_tsv).with_suffix(".unfiltered.tsv"))
+    39	    transcript_lengths_uf = {
+    40	        cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+    41	        for cid, qr in aggregated.items()
+    42	    }
+    43	    # Resolve gene_ids on the unfiltered snapshot too so downstream
+    44	    # consumers don't see empty gene_id columns.
+    45	    for cid, qr in aggregated.items():
+    46	        if qr.source == "gtf" and gtf_reader:
+    47	            tx = gtf_reader.get_transcript(cid)
+    48	            if tx and not qr.gene_id:
+    49	                qr.gene_id = tx.gene_id
+    50	        if not qr.gene_id:
+    51	            qr.gene_id = qr.candidate_id
+    52	    write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
+    53	    logger.info(
+    54	        "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
+    55	        unfiltered_path,
+    56	        len(aggregated),
+    57	    )
+    58	
+    59	
+    60	def finalize_outputs(
+    61	    config,
+    62	    aggregated: Dict[str, "object"],
+    63	    output_gtf: Optional[str],
+    64	    output_tsv: Optional[str],
+    65	    gtf_reader,
+    66	) -> Dict[str, "object"]:
+    67	    """Resolve gene_ids and write the GTF / TSV / BEDPE outputs; return ``aggregated`` unchanged.
+    68	
+    69	    Byte-identical move of the runner's former ``_finalize_and_write`` tail (post-selection): the
+    70	    gene-id resolution loop, the three optional writers, and the final "Pipeline complete" log. No
+    71	    candidate is dropped here.
+    72	    """
+    73	    # Resolve gene_ids from GTF annotation
+    74	    for cid, qr in aggregated.items():
+    75	        if qr.source == "gtf" and gtf_reader:
+    76	            tx = gtf_reader.get_transcript(cid)
+    77	            if tx:
+    78	                qr.gene_id = tx.gene_id
+    79	        if not qr.gene_id:
+    80	            qr.gene_id = qr.candidate_id
+    81	
+    82	    # Write GTF output
+    83	    if output_gtf:
+    84	        from fin.io.io_gtf import write_gtf
+    85	
+    86	        write_gtf(aggregated, output_gtf)
+    87	        logger.info("Wrote GTF output: %s", output_gtf)
+    88	
+    89	    # US-013: Additional output writers
+    90	    if output_tsv:
+    91	        from fin.io.io_tsv import write_scoring_tsv
+    92	
+    93	        transcript_lengths = {
+    94	            cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+    95	            for cid, qr in aggregated.items()
+    96	        }
+    97	        write_scoring_tsv(aggregated, transcript_lengths, output_tsv)
+    98	        logger.info("Wrote TSV output: %s", output_tsv)
+    99	
+   100	    if config.fusion_enabled and config.output_bedpe:
+   101	        from fin.io.io_bedpe import write_fusion_bedpe
+   102	
+   103	        write_fusion_bedpe(aggregated, config.output_bedpe)
+   104	        logger.info("Wrote BEDPE output: %s", config.output_bedpe)
+   105	
+   106	    logger.info(
+   107	        "Pipeline complete: %d transcripts quantified", len(aggregated)
+   108	    )
+   109	    return aggregated
+-- runner Path uses parent/commit --
+REV 1f75400^
+6:from pathlib import Path
+84:        Path(self.config.work_dir).mkdir(parents=True, exist_ok=True)
+145:            unfiltered_path = str(Path(output_tsv).with_suffix(".unfiltered.tsv"))
+219:        work_dir = Path(self.config.work_dir) / interval.region_string.replace(":", "_").replace("-", "_")
+REV 1f75400
+6:from pathlib import Path
+85:        Path(self.config.work_dir).mkdir(parents=True, exist_ok=True)
+163:        work_dir = Path(self.config.work_dir) / interval.region_string.replace(":", "_").replace("-", "_")
+-- relevant references at commit --
+1f75400:benchmarks/ablation_5rows.py:144:        from fin.io.io_gtf import write_gtf
+1f75400:benchmarks/ablation_5rows.py:146:        write_gtf(aggregated, gtf_path)
+1f75400:fin/analysis/quantification.py:36:    # not gate assembly-mode filters on them (see runner._finalize_and_write's
+1f75400:fin/io/io_bedpe.py:13:def write_fusion_bedpe(
+1f75400:fin/io/io_gtf.py:550:def write_gtf(
+1f75400:fin/io/io_tsv.py:19:def write_scoring_tsv(
+1f75400:fin/pipeline/config.py:357:    # _finalize_and_write). Drop a NOVEL single-exon candidate whose hard read
+1f75400:fin/pipeline/selection.py:234:    #     removed by a later _finalize_and_write filter (isoform-fraction /
+1f75400:fin/pipeline/selection.py:331:    Byte-identical move of the filter section of the runner's ``_finalize_and_write``: the A4
+1f75400:record.md:204:  chrom/strand, locus-dominant never dropped); applied in `runner._finalize_and_write` as a
+1f75400:tests/integration/test_cpu_fallback.py:94:    """AC-25: write_scoring_tsv produces a TSV with exactly the expected 14 columns."""
+1f75400:tests/integration/test_cpu_fallback.py:96:    from fin.io.io_tsv import write_scoring_tsv
+1f75400:tests/integration/test_cpu_fallback.py:115:    write_scoring_tsv({"tx1": qr}, {"tx1": 100}, str(out))
+1f75400:tests/integration/test_cpu_fallback.py:150:    """AC-25: write_fusion_bedpe produces a BEDPE file with exactly 10 columns per row."""
+1f75400:tests/integration/test_cpu_fallback.py:152:    from fin.io.io_bedpe import write_fusion_bedpe
+1f75400:tests/integration/test_cpu_fallback.py:170:    write_fusion_bedpe({"fusion_1": qr}, str(out))
+1f75400:tests/unit/test_em_subset_evaluate.py:23:def _write_gtf(path: Path, records: list[tuple]) -> None:
+1f75400:tests/unit/test_em_subset_evaluate.py:37:        _write_gtf(gtf, [
+1f75400:tests/unit/test_em_subset_evaluate.py:49:        _write_gtf(gtf, [
+1f75400:tests/unit/test_em_subset_evaluate.py:62:        _write_gtf(ref, [
+1f75400:tests/unit/test_em_subset_evaluate.py:81:        _write_gtf(ref, [
+1f75400:tests/unit/test_em_subset_evaluate.py:88:        _write_gtf(pred, [
+1f75400:tests/unit/test_em_subset_evaluate.py:107:        _write_gtf(ref, [
+1f75400:tests/unit/test_em_subset_evaluate.py:111:        _write_gtf(pred, [
+1f75400:tests/unit/test_min_abundance_default.py:93:        out = runner._finalize_and_write(agg, None, None)
+1f75400:tests/unit/test_min_abundance_default.py:108:        out = runner._finalize_and_write(agg, None, None)
+1f75400:tests/unit/test_min_abundance_default.py:120:        out = runner._finalize_and_write(agg, None, None)
+1f75400:tests/unit/test_min_abundance_default.py:135:        out = runner._finalize_and_write(agg, None, None)
+1f75400:tests/unit/test_min_abundance_default.py:150:        out = runner._finalize_and_write(agg, None, None)
+1f75400:tests/unit/test_min_abundance_default.py:164:        out = runner._finalize_and_write(agg, None, None)
+1f75400:tests/unit/test_runner_outputs.py:83:             patch("fin.io.io_tsv.write_scoring_tsv") as mock_tsv:
+1f75400:tests/unit/test_runner_outputs.py:102:             patch("fin.io.io_tsv.write_scoring_tsv") as mock_tsv:
+1f75400:tests/unit/test_runner_outputs.py:119:             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+1f75400:tests/unit/test_runner_outputs.py:134:             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+1f75400:tests/unit/test_runner_outputs.py:148:             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+1f75400:tests/unit/test_runner_outputs.py:165:             patch("fin.io.io_gtf.write_gtf") as mock_gtf:
+1f75400:tests/unit/test_runner_outputs.py:179:             patch("fin.io.io_gtf.write_gtf") as mock_gtf:
+1f75400:tests/unit/test_runner_outputs.py:194:        from fin.io.io_tsv import write_scoring_tsv
+1f75400:tests/unit/test_runner_outputs.py:212:        write_scoring_tsv({"tx1": qr}, {"tx1": 100}, tsv_path)
+1f75400:tests/unit/test_runner_outputs.py:221:        from fin.io.io_tsv import write_scoring_tsv
+1f75400:tests/unit/test_runner_outputs.py:239:        write_scoring_tsv({"tx1": qr}, {"tx1": 100}, tsv_path)
+1f75400:tests/unit/test_runner_outputs.py:250:        from fin.io.io_tsv import write_scoring_tsv
+1f75400:tests/unit/test_runner_outputs.py:268:        write_scoring_tsv({"tx1": qr}, {"tx1": 100}, tsv_path)
+1f75400:tests/unit/test_write_fusion_bedpe.py:1:"""Tests for fin.io.io_bedpe.write_fusion_bedpe (AC-20)."""
+1f75400:tests/unit/test_write_fusion_bedpe.py:10:from fin.io.io_bedpe import write_fusion_bedpe
+1f75400:tests/unit/test_write_fusion_bedpe.py:49:        write_fusion_bedpe(results, path)
+1f75400:tests/unit/test_write_fusion_bedpe.py:162:    """write_fusion_bedpe accepts an iterable (not only a dict)."""
+1f75400:tests/unit/test_write_gtf.py:8:from fin.io.io_gtf import write_gtf
+1f75400:tests/unit/test_write_gtf.py:51:        write_gtf(sample_results, out)
+1f75400:tests/unit/test_write_gtf.py:56:        write_gtf(sample_results, out)
+1f75400:tests/unit/test_write_gtf.py:64:        write_gtf(sample_results, out)
+1f75400:tests/unit/test_write_gtf.py:73:        write_gtf(sample_results, out)
+1f75400:tests/unit/test_write_gtf.py:85:        write_gtf(sample_results, out)
+1f75400:tests/unit/test_write_gtf.py:96:        write_gtf(sample_results, out)
+1f75400:tests/unit/test_write_gtf.py:111:        write_gtf(sample_results, out)
+1f75400:tests/unit/test_write_gtf.py:122:        write_gtf(sample_results, out)
+1f75400:tests/unit/test_write_gtf.py:144:        write_gtf(results, out)
+1f75400:tests/unit/test_write_gtf.py:154:        write_gtf(results, out)
+1f75400:tests/unit/test_write_gtf.py:159:        write_gtf({}, out)
+1f75400:tests/unit/test_write_gtf.py:170:        write_gtf({qr.candidate_id: qr}, out)
+1f75400:tests/unit/test_write_gtf.py:211:        write_gtf({qr.candidate_id: qr}, out)
+1f75400:tests/unit/test_write_gtf.py:229:        write_gtf({qr.candidate_id: qr}, out)
+1f75400:tests/unit/test_write_gtf.py:273:        write_gtf(results, out)
+1f75400:tests/unit/test_write_scoring_tsv.py:1:"""Tests for fin.io.io_tsv.write_scoring_tsv (US-015 / AC-19)."""
+1f75400:tests/unit/test_write_scoring_tsv.py:11:from fin.io.io_tsv import write_scoring_tsv
+1f75400:tests/unit/test_write_scoring_tsv.py:57:        write_scoring_tsv(results, lengths, path)
+1f75400:tests/unit/test_write_scoring_tsv.py:65:def test_write_scoring_tsv_basic():
+1f75400:tests/unit/test_write_scoring_tsv.py:94:def test_write_scoring_tsv_empty_results():
+1f75400:tests/unit/test_write_scoring_tsv.py:100:def test_write_scoring_tsv_zero_abundance():
+1f75400:tests/unit/test_write_scoring_tsv.py:111:def test_write_scoring_tsv_missing_length():
+1f75400:tests/unit/test_write_scoring_tsv.py:121:def test_write_scoring_tsv_column_order():
+1f75400:tests/unit/test_write_scoring_tsv.py:135:def test_write_scoring_tsv_sorted_by_id():
+
+exec
+/bin/bash -c "set -o pipefail
+printf '%s\\n' '-- imports parent --'; git show 1f75400"'^:fin/pipeline/runner.py | nl -ba | sed -n '"'1,55p'
+printf '%s\\n' '-- imports commit --'; git show 1f75400:fin/pipeline/runner.py | nl -ba | sed -n '1,60p'
+printf '%s\\n' '-- seam patches and logger assertions --'; git grep -n -E 'patch(\\.object)?\\(["'^'"\\n]*(PipelineRunner|_finalize_and_write|_gtf_reader|_apply_polya5p_filter|fin\\.pipeline\\.runner|logger)|caplog|assertLogs' 1f75400 -- tests fin || true
+printf '%s\\n' '-- test_runner_outputs --'; git show 1f75400:tests/unit/test_runner_outputs.py | nl -ba | sed -n '1,190p'
+printf '%s\\n' '-- min abundance tests --'; git show 1f75400:tests/unit/test_min_abundance_default.py | nl -ba | sed -n '1,190p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+-- imports parent --
+     1	"""Pipeline orchestrator: interval -> candidates -> scoring -> EM -> quantification."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import logging
+     6	from pathlib import Path
+     7	from typing import Dict, List, Optional, Tuple
+     8	
+     9	import numpy as np
+    10	import pysam
+    11	
+    12	from fin.analysis.assignments import em_with_coherence
+    13	from fin.analysis.quantification import (
+    14	    QuantResult,
+    15	    _exons_from_candidate,
+    16	    aggregate_across_intervals,
+    17	    compute_fulllen_frac,
+    18	    polya5p_drops,
+    19	    quantify_transcripts,
+    20	)
+    21	from fin.candidates.dataclasses import CandidateSet
+    22	from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+    23	from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+    24	from fin.pipeline.assignment import Assigner
+    25	from fin.pipeline.config import PipelineConfig
+    26	from fin.pipeline.selection import (
+    27	    canonical_gate_select,
+    28	    junction_dominance_select,
+    29	    select_global,
+    30	    select_m2_interval,
+    31	)
+    32	from fin.scoring.em_inputs import build_em_matrices
+    33	from fin.scoring.krill_tiebreak import krill_tiebreak
+    34	from fin.scoring.mappy_distance import compute_mappy_distance
+    35	
+    36	logger = logging.getLogger(__name__)
+    37	
+    38	# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+    39	# K (transcript-bp each side of the wobbling junction) comes from the configurable
+    40	# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+    41	# an unscorable tie cell (a tied candidate the eventalign window could not score).
+    42	_M2_EM_FLANK = 2
+    43	_M2_EM_PAD = 1.0
+    44	
+    45	
+    46	class PipelineRunner:
+    47	    """Orchestrates the full pyfin pipeline."""
+    48	
+    49	    def __init__(self, config: PipelineConfig):
+    50	        self.config = config
+    51	        self._gtf_reader = None
+    52	        self._genome_fasta = None
+    53	        self._signal_reader = None
+    54	        # Genome-wide mappy aligner for fusion soft-clip arm re-alignment; built
+    55	        # lazily on first fusion interval and cached (indexing is expensive).
+-- imports commit --
+     1	"""Pipeline orchestrator: interval -> candidates -> scoring -> EM -> quantification."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import logging
+     6	from pathlib import Path
+     7	from typing import Dict, List, Optional, Tuple
+     8	
+     9	import numpy as np
+    10	import pysam
+    11	
+    12	from fin.analysis.assignments import em_with_coherence
+    13	from fin.analysis.quantification import (
+    14	    QuantResult,
+    15	    _exons_from_candidate,
+    16	    aggregate_across_intervals,
+    17	    compute_fulllen_frac,
+    18	    polya5p_drops,
+    19	    quantify_transcripts,
+    20	)
+    21	from fin.candidates.dataclasses import CandidateSet
+    22	from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+    23	from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+    24	from fin.pipeline.assignment import Assigner
+    25	from fin.pipeline.config import PipelineConfig
+    26	from fin.pipeline.finalize import finalize_outputs, write_unfiltered_diagnostic
+    27	from fin.pipeline.selection import (
+    28	    canonical_gate_select,
+    29	    junction_dominance_select,
+    30	    select_global,
+    31	    select_m2_interval,
+    32	)
+    33	from fin.scoring.em_inputs import build_em_matrices
+    34	from fin.scoring.krill_tiebreak import krill_tiebreak
+    35	from fin.scoring.mappy_distance import compute_mappy_distance
+    36	
+    37	logger = logging.getLogger(__name__)
+    38	
+    39	# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+    40	# K (transcript-bp each side of the wobbling junction) comes from the configurable
+    41	# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+    42	# an unscorable tie cell (a tied candidate the eventalign window could not score).
+    43	_M2_EM_FLANK = 2
+    44	_M2_EM_PAD = 1.0
+    45	
+    46	
+    47	class PipelineRunner:
+    48	    """Orchestrates the full pyfin pipeline."""
+    49	
+    50	    def __init__(self, config: PipelineConfig):
+    51	        self.config = config
+    52	        self._gtf_reader = None
+    53	        self._genome_fasta = None
+    54	        self._signal_reader = None
+    55	        # Genome-wide mappy aligner for fusion soft-clip arm re-alignment; built
+    56	        # lazily on first fusion interval and cached (indexing is expensive).
+    57	        self._fusion_genome_aligner = None
+    58	        self._fusion_aligner_built = False
+    59	        # m2_em assignment layer (mappy AS -> tie_nll -> d_tx -> EM -> quantify).
+    60	        self._assigner = Assigner(config)
+-- seam patches and logger assertions --
+1f75400:fin/pipeline/assignment.py:18:``assign`` at call time) so the existing ``patch.object(PipelineRunner, ...)`` test seams survive; the
+1f75400:fin/pipeline/assignment.py:274:    methods at call time (``tie_nll_fn`` / ``eff_lengths_fn``) so the ``patch.object(PipelineRunner,
+1f75400:tests/integration/test_pipeline_integration.py:163:        "tie_nll": patch.object(PipelineRunner, "_tie_nll", _fake_tie_nll),
+1f75400:tests/unit/test_m2_em_pure_seed.py:118:    ), patch.object(PipelineRunner, "_tie_nll", tie_nll_fn), patch.object(
+1f75400:tests/unit/test_runner_outputs.py:79:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:81:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:98:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:100:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:115:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:117:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:130:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:132:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:144:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:146:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:161:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:163:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:175:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:177:             patch("fin.pipeline.runner.aggregate_across_intervals",
+-- test_runner_outputs --
+     1	"""Tests for PipelineRunner.run() output writers (US-013)."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	from typing import Dict
+     6	from unittest.mock import patch
+     7	
+     8	from fin.analysis.quantification import QuantResult
+     9	from fin.pipeline.config import PipelineConfig
+    10	from fin.pipeline.runner import PipelineRunner
+    11	
+    12	
+    13	# ---------------------------------------------------------------------------
+    14	# Helpers
+    15	# ---------------------------------------------------------------------------
+    16	
+    17	def _make_quant_result(cid: str, exons=((0, 100),)) -> QuantResult:
+    18	    """Return a minimal QuantResult sufficient for output writers."""
+    19	    return QuantResult(
+    20	        candidate_id=cid,
+    21	        gene_id=cid,
+    22	        chrom="chr1",
+    23	        strand="+",
+    24	        start=0,
+    25	        end=100,
+    26	        source="gtf",
+    27	        abundance=1.0,
+    28	        confidence=1.0,
+    29	        coherence_score=0.5,
+    30	        discrimination_score=0.5,
+    31	        combined_score=0.5,
+    32	        num_assigned_reads=10,
+    33	        exons=exons,
+    34	    )
+    35	
+    36	
+    37	def _make_aggregated() -> Dict[str, QuantResult]:
+    38	    return {"tx1": _make_quant_result("tx1", exons=((0, 100), (200, 300)))}
+    39	
+    40	
+    41	def _make_runner(
+    42	    output_gtf=None,
+    43	    output_tsv=None,
+    44	    output_bedpe=None,
+    45	    fusion_enabled=False,
+    46	) -> PipelineRunner:
+    47	    config = PipelineConfig(
+    48	        bam_path="/fake/reads.bam",
+    49	        output_gtf=output_gtf,
+    50	        output_tsv=output_tsv,
+    51	        output_bedpe=output_bedpe,
+    52	        fusion_enabled=fusion_enabled,
+    53	    )
+    54	    runner = PipelineRunner(config)
+    55	    return runner
+    56	
+    57	
+    58	def _patch_run_internals(runner: PipelineRunner, aggregated: Dict[str, QuantResult]):
+    59	    """Patch out everything in run() except the output section."""
+    60	    runner_mod = "fin.pipeline.runner"
+    61	
+    62	    patches = [
+    63	        patch(f"{runner_mod}.generate_isolated_intervals", return_value={"intervals": []}),
+    64	        patch(f"{runner_mod}.aggregate_across_intervals", return_value=aggregated),
+    65	    ]
+    66	    return patches
+    67	
+    68	
+    69	# ---------------------------------------------------------------------------
+    70	# Tests
+    71	# ---------------------------------------------------------------------------
+    72	
+    73	class TestScoringTsv:
+    74	    def test_run_calls_scoring_tsv_when_configured(self, tmp_path):
+    75	        tsv_path = str(tmp_path / "out.tsv")
+    76	        runner = _make_runner(output_tsv=tsv_path)
+    77	        aggregated = _make_aggregated()
+    78	
+    79	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+    80	                   return_value={"intervals": []}), \
+    81	             patch("fin.pipeline.runner.aggregate_across_intervals",
+    82	                   return_value=aggregated), \
+    83	             patch("fin.io.io_tsv.write_scoring_tsv") as mock_tsv:
+    84	
+    85	            runner.run()
+    86	
+    87	        mock_tsv.assert_called_once()
+    88	        call_args = mock_tsv.call_args
+    89	        assert call_args[0][0] == aggregated
+    90	        # transcript_lengths: tx1 has exons (0,100),(200,300) -> 100+100=200
+    91	        assert call_args[0][1] == {"tx1": 200}
+    92	        assert call_args[0][2] == tsv_path
+    93	
+    94	    def test_run_skips_scoring_tsv_when_none(self):
+    95	        runner = _make_runner(output_tsv=None)
+    96	        aggregated = _make_aggregated()
+    97	
+    98	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+    99	                   return_value={"intervals": []}), \
+   100	             patch("fin.pipeline.runner.aggregate_across_intervals",
+   101	                   return_value=aggregated), \
+   102	             patch("fin.io.io_tsv.write_scoring_tsv") as mock_tsv:
+   103	
+   104	            runner.run()
+   105	
+   106	        mock_tsv.assert_not_called()
+   107	
+   108	
+   109	class TestFusionBedpe:
+   110	    def test_run_calls_fusion_bedpe_when_enabled(self, tmp_path):
+   111	        bedpe_path = str(tmp_path / "out.bedpe")
+   112	        runner = _make_runner(fusion_enabled=True, output_bedpe=bedpe_path)
+   113	        aggregated = _make_aggregated()
+   114	
+   115	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+   116	                   return_value={"intervals": []}), \
+   117	             patch("fin.pipeline.runner.aggregate_across_intervals",
+   118	                   return_value=aggregated), \
+   119	             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+   120	
+   121	            runner.run()
+   122	
+   123	        mock_bedpe.assert_called_once_with(aggregated, bedpe_path)
+   124	
+   125	    def test_run_skips_bedpe_when_fusion_disabled(self, tmp_path):
+   126	        bedpe_path = str(tmp_path / "out.bedpe")
+   127	        runner = _make_runner(fusion_enabled=False, output_bedpe=bedpe_path)
+   128	        aggregated = _make_aggregated()
+   129	
+   130	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+   131	                   return_value={"intervals": []}), \
+   132	             patch("fin.pipeline.runner.aggregate_across_intervals",
+   133	                   return_value=aggregated), \
+   134	             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+   135	
+   136	            runner.run()
+   137	
+   138	        mock_bedpe.assert_not_called()
+   139	
+   140	    def test_run_skips_bedpe_when_path_none(self):
+   141	        runner = _make_runner(fusion_enabled=True, output_bedpe=None)
+   142	        aggregated = _make_aggregated()
+   143	
+   144	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+   145	                   return_value={"intervals": []}), \
+   146	             patch("fin.pipeline.runner.aggregate_across_intervals",
+   147	                   return_value=aggregated), \
+   148	             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+   149	
+   150	            runner.run()
+   151	
+   152	        mock_bedpe.assert_not_called()
+   153	
+   154	
+   155	class TestGtfRegressionUnchanged:
+   156	    def test_run_existing_gtf_output_unchanged(self, tmp_path):
+   157	        gtf_path = str(tmp_path / "out.gtf")
+   158	        runner = _make_runner(output_gtf=gtf_path)
+   159	        aggregated = _make_aggregated()
+   160	
+   161	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+   162	                   return_value={"intervals": []}), \
+   163	             patch("fin.pipeline.runner.aggregate_across_intervals",
+   164	                   return_value=aggregated), \
+   165	             patch("fin.io.io_gtf.write_gtf") as mock_gtf:
+   166	
+   167	            runner.run()
+   168	
+   169	        mock_gtf.assert_called_once_with(aggregated, gtf_path)
+   170	
+   171	    def test_run_gtf_not_called_when_path_none(self):
+   172	        runner = _make_runner(output_gtf=None)
+   173	        aggregated = _make_aggregated()
+   174	
+   175	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+   176	                   return_value={"intervals": []}), \
+   177	             patch("fin.pipeline.runner.aggregate_across_intervals",
+   178	                   return_value=aggregated), \
+   179	             patch("fin.io.io_gtf.write_gtf") as mock_gtf:
+   180	
+   181	            runner.run()
+   182	
+   183	        mock_gtf.assert_not_called()
+   184	
+   185	
+   186	# ---------------------------------------------------------------------------
+   187	# T8: max_R column in scoring TSV
+   188	# ---------------------------------------------------------------------------
+   189	
+   190	class TestMaxRInScoringTsv:
+-- min abundance tests --
+     1	"""Tests for the baked-in A4 abundance floors (novel + GTF).
+     2	
+     3	Covers:
+     4	1. The `fin` assembly CLI defaults: --min-abundance 3.0, --min-gtf-abundance 1.0,
+     5	   --floor-gtf-abundance False.
+     6	2. The runner A4 abundance filter applies per-source floors on soft EM abundance:
+     7	   NOVEL faces min_abundance, GTF faces its own lighter min_gtf_abundance, fusion
+     8	   is always exempt.
+     9	3. With floor_gtf_abundance=True the GTF floor is raised to
+    10	   max(min_gtf_abundance, min_abundance) — never lowered — reproducing the SIRV
+    11	   gffcompare T>=3 with-GTF operating point; fusion stays exempt regardless.
+    12	
+    13	The dataclass field defaults stay min_abundance=0.0 / min_gtf_abundance=0.0 /
+    14	floor_gtf_abundance=False, so programmatic/quantify/ablation callers see NO floor
+    15	unless they opt in; the GTF floor of 1 is a `fin`-CLI default only. Asserted too.
+    16	"""
+    17	
+    18	from __future__ import annotations
+    19	
+    20	from fin.analysis.quantification import QuantResult
+    21	from fin.pipeline.config import PipelineConfig
+    22	from fin.pipeline.runner import PipelineRunner
+    23	
+    24	
+    25	def _qr(cid: str, source: str, abundance: float) -> QuantResult:
+    26	    return QuantResult(
+    27	        candidate_id=cid,
+    28	        abundance=abundance,
+    29	        confidence=0.0,
+    30	        num_assigned_reads=0,
+    31	        source=source,
+    32	    )
+    33	
+    34	
+    35	class TestCliDefault:
+    36	    def test_cli_min_abundance_default_is_3(self):
+    37	        """The `fin` assembly command must default --min-abundance to 3.0."""
+    38	        from fin.cli import main
+    39	
+    40	        opt = next(p for p in main.params if p.name == "min_abundance")
+    41	        assert opt.default == 3.0
+    42	
+    43	    def test_cli_floor_gtf_abundance_default_off(self):
+    44	        """--floor-gtf-abundance must default OFF (GTF uses its own floor)."""
+    45	        from fin.cli import main
+    46	
+    47	        opt = next(p for p in main.params if p.name == "floor_gtf_abundance")
+    48	        assert opt.default is False
+    49	
+    50	    def test_cli_min_gtf_abundance_default_is_1(self):
+    51	        """The `fin` assembly command must default --min-gtf-abundance to 1.0."""
+    52	        from fin.cli import main
+    53	
+    54	        opt = next(p for p in main.params if p.name == "min_gtf_abundance")
+    55	        assert opt.default == 1.0
+    56	
+    57	    def test_config_field_defaults(self):
+    58	        """Field defaults: min_abundance 0.0, min_gtf_abundance 0.0, floor off."""
+    59	        c = PipelineConfig(bam_path="/tmp/x.bam")
+    60	        assert c.min_abundance == 0.0
+    61	        assert c.min_gtf_abundance == 0.0
+    62	        assert c.floor_gtf_abundance is False
+    63	
+    64	
+    65	class TestRunnerAbundanceFloor:
+    66	    def _runner(
+    67	        self, min_ab: float, floor_gtf: bool = False, min_gtf_ab: float = 0.0
+    68	    ) -> PipelineRunner:
+    69	        cfg = PipelineConfig(
+    70	            bam_path="/tmp/x.bam",
+    71	            min_abundance=min_ab,
+    72	            min_gtf_abundance=min_gtf_ab,
+    73	            floor_gtf_abundance=floor_gtf,
+    74	            # Disable every other post-EM filter so we isolate A4 abundance.
+    75	            min_isoform_fraction=0.0,
+    76	            min_fulllen_fraction=0.0,
+    77	            min_polya5p_reads=0,
+    78	        )
+    79	        runner = PipelineRunner.__new__(PipelineRunner)
+    80	        runner.config = cfg
+    81	        runner._gtf_reader = None
+    82	        return runner
+    83	
+    84	    def test_default_floors_novel_only_keeps_gtf_and_fusion(self):
+    85	        """Default (floor_gtf_abundance=False): novel dropped, GTF+fusion kept."""
+    86	        runner = self._runner(min_ab=0.5)
+    87	        agg = {
+    88	            "g_low": _qr("g_low", "gtf", 0.2),
+    89	            "n_low": _qr("n_low", "novel", 0.2),
+    90	            "n_high": _qr("n_high", "novel", 5.0),
+    91	            "f_low": _qr("f_low", "fusion", 0.0),
+    92	        }
+    93	        out = runner._finalize_and_write(agg, None, None)
+    94	        assert "n_low" not in out          # novel below floor dropped
+    95	        assert "g_low" in out              # GTF exempt by default
+    96	        assert "n_high" in out             # novel above floor survives
+    97	        assert "f_low" in out              # fusion always exempt
+    98	
+    99	    def test_floor_gtf_abundance_drops_low_gtf_keeps_fusion(self):
+   100	        """floor_gtf_abundance=True: low-abundance GTF also dropped, fusion kept."""
+   101	        runner = self._runner(min_ab=0.5, floor_gtf=True)
+   102	        agg = {
+   103	            "g_low": _qr("g_low", "gtf", 0.2),
+   104	            "g_high": _qr("g_high", "gtf", 5.0),
+   105	            "n_low": _qr("n_low", "novel", 0.2),
+   106	            "f_low": _qr("f_low", "fusion", 0.0),
+   107	        }
+   108	        out = runner._finalize_and_write(agg, None, None)
+   109	        assert "g_low" not in out          # GTF now subject to floor
+   110	        assert "n_low" not in out
+   111	        assert "g_high" in out
+   112	        assert "f_low" in out              # fusion still exempt
+   113	
+   114	    def test_floor_disabled_keeps_everything(self):
+   115	        runner = self._runner(min_ab=0.0)
+   116	        agg = {
+   117	            "g_low": _qr("g_low", "gtf", 0.0),
+   118	            "n_low": _qr("n_low", "novel", 0.0),
+   119	        }
+   120	        out = runner._finalize_and_write(agg, None, None)
+   121	        assert set(out) == {"g_low", "n_low"}
+   122	
+   123	    def test_gtf_floor_drops_low_gtf_independent_of_novel_floor(self):
+   124	        """min_gtf_abundance gates GTF on soft abundance, even below the novel
+   125	        floor. A GTF with soft-mass < 1 is dropped though it has hard reads; a
+   126	        GTF at/above 1 is kept; fusion stays exempt."""
+   127	        runner = self._runner(min_ab=3.0, min_gtf_ab=1.0)
+   128	        agg = {
+   129	            "g_soft": _qr("g_soft", "gtf", 0.667),   # EM-diluted below 1 -> drop
+   130	            "g_ok": _qr("g_ok", "gtf", 2.0),         # >= 1 -> keep (below novel 3)
+   131	            "n_low": _qr("n_low", "novel", 2.0),     # < 3 novel floor -> drop
+   132	            "n_high": _qr("n_high", "novel", 5.0),   # >= 3 -> keep
+   133	            "f_low": _qr("f_low", "fusion", 0.0),    # fusion exempt
+   134	        }
+   135	        out = runner._finalize_and_write(agg, None, None)
+   136	        assert "g_soft" not in out
+   137	        assert "g_ok" in out
+   138	        assert "n_low" not in out
+   139	        assert "n_high" in out
+   140	        assert "f_low" in out
+   141	
+   142	    def test_gtf_floor_runs_even_when_novel_floor_disabled(self):
+   143	        """With min_abundance=0 (novel floor off) the GTF floor still applies."""
+   144	        runner = self._runner(min_ab=0.0, min_gtf_ab=1.0)
+   145	        agg = {
+   146	            "g_soft": _qr("g_soft", "gtf", 0.5),     # < 1 -> drop
+   147	            "g_ok": _qr("g_ok", "gtf", 1.0),         # >= 1 -> keep
+   148	            "n_zero": _qr("n_zero", "novel", 0.0),   # novel floor 0 -> keep
+   149	        }
+   150	        out = runner._finalize_and_write(agg, None, None)
+   151	        assert "g_soft" not in out
+   152	        assert "g_ok" in out
+   153	        assert "n_zero" in out
+   154	
+   155	    def test_floor_gtf_abundance_overrides_min_gtf_abundance(self):
+   156	        """--floor-gtf-abundance raises GTF to the novel floor, overriding the
+   157	        lighter min_gtf_abundance."""
+   158	        runner = self._runner(min_ab=3.0, floor_gtf=True, min_gtf_ab=1.0)
+   159	        agg = {
+   160	            "g_mid": _qr("g_mid", "gtf", 2.0),       # >= 1 but < 3 -> dropped now
+   161	            "g_high": _qr("g_high", "gtf", 5.0),     # >= 3 -> keep
+   162	            "f_low": _qr("f_low", "fusion", 0.0),    # fusion exempt
+   163	        }
+   164	        out = runner._finalize_and_write(agg, None, None)
+   165	        assert "g_mid" not in out
+   166	        assert "g_high" in out
+   167	        assert "f_low" in out
+
+exec
+/bin/bash -c "printf '%s\\n' '-- patch references --'
+git grep -n -E 'patch|monkeypatch|caplog|assertLogs' 1f75400 -- tests | rg 'runner|finalize|write_scoring|write_gtf|write_fusion|gtf_reader|polya|logger|_finalize' || true
+printf '%s\\n' '-- runner output tests 1-190 --'
+git show 1f75400:tests/unit/test_runner_outputs.py | nl -ba | sed -n '1,190p'
+printf '%s\\n' '-- all Path uses commit --'
+git show 1f75400:fin/pipeline/runner.py | rg -n '\\bPath\\b'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+-- patch references --
+1f75400:tests/integration/test_pipeline_integration.py:309:         patch.object(runner, "_get_fusion_genome_aligner", return_value=object()), \
+1f75400:tests/unit/test_polya5p_filter.py:9:And the runner finalize wiring (``_apply_polya5p_filter``) with krill patched.
+1f75400:tests/unit/test_polya5p_filter.py:189:# runner finalize wiring (krill patched)
+1f75400:tests/unit/test_polya5p_filter.py:191:def _runner_with(monkeypatch, polya_map, *, min_polya5p_reads=1,
+1f75400:tests/unit/test_polya5p_filter.py:208:    monkeypatch.setattr(
+1f75400:tests/unit/test_polya5p_filter.py:211:    monkeypatch.setattr(
+1f75400:tests/unit/test_polya5p_filter.py:218:def test_apply_filter_drops_unsupported(monkeypatch):
+1f75400:tests/unit/test_polya5p_filter.py:219:    runner = _runner_with(monkeypatch, {"r1": (20.0, "PASS"), "r2": (5.0, "PASS")})
+1f75400:tests/unit/test_polya5p_filter.py:228:def test_apply_filter_noop_when_krill_empty(monkeypatch):
+1f75400:tests/unit/test_polya5p_filter.py:229:    runner = _runner_with(monkeypatch, {})
+1f75400:tests/unit/test_polya5p_filter.py:270:def test_compute_polya_import_failure_returns_empty(monkeypatch):
+1f75400:tests/unit/test_polya5p_filter.py:274:    monkeypatch.setitem(sys.modules, "krill", None)
+1f75400:tests/unit/test_polya5p_filter.py:278:def test_compute_polya_gpu_init_falls_back_to_cpu(monkeypatch):
+1f75400:tests/unit/test_polya5p_filter.py:285:    monkeypatch.setitem(sys.modules, "krill", fake)
+1f75400:tests/unit/test_polya5p_filter.py:291:def test_compute_polya_first_batch_error_returns_empty(monkeypatch):
+1f75400:tests/unit/test_polya5p_filter.py:295:    monkeypatch.setitem(sys.modules, "krill", fake)
+1f75400:tests/unit/test_polya5p_filter.py:300:def test_compute_polya_partial_batch_failure_disables_filter(monkeypatch):
+1f75400:tests/unit/test_polya5p_filter.py:307:    monkeypatch.setitem(sys.modules, "krill", fake)
+1f75400:tests/unit/test_polya5p_filter.py:312:def test_compute_polya_cpu_init_failure_returns_empty(monkeypatch):
+1f75400:tests/unit/test_polya5p_filter.py:316:    monkeypatch.setitem(sys.modules, "krill", fake)
+1f75400:tests/unit/test_runner_outputs.py:6:from unittest.mock import patch
+1f75400:tests/unit/test_runner_outputs.py:58:def _patch_run_internals(runner: PipelineRunner, aggregated: Dict[str, QuantResult]):
+1f75400:tests/unit/test_runner_outputs.py:62:    patches = [
+1f75400:tests/unit/test_runner_outputs.py:63:        patch(f"{runner_mod}.generate_isolated_intervals", return_value={"intervals": []}),
+1f75400:tests/unit/test_runner_outputs.py:64:        patch(f"{runner_mod}.aggregate_across_intervals", return_value=aggregated),
+1f75400:tests/unit/test_runner_outputs.py:66:    return patches
+1f75400:tests/unit/test_runner_outputs.py:79:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:81:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:83:             patch("fin.io.io_tsv.write_scoring_tsv") as mock_tsv:
+1f75400:tests/unit/test_runner_outputs.py:98:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:100:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:102:             patch("fin.io.io_tsv.write_scoring_tsv") as mock_tsv:
+1f75400:tests/unit/test_runner_outputs.py:115:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:117:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:119:             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+1f75400:tests/unit/test_runner_outputs.py:130:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:132:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:134:             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+1f75400:tests/unit/test_runner_outputs.py:144:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:146:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:148:             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+1f75400:tests/unit/test_runner_outputs.py:161:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:163:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:165:             patch("fin.io.io_gtf.write_gtf") as mock_gtf:
+1f75400:tests/unit/test_runner_outputs.py:175:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+1f75400:tests/unit/test_runner_outputs.py:177:             patch("fin.pipeline.runner.aggregate_across_intervals",
+1f75400:tests/unit/test_runner_outputs.py:179:             patch("fin.io.io_gtf.write_gtf") as mock_gtf:
+-- runner output tests 1-190 --
+     1	"""Tests for PipelineRunner.run() output writers (US-013)."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	from typing import Dict
+     6	from unittest.mock import patch
+     7	
+     8	from fin.analysis.quantification import QuantResult
+     9	from fin.pipeline.config import PipelineConfig
+    10	from fin.pipeline.runner import PipelineRunner
+    11	
+    12	
+    13	# ---------------------------------------------------------------------------
+    14	# Helpers
+    15	# ---------------------------------------------------------------------------
+    16	
+    17	def _make_quant_result(cid: str, exons=((0, 100),)) -> QuantResult:
+    18	    """Return a minimal QuantResult sufficient for output writers."""
+    19	    return QuantResult(
+    20	        candidate_id=cid,
+    21	        gene_id=cid,
+    22	        chrom="chr1",
+    23	        strand="+",
+    24	        start=0,
+    25	        end=100,
+    26	        source="gtf",
+    27	        abundance=1.0,
+    28	        confidence=1.0,
+    29	        coherence_score=0.5,
+    30	        discrimination_score=0.5,
+    31	        combined_score=0.5,
+    32	        num_assigned_reads=10,
+    33	        exons=exons,
+    34	    )
+    35	
+    36	
+    37	def _make_aggregated() -> Dict[str, QuantResult]:
+    38	    return {"tx1": _make_quant_result("tx1", exons=((0, 100), (200, 300)))}
+    39	
+    40	
+    41	def _make_runner(
+    42	    output_gtf=None,
+    43	    output_tsv=None,
+    44	    output_bedpe=None,
+    45	    fusion_enabled=False,
+    46	) -> PipelineRunner:
+    47	    config = PipelineConfig(
+    48	        bam_path="/fake/reads.bam",
+    49	        output_gtf=output_gtf,
+    50	        output_tsv=output_tsv,
+    51	        output_bedpe=output_bedpe,
+    52	        fusion_enabled=fusion_enabled,
+    53	    )
+    54	    runner = PipelineRunner(config)
+    55	    return runner
+    56	
+    57	
+    58	def _patch_run_internals(runner: PipelineRunner, aggregated: Dict[str, QuantResult]):
+    59	    """Patch out everything in run() except the output section."""
+    60	    runner_mod = "fin.pipeline.runner"
+    61	
+    62	    patches = [
+    63	        patch(f"{runner_mod}.generate_isolated_intervals", return_value={"intervals": []}),
+    64	        patch(f"{runner_mod}.aggregate_across_intervals", return_value=aggregated),
+    65	    ]
+    66	    return patches
+    67	
+    68	
+    69	# ---------------------------------------------------------------------------
+    70	# Tests
+    71	# ---------------------------------------------------------------------------
+    72	
+    73	class TestScoringTsv:
+    74	    def test_run_calls_scoring_tsv_when_configured(self, tmp_path):
+    75	        tsv_path = str(tmp_path / "out.tsv")
+    76	        runner = _make_runner(output_tsv=tsv_path)
+    77	        aggregated = _make_aggregated()
+    78	
+    79	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+    80	                   return_value={"intervals": []}), \
+    81	             patch("fin.pipeline.runner.aggregate_across_intervals",
+    82	                   return_value=aggregated), \
+    83	             patch("fin.io.io_tsv.write_scoring_tsv") as mock_tsv:
+    84	
+    85	            runner.run()
+    86	
+    87	        mock_tsv.assert_called_once()
+    88	        call_args = mock_tsv.call_args
+    89	        assert call_args[0][0] == aggregated
+    90	        # transcript_lengths: tx1 has exons (0,100),(200,300) -> 100+100=200
+    91	        assert call_args[0][1] == {"tx1": 200}
+    92	        assert call_args[0][2] == tsv_path
+    93	
+    94	    def test_run_skips_scoring_tsv_when_none(self):
+    95	        runner = _make_runner(output_tsv=None)
+    96	        aggregated = _make_aggregated()
+    97	
+    98	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+    99	                   return_value={"intervals": []}), \
+   100	             patch("fin.pipeline.runner.aggregate_across_intervals",
+   101	                   return_value=aggregated), \
+   102	             patch("fin.io.io_tsv.write_scoring_tsv") as mock_tsv:
+   103	
+   104	            runner.run()
+   105	
+   106	        mock_tsv.assert_not_called()
+   107	
+   108	
+   109	class TestFusionBedpe:
+   110	    def test_run_calls_fusion_bedpe_when_enabled(self, tmp_path):
+   111	        bedpe_path = str(tmp_path / "out.bedpe")
+   112	        runner = _make_runner(fusion_enabled=True, output_bedpe=bedpe_path)
+   113	        aggregated = _make_aggregated()
+   114	
+   115	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+   116	                   return_value={"intervals": []}), \
+   117	             patch("fin.pipeline.runner.aggregate_across_intervals",
+   118	                   return_value=aggregated), \
+   119	             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+   120	
+   121	            runner.run()
+   122	
+   123	        mock_bedpe.assert_called_once_with(aggregated, bedpe_path)
+   124	
+   125	    def test_run_skips_bedpe_when_fusion_disabled(self, tmp_path):
+   126	        bedpe_path = str(tmp_path / "out.bedpe")
+   127	        runner = _make_runner(fusion_enabled=False, output_bedpe=bedpe_path)
+   128	        aggregated = _make_aggregated()
+   129	
+   130	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+   131	                   return_value={"intervals": []}), \
+   132	             patch("fin.pipeline.runner.aggregate_across_intervals",
+   133	                   return_value=aggregated), \
+   134	             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+   135	
+   136	            runner.run()
+   137	
+   138	        mock_bedpe.assert_not_called()
+   139	
+   140	    def test_run_skips_bedpe_when_path_none(self):
+   141	        runner = _make_runner(fusion_enabled=True, output_bedpe=None)
+   142	        aggregated = _make_aggregated()
+   143	
+   144	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+   145	                   return_value={"intervals": []}), \
+   146	             patch("fin.pipeline.runner.aggregate_across_intervals",
+   147	                   return_value=aggregated), \
+   148	             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+   149	
+   150	            runner.run()
+   151	
+   152	        mock_bedpe.assert_not_called()
+   153	
+   154	
+   155	class TestGtfRegressionUnchanged:
+   156	    def test_run_existing_gtf_output_unchanged(self, tmp_path):
+   157	        gtf_path = str(tmp_path / "out.gtf")
+   158	        runner = _make_runner(output_gtf=gtf_path)
+   159	        aggregated = _make_aggregated()
+   160	
+   161	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+   162	                   return_value={"intervals": []}), \
+   163	             patch("fin.pipeline.runner.aggregate_across_intervals",
+   164	                   return_value=aggregated), \
+   165	             patch("fin.io.io_gtf.write_gtf") as mock_gtf:
+   166	
+   167	            runner.run()
+   168	
+   169	        mock_gtf.assert_called_once_with(aggregated, gtf_path)
+   170	
+   171	    def test_run_gtf_not_called_when_path_none(self):
+   172	        runner = _make_runner(output_gtf=None)
+   173	        aggregated = _make_aggregated()
+   174	
+   175	        with patch("fin.pipeline.runner.generate_isolated_intervals",
+   176	                   return_value={"intervals": []}), \
+   177	             patch("fin.pipeline.runner.aggregate_across_intervals",
+   178	                   return_value=aggregated), \
+   179	             patch("fin.io.io_gtf.write_gtf") as mock_gtf:
+   180	
+   181	            runner.run()
+   182	
+   183	        mock_gtf.assert_not_called()
+   184	
+   185	
+   186	# ---------------------------------------------------------------------------
+   187	# T8: max_R column in scoring TSV
+   188	# ---------------------------------------------------------------------------
+   189	
+   190	class TestMaxRInScoringTsv:
+-- all Path uses commit --
+6:from pathlib import Path
+85:        Path(self.config.work_dir).mkdir(parents=True, exist_ok=True)
+163:        work_dir = Path(self.config.work_dir) / interval.region_string.replace(":", "_").replace("-", "_")
+
+codex
+The moved executable statements match structurally so far. I found one compatibility risk to validate: the writer logs now originate from a different module logger.
+  ✓ Inspect commit and repository guidance
+  ✓ Compare moved code against parent
+  → Audit seams imports and semantics
+  • Run focused regression tests
+  • Deliver skeptical commit verdict
+exec
+/bin/bash -c "set -o pipefail
+printf '%s\\n' '-- logging configuration/references --'
+git grep -n -E 'getLogger\\(|dictConfig|fileConfig|disable_existing_loggers|fin\\.pipeline\\.runner|fin\\.pipeline\\.finalize' 1f75400 -- fin tests pyproject.toml setup.cfg pytest.ini 2>/dev/null | head -300
+printf '%s\\n' '-- package init imports --'
+for f in fin/__init__.py fin/pipeline/__init__.py; do echo \"FILE "'$f"; git show 1f75400:$f 2>/dev/null || true; done
+printf '"'%s\\n' '-- selection signature and mutation --'
+git show 1f75400:fin/pipeline/selection.py | nl -ba | rg -n 'def select_global|return aggregated|aggregated =|del aggregated|pop\\(|global_outcomes|apply_polya' -C 5
+printf '%s\\n' '-- direct imports of runner symbols --'
+git grep -n -E 'from fin\\.pipeline\\.runner import|import fin\\.pipeline\\.runner' 1f75400 -- fin tests | head -200
+printf '%s\\n' '-- compile/import smoke from commit archive --'
+tmp="'$(mktemp -d /tmp/pyfin-review.XXXXXX)
+git archive 1f75400 | tar -x -C "$tmp"
+PYTHONPATH="$tmp" python - <<'"'PY'
+import fin.pipeline.finalize
+import fin.pipeline.runner
+print(fin.pipeline.runner.PipelineRunner.__module__)
+print(fin.pipeline.finalize.finalize_outputs.__module__)
+PY
+rm -rf \""'$tmp"' in /SSD/logan/dev/pyfin
+ succeeded in 289ms:
+2026-07-24 11:54:57 | INFO     | __init__.py:38 | Package initialized - version 0.1.0
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/SSD/logan/dev/pyfin/fin/pipeline/__init__.py", line 4, in <module>
+    from .runner import PipelineRunner
+  File "/SSD/logan/dev/pyfin/fin/pipeline/runner.py", line 24, in <module>
+    from fin.pipeline.assignment import Assigner
+  File "/SSD/logan/dev/pyfin/fin/pipeline/assignment.py", line 31, in <module>
+    from fin.scoring.krill_tiebreak import krill_tiebreak
+  File "/SSD/logan/dev/pyfin/fin/scoring/krill_tiebreak.py", line 15, in <module>
+    import mappy
+ModuleNotFoundError: No module named 'mappy'
+
+exec
+/bin/bash -c "printf '%s\\n' '-- log config --'; git show 1f75400:fin/utils/log_config.py | nl -ba | sed -n '1,140p'
+printf '%s\\n' '-- fin init and pipeline init --'; git show 1f75400:fin/__init__.py | nl -ba; git show 1f75400:fin/pipeline/__init__.py | nl -ba
+printf '%s\\n' '-- project test commands/dependencies --'; git show 1f75400:pyproject.toml | nl -ba | sed -n '1,240p' 2>/dev/null || true; git ls-tree -r --name-only 1f75400 | rg '("'^|/)(requirements.*|environment.*|tox.ini|pytest.ini|setup.cfg|Makefile)$'"'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+-- log config --
+     1	"""
+     2	Logging configuration for the py-fin package
+     3	
+     4	This module provides centralized logging configuration with:
+     5	- Time format: YYYY-MM-DD HH:MM:SS
+     6	- File name and line number
+     7	- Log levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
+     8	- Optional file and console handlers
+     9	"""
+    10	
+    11	import logging
+    12	import sys
+    13	from datetime import datetime
+    14	from pathlib import Path
+    15	from typing import Optional, List
+    16	
+    17	
+    18	def setup_logger(
+    19	    name: str,
+    20	    level: str = 'DEBUG',
+    21	    log_file: Optional[str] = None,
+    22	    console: bool = True,
+    23	    file_mode: str = 'a',
+    24	    format_string: Optional[str] = None
+    25	) -> logging.Logger:
+    26	    """
+    27	    Set up a logger with datetime and file name formatting
+    28	
+    29	    Args:
+    30	        name: Logger name (use __name__ for module-level logging)
+    31	        level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    32	        log_file: Optional path to log file
+    33	        console: Whether to log to console
+    34	        file_mode: File mode ('w' for overwrite, 'a' for append)
+    35	        format_string: Custom format string (optional)
+    36	
+    37	    Returns:
+    38	        Configured logger instance
+    39	
+    40	    Example:
+    41	        >>> logger = setup_logger(__name__, level='DEBUG', log_file='fin.log')
+    42	        >>> logger.info("Process started")
+    43	    """
+    44	    # Create logger
+    45	    logger = logging.getLogger(name)
+    46	    logger.setLevel(getattr(logging, level.upper()))
+    47	
+    48	    # Clear existing handlers to avoid duplicates
+    49	    logger.handlers.clear()
+    50	
+    51	    # Define format
+    52	    if format_string is None:
+    53	        # Default format with datetime and filename
+    54	        format_string = (
+    55	            "%(asctime)s | "
+    56	            "%(levelname)-8s | "
+    57	            "%(filename)s:%(lineno)d | "
+    58	            "%(message)s"
+    59	        )
+    60	
+    61	    formatter = logging.Formatter(format_string, datefmt='%Y-%m-%d %H:%M:%S')
+    62	
+    63	    # Console handler
+    64	    if console:
+    65	        console_handler = logging.StreamHandler(sys.stdout)
+    66	        console_handler.setFormatter(formatter)
+    67	        logger.addHandler(console_handler)
+    68	
+    69	    # File handler
+    70	    if log_file:
+    71	        log_path = Path(log_file)
+    72	        log_path.parent.mkdir(parents=True, exist_ok=True)
+    73	        file_handler = logging.FileHandler(log_path, mode=file_mode)
+    74	        file_handler.setFormatter(formatter)
+    75	        logger.addHandler(file_handler)
+    76	
+    77	    return logger
+    78	
+    79	
+    80	def get_package_logger(name: str, **kwargs) -> logging.Logger:
+    81	    """
+    82	    Get a logger instance configured for the py-fin package
+    83	
+    84	    This is a convenient wrapper around setup_logger with sensible defaults
+    85	    for the py-fin package.
+    86	
+    87	    Args:
+    88	        name: Logger name (use __name__)
+    89	        **kwargs: Additional arguments passed to setup_logger
+    90	
+    91	    Returns:
+    92	        Configured logger instance
+    93	
+    94	    Example:
+    95	        >>> from fin.utils.log_config import get_package_logger
+    96	        >>> logger = get_package_logger(__name__)
+    97	        >>> logger.info("Starting analysis")
+    98	    """
+    99	    # Set default log file if not specified
+   100	    if 'log_file' not in kwargs:
+   101	        # Create logs directory in current working directory
+   102	        log_dir = Path.cwd() / 'logs'
+   103	        log_dir.mkdir(exist_ok=True)
+   104	        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+   105	        kwargs['log_file'] = str(log_dir / f'fin_{timestamp}.log')
+   106	
+   107	    logger = setup_logger(name, **kwargs)
+   108	
+   109	    # Disable propagation for non-root loggers to prevent duplicate logging
+   110	    # This ensures messages aren't sent to parent loggers' handlers
+   111	    if name != 'fin':  # Allow the package root logger to propagate
+   112	        logger.propagate = False
+   113	
+   114	    return logger
+   115	
+   116	
+   117	def list_log_files(log_dir: str = 'logs') -> List[str]:
+   118	    """
+   119	    List all log files in the logs directory
+   120	
+   121	    Args:
+   122	        log_dir: Directory containing log files
+   123	
+   124	    Returns:
+   125	        List of log file paths
+   126	    """
+   127	    log_path = Path(log_dir)
+   128	    if not log_path.exists():
+   129	        return []
+   130	
+   131	    return sorted([str(f) for f in log_path.glob('*.log')])
+-- fin init and pipeline init --
+     1	"""
+     2	fin - A Python package for nanopore Direct RNA-seq data analysis
+     3	"""
+     4	
+     5	__version__ = "0.1.0"
+     6	__author__ = "loganylchen"
+     7	
+     8	# Import submodules
+     9	from . import io
+    10	from .utils.log_config import setup_logger, get_package_logger
+    11	
+    12	# Try to import _dtw extension (optional CUDA DTW)
+    13	try:
+    14	    from ._dtw import dtw_distance, dtw_pairwise, cleanup, is_available as dtw_is_available
+    15	
+    16	    _DTW_IMPORT_ERROR = None
+    17	    _DTW_AVAILABLE = True
+    18	except ImportError as e:
+    19	    _DTW_AVAILABLE = False
+    20	    dtw_distance = None
+    21	    dtw_pairwise = None
+    22	    cleanup = None
+    23	    def dtw_is_available() -> bool:
+    24	        return False
+    25	    _DTW_IMPORT_ERROR = str(e)
+    26	
+    27	# Try CuPy for GPU-accelerated EM
+    28	try:
+    29	    import cupy  # noqa: F401  # availability probe
+    30	    _CUPY_AVAILABLE = True
+    31	except ImportError:
+    32	    _CUPY_AVAILABLE = False
+    33	
+    34	# Initialize package logger
+    35	package_logger = get_package_logger(__name__, level="INFO")
+    36	
+    37	# Log package initialization
+    38	package_logger.info(f"Package initialized - version {__version__}")
+    39	
+    40	if not _DTW_AVAILABLE:
+    41	    package_logger.info(
+    42	        f"_dtw CUDA extension not available (optional). Error: {_DTW_IMPORT_ERROR}"
+    43	    )
+    44	
+    45	if _CUPY_AVAILABLE:
+    46	    package_logger.info("CuPy GPU acceleration available for EM algorithm")
+    47	
+    48	__all__ = [
+    49	    "io",
+    50	    "setup_logger",
+    51	    "get_package_logger",
+    52	]
+    53	
+    54	if _DTW_AVAILABLE:
+    55	    __all__.extend(["dtw_distance", "dtw_pairwise", "cleanup", "dtw_is_available"])
+     1	"""Pipeline orchestration modules."""
+     2	
+     3	from .config import PipelineConfig
+     4	from .runner import PipelineRunner
+     5	
+     6	__all__ = [
+     7	    "PipelineConfig",
+     8	    "PipelineRunner",
+     9	]
+-- project test commands/dependencies --
+     1	[build-system]
+     2	requires = ["setuptools>=61.0", "wheel", "numpy>=1.21.0"]
+     3	build-backend = "setuptools.build_meta"
+     4	
+     5	[project]
+     6	name = "py-fin"
+     7	version = "0.1.0"
+     8	description = "A Python package for nanopore Direct RNA-seq data analysis and transcriptome assembly"
+     9	readme = "README.md"
+    10	requires-python = ">=3.8"
+    11	license = {text = "MIT"}
+    12	authors = [
+    13	    {name = "loganylchen", email = "yuelong.chen.btr@gmail.com"},
+    14	]
+    15	keywords = ["nanopore", "RNA-seq", "bioinformatics", "transcriptomics", "DTW", "alignment"]
+    16	classifiers = [
+    17	    "Development Status :: 3 - Alpha",
+    18	    "Intended Audience :: Science/Research",
+    19	    "License :: OSI Approved :: MIT License",
+    20	    "Operating System :: OS Independent",
+    21	    "Programming Language :: Python :: 3",
+    22	    "Programming Language :: Python :: 3.8",
+    23	    "Programming Language :: Python :: 3.9",
+    24	    "Programming Language :: Python :: 3.10",
+    25	    "Programming Language :: Python :: 3.11",
+    26	    "Programming Language :: Python :: 3.12",
+    27	    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    28	]
+    29	dependencies = [
+    30	    # Core scientific computing
+    31	    "numpy>=1.21.0",
+    32	    "pandas>=1.3.0",
+    33	    "scipy>=1.7.0",
+    34	    # File I/O handling - format parsers
+    35	    "ont-fast5-api>=4.0.0",
+    36	    "pyslow5>=0.3.0",
+    37	    "pod5>=0.2.0",
+    38	    "pysam>=0.21.0",
+    39	    "mappy>=2.24",
+    40	    "h5py>=3.0.0",
+    41	    # CLI and progress
+    42	    "click>=8.0.0",
+    43	    "tqdm>=4.62.0",
+    44	    # Visualization
+    45	    "matplotlib>=3.4.0",
+    46	    "seaborn>=0.11.0",
+    47	    # Configuration
+    48	    "pyyaml>=6.0",
+    49	]
+    50	
+    51	[project.optional-dependencies]
+    52	dev = [
+    53	    "pytest>=6.0.0",
+    54	    "pytest-cov",
+    55	    "black",
+    56	    "flake8",
+    57	]
+    58	gpu = [
+    59	    # GPU acceleration dependencies
+    60	    "cupy>=12.0.0",
+    61	    "numba>=0.56.0",
+    62	]
+    63	all = [
+    64	    "py-fin[dev,gpu]",
+    65	]
+    66	
+    67	[project.urls]
+    68	Homepage = "https://github.com/loganylchen/pyfin"
+    69	Repository = "https://github.com/loganylchen/pyfin.git"
+    70	Issues = "https://github.com/loganylchen/pyfin/issues"
+    71	
+    72	[project.scripts]
+    73	fin = "fin.cli:main"
+    74	
+    75	[tool.setuptools.packages.find]
+    76	where = ["."]
+    77	include = ["fin*", "fin.*"]
+    78	
+    79	[tool.setuptools.package-data]
+    80	fin = ["*.py", "*.cu", "*.c", "*.h", "*.cuh", "*.yaml", "*.yml"]
+    81	
+    82	[tool.black]
+    83	line-length = 100
+    84	target-version = ['py38']
+    85	include = '\.pyi?$'
+    86	extend-exclude = '''
+    87	/(
+    88	  # directories
+    89	  \.eggs
+    90	  | \.git
+    91	  | \.hg
+    92	  | \.mypy_cache
+    93	  | \.tox
+    94	  | \.venv
+    95	  | build
+    96	  | dist
+    97	)/
+    98	'''
+    99	
+   100	[tool.pytest.ini_options]
+   101	testpaths = ["tests/unit", "tests/integration"]
+   102	python_files = ["test_*.py", "*_test.py"]
+   103	python_classes = ["Test*"]
+   104	python_functions = ["test_*"]
+   105	addopts = [
+   106	    "--strict-markers",
+   107	    "--strict-config",
+   108	    "--verbose",
+   109	]
+   110	markers = [
+   111	    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+   112	    "gpu: marks tests that require GPU",
+   113	    "integration: marks tests as integration tests",
+   114	]
+   115	
+   116	[tool.ruff]
+   117	# Lint the package, real test suites, and benchmarks.
+   118	# Legacy debug/example scripts in tests/ root are not part of the package.
+   119	include = [
+   120	    "fin/**/*.py",
+   121	    "tests/unit/**/*.py",
+   122	    "tests/integration/**/*.py",
+   123	    "benchmarks/**/*.py",
+   124	]
+   125	extend-exclude = [
+   126	    "tests/*.py",
+   127	    "tests/*.ipynb",
+   128	    "**/__pycache__",
+   129	]
+   130	line-length = 120
+fin/_dtw/Makefile
+requirements.txt
+
+exec
+/bin/bash -c "printf '%s\\n' '-- tools --'; command -v python; python --version; command -v pytest || true; command -v uv || true; command -v conda || true; conda env list 2>/dev/null || true; printf '%s\\n' '-- installed core imports --'; python - <<'PY'
+mods=['pytest','numpy','pysam','mappy']
+for name in mods:
+    try:
+        mod=__import__(name)
+        print(name, 'OK', getattr(mod,'__version__',''))
+    except Exception as exc:
+        print(name, 'FAIL', repr(exc))
+PY" in /SSD/logan/dev/pyfin
+ succeeded in 867ms:
+
+# conda environments:
+#
+base                 * /SSD/logan/miniforge3
+ambf-py                /SSD/logan/miniforge3/envs/ambf-py
+ambf-r                 /SSD/logan/miniforge3/envs/ambf-r
+bonito                 /SSD/logan/miniforge3/envs/bonito
+eventalign             /SSD/logan/miniforge3/envs/eventalign
+fin_deepseek           /SSD/logan/miniforge3/envs/fin_deepseek
+fin_doubao             /SSD/logan/miniforge3/envs/fin_doubao
+fin_qwen               /SSD/logan/miniforge3/envs/fin_qwen
+nanofusion             /SSD/logan/miniforge3/envs/nanofusion
+py-baleen              /SSD/logan/miniforge3/envs/py-baleen
+py-baleen-dev          /SSD/logan/miniforge3/envs/py-baleen-dev
+pybaleen               /SSD/logan/miniforge3/envs/pybaleen
+pyfin                  /SSD/logan/miniforge3/envs/pyfin
+snakemake              /SSD/logan/miniforge3/envs/snakemake
+testnanopolish         /SSD/logan/miniforge3/envs/testnanopolish
+tex                    /SSD/logan/miniforge3/envs/tex
+                       /SSD/logan/projects/baleen_benchmarking/.snakemake/conda/00b7ac16540f871cde4123f161674d6b_
+                       /SSD/logan/projects/baleen_benchmarking/.snakemake/conda/7bdb1605f32331cab4b0b35d9925efb0_
+
+-- installed core imports --
+pytest FAIL ModuleNotFoundError("No module named 'pytest'")
+numpy OK 2.4.1
+pysam OK 0.23.3
+mappy FAIL ModuleNotFoundError("No module named 'mappy'")
+
+codex
+The semantic audit is clean except logging identity/output. I’m now running the commit’s focused tests in the repository’s `pyfin` environment and checking parent-vs-commit log bytes.
+  ✓ Inspect commit and repository guidance
+  ✓ Compare moved code against parent
+  ✓ Audit seams imports and semantics
+  → Run focused regression tests
+  • Deliver skeptical commit verdict
+exec
+/bin/bash -c "set -e
+conda run -n pyfin python - <<'PY'
+mods=['pytest','numpy','pysam','mappy']
+for name in mods:
+    try:
+        mod=__import__(name)
+        print(name, 'OK', getattr(mod,'__version__',''))
+    except Exception as exc:
+        print(name, 'FAIL', repr(exc))
+PY
+review_dir="'$(mktemp -d /tmp/pyfin-1f75400.XXXXXX)
+git archive 1f75400 | tar -x -C "$review_dir"
+cd "$review_dir"
+conda run -n pyfin python -m pytest -q tests/unit/test_runner_outputs.py tests/unit/test_min_abundance_default.py tests/unit/test_polya5p_filter.py
+status=$?
+cd /
+rm -rf "$review_dir"
+exit $status' in /SSD/logan/dev/pyfin
+ exited 2 in 2863ms:
+============================= test session starts ==============================
+platform linux -- Python 3.10.19, pytest-9.0.2, pluggy-1.6.0
+rootdir: /tmp/pyfin-1f75400.nSnXj1
+configfile: pyproject.toml
+collected 25 items / 2 errors
+
+==================================== ERRORS ====================================
+______________ ERROR collecting tests/unit/test_runner_outputs.py ______________
+ImportError while importing test module '/tmp/pyfin-1f75400.nSnXj1/tests/unit/test_runner_outputs.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/SSD/logan/miniforge3/envs/pyfin/lib/python3.10/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests/unit/test_runner_outputs.py:9: in <module>
+    from fin.pipeline.config import PipelineConfig
+fin/pipeline/__init__.py:4: in <module>
+    from .runner import PipelineRunner
+fin/pipeline/runner.py:24: in <module>
+    from fin.pipeline.assignment import Assigner
+fin/pipeline/assignment.py:31: in <module>
+    from fin.scoring.krill_tiebreak import krill_tiebreak
+fin/scoring/krill_tiebreak.py:15: in <module>
+    import mappy
+E   ModuleNotFoundError: No module named 'mappy'
+------------------------------- Captured stdout --------------------------------
+2026-07-24 11:55:30 | INFO     | __init__.py:38 | Package initialized - version 0.1.0
+__________ ERROR collecting tests/unit/test_min_abundance_default.py ___________
+ImportError while importing test module '/tmp/pyfin-1f75400.nSnXj1/tests/unit/test_min_abundance_default.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/SSD/logan/miniforge3/envs/pyfin/lib/python3.10/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests/unit/test_min_abundance_default.py:22: in <module>
+    from fin.pipeline.runner import PipelineRunner
+fin/pipeline/__init__.py:4: in <module>
+    from .runner import PipelineRunner
+fin/pipeline/runner.py:24: in <module>
+    from fin.pipeline.assignment import Assigner
+fin/pipeline/assignment.py:31: in <module>
+    from fin.scoring.krill_tiebreak import krill_tiebreak
+fin/scoring/krill_tiebreak.py:15: in <module>
+    import mappy
+E   ModuleNotFoundError: No module named 'mappy'
+=========================== short test summary info ============================
+ERROR tests/unit/test_runner_outputs.py
+ERROR tests/unit/test_min_abundance_default.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!
+============================== 2 errors in 0.41s ===============================
+
+ERROR conda.cli.main_run:execute(125): `conda run python -m pytest -q tests/unit/test_runner_outputs.py tests/unit/test_min_abundance_default.py tests/unit/test_polya5p_filter.py` failed. (See above for error)
+
+codex
+Focused tests are blocked in the nominal `pyfin` environment because `mappy` is missing. I’ll locate the intended test environment, then run only the affected suites without touching the checkout.
+exec
+/bin/bash -c "for env in base pyfin nanofusion fin_deepseek fin_doubao fin_qwen; do
+  printf '%-14s ' \""'$env"
+  conda run -n "$env" python -c '"'import importlib.util as u; print(\"pytest=\"+str(bool(u.find_spec(\"pytest\"))), \"mappy=\"+str(bool(u.find_spec(\"mappy\"))), \"pysam=\"+str(bool(u.find_spec(\"pysam\"))))' 2>/dev/null || echo FAIL
+done" in /SSD/logan/dev/pyfin
+ succeeded in 6627ms:
+pytest=False mappy=False pysam=True
+
+pyfin          pytest=True mappy=False pysam=True
+
+nanofusion     pytest=True mappy=True pysam=True
+
+fin_deepseek   pytest=True mappy=False pysam=False
+
+fin_doubao     pytest=True mappy=False pysam=False
+
+fin_qwen       pytest=True mappy=False pysam=False
+
+
+exec
+/bin/bash -c 'set -e
+review_dir=$(mktemp -d /tmp/pyfin-1f75400.XXXXXX)
+git archive 1f75400 | tar -x -C "$review_dir"
+cd "$review_dir"
+conda run -n nanofusion python -m pytest -q tests/unit/test_runner_outputs.py tests/unit/test_min_abundance_default.py tests/unit/test_polya5p_filter.py
+status=$?
+cd /
+rm -rf "$review_dir"
+exit $status' in /SSD/logan/dev/pyfin
+ succeeded in 1933ms:
+============================= test session starts ==============================
+platform linux -- Python 3.10.16, pytest-9.0.2, pluggy-1.6.0
+rootdir: /tmp/pyfin-1f75400.1wndJu
+configfile: pyproject.toml
+plugins: anyio-4.8.0
+collected 47 items
+
+tests/unit/test_runner_outputs.py ............                           [ 25%]
+tests/unit/test_min_abundance_default.py ..........                      [ 46%]
+tests/unit/test_polya5p_filter.py .........................              [100%]
+
+============================== 47 passed in 0.40s ==============================
+
+
+codex
+All 47 focused tests pass. I’m doing one adversarial parent/commit probe for logger bytes and patch-target preservation, then a broader suite run.
+exec
+/bin/bash -c 'set -e
+base=$(mktemp -d /tmp/pyfin-logprobe.XXXXXX)
+for spec in '"'parent:1f75400"'^'"' 'commit:1f75400'; do
+  label="'${spec%%:*}; rev=${spec#*:}; dir="$base/$label"; mkdir -p "$dir"; git archive "$rev" | tar -x -C "$dir"
+  cat > "$dir/probe.py" <<'"'PY'
+import io
+import logging
+from types import SimpleNamespace
+from unittest.mock import Mock
+import fin.pipeline.runner as runner_mod
+
+runner_mod.select_global = lambda config, aggregated, apply_fn: (aggregated, [])
+runner = runner_mod.PipelineRunner.__new__(runner_mod.PipelineRunner)
+runner.config = SimpleNamespace(write_unfiltered_scores=False, fusion_enabled=False, output_bedpe=None)
+runner._gtf_reader = None
+runner._apply_polya5p_filter = lambda aggregated: aggregated
+
+stream = io.StringIO()
+handler = logging.StreamHandler(stream)
+handler.setFormatter(logging.Formatter('%(name)s|%(filename)s:%(lineno)d|%(message)s'))
+package_logger = logging.getLogger('fin')
+package_logger.handlers[:] = [handler]
+package_logger.setLevel(logging.INFO)
+package_logger.propagate = False
+runner_mod.logger.setLevel(logging.NOTSET)
+runner._finalize_and_write({}, None, None)
+print('record=' + stream.getvalue().strip())
+
+mock_logger = Mock()
+runner_mod.logger = mock_logger
+runner._finalize_and_write({}, None, None)
+print('runner_logger_info_calls=' + str(mock_logger.info.call_count))
+PY
+  echo \"-- "'$label --"
+  (cd "$dir" && conda run -n nanofusion python probe.py) | tail -2
+done
+rm -rf "$base"' in /SSD/logan/dev/pyfin
+ succeeded in 2778ms:
+runner_logger_info_calls=1
+
+-- commit --
+runner_logger_info_calls=0
+
+
+exec
+/bin/bash -c 'set -e
+base=$(mktemp -d /tmp/pyfin-logprobe.XXXXXX)
+for spec in '"'parent:1f75400"'^'"' 'commit:1f75400'; do
+  label="'${spec%%:*}; rev=${spec#*:}; dir="$base/$label"; mkdir -p "$dir"; git archive "$rev" | tar -x -C "$dir"
+  cat > "$dir/probe.py" <<'"'PY'
+import io
+import logging
+from types import SimpleNamespace
+from unittest.mock import Mock
+import fin.pipeline.runner as runner_mod
+runner_mod.select_global = lambda config, aggregated, apply_fn: (aggregated, [])
+runner = runner_mod.PipelineRunner.__new__(runner_mod.PipelineRunner)
+runner.config = SimpleNamespace(write_unfiltered_scores=False, fusion_enabled=False, output_bedpe=None)
+runner._gtf_reader = None
+runner._apply_polya5p_filter = lambda aggregated: aggregated
+stream = io.StringIO()
+handler = logging.StreamHandler(stream)
+handler.setFormatter(logging.Formatter('%(name)s|%(filename)s:%(lineno)d|%(message)s'))
+package_logger = logging.getLogger('fin')
+package_logger.handlers[:] = [handler]
+package_logger.setLevel(logging.INFO)
+package_logger.propagate = False
+runner_mod.logger.setLevel(logging.NOTSET)
+runner._finalize_and_write({}, None, None)
+print('record=' + repr(stream.getvalue().strip()))
+mock_logger = Mock()
+runner_mod.logger = mock_logger
+runner._finalize_and_write({}, None, None)
+print('runner_logger_info_calls=' + str(mock_logger.info.call_count))
+PY
+  echo \"-- "'$label --"
+  (cd "$dir" && conda run -n nanofusion python probe.py)
+done
+rm -rf "$base"' in /SSD/logan/dev/pyfin
+ succeeded in 2885ms:
+2026-07-24 11:56:54 | INFO     | __init__.py:38 | Package initialized - version 0.1.0
+record='fin.pipeline.runner|runner.py:205|Pipeline complete: 0 transcripts quantified'
+runner_logger_info_calls=1
+
+-- commit --
+2026-07-24 11:56:56 | INFO     | __init__.py:38 | Package initialized - version 0.1.0
+record='fin.pipeline.finalize|finalize.py:106|Pipeline complete: 0 transcripts quantified'
+runner_logger_info_calls=0
+
+
+exec
+/bin/bash -c 'set -e
+review_dir=$(mktemp -d /tmp/pyfin-1f75400-full.XXXXXX)
+git archive 1f75400 | tar -x -C "$review_dir"
+cd "$review_dir"
+conda run -n nanofusion python -m pytest -q
+status=$?
+cd /
+rm -rf "$review_dir"
+exit $status' in /SSD/logan/dev/pyfin
+ exited 1 in 7356ms:
+============================= test session starts ==============================
+platform linux -- Python 3.10.16, pytest-9.0.2, pluggy-1.6.0
+rootdir: /tmp/pyfin-1f75400-full.zmTAfk
+configfile: pyproject.toml
+testpaths: tests/unit, tests/integration
+plugins: anyio-4.8.0
+collected 922 items
+
+tests/unit/test_ablation_runner.py .........................             [  2%]
+tests/unit/test_assignments.py ......................                    [  5%]
+tests/unit/test_candidate_fusion.py .......                              [  5%]
+tests/unit/test_canonical_gate.py ..........                             [  6%]
+tests/unit/test_canonical_search_v2.py ..........                        [  8%]
+tests/unit/test_canonical_shared.py ..............                       [  9%]
+tests/unit/test_chain_cluster.py .....................                   [ 11%]
+tests/unit/test_cli.py ..............FFF                                 [ 13%]
+tests/unit/test_cluster_quant.py ...............                         [ 15%]
+tests/unit/test_clustering_bugs.py ...                                   [ 15%]
+tests/unit/test_containment_cluster.py ................                  [ 17%]
+tests/unit/test_containment_collapse.py .............                    [ 18%]
+tests/unit/test_denovo_wobble_collapse.py .................              [ 20%]
+tests/unit/test_diff_region_dtw.py ..................................... [ 24%]
+.....                                                                    [ 25%]
+tests/unit/test_discovery_fusion.py .....                                [ 25%]
+tests/unit/test_discovery_mono_gtf.py .......                            [ 26%]
+tests/unit/test_discovery_no_gtf.py ............                         [ 27%]
+tests/unit/test_dtw.py ..ssssssssssssssssss..ss                          [ 30%]
+tests/unit/test_em_abundance_feedback.py ..........s.                    [ 31%]
+tests/unit/test_em_inputs.py ...........                                 [ 32%]
+tests/unit/test_em_iter_toggle.py .................                      [ 34%]
+tests/unit/test_em_prior.py ......                                       [ 35%]
+tests/unit/test_em_subset_evaluate.py .....                              [ 35%]
+tests/unit/test_eventalign_parser.py ......                              [ 36%]
+tests/unit/test_fulllen_fraction.py .................                    [ 38%]
+tests/unit/test_fusion_arm_assembly.py .........                         [ 39%]
+tests/unit/test_fusion_chimeric.py .................                     [ 41%]
+tests/unit/test_fusion_stitch.py ............                            [ 42%]
+tests/unit/test_guided_junction_support_gate.py ...........              [ 43%]
+tests/unit/test_interval_manager.py .................................... [ 47%]
+..                                                                       [ 47%]
+tests/unit/test_interval_manager_fusion.py ....                          [ 48%]
+tests/unit/test_intron_chains.py ...............                         [ 49%]
+tests/unit/test_intron_chains_snap.py ...........                        [ 51%]
+tests/unit/test_io_fasta.py ....................................s....    [ 55%]
+tests/unit/test_isoform_fraction.py ...............                      [ 57%]
+tests/unit/test_isoform_recovery.py ........                             [ 58%]
+tests/unit/test_junction_dominance_gate.py ..........                    [ 59%]
+tests/unit/test_junction_graph.py ...........                            [ 60%]
+tests/unit/test_junction_support_gate.py .........                       [ 61%]
+tests/unit/test_krill_aligner_helper.py .......                          [ 62%]
+tests/unit/test_log_config.py .......................                    [ 64%]
+tests/unit/test_m2_diff_cover.py ..................                      [ 66%]
+tests/unit/test_m2_em_pure_seed.py .................FF.                  [ 68%]
+tests/unit/test_m2_junction_nll.py ................                      [ 70%]
+tests/unit/test_m2_resolve_tie.py ..............                         [ 71%]
+tests/unit/test_m3_junction_coherence.py .....                           [ 72%]
+tests/unit/test_mappy_distance.py ........                               [ 73%]
+tests/unit/test_min_abundance_default.py ..........                      [ 74%]
+tests/unit/test_mono_exon_gate.py .........                              [ 75%]
+tests/unit/test_mono_resolve.py .........                                [ 76%]
+tests/unit/test_parallel_config.py ..........                            [ 77%]
+tests/unit/test_pipeline_config.py ............                          [ 78%]
+tests/unit/test_polya5p_filter.py .........................              [ 81%]
+tests/unit/test_quant_argmax_keep.py ....                                [ 81%]
+tests/unit/test_quant_cluster_dispatch.py .....                          [ 82%]
+tests/unit/test_quantification.py ......                                 [ 83%]
+tests/unit/test_quantresult_scores.py ........                           [ 83%]
+tests/unit/test_recovery_wiring.py .                                     [ 84%]
+tests/unit/test_runner_outputs.py ............                           [ 85%]
+tests/unit/test_sequences.py ...............................             [ 88%]
+tests/unit/test_signal_normalization.py ...                              [ 89%]
+tests/unit/test_soft_mass_ratio.py ..........                            [ 90%]
+tests/unit/test_structural_wobble_cassette.py .......................... [ 92%]
+....                                                                     [ 93%]
+tests/unit/test_support_gate.py ..........                               [ 94%]
+tests/unit/test_write_fusion_bedpe.py ..........                         [ 95%]
+tests/unit/test_write_gtf.py .................                           [ 97%]
+tests/unit/test_write_scoring_tsv.py ......                              [ 98%]
+tests/integration/test_benchmark_smoke.py .....                          [ 98%]
+tests/integration/test_cpu_fallback.py s..                               [ 98%]
+tests/integration/test_discovery_gtf_vs_no_gtf.py s                      [ 99%]
+tests/integration/test_gpu_cpu_equiv.py ss                               [ 99%]
+tests/integration/test_pipeline_integration.py ......                    [ 99%]
+tests/integration/test_threads_determinism.py s                          [100%]
+
+=================================== FAILURES ===================================
+__________________________ test_threads_zero_rejected __________________________
+
+    def test_threads_zero_rejected():
+        # Validation fires before the pipeline runs -> fast, non-zero exit.
+        r = run_cli(*_REQUIRED, "--threads", "0")
+        assert r.returncode != 0
+>       assert "threads" in (r.stdout + r.stderr).lower()
+E       assert 'threads' in "2026-07-24 11:57:06 | info     | __init__.py:38 | package initialized - version 0.1.0\nusage: python -m fin.cli [opti...nvalid value for '--bam': path '/tmp/pyfin-1f75400-full.zmtafk/tests/unit/../../testdata/mapped.bam' does not exist.\n"
+E        +  where "2026-07-24 11:57:06 | info     | __init__.py:38 | package initialized - version 0.1.0\nusage: python -m fin.cli [opti...nvalid value for '--bam': path '/tmp/pyfin-1f75400-full.zmtafk/tests/unit/../../testdata/mapped.bam' does not exist.\n" = <built-in method lower of str object at 0x7226d6507e00>()
+E        +    where <built-in method lower of str object at 0x7226d6507e00> = ('2026-07-24 11:57:06 | INFO     | __init__.py:38 | Package initialized - version 0.1.0\n' + "Usage: python -m fin.cli [OPTIONS] [COMMAND] [ARGS]...\nTry 'python -m fin.cli --help' for help.\n\nError: Invalid value for '--bam': Path '/tmp/pyfin-1f75400-full.zmTAfk/tests/unit/../../testdata/mapped.bam' does not exist.\n").lower
+E        +      where '2026-07-24 11:57:06 | INFO     | __init__.py:38 | Package initialized - version 0.1.0\n' = CompletedProcess(args=['/SSD/logan/miniforge3/envs/nanofusion/bin/python', '-m', 'fin.cli', '--bam', '/tmp/pyfin-1f754...valid value for '--bam': Path '/tmp/pyfin-1f75400-full.zmTAfk/tests/unit/../../testdata/mapped.bam' does not exist.\n").stdout
+E        +      and   "Usage: python -m fin.cli [OPTIONS] [COMMAND] [ARGS]...\nTry 'python -m fin.cli --help' for help.\n\nError: Invalid value for '--bam': Path '/tmp/pyfin-1f75400-full.zmTAfk/tests/unit/../../testdata/mapped.bam' does not exist.\n" = CompletedProcess(args=['/SSD/logan/miniforge3/envs/nanofusion/bin/python', '-m', 'fin.cli', '--bam', '/tmp/pyfin-1f754...valid value for '--bam': Path '/tmp/pyfin-1f75400-full.zmTAfk/tests/unit/../../testdata/mapped.bam' does not exist.\n").stderr
+
+tests/unit/test_cli.py:163: AssertionError
+______________________ test_gpu_workers_negative_rejected ______________________
+
+    def test_gpu_workers_negative_rejected():
+        r = run_cli(*_REQUIRED, "--threads", "2", "--gpu-workers=-1")
+        assert r.returncode != 0
+>       assert "gpu-workers" in (r.stdout + r.stderr).lower()
+E       assert 'gpu-workers' in "2026-07-24 11:57:07 | info     | __init__.py:38 | package initialized - version 0.1.0\nusage: python -m fin.cli [opti...nvalid value for '--bam': path '/tmp/pyfin-1f75400-full.zmtafk/tests/unit/../../testdata/mapped.bam' does not exist.\n"
+E        +  where "2026-07-24 11:57:07 | info     | __init__.py:38 | package initialized - version 0.1.0\nusage: python -m fin.cli [opti...nvalid value for '--bam': path '/tmp/pyfin-1f75400-full.zmtafk/tests/unit/../../testdata/mapped.bam' does not exist.\n" = <built-in method lower of str object at 0x7226215b8310>()
+E        +    where <built-in method lower of str object at 0x7226215b8310> = ('2026-07-24 11:57:07 | INFO     | __init__.py:38 | Package initialized - version 0.1.0\n' + "Usage: python -m fin.cli [OPTIONS] [COMMAND] [ARGS]...\nTry 'python -m fin.cli --help' for help.\n\nError: Invalid value for '--bam': Path '/tmp/pyfin-1f75400-full.zmTAfk/tests/unit/../../testdata/mapped.bam' does not exist.\n").lower
+E        +      where '2026-07-24 11:57:07 | INFO     | __init__.py:38 | Package initialized - version 0.1.0\n' = CompletedProcess(args=['/SSD/logan/miniforge3/envs/nanofusion/bin/python', '-m', 'fin.cli', '--bam', '/tmp/pyfin-1f754...valid value for '--bam': Path '/tmp/pyfin-1f75400-full.zmTAfk/tests/unit/../../testdata/mapped.bam' does not exist.\n").stdout
+E        +      and   "Usage: python -m fin.cli [OPTIONS] [COMMAND] [ARGS]...\nTry 'python -m fin.cli --help' for help.\n\nError: Invalid value for '--bam': Path '/tmp/pyfin-1f75400-full.zmTAfk/tests/unit/../../testdata/mapped.bam' does not exist.\n" = CompletedProcess(args=['/SSD/logan/miniforge3/envs/nanofusion/bin/python', '-m', 'fin.cli', '--bam', '/tmp/pyfin-1f754...valid value for '--bam': Path '/tmp/pyfin-1f75400-full.zmTAfk/tests/unit/../../testdata/mapped.bam' does not exist.\n").stderr
+
+tests/unit/test_cli.py:169: AssertionError
+__________________ test_gpu_workers_exceeds_threads_rejected ___________________
+
+    def test_gpu_workers_exceeds_threads_rejected():
+        r = run_cli(*_REQUIRED, "--gpu", "--threads", "2", "--gpu-workers", "3")
+        assert r.returncode != 0
+>       assert "gpu-workers" in (r.stdout + r.stderr).lower()
+E       assert 'gpu-workers' in "2026-07-24 11:57:07 | info     | __init__.py:38 | package initialized - version 0.1.0\nusage: python -m fin.cli [opti...nvalid value for '--bam': path '/tmp/pyfin-1f75400-full.zmtafk/tests/unit/../../testdata/mapped.bam' does not exist.\n"
+E        +  where "2026-07-24 11:57:07 | info     | __init__.py:38 | package initialized - version 0.1.0\nusage: python -m fin.cli [opti...nvalid value for '--bam': path '/tmp/pyfin-1f75400-full.zmtafk/tests/unit/../../testdata/mapped.bam' does not exist.\n" = <built-in method lower of str object at 0x7226215b8760>()
+E        +    where <built-in method lower of str object at 0x7226215b8760> = ('2026-07-24 11:57:07 | INFO     | __init__.py:38 | Package initialized - version 0.1.0\n' + "Usage: python -m fin.cli [OPTIONS] [COMMAND] [ARGS]...\nTry 'python -m fin.cli --help' for help.\n\nError: Invalid value for '--bam': Path '/tmp/pyfin-1f75400-full.zmTAfk/tests/unit/../../testdata/mapped.bam' does not exist.\n").lower
+E        +      where '2026-07-24 11:57:07 | INFO     | __init__.py:38 | Package initialized - version 0.1.0\n' = CompletedProcess(args=['/SSD/logan/miniforge3/envs/nanofusion/bin/python', '-m', 'fin.cli', '--bam', '/tmp/pyfin-1f754...valid value for '--bam': Path '/tmp/pyfin-1f75400-full.zmTAfk/tests/unit/../../testdata/mapped.bam' does not exist.\n").stdout
+E        +      and   "Usage: python -m fin.cli [OPTIONS] [COMMAND] [ARGS]...\nTry 'python -m fin.cli --help' for help.\n\nError: Invalid value for '--bam': Path '/tmp/pyfin-1f75400-full.zmTAfk/tests/unit/../../testdata/mapped.bam' does not exist.\n" = CompletedProcess(args=['/SSD/logan/miniforge3/envs/nanofusion/bin/python', '-m', 'fin.cli', '--bam', '/tmp/pyfin-1f754...valid value for '--bam': Path '/tmp/pyfin-1f75400-full.zmTAfk/tests/unit/../../testdata/mapped.bam' does not exist.\n").stderr
+
+tests/unit/test_cli.py:175: AssertionError
+_______ TestTieNllKrillUnavailable.test_gate_on_populates_ties_from_raw ________
+
+self = <unit.test_m2_em_pure_seed.TestTieNllKrillUnavailable object at 0x7226221e7af0>
+
+    def test_gate_on_populates_ties_from_raw(self):
+>       nlls, ties, n_ties, n_ref, cover = self._call(gate=True)
+
+tests/unit/test_m2_em_pure_seed.py:390: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_m2_em_pure_seed.py:387: in _call
+    return runner._tie_nll(kept, read_seqs, cands, [None] * N_C, raw)
+fin/pipeline/runner.py:1113: in _tie_nll
+    return tie_nll(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = PipelineConfig(bam_path='/tmp/x.bam', gtf_path=None, genome_fasta_path='', fastq_path='', signal_path='', signal_forma...e, fusion_enabled=False, fusion_min_support=2, fusion_max_dist=500, fusion_flank_bp=500, fusion_max_internal_gap_bp=30)
+kept_read_ids = ['r0', 'r1']
+read_seqs = {'r0': 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'r1': 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'}
+cand_list = [TranscriptCandidate(candidate_id='c0', intron_chain=IntronChain(introns=()), three_prime_pos=0, sequence='ACGTACGTACG...=set(), chrom='chr1', strand='+', start=0, end=100, fusion_junction=None, breakpoint_left=None, breakpoint_right=None)]
+aligners = [None, None, None]
+raw = array([[-inf,   5., -inf],
+       [  3., -inf,   3.]])
+
+    def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
+        """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
+    
+        For each read whose raw mappy AS is simultaneously best across >=2 candidates, build the
+        class junction-discrimination window over that tie set and score each tied candidate with the
+        per-event junction mean-NLL (non-HMM krill eventalign over the window). Only tied,
+        window-scorable cells are touched -- never the dense read×candidate matrix.
+    
+        Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]}, n_ties, n_refined,
+        cover_by_read {i: bool}). ``cover_by_read`` is populated only when the diff-region coverage
+        gate (config.m2_diff_cover_gate) is ON; otherwise it is empty.
+        """
+>       import krill
+E       ModuleNotFoundError: No module named 'krill'
+
+fin/pipeline/assignment.py:55: ModuleNotFoundError
+__________ TestTieNllKrillUnavailable.test_gate_off_leaves_ties_empty __________
+
+self = <unit.test_m2_em_pure_seed.TestTieNllKrillUnavailable object at 0x7226221e7130>
+
+    def test_gate_off_leaves_ties_empty(self):
+>       nlls, ties, n_ties, n_ref, cover = self._call(gate=False)
+
+tests/unit/test_m2_em_pure_seed.py:395: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_m2_em_pure_seed.py:387: in _call
+    return runner._tie_nll(kept, read_seqs, cands, [None] * N_C, raw)
+fin/pipeline/runner.py:1113: in _tie_nll
+    return tie_nll(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = PipelineConfig(bam_path='/tmp/x.bam', gtf_path=None, genome_fasta_path='', fastq_path='', signal_path='', signal_forma...e, fusion_enabled=False, fusion_min_support=2, fusion_max_dist=500, fusion_flank_bp=500, fusion_max_internal_gap_bp=30)
+kept_read_ids = ['r0', 'r1']
+read_seqs = {'r0': 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'r1': 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'}
+cand_list = [TranscriptCandidate(candidate_id='c0', intron_chain=IntronChain(introns=()), three_prime_pos=0, sequence='ACGTACGTACG...=set(), chrom='chr1', strand='+', start=0, end=100, fusion_junction=None, breakpoint_left=None, breakpoint_right=None)]
+aligners = [None, None, None]
+raw = array([[-inf,   5., -inf],
+       [  3., -inf,   3.]])
+
+    def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
+        """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
+    
+        For each read whose raw mappy AS is simultaneously best across >=2 candidates, build the
+        class junction-discrimination window over that tie set and score each tied candidate with the
+        per-event junction mean-NLL (non-HMM krill eventalign over the window). Only tied,
+        window-scorable cells are touched -- never the dense read×candidate matrix.
+    
+        Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]}, n_ties, n_refined,
+        cover_by_read {i: bool}). ``cover_by_read`` is populated only when the diff-region coverage
+        gate (config.m2_diff_cover_gate) is ON; otherwise it is empty.
+        """
+>       import krill
+E       ModuleNotFoundError: No module named 'krill'
+
+fin/pipeline/assignment.py:55: ModuleNotFoundError
+=========================== short test summary info ============================
+FAILED tests/unit/test_cli.py::test_threads_zero_rejected - assert 'threads' ...
+FAILED tests/unit/test_cli.py::test_gpu_workers_negative_rejected - assert 'g...
+FAILED tests/unit/test_cli.py::test_gpu_workers_exceeds_threads_rejected - as...
+FAILED tests/unit/test_m2_em_pure_seed.py::TestTieNllKrillUnavailable::test_gate_on_populates_ties_from_raw
+FAILED tests/unit/test_m2_em_pure_seed.py::TestTieNllKrillUnavailable::test_gate_off_leaves_ties_empty
+================== 5 failed, 890 passed, 27 skipped in 5.89s ===================
+
+ERROR conda.cli.main_run:execute(125): `conda run python -m pytest -q` failed. (See above for error)
+
+codex
+The broader run reaches 890 passes; five failures are dependency/version-sensitive. I’m checking those same tests on the parent to separate environment noise from this commit.
+exec
+/bin/bash -c 'set -e
+review_dir=$(mktemp -d /tmp/pyfin-parent.XXXXXX)
+git archive 1f75400''^ | tar -x -C "$review_dir"
+cd "$review_dir"
+set +e
+conda run -n nanofusion python -m pytest -q '"\\
+  tests/unit/test_cli.py::test_threads_zero_rejected \\
+  tests/unit/test_cli.py::test_gpu_workers_negative_rejected \\
+  tests/unit/test_cli.py::test_gpu_workers_exceeds_threads_rejected \\
+  tests/unit/test_m2_em_pure_seed.py::TestTieNllKrillUnavailable::test_gate_on_populates_ties_from_raw \\
+  tests/unit/test_m2_em_pure_seed.py::TestTieNllKrillUnavailable::test_gate_off_leaves_ties_empty
+status="'$?
+set -e
+cd /
+rm -rf "$review_dir"
+exit $status' in /SSD/logan/dev/pyfin
+ exited 1 in 2242ms:
+============================= test session starts ==============================
+platform linux -- Python 3.10.16, pytest-9.0.2, pluggy-1.6.0
+rootdir: /tmp/pyfin-parent.vrncTI
+configfile: pyproject.toml
+plugins: anyio-4.8.0
+collected 5 items
+
+tests/unit/test_cli.py FFF                                               [ 60%]
+tests/unit/test_m2_em_pure_seed.py FF                                    [100%]
+
+=================================== FAILURES ===================================
+__________________________ test_threads_zero_rejected __________________________
+
+    def test_threads_zero_rejected():
+        # Validation fires before the pipeline runs -> fast, non-zero exit.
+        r = run_cli(*_REQUIRED, "--threads", "0")
+        assert r.returncode != 0
+>       assert "threads" in (r.stdout + r.stderr).lower()
+E       assert 'threads' in "2026-07-24 11:57:21 | info     | __init__.py:38 | package initialized - version 0.1.0\nusage: python -m fin.cli [opti...ror: invalid value for '--bam': path '/tmp/pyfin-parent.vrncti/tests/unit/../../testdata/mapped.bam' does not exist.\n"
+E        +  where "2026-07-24 11:57:21 | info     | __init__.py:38 | package initialized - version 0.1.0\nusage: python -m fin.cli [opti...ror: invalid value for '--bam': path '/tmp/pyfin-parent.vrncti/tests/unit/../../testdata/mapped.bam' does not exist.\n" = <built-in method lower of str object at 0x77ad81169fd0>()
+E        +    where <built-in method lower of str object at 0x77ad81169fd0> = ('2026-07-24 11:57:21 | INFO     | __init__.py:38 | Package initialized - version 0.1.0\n' + "Usage: python -m fin.cli [OPTIONS] [COMMAND] [ARGS]...\nTry 'python -m fin.cli --help' for help.\n\nError: Invalid value for '--bam': Path '/tmp/pyfin-parent.vrncTI/tests/unit/../../testdata/mapped.bam' does not exist.\n").lower
+E        +      where '2026-07-24 11:57:21 | INFO     | __init__.py:38 | Package initialized - version 0.1.0\n' = CompletedProcess(args=['/SSD/logan/miniforge3/envs/nanofusion/bin/python', '-m', 'fin.cli', '--bam', '/tmp/pyfin-paren...or: Invalid value for '--bam': Path '/tmp/pyfin-parent.vrncTI/tests/unit/../../testdata/mapped.bam' does not exist.\n").stdout
+E        +      and   "Usage: python -m fin.cli [OPTIONS] [COMMAND] [ARGS]...\nTry 'python -m fin.cli --help' for help.\n\nError: Invalid value for '--bam': Path '/tmp/pyfin-parent.vrncTI/tests/unit/../../testdata/mapped.bam' does not exist.\n" = CompletedProcess(args=['/SSD/logan/miniforge3/envs/nanofusion/bin/python', '-m', 'fin.cli', '--bam', '/tmp/pyfin-paren...or: Invalid value for '--bam': Path '/tmp/pyfin-parent.vrncTI/tests/unit/../../testdata/mapped.bam' does not exist.\n").stderr
+
+tests/unit/test_cli.py:163: AssertionError
+______________________ test_gpu_workers_negative_rejected ______________________
+
+    def test_gpu_workers_negative_rejected():
+        r = run_cli(*_REQUIRED, "--threads", "2", "--gpu-workers=-1")
+        assert r.returncode != 0
+>       assert "gpu-workers" in (r.stdout + r.stderr).lower()
+E       assert 'gpu-workers' in "2026-07-24 11:57:21 | info     | __init__.py:38 | package initialized - version 0.1.0\nusage: python -m fin.cli [opti...ror: invalid value for '--bam': path '/tmp/pyfin-parent.vrncti/tests/unit/../../testdata/mapped.bam' does not exist.\n"
+E        +  where "2026-07-24 11:57:21 | info     | __init__.py:38 | package initialized - version 0.1.0\nusage: python -m fin.cli [opti...ror: invalid value for '--bam': path '/tmp/pyfin-parent.vrncti/tests/unit/../../testdata/mapped.bam' does not exist.\n" = <built-in method lower of str object at 0x77ad8116a130>()
+E        +    where <built-in method lower of str object at 0x77ad8116a130> = ('2026-07-24 11:57:21 | INFO     | __init__.py:38 | Package initialized - version 0.1.0\n' + "Usage: python -m fin.cli [OPTIONS] [COMMAND] [ARGS]...\nTry 'python -m fin.cli --help' for help.\n\nError: Invalid value for '--bam': Path '/tmp/pyfin-parent.vrncTI/tests/unit/../../testdata/mapped.bam' does not exist.\n").lower
+E        +      where '2026-07-24 11:57:21 | INFO     | __init__.py:38 | Package initialized - version 0.1.0\n' = CompletedProcess(args=['/SSD/logan/miniforge3/envs/nanofusion/bin/python', '-m', 'fin.cli', '--bam', '/tmp/pyfin-paren...or: Invalid value for '--bam': Path '/tmp/pyfin-parent.vrncTI/tests/unit/../../testdata/mapped.bam' does not exist.\n").stdout
+E        +      and   "Usage: python -m fin.cli [OPTIONS] [COMMAND] [ARGS]...\nTry 'python -m fin.cli --help' for help.\n\nError: Invalid value for '--bam': Path '/tmp/pyfin-parent.vrncTI/tests/unit/../../testdata/mapped.bam' does not exist.\n" = CompletedProcess(args=['/SSD/logan/miniforge3/envs/nanofusion/bin/python', '-m', 'fin.cli', '--bam', '/tmp/pyfin-paren...or: Invalid value for '--bam': Path '/tmp/pyfin-parent.vrncTI/tests/unit/../../testdata/mapped.bam' does not exist.\n").stderr
+
+tests/unit/test_cli.py:169: AssertionError
+__________________ test_gpu_workers_exceeds_threads_rejected ___________________
+
+    def test_gpu_workers_exceeds_threads_rejected():
+        r = run_cli(*_REQUIRED, "--gpu", "--threads", "2", "--gpu-workers", "3")
+        assert r.returncode != 0
+>       assert "gpu-workers" in (r.stdout + r.stderr).lower()
+E       assert 'gpu-workers' in "2026-07-24 11:57:21 | info     | __init__.py:38 | package initialized - version 0.1.0\nusage: python -m fin.cli [opti...ror: invalid value for '--bam': path '/tmp/pyfin-parent.vrncti/tests/unit/../../testdata/mapped.bam' does not exist.\n"
+E        +  where "2026-07-24 11:57:21 | info     | __init__.py:38 | package initialized - version 0.1.0\nusage: python -m fin.cli [opti...ror: invalid value for '--bam': path '/tmp/pyfin-parent.vrncti/tests/unit/../../testdata/mapped.bam' does not exist.\n" = <built-in method lower of str object at 0x77ad8116a3f0>()
+E        +    where <built-in method lower of str object at 0x77ad8116a3f0> = ('2026-07-24 11:57:21 | INFO     | __init__.py:38 | Package initialized - version 0.1.0\n' + "Usage: python -m fin.cli [OPTIONS] [COMMAND] [ARGS]...\nTry 'python -m fin.cli --help' for help.\n\nError: Invalid value for '--bam': Path '/tmp/pyfin-parent.vrncTI/tests/unit/../../testdata/mapped.bam' does not exist.\n").lower
+E        +      where '2026-07-24 11:57:21 | INFO     | __init__.py:38 | Package initialized - version 0.1.0\n' = CompletedProcess(args=['/SSD/logan/miniforge3/envs/nanofusion/bin/python', '-m', 'fin.cli', '--bam', '/tmp/pyfin-paren...or: Invalid value for '--bam': Path '/tmp/pyfin-parent.vrncTI/tests/unit/../../testdata/mapped.bam' does not exist.\n").stdout
+E        +      and   "Usage: python -m fin.cli [OPTIONS] [COMMAND] [ARGS]...\nTry 'python -m fin.cli --help' for help.\n\nError: Invalid value for '--bam': Path '/tmp/pyfin-parent.vrncTI/tests/unit/../../testdata/mapped.bam' does not exist.\n" = CompletedProcess(args=['/SSD/logan/miniforge3/envs/nanofusion/bin/python', '-m', 'fin.cli', '--bam', '/tmp/pyfin-paren...or: Invalid value for '--bam': Path '/tmp/pyfin-parent.vrncTI/tests/unit/../../testdata/mapped.bam' does not exist.\n").stderr
+
+tests/unit/test_cli.py:175: AssertionError
+_______ TestTieNllKrillUnavailable.test_gate_on_populates_ties_from_raw ________
+
+self = <unit.test_m2_em_pure_seed.TestTieNllKrillUnavailable object at 0x77accd1edea0>
+
+    def test_gate_on_populates_ties_from_raw(self):
+>       nlls, ties, n_ties, n_ref, cover = self._call(gate=True)
+
+tests/unit/test_m2_em_pure_seed.py:390: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_m2_em_pure_seed.py:387: in _call
+    return runner._tie_nll(kept, read_seqs, cands, [None] * N_C, raw)
+fin/pipeline/runner.py:1169: in _tie_nll
+    return tie_nll(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = PipelineConfig(bam_path='/tmp/x.bam', gtf_path=None, genome_fasta_path='', fastq_path='', signal_path='', signal_forma...e, fusion_enabled=False, fusion_min_support=2, fusion_max_dist=500, fusion_flank_bp=500, fusion_max_internal_gap_bp=30)
+kept_read_ids = ['r0', 'r1']
+read_seqs = {'r0': 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'r1': 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'}
+cand_list = [TranscriptCandidate(candidate_id='c0', intron_chain=IntronChain(introns=()), three_prime_pos=0, sequence='ACGTACGTACG...=set(), chrom='chr1', strand='+', start=0, end=100, fusion_junction=None, breakpoint_left=None, breakpoint_right=None)]
+aligners = [None, None, None]
+raw = array([[-inf,   5., -inf],
+       [  3., -inf,   3.]])
+
+    def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
+        """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
+    
+        For each read whose raw mappy AS is simultaneously best across >=2 candidates, build the
+        class junction-discrimination window over that tie set and score each tied candidate with the
+        per-event junction mean-NLL (non-HMM krill eventalign over the window). Only tied,
+        window-scorable cells are touched -- never the dense read×candidate matrix.
+    
+        Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]}, n_ties, n_refined,
+        cover_by_read {i: bool}). ``cover_by_read`` is populated only when the diff-region coverage
+        gate (config.m2_diff_cover_gate) is ON; otherwise it is empty.
+        """
+>       import krill
+E       ModuleNotFoundError: No module named 'krill'
+
+fin/pipeline/assignment.py:55: ModuleNotFoundError
+__________ TestTieNllKrillUnavailable.test_gate_off_leaves_ties_empty __________
+
+self = <unit.test_m2_em_pure_seed.TestTieNllKrillUnavailable object at 0x77accd1edbd0>
+
+    def test_gate_off_leaves_ties_empty(self):
+>       nlls, ties, n_ties, n_ref, cover = self._call(gate=False)
+
+tests/unit/test_m2_em_pure_seed.py:395: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_m2_em_pure_seed.py:387: in _call
+    return runner._tie_nll(kept, read_seqs, cands, [None] * N_C, raw)
+fin/pipeline/runner.py:1169: in _tie_nll
+    return tie_nll(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = PipelineConfig(bam_path='/tmp/x.bam', gtf_path=None, genome_fasta_path='', fastq_path='', signal_path='', signal_forma...e, fusion_enabled=False, fusion_min_support=2, fusion_max_dist=500, fusion_flank_bp=500, fusion_max_internal_gap_bp=30)
+kept_read_ids = ['r0', 'r1']
+read_seqs = {'r0': 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'r1': 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'}
+cand_list = [TranscriptCandidate(candidate_id='c0', intron_chain=IntronChain(introns=()), three_prime_pos=0, sequence='ACGTACGTACG...=set(), chrom='chr1', strand='+', start=0, end=100, fusion_junction=None, breakpoint_left=None, breakpoint_right=None)]
+aligners = [None, None, None]
+raw = array([[-inf,   5., -inf],
+       [  3., -inf,   3.]])
+
+    def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
+        """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
+    
+        For each read whose raw mappy AS is simultaneously best across >=2 candidates, build the
+        class junction-discrimination window over that tie set and score each tied candidate with the
+        per-event junction mean-NLL (non-HMM krill eventalign over the window). Only tied,
+        window-scorable cells are touched -- never the dense read×candidate matrix.
+    
+        Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]}, n_ties, n_refined,
+        cover_by_read {i: bool}). ``cover_by_read`` is populated only when the diff-region coverage
+        gate (config.m2_diff_cover_gate) is ON; otherwise it is empty.
+        """
+>       import krill
+E       ModuleNotFoundError: No module named 'krill'
+
+fin/pipeline/assignment.py:55: ModuleNotFoundError
+=========================== short test summary info ============================
+FAILED tests/unit/test_cli.py::test_threads_zero_rejected - assert 'threads' ...
+FAILED tests/unit/test_cli.py::test_gpu_workers_negative_rejected - assert 'g...
+FAILED tests/unit/test_cli.py::test_gpu_workers_exceeds_threads_rejected - as...
+FAILED tests/unit/test_m2_em_pure_seed.py::TestTieNllKrillUnavailable::test_gate_on_populates_ties_from_raw
+FAILED tests/unit/test_m2_em_pure_seed.py::TestTieNllKrillUnavailable::test_gate_off_leaves_ties_empty
+============================== 5 failed in 0.80s ===============================
+
+ERROR conda.cli.main_run:execute(125): `conda run python -m pytest -q tests/unit/test_cli.py::test_threads_zero_rejected tests/unit/test_cli.py::test_gpu_workers_negative_rejected tests/unit/test_cli.py::test_gpu_workers_exceeds_threads_rejected tests/unit/test_m2_em_pure_seed.py::TestTieNllKrillUnavailable::test_gate_on_populates_ties_from_raw tests/unit/test_m2_em_pure_seed.py::TestTieNllKrillUnavailable::test_gate_off_leaves_ties_empty` failed. (See above for error)
+
+codex
+The parent reproduces the same five broad-suite failures, so they are unrelated. I’m consolidating the exact changed-line citations and verdict now.
+  ✓ Inspect commit and repository guidance
+  ✓ Compare moved code against parent
+  ✓ Audit seams imports and semantics
+  ✓ Run focused regression tests
+  → Deliver skeptical commit verdict
+exec
+/bin/bash -c "git show 1f75400:fin/pipeline/finalize.py | nl -ba | sed -n '15,110p'; printf '\\n-- runner wiring --\\n'; git show 1f75400:fin/pipeline/runner.py | nl -ba | sed -n '132,160p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+    15	
+    16	import logging
+    17	from pathlib import Path
+    18	from typing import Dict, Optional
+    19	
+    20	logger = logging.getLogger(__name__)
+    21	
+    22	
+    23	def write_unfiltered_diagnostic(
+    24	    config, aggregated: Dict[str, "object"], output_tsv: Optional[str], gtf_reader
+    25	) -> None:
+    26	    """Write the pre-filter scoring TSV (diagnostic) when ``write_unfiltered_scores`` is set.
+    27	
+    28	    Runs BEFORE the GLOBAL selection cascade so downstream FN-root-cause analysis can distinguish
+    29	    "candidate never reached EM" from "candidate dropped by a filter". Resolves gene_ids on the
+    30	    unfiltered snapshot too (so the diagnostic TSV has no empty gene_id column). No-op unless both
+    31	    ``write_unfiltered_scores`` and ``output_tsv`` are set. Byte-identical move of the former
+    32	    ``_finalize_and_write`` diagnostic block.
+    33	    """
+    34	    if not (getattr(config, "write_unfiltered_scores", False) and output_tsv):
+    35	        return
+    36	    from fin.io.io_tsv import write_scoring_tsv
+    37	
+    38	    unfiltered_path = str(Path(output_tsv).with_suffix(".unfiltered.tsv"))
+    39	    transcript_lengths_uf = {
+    40	        cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+    41	        for cid, qr in aggregated.items()
+    42	    }
+    43	    # Resolve gene_ids on the unfiltered snapshot too so downstream
+    44	    # consumers don't see empty gene_id columns.
+    45	    for cid, qr in aggregated.items():
+    46	        if qr.source == "gtf" and gtf_reader:
+    47	            tx = gtf_reader.get_transcript(cid)
+    48	            if tx and not qr.gene_id:
+    49	                qr.gene_id = tx.gene_id
+    50	        if not qr.gene_id:
+    51	            qr.gene_id = qr.candidate_id
+    52	    write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
+    53	    logger.info(
+    54	        "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
+    55	        unfiltered_path,
+    56	        len(aggregated),
+    57	    )
+    58	
+    59	
+    60	def finalize_outputs(
+    61	    config,
+    62	    aggregated: Dict[str, "object"],
+    63	    output_gtf: Optional[str],
+    64	    output_tsv: Optional[str],
+    65	    gtf_reader,
+    66	) -> Dict[str, "object"]:
+    67	    """Resolve gene_ids and write the GTF / TSV / BEDPE outputs; return ``aggregated`` unchanged.
+    68	
+    69	    Byte-identical move of the runner's former ``_finalize_and_write`` tail (post-selection): the
+    70	    gene-id resolution loop, the three optional writers, and the final "Pipeline complete" log. No
+    71	    candidate is dropped here.
+    72	    """
+    73	    # Resolve gene_ids from GTF annotation
+    74	    for cid, qr in aggregated.items():
+    75	        if qr.source == "gtf" and gtf_reader:
+    76	            tx = gtf_reader.get_transcript(cid)
+    77	            if tx:
+    78	                qr.gene_id = tx.gene_id
+    79	        if not qr.gene_id:
+    80	            qr.gene_id = qr.candidate_id
+    81	
+    82	    # Write GTF output
+    83	    if output_gtf:
+    84	        from fin.io.io_gtf import write_gtf
+    85	
+    86	        write_gtf(aggregated, output_gtf)
+    87	        logger.info("Wrote GTF output: %s", output_gtf)
+    88	
+    89	    # US-013: Additional output writers
+    90	    if output_tsv:
+    91	        from fin.io.io_tsv import write_scoring_tsv
+    92	
+    93	        transcript_lengths = {
+    94	            cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+    95	            for cid, qr in aggregated.items()
+    96	        }
+    97	        write_scoring_tsv(aggregated, transcript_lengths, output_tsv)
+    98	        logger.info("Wrote TSV output: %s", output_tsv)
+    99	
+   100	    if config.fusion_enabled and config.output_bedpe:
+   101	        from fin.io.io_bedpe import write_fusion_bedpe
+   102	
+   103	        write_fusion_bedpe(aggregated, config.output_bedpe)
+   104	        logger.info("Wrote BEDPE output: %s", config.output_bedpe)
+   105	
+   106	    logger.info(
+   107	        "Pipeline complete: %d transcripts quantified", len(aggregated)
+   108	    )
+   109	    return aggregated
+
+-- runner wiring --
+   132	
+   133	    def _finalize_and_write(
+   134	        self,
+   135	        aggregated: Dict[str, QuantResult],
+   136	        output_gtf: Optional[str],
+   137	        output_tsv: Optional[str],
+   138	    ) -> Dict[str, QuantResult]:
+   139	        """Finalize: diagnostic dump -> GLOBAL selection -> gene-id resolution + writers.
+   140	
+   141	        Thin orchestrator wiring three independent layers: the pre-filter diagnostic and the
+   142	        output writers live in fin.pipeline.finalize; the GLOBAL selection cascade lives in
+   143	        fin.pipeline.selection. Kept as a method so tests can call this seam directly."""
+   144	        write_unfiltered_diagnostic(
+   145	            self.config, aggregated, output_tsv, self._gtf_reader
+   146	        )
+   147	        aggregated, _global_outcomes = select_global(
+   148	            self.config, aggregated, self._apply_polya5p_filter,
+   149	        )
+   150	        return finalize_outputs(
+   151	            self.config, aggregated, output_gtf, output_tsv, self._gtf_reader,
+   152	        )
+   153	
+   154	    def process_interval(
+   155	        self, interval: GenomicInterval
+   156	    ) -> Optional[List[QuantResult]]:
+   157	        """Discover candidates and quantify a single interval via ``quant_mode``.
+   158	
+   159	        Returns:
+   160	            - List[QuantResult] from the dispatched quant_mode engine.
+
+  ✓ Inspect commit and repository guidance
+  ✓ Compare moved code against parent
+  ✓ Audit seams imports and semantics
+  ✓ Run focused regression tests
+  ✓ Deliver skeptical commit verdict
+codex
+**Verdict: ISSUES**
+
+- **Logging behavior and mock seam changed.** The extracted code creates `fin.pipeline.finalize.logger` at `fin/pipeline/finalize.py:20`, and all five formerly runner-owned messages now use it at `fin/pipeline/finalize.py:53`, `fin/pipeline/finalize.py:87`, `fin/pipeline/finalize.py:98`, `fin/pipeline/finalize.py:104`, and `fin/pipeline/finalize.py:106`.
+- This is observably non-byte-identical: the configured formatter includes `%(filename)s:%(lineno)d` at `fin/utils/log_config.py:54`. An adversarial comparison produced:
+  - Parent: `fin.pipeline.runner|runner.py:205|Pipeline complete: 0 transcripts quantified`
+  - Commit: `fin.pipeline.finalize|finalize.py:106|Pipeline complete: 0 transcripts quantified`
+- It also breaks the existing module-level patch seam: patching `fin.pipeline.runner.logger` intercepted the final message before this commit but no longer intercepts any extracted writer/finalization messages. Probe result: parent `runner.logger.info` calls = 1; commit = 0. Logger-specific levels, filters, and handlers for `fin.pipeline.runner` likewise no longer apply.
+
+I found no change to candidate ordering, selection sequencing, gene-ID mutation rules, writer arguments, lazy imports, fold/survivor semantics, or `_gtf_reader`/`_apply_polya5p_filter` call-time behavior. The 47 focused tests passed; the broader run had 5 environment-related failures reproduced identically on the parent. Under the stated strict behavior/mock-seam bar, however, the logging change requires **ISSUES**.
+tokens used
+101,202
+**Verdict: ISSUES**
+
+- **Logging behavior and mock seam changed.** The extracted code creates `fin.pipeline.finalize.logger` at `fin/pipeline/finalize.py:20`, and all five formerly runner-owned messages now use it at `fin/pipeline/finalize.py:53`, `fin/pipeline/finalize.py:87`, `fin/pipeline/finalize.py:98`, `fin/pipeline/finalize.py:104`, and `fin/pipeline/finalize.py:106`.
+- This is observably non-byte-identical: the configured formatter includes `%(filename)s:%(lineno)d` at `fin/utils/log_config.py:54`. An adversarial comparison produced:
+  - Parent: `fin.pipeline.runner|runner.py:205|Pipeline complete: 0 transcripts quantified`
+  - Commit: `fin.pipeline.finalize|finalize.py:106|Pipeline complete: 0 transcripts quantified`
+- It also breaks the existing module-level patch seam: patching `fin.pipeline.runner.logger` intercepted the final message before this commit but no longer intercepts any extracted writer/finalization messages. Probe result: parent `runner.logger.info` calls = 1; commit = 0. Logger-specific levels, filters, and handlers for `fin.pipeline.runner` likewise no longer apply.
+
+I found no change to candidate ordering, selection sequencing, gene-ID mutation rules, writer arguments, lazy imports, fold/survivor semantics, or `_gtf_reader`/`_apply_polya5p_filter` call-time behavior. The 47 focused tests passed; the broader run had 5 environment-related failures reproduced identically on the parent. Under the stated strict behavior/mock-seam bar, however, the logging change requires **ISSUES**.

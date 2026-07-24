@@ -1,0 +1,56 @@
+Design discussion (read-only; use a PTY if the non-PTY shell returns blank stdout). pyfin de-novo
+transcript assembly. QUESTION: why do truth transcripts that HAVE full-length read support still
+produce NO candidate at the GENERATION stage?
+
+MEASURED CONTEXT (this is real, from a SGNex H9 directRNA sample, gencode v44 truth):
+- pyfin's genome input is a minimap2 SPLICED genome BAM (reads aligned to the GENOME with -ax splice).
+  Generation extracts each read's intron chain from its genome CIGAR (fin/candidates/intron_chains.py
+  extract_intron_chain: N ops -> (donor,acceptor) EXACT genome coords) and groups reads by EXACT
+  intron-chain tuple (fin/candidates/chain_cluster.py cluster_families / cluster_read_chains). A
+  candidate can only '=' -match a truth transcript if some read's EXACT genome intron chain equals the
+  truth's chain.
+- "Full-length support" is measured from a separate TRANSCRIPTOME BAM (reads aligned to the reference
+  TRANSCRIPTOME): a transcript is FL-supported if >=3 reads cover it end-to-end (start<=50bp,
+  end>=L-50bp).
+- Even the "keep everything" clustering (cluster_families: keeps ALL variants, NO fold, NO snap) only
+  recalls 85.6% of FL>=3 truth -> ~14% (~500) FL-supported transcripts get NO exact-chain candidate.
+- A genome-BAM diagnostic of the MISSED (nanocount est>=3) truth classified each missed transcript by
+  its best genome read: A) an EXACT genome read exists but wasn't emitted = 1.7%; B) only WOBBLE-close
+  genome reads (junctions <=6bp off, none exact) = 10%; C) only TRUNCATED sub-chain genome reads (no
+  full genome chain) = 74%; D) genome reads with other structure = 12%; E) no genome reads = 1%.
+
+So the dominant reason a FL-supported transcript yields no candidate is that its GENOME reads' chains
+do NOT exactly equal the truth chain -- mostly because the reads are TRUNCATED in the genome spliced
+alignment (74%) or WOBBLED (10%), even though the SAME reads look full-length against the transcriptome.
+
+DISCUSS, reading the code (extract_intron_chain, cluster_families/cluster_read_chains, the fusion
+>=250bp soft-clip exclusion in discovery.py, interval strand assignment, io_bam):
+
+1. MECHANISM: enumerate the concrete reasons a read that is full-length in the TRANSCRIPTOME alignment
+   yields a truncated / wobbled / absent GENOME intron chain: (a) minimap2 spliced genome alignment
+   places junctions a few bp off (wobble) vs the transcriptome linear alignment; (b) spliced alignment
+   soft-clips / drops terminal exons -> genome chain is a proper sub-chain; (c) the read's PRIMARY
+   genome alignment is to a paralog/other locus (multi-map) so it never appears at this locus / this
+   strand; (d) >=250bp terminal soft-clip -> fusion-excluded from generation; (e) small terminal exons
+   below minimap2's detection -> dropped junction. Which of these do you judge dominant given the 74%
+   truncated / 10% wobble split, and how would you confirm each from the BAMs?
+
+2. THE HARD CONSTRAINT: the user REJECTS snapping to annotation (pyfin's differentiator: it wins
+   corrupted-annotation conditions precisely because it does NOT snap). But a DATA-DRIVEN consensus
+   (snap reads to their OWN modal/median junction within a wobble family; assemble a full path from
+   overlapping partial reads) is NOT annotation-snap. For each of the 74% truncated and 10% wobble
+   cases, is there a data-only way to synthesize the missing exact-chain candidate WITHOUT touching
+   annotation? Specifically evaluate: (i) read-consensus junctions within a cluster_families family
+   (does the modal junction of the pooled reads recover truth coords?); (ii) path-completion /
+   intron-graph assembly of a full chain from overlapping truncated reads (the E1-I1'-E2' -> full-path
+   idea); (iii) using the transcriptome alignment as a second evidence source.
+
+3. RISK / no-double-snap: any of these consensus/assembly steps could re-introduce a soft annotation
+   snap or over-merge distinct close isoforms. How to keep it evidence-only and reversible, consistent
+   with "keep all variants, pool reads, let assignment decide"?
+
+4. Recommend ONE concrete highest-leverage generation-stage change to recover these FL-supported-but-
+   ungenerated transcripts, and how to measure it (structural '=' recall vs the FL>=3 denominator,
+   watching precision).
+
+Be decisive and concrete with file:line cites. Do not modify code.

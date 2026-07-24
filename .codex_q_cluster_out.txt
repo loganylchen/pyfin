@@ -1,0 +1,2531 @@
+Reading prompt from stdin...
+OpenAI Codex v0.142.0
+--------
+workdir: /SSD/logan/dev/pyfin
+model: gpt-5.5
+provider: OpenAI
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019f8e32-3911-7861-b27d-0079ba65f568
+--------
+user
+Deep-dive ONE narrow step in the pyfin repo (read-only; use a PTY if the non-PTY shell returns blank
+stdout). Focus ONLY on the CLUSTERING step within an interval: how the reads of one interval get
+grouped into clusters. The code is fin/candidates/chain_cluster.py — `cluster_read_chains` and its
+helper predicates `_exact_subchain`, `_subchain_offset`, `_wobble`, `_cassette`, `_contains`,
+`_related`, `_monoexon_in_exon`, plus the `GenCandidate` / `ChainCluster` dataclasses. Also note how
+`_chain_cluster_candidates` (fin/candidates/discovery.py) FEEDS it (the (read, IntronChain) list) and
+consumes the resulting clusters — but do NOT analyze emission/GTF/quant, just the clustering.
+
+Report precisely, with file:line cites:
+
+1. INPUT + GROUPING KEY: what exactly is clustered — reads, or distinct intron chains? What is the
+   first-level grouping key (exact intron-chain tuple? is 3' end used)? How are a chain's reads
+   tracked (by_chain)?
+
+2. THE THREE JOIN RELATIONS: define exactly what makes two chains land in the same cluster —
+   `_wobble` (same intron count, every junction within wobble_bp?), `_cassette` (one skipped exon,
+   size <= cassette_max_exon_bp?), `_contains` (tolerant containment?). Give the exact predicate
+   logic and the union-find that builds clusters (chain_cluster.py ~260).
+
+3. FOLD-VS-CLUSTER ENTANGLEMENT: the user wants "clustering" as a clean standalone step, separate
+   from folding. In the current code, WHERE does exact-sub-chain folding happen relative to the
+   union-find clustering (before? interleaved?), and does folding CHANGE which chains survive to be
+   clustered (i.e. does a folded sub-chain disappear from the cluster membership)? Quote the ordering.
+   Also: mono (empty-chain) reads — how are they handled vs multi-exon chains in clustering?
+
+4. WHAT A "CLUSTER" IS: after cluster_read_chains, what does one ChainCluster contain (members =
+   distinct surviving chains each with their own read set + folded shadows)? Are reads pooled across
+   the cluster or kept per-member? Is a read ever in more than one cluster?
+
+5. SOUNDNESS / DETERMINISM of the CLUSTERING itself: is the union-find correct and order-independent?
+   Any edge cases: single-read chains, identical chains, a chain that is wobble to two different
+   families (transitive merging that over-joins), empty chains, off-by-one in the wobble/cassette
+   boundary tests? Is clustering deterministic given the same input?
+
+6. Relative to the user's target design (clustering first, THEN per-cluster fold/path-completion/
+   read-pool): how far is the current code from a clean "cluster reads into families, keep the read
+   pool at cluster level" model? What is currently done at cluster-time that arguably belongs to a
+   later per-cluster step, and vice versa?
+
+Be concrete and scoped to clustering. Do not modify anything.
+
+codex
+I’ll inspect the clustering and feeder code read-only, then cite exact lines. I’ll use parallel reads/searches first to map the relevant functions without touching files.
+exec
+/bin/bash -lc 'pwd && rg -n "def cluster_read_chains|def _exact_subchain|def _subchain_offset|def _wobble|def _cassette|def _contains|def _related|def _monoexon_in_exon|class GenCandidate|class ChainCluster|by_chain|Union|union|find|_chain_cluster_candidates" fin/candidates/chain_cluster.py fin/candidates/discovery.py' in /SSD/logan/dev/pyfin
+exec
+/bin/bash -lc "sed -n '1,360p' fin/candidates/chain_cluster.py" in /SSD/logan/dev/pyfin
+exec
+/bin/bash -lc "sed -n '1,260p' fin/candidates/discovery.py" in /SSD/logan/dev/pyfin
+codex
+The PTY sessions came back at a prompt rather than streaming the command output, so I’m going to poll/send the commands into those sessions and fall back to non-PTY reads where needed. Still read-only.
+ succeeded in 20744ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:58:14[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:58:14[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:58:14[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> pwd[?2004l
+/SSD/logan/dev/pyfin
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:58:33[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hrg -n "def cluster_read_chains|def _exact_subchain|de<er_read_chains|def _exact_subchain|def                                       <er_read_chains|def _exact_subchain|def _subchain_offset|def _wobble|def _cass<subchain_offset|def _wobble|def _casse                                       <subchain_offset|def _wobble|def _cassette|def _contains|def _related|def _mon<e|def _contains|def _related|def _mono                                       <e|def _contains|def _related|def _monoexon_in_exon|class GenCandidate|class C<on_in_exon|class GenCandidate|class Ch                                       <on_in_exon|class GenCandidate|class ChainCluster|by_chain|union|find|_chain_c<nCluster|by_chain|union|find|_chain_cl                                       <nCluster|by_chain|union|find|_chain_cluster_candidates" fin/candidates/chain_<ter_candidates" fin/candidates/chain_c                                       <ter_candidates" fin/candidates/chain_cluster.py fin/candidates/discovery.py[?2004l
+fin/candidates/discovery.py
+40:    pools into ONE candidate whose union span bridges distinct single-exon genes.
+172:    by_chain: dict = {}
+174:        by_chain.setdefault(extended[i], []).append(rd)
+177:    for ext_chain, reads in by_chain.items():
+186:def _chain_cluster_candidates(
+220:    gtf_by_chain: dict = {}
+239:            gtf_by_chain.setdefault(chain, gc)   # first GTF wins on an exact-chain tie
+282:                                gtf_by_chain.get(m.chain))
+433:        return _chain_cluster_candidates(
+654:def _wobble_chain_match(a, b, tol: int) -> bool:
+666:def _wobble_collapse_novel(
+673:    representative (the reads' own mode); wobbled shadows union their reads into
+728:    existing (longest-span) representative, unioning supporting reads."""
+729:    novel_by_chain: dict = {}
+731:        novel_by_chain.setdefault(cand.intron_chain, []).append(cand)
+733:    for chain, bucket in novel_by_chain.items():
+742:                    # rep is already at least as long (sort order). Only union the
+772:    supporting read IDs are unioned.
+
+fin/candidates/chain_cluster.py
+8:  2. CLUSTER the survivors      -- union-find groups the remaining distinct chains into
+36:class GenCandidate:
+54:class ChainCluster:
+58:    away). ``read_ids`` is the union of all members' reads. ``representative`` is the
+72:def _exact_subchain(short: Chain, long_: Chain) -> bool:
+80:def _subchain_offset(short: Chain, long_: Chain) -> int:
+93:def _wobble(a: Chain, b: Chain, bp: int) -> bool:
+101:def _contains(short: Chain, long_: Chain, bp: int) -> bool:
+113:def _cassette(a: Chain, b: Chain, bp: int, max_exon_bp: int) -> bool:
+136:def _related(a: Chain, b: Chain, wobble_bp: int, cassette_max_exon_bp: int) -> bool:
+149:def _monoexon_in_exon(s: int, e: int, chain: Chain, lo: int, hi: int) -> bool:
+163:def cluster_read_chains(
+197:        recovery step (e.g. read-end pileup), not done here. The survivors are unioned
+202:    by_chain: Dict[Chain, Set[str]] = {}
+207:        by_chain.setdefault(tuple(chain.introns), set()).add(rid)
+227:    chains_sorted = sorted(by_chain, key=lambda c: (-len(c), -len(by_chain[c]), c))
+235:            reads[c] = set(by_chain[c])
+238:            reads[container] |= by_chain[c]
+239:            folded_of.setdefault(container, []).append((c, set(by_chain[c])))
+247:        for rid in by_chain[c]:
+260:    # 3. union-find the survivors by wobble / cassette / containment (multi-exon only).
+296:    def find(x: Chain) -> Chain:
+305:            if find(a) != find(b) and _related(a, b, wobble_bp, cassette_max_exon_bp):
+306:                parent[find(a)] = find(b)
+310:        comps.setdefault(find(c), []).append(c)
+322:        union: Set[str] = set()
+324:            union |= reads[c]
+325:        clusters.append(ChainCluster(members=members, read_ids=union))
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:58:33[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+ succeeded in 20833ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/16[30m)[36m─┐
+[36m└[34m─([33m16:58:14[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/16[30m)[36m─┐
+[36m└[34m─([33m16:58:14[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/16[30m)[36m─┐
+[36m└[34m─([33m16:58:14[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> sed -n '1,360p' fin/candidates/chain_cluster.py[?2004l
+"""Generation-side intron-chain clustering.
+
+Cluster-first candidate generation. Pool all reads, group by their EXACT (raw,
+un-snapped) intron chain, then:
+
+  1. COLLAPSE exact sub-chains  -- a chain that is a strict contiguous sub-chain of a
+     longer chain with IDENTICAL coordinates folds into it (reads pooled, chain gone).
+  2. CLUSTER the survivors      -- union-find groups the remaining distinct chains into
+     one cluster when related by any of:
+       * WOBBLE      : same intron count, every junction within ``wobble_bp``,
+       * CASSETTE    : K vs K-1 chains differing by one small (< ``cassette_max_exon_bp``)
+                       skipped exon (minimap2's small-exon-skip artefact),
+       * CONTAINMENT : a shorter chain that is a contiguous sub-chain of a longer one
+                       within ``wobble_bp`` per junction (the non-exact leftovers that
+                       step 1 did not fold).
+
+A cluster KEEPS all its member candidates (distinct chains + pooled reads); only exact
+sub-chains disappear. NO consensus snapping (coordinates are never rewritten). The
+cluster is the downstream unit: reads attach to a cluster instead of splitting across
+near-duplicates, and which members are genuine isoforms is decided later by the
+per-cluster computation. The caller runs with canonical_search_bp = 0 (no shadows).
+
+Mono-exon chains never join a structural cluster; each unique mono chain is a singleton.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Set, Tuple
+
+from fin.candidates.dataclasses import IntronChain
+
+Chain = Tuple[Tuple[int, int], ...]
+
+
+@dataclass
+class GenCandidate:
+    """One candidate inside a cluster: a distinct intron chain + its pooled reads.
+
+    ``folded`` holds the SHADOW sub-chains folded into this candidate (each an exact
+    contiguous sub-chain, with its OWN reads). They are dormant provenance for the
+    downstream short-isoform recovery step: their truncation boundary is a proposed
+    TSS/polyA site and their reads are the direct endpoint evidence. ``read_ids``
+    already INCLUDES every shadow's reads (pooled), so shadows never add read mass."""
+    chain: IntronChain
+    read_ids: Set[str] = field(default_factory=set)
+    folded: List["GenCandidate"] = field(default_factory=list)
+
+    @property
+    def num_introns(self) -> int:
+        return len(self.chain.introns)
+
+
+@dataclass
+class ChainCluster:
+    """A structural family of candidate chains sharing their reads' assignment.
+
+    ``members`` are the distinct surviving candidates (exact sub-chains already folded
+    away). ``read_ids`` is the union of all members' reads. ``representative`` is the
+    longest member (convenience; NOT a snapped consensus -- original coordinates)."""
+    members: List[GenCandidate]
+    read_ids: Set[str] = field(default_factory=set)
+
+    @property
+    def representative(self) -> GenCandidate:
+        return max(self.members,
+                   key=lambda m: (m.num_introns, len(m.read_ids), m.chain.introns))
+
+
+# ---------------------------------------------------------------------------
+# chain-relation predicates (single interval/strand: no chrom/strand bucketing)
+# ---------------------------------------------------------------------------
+def _exact_subchain(short: Chain, long_: Chain) -> bool:
+    """``short`` is a strict EXACT (identical coords) contiguous sub-chain of ``long_``."""
+    n, m = len(long_), len(short)
+    if m == 0 or m >= n:
+        return False
+    return any(long_[off:off + m] == short for off in range(n - m + 1))
+
+
+def _subchain_offset(short: Chain, long_: Chain) -> int:
+    """Offset of the first exact ``short`` occurrence in ``long_`` (-1 if none). The
+    introns of ``long_`` outside ``[off, off+len(short))`` are the container's EXTRA
+    introns relative to ``short`` -- positions where ``short`` splices differently."""
+    n, m = len(long_), len(short)
+    if m == 0 or m >= n:
+        return -1
+    for off in range(n - m + 1):
+        if long_[off:off + m] == short:
+            return off
+    return -1
+
+
+def _wobble(a: Chain, b: Chain, bp: int) -> bool:
+    """Same intron count, every donor/acceptor within ``bp``."""
+    if len(a) != len(b):
+        return False
+    return all(abs(s1 - s2) <= bp and abs(e1 - e2) <= bp
+               for (s1, e1), (s2, e2) in zip(a, b))
+
+
+def _contains(short: Chain, long_: Chain, bp: int) -> bool:
+    """``short`` is a strictly-shorter contiguous sub-chain of ``long_`` within ``bp``."""
+    n, m = len(long_), len(short)
+    if m == 0 or m >= n:
+        return False
+    for off in range(n - m + 1):
+        if all(abs(short[k][0] - long_[off + k][0]) <= bp and
+               abs(short[k][1] - long_[off + k][1]) <= bp for k in range(m)):
+            return True
+    return False
+
+
+def _cassette(a: Chain, b: Chain, bp: int, max_exon_bp: int) -> bool:
+    """``a`` (K introns) is a cassette-skip sibling of ``b`` (K-1 introns): at one
+    position ``i`` the two introns ``a[i], a[i+1]`` replace ``b[i]``'s span (outer
+    donor/acceptor within bp), the skipped exon between them is < ``max_exon_bp``, and
+    every other intron matches within bp."""
+    if max_exon_bp <= 0 or len(a) != len(b) + 1:
+        return False
+    for i in range(len(a) - 1):
+        if any(abs(a[k][0] - b[k][0]) > bp or abs(a[k][1] - b[k][1]) > bp
+               for k in range(i)):
+            continue
+        if abs(a[i][0] - b[i][0]) > bp or abs(a[i + 1][1] - b[i][1]) > bp:
+            continue
+        rest = len(b) - i - 1
+        if any(abs(a[i + 2 + k][0] - b[i + 1 + k][0]) > bp or
+               abs(a[i + 2 + k][1] - b[i + 1 + k][1]) > bp for k in range(rest)):
+            continue
+        cas = a[i + 1][0] - a[i][1]
+        if 0 < cas < max_exon_bp:
+            return True
+    return False
+
+
+def _related(a: Chain, b: Chain, wobble_bp: int, cassette_max_exon_bp: int) -> bool:
+    """True iff ``a`` and ``b`` should share a cluster (wobble / cassette / containment)."""
+    if _wobble(a, b, wobble_bp):
+        return True
+    lo, hi = (a, b) if len(a) < len(b) else (b, a)
+    if len(lo) < len(hi):
+        if _cassette(hi, lo, wobble_bp, cassette_max_exon_bp):
+            return True
+        if _contains(lo, hi, wobble_bp):
+            return True
+    return False
+
+
+def _monoexon_in_exon(s: int, e: int, chain: Chain, lo: int, hi: int) -> bool:
+    """``[s, e)`` (a single-exon read) lies wholly inside ONE exon of a multi-exon
+    candidate whose exonic footprint is ``[lo, hi)`` and whose introns are ``chain``
+    (each ``[d, a)`` half-open). True iff the read is within the footprint AND overlaps
+    no intron -- i.e. it is a fragment of that candidate's exonic sequence, not an
+    intronic feature (a different gene) and not something that crosses a junction."""
+    if s < lo or e > hi:
+        return False
+    for d, a in chain:                       # overlap of [s,e) and intron [d,a)
+        if s < a and d < e:
+            return False
+    return True
+
+
+def cluster_read_chains(
+    read_chains: List[Tuple[Dict, IntronChain]],
+    *,
+    wobble_bp: int = 6,
+    cassette_max_exon_bp: int = 70,
+    fold_monoexon_contained: bool = False,
+    fold_span_guard: bool = False,
+) -> List[ChainCluster]:
+    """Build generation-side clusters from per-read chains (NO snap, 3' ignored).
+
+    Args:
+        read_chains: per-read ``(read_dict, IntronChain)`` (read_dict needs
+            "query_name"; CIGAR-derived chains, used as-is).
+        wobble_bp: per-junction tolerance for wobble / cassette / containment joins.
+        cassette_max_exon_bp: max skipped-exon length for a cassette join (0 off).
+        fold_monoexon_contained: when True, a single-exon (chain-less) read whose
+            aligned span lies wholly inside one exon of a multi-exon candidate is folded
+            into that candidate (its read joins the candidate's support) instead of
+            emitting a standalone mono candidate. This absorbs 5'/3' degradation
+            fragments of a spliced transcript. Reads inside an INTRON (a different gene)
+            or not contained in any multi-exon candidate stay as mono candidates. Off by
+            default (byte-identical legacy behaviour).
+        fold_span_guard: when True, a read only folds into an exact-sub-chain container
+            if its aligned span does NOT run exonically across one of the container's
+            EXTRA introns (introns present in the container but absent from the read's
+            chain). A read that spans such an intron contradicts it (retained-intron or
+            alternative isoform) and is kept as its own candidate instead of being
+            absorbed. Off by default (byte-identical legacy behaviour).
+
+    Returns:
+        List of :class:`ChainCluster`. EVERY exact contiguous sub-chain is folded
+        (unconditionally, no read-support guard) into its longest exact container --
+        generation does pure structural collapse and does NOT decide whether a folded
+        sub-chain is a real short isoform; that judgement is a SEPARATE downstream
+        recovery step (e.g. read-end pileup), not done here. The survivors are unioned
+        into clusters by wobble/cassette/containment; each unique mono chain is its own
+        singleton cluster.
+    """
+    # 1. group reads by EXACT chain (no 3', no snap).
+    by_chain: Dict[Chain, Set[str]] = {}
+    for rd, chain in read_chains:
+        rid = rd.get("query_name")
+        if rid is None:
+            continue
+        by_chain.setdefault(tuple(chain.introns), set()).add(rid)
+
+    # Read spans (0-based [start, end)) -- needed by the span-guarded fold and the
+    # mono-exon fold. Built once, only when a span-aware step is enabled.
+    read_span: Dict[str, Tuple[int, int]] = {}
+    if fold_span_guard or fold_monoexon_contained:
+        for rd, _chain in read_chains:
+            rid = rd.get("query_name")
+            rs = rd.get("reference_start")
+            re_ = rd.get("reference_end")
+            if rid is not None and rs is not None and re_ is not None:
+                read_span[rid] = (rs, re_)
+
+    # 2. collapse every exact contiguous sub-chain into its longest exact container.
+    #    Default: UNCONDITIONAL (no read-support guard). With fold_span_guard, a read
+    #    folds ONLY if its aligned span does not run exonically across one of the
+    #    container's EXTRA introns (retained-intron / alternative isoform reads are kept
+    #    as their own candidate instead of being absorbed). Whether a *consistent*
+    #    folded sub-chain is a genuine short isoform is still a SEPARATE downstream
+    #    recovery step (read-end pileup), never guessed here from read counts.
+    chains_sorted = sorted(by_chain, key=lambda c: (-len(c), -len(by_chain[c]), c))
+    kept: List[Chain] = []
+    reads: Dict[Chain, Set[str]] = {}
+    folded_of: Dict[Chain, List[Tuple[Chain, Set[str]]]] = {}  # container -> shadows
+    for c in chains_sorted:
+        container = next((k for k in kept if _exact_subchain(c, k)), None)
+        if container is None:
+            kept.append(c)
+            reads[c] = set(by_chain[c])
+            continue
+        if not fold_span_guard:
+            reads[container] |= by_chain[c]
+            folded_of.setdefault(container, []).append((c, set(by_chain[c])))
+            continue
+        # span guard: split c's reads into those consistent with the container (fold)
+        # and those exonic across one of the container's extra introns (keep as c).
+        off = _subchain_offset(c, container)
+        extra = container[:off] + container[off + len(c):]
+        fold_r: Set[str] = set()
+        keep_r: Set[str] = set()
+        for rid in by_chain[c]:
+            sp = read_span.get(rid)
+            if sp is not None and any(sp[0] <= d and sp[1] >= a for d, a in extra):
+                keep_r.add(rid)            # exonic across an extra intron -> distinct
+            else:
+                fold_r.add(rid)
+        if fold_r:
+            reads[container] |= fold_r
+            folded_of.setdefault(container, []).append((c, fold_r))
+        if keep_r:
+            kept.append(c)
+            reads[c] = keep_r
+
+    # 3. union-find the survivors by wobble / cassette / containment (multi-exon only).
+    multi = [c for c in kept if len(c) >= 1]
+    mono = [c for c in kept if len(c) == 0]
+
+    # 3b. (optional) fold single-exon reads that are wholly inside a multi-exon
+    #     candidate's exon into that candidate -- 5'/3' degradation fragments of a
+    #     spliced transcript, otherwise emitted as standalone mono FPs. Per-read (the
+    #     mono chain pools every chain-less read), deterministic container choice.
+    if fold_monoexon_contained and mono and multi:
+        multi_span: Dict[Chain, Tuple[int, int]] = {}
+        for c in multi:
+            pts = [read_span[r] for r in reads[c] if r in read_span]
+            if pts:
+                multi_span[c] = (min(p[0] for p in pts), max(p[1] for p in pts))
+        containers = [c for c in multi if c in multi_span]
+        for mc in mono:
+            remaining: Set[str] = set()
+            for rid in reads[mc]:
+                sp = read_span.get(rid)
+                if sp is None:
+                    remaining.add(rid)
+                    continue
+                s, e = sp
+                hits = [c for c in containers
+                        if _monoexon_in_exon(s, e, c, *multi_span[c])]
+                if not hits:
+                    remaining.add(rid)
+                    continue
+                best = max(hits, key=lambda c: (len(reads[c]), len(c), c))
+                reads[best].add(rid)
+                folded_of.setdefault(best, []).append(((), {rid}))
+            reads[mc] = remaining
+        mono = [c for c in mono if reads[c]]
+
+    parent = {c: c for c in multi}
+
+    def find(x: Chain) -> Chain:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(len(multi)):
+        for j in range(i + 1, len(multi)):
+            a, b = multi[i], multi[j]
+            if find(a) != find(b) and _related(a, b, wobble_bp, cassette_max_exon_bp):
+                parent[find(a)] = find(b)
+
+    comps: Dict[Chain, List[Chain]] = {}
+    for c in multi:
+        comps.setdefault(find(c), []).append(c)
+
+    def _mk(c: Chain) -> GenCandidate:
+        """Member candidate with its folded exact-sub-chain shadows attached."""
+        return GenCandidate(
+            IntronChain(introns=c), set(reads[c]),
+            folded=[GenCandidate(IntronChain(introns=fc), set(fr))
+                    for fc, fr in folded_of.get(c, [])])
+
+    clusters: List[ChainCluster] = []
+    for comp in comps.values():
+        members = [_mk(c) for c in comp]
+        union: Set[str] = set()
+        for c in comp:
+            union |= reads[c]
+        clusters.append(ChainCluster(members=members, read_ids=union))
+
+    for c in mono:  # mono singletons
+        clusters.append(ChainCluster(members=[_mk(c)], read_ids=set(reads[c])))
+
+    return clusters
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/16[30m)[36m─┐
+[36m└[34m─([33m16:58:33[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+ succeeded in 21096ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/17[30m)[36m─┐
+[36m└[34m─([33m16:58:14[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/17[30m)[36m─┐
+[36m└[34m─([33m16:58:14[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/17[30m)[36m─┐
+[36m└[34m─([33m16:58:14[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> sed -n '1,300p' fin/candidates/discovery.py[?2004l
+"""Candidate transcript discovery per genomic interval."""
+
+from __future__ import annotations
+
+import logging
+from typing import List, Set
+
+from fin.candidates.dataclasses import CandidateSet, IntronChain, TranscriptCandidate
+from fin.candidates.canonical import parse_motifs
+from fin.candidates.intron_chains import (
+    expand_canonical_chain_alternatives_v2,
+    extract_intron_chain,
+    group_reads_by_three_prime_and_intron_chain,
+    gtf_transcript_to_intron_chain,
+    pick_representative_read,
+)
+from fin.io.interval_manager import (
+    GenomicInterval,
+    is_fusion_read,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _generate_novel_id() -> str:
+    """Generate a short unique ID for a novel candidate."""
+    import uuid
+
+    return "novel_" + uuid.uuid4().hex[:8]
+
+
+def _intron_chains_match(a: IntronChain, b: IntronChain) -> bool:
+    """Check if two intron chains are identical."""
+    return a.introns == b.introns
+
+
+def _spatial_read_clusters(read_ids, spans):
+    """Group chain-less (single-exon) reads into non-overlapping genomic loci via
+    single-linkage over span overlap. Without this, every mono read in an interval
+    pools into ONE candidate whose union span bridges distinct single-exon genes.
+    Reads absent from ``spans`` are dropped. Returns a list of read-id lists."""
+    items = sorted((spans[r][0], spans[r][1], r) for r in read_ids if r in spans)
+    clusters = []
+    cur = []
+    cur_end = None
+    for s, e, r in items:
+        if cur and s > cur_end:                 # no overlap with the current locus
+            clusters.append([x[2] for x in cur])
+            cur = []
+            cur_end = None
+        cur.append((s, e, r))
+        cur_end = e if cur_end is None else max(cur_end, e)
+    if cur:
+        clusters.append([x[2] for x in cur])
+    return clusters
+
+
+def _best_overlap_gtf(mono_gtf, lo: int, hi: int):
+    """Pick the single-exon GTF candidate whose span most overlaps ``[lo, hi)``.
+
+    Mono (empty-chain) candidates must NOT be matched to GTF by chain equality -- every
+    single-exon transcript shares the empty chain, so a dict keyed by chain collapses
+    them and routes all single-exon reads to whichever mono GTF was inserted first.
+    Match by genomic overlap instead; returns None when nothing overlaps."""
+    best = None
+    best_ov = 0
+    for gc, gs, ge in mono_gtf:
+        ov = min(hi, ge) - max(lo, gs)
+        if ov > best_ov:
+            best_ov = ov
+            best = gc
+    return best
+
+
+_COMPLEMENT = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+
+
+def _reverse_complement(seq: str) -> str:
+    return seq.translate(_COMPLEMENT)[::-1]
+
+
+def _exons_from_chain(start: int, end: int, chain: IntronChain) -> List[tuple]:
+    """Derive exon (start, end) blocks from an intron chain spanning [start, end)."""
+    introns = chain.introns
+    if not introns:
+        return [(start, end)]
+    exons = [(start, introns[0][0])]
+    for i in range(len(introns) - 1):
+        exons.append((introns[i][1], introns[i + 1][0]))
+    exons.append((introns[-1][1], end))
+    # Drop any zero-length blocks defensively
+    return [(s, e) for s, e in exons if e > s]
+
+
+def _build_spliced_sequence(
+    genome_fasta: str,
+    start: int,
+    end: int,
+    chain: IntronChain,
+    strand: str,
+) -> str:
+    """Stitch a spliced transcript sequence from a genome chromosome string.
+
+    Args:
+        genome_fasta: Full chromosome sequence string.
+        start: 0-based transcript start (left edge of first exon).
+        end: 0-based exclusive transcript end (right edge of last exon).
+        chain: Intron chain in genomic coordinates.
+        strand: '+' or '-'. Reverse complement is applied for '-'.
+
+    Returns:
+        Spliced cDNA sequence, or empty string when bounds are unusable.
+    """
+    if not genome_fasta or end <= start:
+        return ""
+    chrom_len = len(genome_fasta)
+    # Clip to chromosome bounds.
+    s = max(0, min(start, chrom_len))
+    e = max(0, min(end, chrom_len))
+    if e <= s:
+        return ""
+    parts = []
+    for ex_s, ex_e in _exons_from_chain(s, e, chain):
+        ex_s_c = max(s, min(ex_s, chrom_len))
+        ex_e_c = max(s, min(ex_e, chrom_len))
+        if ex_e_c > ex_s_c:
+            parts.append(genome_fasta[ex_s_c:ex_e_c])
+    seq = "".join(parts)
+    if strand == "-":
+        seq = _reverse_complement(seq)
+    return seq
+
+
+def _three_prime_within_threshold(pos_a: int, pos_b: int, threshold: int) -> bool:
+    return abs(pos_a - pos_b) <= threshold
+
+
+def _graph_groups(non_fusion_reads, strand, tol, min_edge_reads,
+                  tss_brake=True, tss_tol=20, tss_min_reads=3, tss_frac=0.4):
+    """Build novel-candidate read groups via intron-graph assembly: extend each
+    read's chain to a maximal read-supported chain (:func:`assemble_chains`),
+    group reads by that extended chain, and key each group by (TES, IntronChain)
+    for the shared candidate-creation path. TES = the group's 3' terminus (max
+    reference_end on '+', min reference_start on '-'). Truncated reads on the same
+    maximal path land in ONE group -> one full-length candidate.
+
+    ``tss_brake`` passes each read's 5'-end position to the assembler so genuine
+    short isoforms sitting at a real TSS peak are not extended (merged) away."""
+    from fin.candidates.junction_graph import assemble_chains
+
+    reads_kept = []
+    chains = []
+    five_prime_pos = []
+    for rd in non_fusion_reads:
+        cigar = rd.get("cigartuples")
+        ref_start = rd.get("reference_start")
+        if cigar is None or ref_start is None:
+            continue
+        reads_kept.append(rd)
+        chains.append(tuple(extract_intron_chain(cigar, ref_start).introns))
+        # read 5'-end = the truncation-prone terminus (strand-aware)
+        five_prime_pos.append(rd.get("reference_end") if strand == "-" else ref_start)
+    if not chains:
+        return {}
+    _, extended = assemble_chains(
+        chains, tol, min_edge_reads,
+        five_prime_pos=(five_prime_pos if tss_brake else None),
+        strand=strand, tss_tol=tss_tol,
+        min_tss_reads=tss_min_reads, tss_frac=tss_frac,
+    )
+
+    by_chain: dict = {}
+    for i, rd in enumerate(reads_kept):
+        by_chain.setdefault(extended[i], []).append(rd)
+
+    groups: dict = {}
+    for ext_chain, reads in by_chain.items():
+        if strand == "-":
+            tes = min((rd.get("reference_start", 0) for rd in reads), default=0)
+        else:
+            tes = max((rd.get("reference_end", 0) for rd in reads), default=0)
+        groups[(tes, IntronChain(introns=ext_chain))] = reads
+    return groups
+
+
+def _chain_cluster_candidates(
+    interval, non_fusion_reads, all_read_ids, read_sequences, gtf_reader,
+    genome_fasta, strand, min_novel_reads, *, wobble_bp, cassette_max_exon_bp,
+    fold_monoexon_contained=False, fold_span_guard=False,
+) -> CandidateSet:
+    """NEW generation: build candidates via intron-chain clustering.
+
+    Group reads by intron chain (3' ignored), fold EXACT sub-chains, cluster
+    wobble/cassette/containment (members kept); each surviving member chain is a NOVEL
+    candidate whose span is the UNION of its reads' extents and whose sequence is
+    stitched from the genome. A novel chain that EXACTLY matches a GTF transcript's
+    chain merges its reads into that GTF candidate instead. No canonical search.
+    """
+    from fin.candidates.chain_cluster import cluster_read_chains
+
+    read_chains = []
+    spans: dict = {}
+    for rd in non_fusion_reads:
+        cigar = rd.get("cigartuples")
+        ref_start = rd.get("reference_start")
+        if cigar is None or ref_start is None:
+            continue
+        read_chains.append((rd, extract_intron_chain(cigar, ref_start)))
+        q = rd.get("query_name")
+        if q is not None:
+            spans[q] = (ref_start, rd.get("reference_end", ref_start))
+
+    clusters = cluster_read_chains(
+        read_chains, wobble_bp=wobble_bp, cassette_max_exon_bp=cassette_max_exon_bp,
+        fold_monoexon_contained=fold_monoexon_contained,
+        fold_span_guard=fold_span_guard)
+
+    # GTF candidates (identical to the legacy path).
+    gtf_candidates: List[TranscriptCandidate] = []
+    gtf_by_chain: dict = {}
+    if gtf_reader is not None:
+        for tx in gtf_reader.get_transcripts_in_region(
+                interval.chrom, interval.start, interval.end):
+            # Interval is strand-separated (reads are strand-filtered into it), so an
+            # opposite-strand annotation must NOT enter and compete for reads / absorb
+            # same-chain support. (No effect when the interval is unstranded or there is
+            # no GTF, e.g. p00.)
+            if interval.strand is not None and tx.strand != interval.strand:
+                continue
+            chain = gtf_transcript_to_intron_chain(tx)
+            tx.sort_features()
+            three_prime = tx.end if tx.strand == "+" else tx.start
+            gc = TranscriptCandidate(
+                candidate_id=tx.transcript_id, intron_chain=chain,
+                three_prime_pos=three_prime, sequence=tx.get_spliced_sequence(genome_fasta),
+                source="gtf", supporting_read_ids=set(), chrom=interval.chrom,
+                strand=tx.strand, start=tx.start, end=tx.end)
+            gtf_candidates.append(gc)
+            gtf_by_chain.setdefault(chain, gc)   # first GTF wins on an exact-chain tie
+
+    # Single-exon (empty-chain) GTF transcripts, matched to mono members by genomic
+    # overlap (NOT by empty-chain equality, which would collapse them all to one).
+    mono_gtf = [(gc, gc.start, gc.end)
+                for gc in gtf_candidates if not gc.intron_chain.introns]
+
+    # Record each ChainCluster's members by candidate_id (NOT list index): downstream
+    # gates (canonical_gate, junction-dominance, fusion) drop/reorder candidate_set
+    # candidates after discovery, so an id survives those mutations where an index
+    # would go stale. A member with no candidate (empty span/seq) contributes nothing.
+    candidates: List[TranscriptCandidate] = list(gtf_candidates)
+    cluster_id_lists: List[List[str]] = []
+    # container candidate_id -> its folded SHADOW sub-chains (for 5'-TSS recovery).
+    # Each shadow: (intron_chain_tuple, sorted_read_id_tuple). GTF ids can recur
+    # across clusters (same annotation matched twice) -> merge the shadow lists.
+    shadow_map: Dict[str, List[Tuple[Tuple[Tuple[int, int], ...], Tuple[str, ...]]]] = {}
+    def _emit(chain, member_reads, start, end, gc):
+        """Merge ``member_reads`` into GTF ``gc`` (if any) else emit a novel candidate.
+        Returns the candidate_id, or None when the spliced sequence cannot be built."""
+        if gc is not None:                        # GTF match -> merge
+            gc.supporting_read_ids.update(member_reads)
+            return gc.candidate_id
+        seq = _build_spliced_sequence(genome_fasta, start, end, chain, strand)
+        if not seq:
+            return None
+        cid = _generate_novel_id()
+        candidates.append(TranscriptCandidate(
+            candidate_id=cid, intron_chain=chain,
+            three_prime_pos=(end if strand == "+" else start), sequence=seq,
+            source="novel", supporting_read_ids=set(member_reads),
+            chrom=interval.chrom, strand=strand, start=start, end=end))
+        return cid
+
+    for cl in clusters:
+        ids: List[str] = []
+        for m in cl.members:
+            if m.chain.introns:                   # multi-exon: exact-chain GTF match
+                starts = [spans[r][0] for r in m.read_ids if r in spans]
+                ends = [spans[r][1] for r in m.read_ids if r in spans]
+                if not starts:
+                    continue
+                cand_id = _emit(m.chain, m.read_ids, min(starts), max(ends),
+                                gtf_by_chain.get(m.chain))
+                if cand_id is None:
+                    continue
+                ids.append(cand_id)
+                # folded exact-sub-chain shadows keyed by the candidate it became
+                # (5'-TSS recovery). Mono members carry none.
+                member_shadows = [
+                    (tuple(f.chain.introns), tuple(sorted(f.read_ids)))
+                    for f in m.folded if f.chain.introns
+                ]
+                if member_shadows:
+                    shadow_map.setdefault(cand_id, []).extend(member_shadows)
+            else:
+                # mono (single-exon): split the pooled chain-less reads into per-locus
+                # groups so distinct single-exon genes are not bridged, then overlap-match
+                # each locus to a single-exon GTF (else emit a per-locus novel candidate).
+                for group in _spatial_read_clusters(m.read_ids, spans):
+                    gs = [spans[r][0] for r in group]
+                    ge = [spans[r][1] for r in group]
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/17[30m)[36m─┐
+[36m└[34m─([33m16:58:33[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+codex
+I have the core logic now. Next I’m pulling numbered excerpts for exact file:line citations, especially around the feeder/consumer path in discovery and the union-find block.
+exec
+/bin/bash -lc "nl -ba fin/candidates/chain_cluster.py | sed -n '1,340p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+exec
+/bin/bash -lc "nl -ba fin/candidates/discovery.py | sed -n '186,330p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+exec
+/bin/bash -lc "nl -ba fin/candidates/discovery.py | sed -n '420,455p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+codex
+The non-PTY shell is indeed returning blank stdout in this repo, so I’m switching the numbered excerpts to PTY input as requested.
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+ succeeded in 7300ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:58:54[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:58:54[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:58:54[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> nl -ba fin/candidates/chain_cluster.py | sed -n '1,34<dates/chain_cluster.py | sed -n '1,340                                       <dates/chain_cluster.py | sed -n '1,340p'[?2004l
+     1	"""Generation-side intron-chain clustering.
+     2	
+     3	Cluster-first candidate generation. Pool all reads, group by their EXACT (raw,
+     4	un-snapped) intron chain, then:
+     5	
+     6	  1. COLLAPSE exact sub-chains  -- a chain that is a strict contiguous sub-chain of a
+     7	     longer chain with IDENTICAL coordinates folds into it (reads pooled, chain gone).
+     8	  2. CLUSTER the survivors      -- union-find groups the remaining distinct chains into
+     9	     one cluster when related by any of:
+    10	       * WOBBLE      : same intron count, every junction within ``wobble_bp``,
+    11	       * CASSETTE    : K vs K-1 chains differing by one small (< ``cassette_max_exon_bp``)
+    12	                       skipped exon (minimap2's small-exon-skip artefact),
+    13	       * CONTAINMENT : a shorter chain that is a contiguous sub-chain of a longer one
+    14	                       within ``wobble_bp`` per junction (the non-exact leftovers that
+    15	                       step 1 did not fold).
+    16	
+    17	A cluster KEEPS all its member candidates (distinct chains + pooled reads); only exact
+    18	sub-chains disappear. NO consensus snapping (coordinates are never rewritten). The
+    19	cluster is the downstream unit: reads attach to a cluster instead of splitting across
+    20	near-duplicates, and which members are genuine isoforms is decided later by the
+    21	per-cluster computation. The caller runs with canonical_search_bp = 0 (no shadows).
+    22	
+    23	Mono-exon chains never join a structural cluster; each unique mono chain is a singleton.
+    24	"""
+    25	from __future__ import annotations
+    26	
+    27	from dataclasses import dataclass, field
+    28	from typing import Dict, List, Set, Tuple
+    29	
+    30	from fin.candidates.dataclasses import IntronChain
+    31	
+    32	Chain = Tuple[Tuple[int, int], ...]
+    33	
+    34	
+    35	@dataclass
+    36	class GenCandidate:
+    37	    """One candidate inside a cluster: a distinct intron chain + its pooled reads.
+    38	
+    39	    ``folded`` holds the SHADOW sub-chains folded into this candidate (each an exact
+    40	    contiguous sub-chain, with its OWN reads). They are dormant provenance for the
+    41	    downstream short-isoform recovery step: their truncation boundary is a proposed
+    42	    TSS/polyA site and their reads are the direct endpoint evidence. ``read_ids``
+    43	    already INCLUDES every shadow's reads (pooled), so shadows never add read mass."""
+    44	    chain: IntronChain
+    45	    read_ids: Set[str] = field(default_factory=set)
+    46	    folded: List["GenCandidate"] = field(default_factory=list)
+    47	
+    48	    @property
+    49	    def num_introns(self) -> int:
+    50	        return len(self.chain.introns)
+    51	
+    52	
+    53	@dataclass
+    54	class ChainCluster:
+    55	    """A structural family of candidate chains sharing their reads' assignment.
+    56	
+    57	    ``members`` are the distinct surviving candidates (exact sub-chains already folded
+    58	    away). ``read_ids`` is the union of all members' reads. ``representative`` is the
+    59	    longest member (convenience; NOT a snapped consensus -- original coordinates)."""
+    60	    members: List[GenCandidate]
+    61	    read_ids: Set[str] = field(default_factory=set)
+    62	
+    63	    @property
+    64	    def representative(self) -> GenCandidate:
+    65	        return max(self.members,
+    66	                   key=lambda m: (m.num_introns, len(m.read_ids), m.chain.introns))
+    67	
+    68	
+    69	# ---------------------------------------------------------------------------
+    70	# chain-relation predicates (single interval/strand: no chrom/strand bucketing)
+    71	# ---------------------------------------------------------------------------
+    72	def _exact_subchain(short: Chain, long_: Chain) -> bool:
+    73	    """``short`` is a strict EXACT (identical coords) contiguous sub-chain of ``long_``."""
+    74	    n, m = len(long_), len(short)
+    75	    if m == 0 or m >= n:
+    76	        return False
+    77	    return any(long_[off:off + m] == short for off in range(n - m + 1))
+    78	
+    79	
+    80	def _subchain_offset(short: Chain, long_: Chain) -> int:
+    81	    """Offset of the first exact ``short`` occurrence in ``long_`` (-1 if none). The
+    82	    introns of ``long_`` outside ``[off, off+len(short))`` are the container's EXTRA
+    83	    introns relative to ``short`` -- positions where ``short`` splices differently."""
+    84	    n, m = len(long_), len(short)
+    85	    if m == 0 or m >= n:
+    86	        return -1
+    87	    for off in range(n - m + 1):
+    88	        if long_[off:off + m] == short:
+    89	            return off
+    90	    return -1
+    91	
+    92	
+    93	def _wobble(a: Chain, b: Chain, bp: int) -> bool:
+    94	    """Same intron count, every donor/acceptor within ``bp``."""
+    95	    if len(a) != len(b):
+    96	        return False
+    97	    return all(abs(s1 - s2) <= bp and abs(e1 - e2) <= bp
+    98	               for (s1, e1), (s2, e2) in zip(a, b))
+    99	
+   100	
+   101	def _contains(short: Chain, long_: Chain, bp: int) -> bool:
+   102	    """``short`` is a strictly-shorter contiguous sub-chain of ``long_`` within ``bp``."""
+   103	    n, m = len(long_), len(short)
+   104	    if m == 0 or m >= n:
+   105	        return False
+   106	    for off in range(n - m + 1):
+   107	        if all(abs(short[k][0] - long_[off + k][0]) <= bp and
+   108	               abs(short[k][1] - long_[off + k][1]) <= bp for k in range(m)):
+   109	            return True
+   110	    return False
+   111	
+   112	
+   113	def _cassette(a: Chain, b: Chain, bp: int, max_exon_bp: int) -> bool:
+   114	    """``a`` (K introns) is a cassette-skip sibling of ``b`` (K-1 introns): at one
+   115	    position ``i`` the two introns ``a[i], a[i+1]`` replace ``b[i]``'s span (outer
+   116	    donor/acceptor within bp), the skipped exon between them is < ``max_exon_bp``, and
+   117	    every other intron matches within bp."""
+   118	    if max_exon_bp <= 0 or len(a) != len(b) + 1:
+   119	        return False
+   120	    for i in range(len(a) - 1):
+   121	        if any(abs(a[k][0] - b[k][0]) > bp or abs(a[k][1] - b[k][1]) > bp
+   122	               for k in range(i)):
+   123	            continue
+   124	        if abs(a[i][0] - b[i][0]) > bp or abs(a[i + 1][1] - b[i][1]) > bp:
+   125	            continue
+   126	        rest = len(b) - i - 1
+   127	        if any(abs(a[i + 2 + k][0] - b[i + 1 + k][0]) > bp or
+   128	               abs(a[i + 2 + k][1] - b[i + 1 + k][1]) > bp for k in range(rest)):
+   129	            continue
+   130	        cas = a[i + 1][0] - a[i][1]
+   131	        if 0 < cas < max_exon_bp:
+   132	            return True
+   133	    return False
+   134	
+   135	
+   136	def _related(a: Chain, b: Chain, wobble_bp: int, cassette_max_exon_bp: int) -> bool:
+   137	    """True iff ``a`` and ``b`` should share a cluster (wobble / cassette / containment)."""
+   138	    if _wobble(a, b, wobble_bp):
+   139	        return True
+   140	    lo, hi = (a, b) if len(a) < len(b) else (b, a)
+   141	    if len(lo) < len(hi):
+   142	        if _cassette(hi, lo, wobble_bp, cassette_max_exon_bp):
+   143	            return True
+   144	        if _contains(lo, hi, wobble_bp):
+   145	            return True
+   146	    return False
+   147	
+   148	
+   149	def _monoexon_in_exon(s: int, e: int, chain: Chain, lo: int, hi: int) -> bool:
+   150	    """``[s, e)`` (a single-exon read) lies wholly inside ONE exon of a multi-exon
+   151	    candidate whose exonic footprint is ``[lo, hi)`` and whose introns are ``chain``
+   152	    (each ``[d, a)`` half-open). True iff the read is within the footprint AND overlaps
+   153	    no intron -- i.e. it is a fragment of that candidate's exonic sequence, not an
+   154	    intronic feature (a different gene) and not something that crosses a junction."""
+   155	    if s < lo or e > hi:
+   156	        return False
+   157	    for d, a in chain:                       # overlap of [s,e) and intron [d,a)
+   158	        if s < a and d < e:
+   159	            return False
+   160	    return True
+   161	
+   162	
+   163	def cluster_read_chains(
+   164	    read_chains: List[Tuple[Dict, IntronChain]],
+   165	    *,
+   166	    wobble_bp: int = 6,
+   167	    cassette_max_exon_bp: int = 70,
+   168	    fold_monoexon_contained: bool = False,
+   169	    fold_span_guard: bool = False,
+   170	) -> List[ChainCluster]:
+   171	    """Build generation-side clusters from per-read chains (NO snap, 3' ignored).
+   172	
+   173	    Args:
+   174	        read_chains: per-read ``(read_dict, IntronChain)`` (read_dict needs
+   175	            "query_name"; CIGAR-derived chains, used as-is).
+   176	        wobble_bp: per-junction tolerance for wobble / cassette / containment joins.
+   177	        cassette_max_exon_bp: max skipped-exon length for a cassette join (0 off).
+   178	        fold_monoexon_contained: when True, a single-exon (chain-less) read whose
+   179	            aligned span lies wholly inside one exon of a multi-exon candidate is folded
+   180	            into that candidate (its read joins the candidate's support) instead of
+   181	            emitting a standalone mono candidate. This absorbs 5'/3' degradation
+   182	            fragments of a spliced transcript. Reads inside an INTRON (a different gene)
+   183	            or not contained in any multi-exon candidate stay as mono candidates. Off by
+   184	            default (byte-identical legacy behaviour).
+   185	        fold_span_guard: when True, a read only folds into an exact-sub-chain container
+   186	            if its aligned span does NOT run exonically across one of the container's
+   187	            EXTRA introns (introns present in the container but absent from the read's
+   188	            chain). A read that spans such an intron contradicts it (retained-intron or
+   189	            alternative isoform) and is kept as its own candidate instead of being
+   190	            absorbed. Off by default (byte-identical legacy behaviour).
+   191	
+   192	    Returns:
+   193	        List of :class:`ChainCluster`. EVERY exact contiguous sub-chain is folded
+   194	        (unconditionally, no read-support guard) into its longest exact container --
+   195	        generation does pure structural collapse and does NOT decide whether a folded
+   196	        sub-chain is a real short isoform; that judgement is a SEPARATE downstream
+   197	        recovery step (e.g. read-end pileup), not done here. The survivors are unioned
+   198	        into clusters by wobble/cassette/containment; each unique mono chain is its own
+   199	        singleton cluster.
+   200	    """
+   201	    # 1. group reads by EXACT chain (no 3', no snap).
+   202	    by_chain: Dict[Chain, Set[str]] = {}
+   203	    for rd, chain in read_chains:
+   204	        rid = rd.get("query_name")
+   205	        if rid is None:
+   206	            continue
+   207   208	
+   209	    # Read spans (0-based [start, end)) -- needed by the span-guarded fold and the
+   210	    # mono-exon fold. Built once, only when a span-aware step is enabled.
+   211	    read_span: Dict[str, Tuple[int, int]] = {}
+   212	    if fold_span_guard or fold_monoexon_contained:            if rid is not None and rs is not None and re_ is not None:
+   218	                read_span[rid] = (rs, re_)
+   219	
+   220	    # 2. collapse every exact contiguous sub-chain into its longest exact container.
+   221	    #    Default: UNCONDITIONAL (no read-support guard). With fold_span_guard, a read
+	    #    container's EXTRA introns (retained-intron / alternative isoform reads are kept
+   224	    #    as their own candidate instead of being absorbed). Whether a *consistent*
+   225	    #    folded sub-chain is a genuine short isoform is still a SEPARATE downstream
+   226	    #    recovery step (read-end pileup), never guessed here from read counts.
+   227	    chains_sorted = sorted(by_chain, key=lambda c: (-len(c), -len(by_chain[c]), c))
+   228	    kept: List[Chain] = []
+   229	    reads: Dict[Chain, Set[str]] = {}
+   230	    folded_of: Dict[Chain, List[Tuple[Chain, Set[str]]]] = {}  # container -> shadows
+   231	    for c in chains_sorted:
+   232	        container = next((k for k in kept if _exact_subchain(c, k)), None)
+   233	        if container is None:
+   234	            kept.append(c)
+   235	            reads[c] = set(by_chain[c])
+   236	            continue
+   237	        if not fold_span_guard:
+   238	            reads[container] |= by_chain[c]
+   239	            folded_of.setdefault(container, []).append((c, set(by_chain[c])))
+   240	            continue
+   241	        # span guard: split c's reads into those consistent with the container (fold)
+   242	        # and those exonic across one of the container's extra introns (keep as c).
+   243	        off = _subchain_offset(c, container)
+   244	        extra = container[:off] + container[off + len(c):]
+   245	        fold_r: Set[str] = set()
+   246	        keep_r: Set[str] = set()
+   247	        for rid in by_chain[c]:
+   248	            sp = read_span.get(rid)
+   249	            if sp is not None and any(sp[0] <= d and sp[1] >= a for d, a in extra):
+   250	                keep_r.add(rid)            # exonic across an extra intron -> distinct
+   251	            else:
+   252	                fold_r.add(rid)
+   253	        if fold_r:
+   254	            reads[container] |= fold_r
+   255	            folded_of.setdefault(container, []).append((c, fold_r))
+   256	        if keep_r:
+   257	            kept.append(c)
+   258	            reads[c] = keep_r
+   259	
+   260	    # 3. union-find the survivors by wobble / cassette / containment (multi-exon only).
+   261	    multi = [c for c in kept if len(c) >= 1]
+   262	    mono = [c for c in kept if len(c) == 0]
+   263	
+   264	    # 3b. (optional) fold single-exon reads that are wholly inside a multi-exon
+   265	    #     candidate's exon into that candidate -- 5'/3' degradation fragments of a
+   266	    #     spliced transcript, otherwise emitted as standalone mono FPs. Per-read (the
+   267	    #     mono chain pools every chain-less read), deterministic container choice.
+   268	    if fold_monoexon_contained and mono and multi:
+   269	        multi_span: Dict[Chain, Tuple[int, int]] = {}
+   270	        for c in multi:
+   271	            pts = [read_span[r] for r in reads[c] if r in read_span]
+   272	            if pts:
+   273	                multi_span[c] = (min(p[0] for p in pts), max(p[1] for p in pts))
+   274	        containers = [c for c in multi if c in multi_span]
+   275	        for mc in mono:
+   276	            remaining: Set[str] = set()
+   277	            for rid in reads[mc]:
+   278	                sp = read_span.get(rid)
+   279	                if sp is None:
+   280	                    remaining.add(rid)
+   281	                    continue
+   282	                s, e = sp
+   283	                hits = [c for c in containers
+   284	                        if _monoexon_in_exon(s, e, c, *multi_span[c])]
+   285	                if not hits:
+   286	                    remaining.add(rid)
+   287	                    continue
+   288	                best = max(hits, key=lambda c: (len(reads[c]), len(c), c))
+   289	                reads[best].add(rid)
+   290	                folded_of.setdefault(best, []).append(((), {rid}))
+   291	            reads[mc] = remaining
+   292	        mono = [c for c in mono if reads[c]]
+   293	
+   294	    parent = {c: c for c in multi}
+   295	
+   296	    def find(x: Chain) -> Chain:
+   297	        while parent[x] != x:
+   298	            parent[x] = parent[parent[x]]
+   299	            x = parent[x]
+   300	        return x
+   301	
+   302	    for i in range(len(multi)):
+   303	        for j in range(i + 1, len(multi)):
+   304	            a, b = multi[i], multi[j]
+   305	            if find(a) != find(b) and _related(a, b, wobble_bp, cassette_max_exon_bp):
+   306	                parent[find(a)] = find(b)
+   307	
+   308	    comps: Dict[Chain, List[Chain]] = {}
+   309	    for c in multi:
+   310	        comps.setdefault(find(c), []).append(c)
+   311	
+   312	    def _mk(c: Chain) -> GenCandidate:
+   313	        """Member candidate with its folded exact-sub-chain shadows attached."""
+   314	        return GenCandidate(
+   315	            IntronChain(introns=c), set(reads[c]),
+   316	            folded=[GenCandidate(IntronChain(introns=fc), set(fr))
+   317	                    for fc, fr in folded_of.get(c, [])])
+   318	
+   319	    clusters: List[ChainCluster] = []
+   320	    for comp in comps.values():
+   321	        members = [_mk(c) for c in comp]
+   322	        union: Set[str] = set()
+   323	        for c in comp:
+   324	            union |= reads[c]
+   325	        clusters.append(ChainCluster(members=members, read_ids=union))
+   326	
+   327	    for c in mono:  # mono singletons
+   328	        clusters.append(ChainCluster(members=[_mk(c)], read_ids=set(reads[c])))
+   329	
+   330	    return clusters
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:00[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+ succeeded in 7388ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/16[30m)[36m─┐
+[36m└[34m─([33m16:58:54[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/16[30m)[36m─┐
+[36m└[34m─([33m16:58:54[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/16[30m)[36m─┐
+[36m└[34m─([33m16:58:54[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> nl -ba fin/candidates/discovery.py | sed -n '186,330p<dates/discovery.py | sed -n '186,330p'                                       <dates/discovery.py | sed -n '186,330p'[?2004l
+   186	def _chain_cluster_candidates(
+   187	    interval, non_fusion_reads, all_read_ids, read_sequences, gtf_reader,
+   188	    genome_fasta, strand, min_novel_reads, *, wobble_bp, cassette_max_exon_bp,
+   189	    fold_monoexon_contained=False, fold_span_guard=False,
+   190	) -> CandidateSet:
+   191	    """NEW generation: build candidates via intron-chain clustering.
+   192	
+   193	    Group reads by intron chain (3' ignored), fold EXACT sub-chains, cluster
+   194	    wobble/cassette/containment (members kept); each surviving member chain is a NOVEL
+   195	    candidate whose span is the UNION of its reads' extents and whose sequence is
+   196	    stitched from the genome. A novel chain that EXACTLY matches a GTF transcript's
+   197	    chain merges its reads into that GTF candidate instead. No canonical search.
+   198	    """
+   199	    from fin.candidates.chain_cluster import cluster_read_chains
+   200	
+   201	    read_chains = []
+   202	    spans: dict = {}
+   203	    for rd in non_fusion_reads:
+   204	        cigar = rd.get("cigartuples")
+   205	        ref_start = rd.get("reference_start")
+   206	        if cigar is None or ref_start is None:
+   207	            continue
+   208	        read_chains.append((rd, extract_intron_chain(cigar, ref_start)))
+   209	        q = rd.get("query_name")
+   210	        if q is not None:
+   211	            spans[q] = (ref_start, rd.get("reference_end", ref_start))
+   212	
+   213	    clusters = cluster_read_chains(
+   214	        read_chains, wobble_bp=wobble_bp, cassette_max_exon_bp=cassette_max_exon_bp,
+   215	        fold_monoexon_contained=fold_monoexon_contained,
+   216	        fold_span_guard=fold_span_guard)
+   217	
+   218	    # GTF candidates (identical to the legacy path).
+   219	    gtf_candidates: List[TranscriptCandidate] = []
+   220	    gtf_by_chain: dict = {}
+   221	    if gtf_reader is not None:
+   222	        for tx in gtf_reader.get_transcripts_in_region(
+   223	                interval.chrom, interval.start, interval.end):
+   224	            # Interval is strand-separated (reads are strand-filtered into it), so an
+   225	            # opposite-strand annotation must NOT enter and compete for reads / absorb
+   226	            # same-chain support. (No effect when the interval is unstranded or there is
+   227	            # no GTF, e.g. p00.)
+   228	            if interval.strand is not None and tx.strand != interval.strand:
+   229	                continue
+   230	            chain = gtf_transcript_to_intron_chain(tx)
+   231	            tx.sort_features()
+   232	            three_prime = tx.end if tx.strand == "+" else tx.start
+   233	            gc = TranscriptCandidate(
+   234	                candidate_id=tx.transcript_id, intron_chain=chain,
+   235	                three_prime_pos=three_prime, sequence=tx.get_spliced_sequence(genome_fasta),
+   236	                source="gtf", supporting_read_ids=set(), chrom=interval.chrom,
+   237	                strand=tx.strand, start=tx.start, end=tx.end)
+   238	            gtf_candidates.append(gc)
+   239	            gtf_by_chain.setdefault(chain, gc)   # first GTF wins on an exact-chain tie
+   240	
+   241	    # Single-exon (empty-chain) GTF transcripts, matched to mono members by genomic
+   242	    # overlap (NOT by empty-chain equality, which would collapse them all to one).
+   243	    mono_gtf = [(gc, gc.start, gc.end)
+   244	                for gc in gtf_candidates if not gc.intron_chain.introns]
+   245	
+   246	    # Record each ChainCluster's members by candidate_id (NOT list index): downstream
+   247	    # gates (canonical_gate, junction-dominance, fusion) drop/reorder candidate_set
+   248	    # candidates after discovery, so an id survives those mutations where an index
+   249	    # would go stale. A member with no candidate (empty span/seq) contributes nothing.
+   250	    candidates: List[TranscriptCandidate] = list(gtf_candidates)
+   251	    cluster_id_lists: List[List[str]] = []
+   252	    # container candidate_id -> its folded SHADOW sub-chains (for 5'-TSS recovery).
+   253	    # Each shadow: (intron_chain_tuple, sorted_read_id_tuple). GTF ids can recur
+   254	    # across clusters (same annotation matched twice) -> merge the shadow lists.
+   255	    shadow_map: Dict[str, List[Tuple[Tuple[Tuple[int, int], ...], Tuple[str, ...]]]] = {}
+   256	    def _emit(chain, member_reads, start, end, gc):
+   257	        """Merge ``member_reads`` into GTF ``gc`` (if any) else emit a novel candidate.
+   258	        Returns the candidate_id, or None when the spliced sequence cannot be built."""
+   259	        if gc is not None:                        # GTF match -> merge
+   260	            gc.supporting_read_ids.update(member_reads)
+   261	            return gc.candidate_id
+   262	        seq = _build_spliced_sequence(genome_fasta, start, end, chain, strand)
+   263	        if not seq:
+   264	            return None
+   265	        cid = _generate_novel_id()
+   266	        candidates.append(TranscriptCandidate(
+   267	            candidate_id=cid, intron_chain=chain,
+   268	            three_prime_pos=(end if strand == "+" else start), sequence=seq,
+   269	            source="novel", supporting_read_ids=set(member_reads),
+   270	            chrom=interval.chrom, strand=strand, start=start, end=end))
+   271	        return cid
+   272	
+   273	    for cl in clusters:
+   274	        ids: List[str] = []
+   275	        for m in cl.members:
+   276	            if m.chain.introns:                   # multi-exon: exact-chain GTF match
+   277	                starts = [spans[r][0] for r in m.read_ids if r in spans]
+   278	                ends = [spans[r][1] for r in m.read_ids if r in spans]
+   279	                if not starts:
+   280	                    continue
+   281	                cand_id = _emit(m.chain, m.read_ids, min(starts), max(ends),
+   282	                                gtf_by_chain.get(m.chain))
+   283	                if cand_id is None:
+   284	                    continue
+   285	                ids.append(cand_id)
+   286	                # folded exact-sub-chain shadows keyed by the candidate it became
+   287	                # (5'-TSS recovery). Mono members carry none.
+   288	                member_shadows = [
+   289	                    (tuple(f.chain.introns), tuple(sorted(f.read_ids)))
+   290	                    for f in m.folded if f.chain.introns
+   291	                ]
+   292	                if member_shadows:
+   293	                    shadow_map.setdefault(cand_id, []).extend(member_shadows)
+   294	            else:
+   295	                # mono (single-exon): split the pooled chain-less reads into per-locus
+   296	                # groups so distinct single-exon genes are not bridged, then overlap-match
+   297	                # each locus to a single-exon GTF (else emit a per-locus novel candidate).
+   298	                for group in _spatial_read_clusters(m.read_ids, spans):
+   299	                    gs = [spans[r][0] for r in group]
+   300	                    ge = [spans[r][1] for r in group]
+   301	                    lo, hi = min(gs), max(ge)
+   302	                    cand_id = _emit(m.chain, set(group), lo, hi,
+   303	                                    _best_overlap_gtf(mono_gtf, lo, hi))
+   304	                    if cand_id is not None:
+   305	                        ids.append(cand_id)
+   306	        cluster_id_lists.append(ids)
+   307	
+   308	    # Drop low-support novels; prune cluster lists to surviving candidate ids.
+   309	    if min_novel_reads > 1:
+   310	        candidates = [c for c in candidates
+   311	                      if c.source != "novel"
+   312	                      or len(c.supporting_read_ids) >= min_novel_reads]
+   313	        keep_ids = {c.candidate_id for c in candidates}
+   314	        cluster_id_lists = [
+   315	            [cid for cid in ids if cid in keep_ids] for ids in cluster_id_lists
+   316	        ]
+   317	        # Prune shadow entries whose container candidate was dropped.
+   318	        shadow_map = {cid: sh for cid, sh in shadow_map.items() if cid in keep_ids}
+   319	
+   320	    logger.info(
+   321	        "Interval %s: %d candidates (%d GTF, %d novel) from %d reads [chain-cluster]",
+   322	        interval.region_string, len(candidates),
+   323	        sum(1 for c in candidates if c.source == "gtf"),
+   324	        sum(1 for c in candidates if c.source == "novel"), len(all_read_ids))
+   325	
+   326	    return CandidateSet(
+   327	        interval=interval, candidates=candidates, read_ids=all_read_ids,
+   328	        read_sequences=read_sequences, clusters=cluster_id_lists,
+   329	        shadows=shadow_map, read_spans=spans)
+   330	
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/16[30m)[36m─┐
+[36m└[34m─([33m16:59:00[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+ succeeded in 7271ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/17[30m)[36m─┐
+[36m└[34m─([33m16:58:54[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/17[30m)[36m─┐
+[36m└[34m─([33m16:58:54[34m[00m on [32mdev[00m[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/17[30m)[36m─┐
+[36m└[34m─([33m16:58:54[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> nl -ba fin/candidates/discovery.py | sed -n '420,455p<dates/discovery.py | sed -n '420,455p'                                       <dates/discovery.py | sed -n '420,455p'[?2004l
+   420	            candidates=[],
+   421	            read_ids=all_read_ids,
+   422	            read_sequences=read_sequences,
+   423	        )
+   424	
+   425	    # Determine strand from reads
+   426	    strand = interval.strand or "+"
+   427	
+   428	    # NEW generation-side clustering (production default). Group reads by intron chain
+   429	    # (3' ignored), collapse EXACT sub-chains, cluster wobble/cassette/containment
+   430	    # keeping members; NO canonical-search shadow generation. Bypasses the legacy
+   431	    # 3'+exact-chain grouping and canonical expansion entirely.
+   432	    if chain_cluster:
+   433	        return _chain_cluster_candidates(
+   434	            interval, non_fusion_reads, all_read_ids, read_sequences,
+   435	            gtf_reader, genome_fasta, strand, min_novel_reads,
+   436	            wobble_bp=chain_cluster_wobble_bp,
+   437	            cassette_max_exon_bp=chain_cluster_cassette_max_exon_bp,
+   438	            fold_monoexon_contained=chain_cluster_fold_monoexon,
+   439	            fold_span_guard=chain_cluster_fold_span_guard,
+   440	        )
+   441	
+   442	    # 2. Group reads by 3' + intron chain → novel candidate groups.
+   443	    # Optional pre-processing:
+   444	    #   - canonical_search_bp>0: for each junction, scan the genome ±N bp for
+   445	    #     canonical GT-AG motifs and emit the resulting chain alternatives
+   446	    #     alongside the original (recovering ambiguous-GT-AG strict misses
+   447	    #     where multiple valid splice sites exist within a few bp).
+   448	    multi_chain_override = None
+   449	
+   450	    if canonical_search_bp > 0:
+   451	        # Pre-extract CIGAR-derived chains once.
+   452	        read_chains = []
+   453	        for rd in non_fusion_reads:
+   454	            cigar = rd.get("cigartuples")
+   455	            ref_start = rd.get("reference_start")
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/17[30m)[36m─┐
+[36m└[34m─([33m16:59:00[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+codex
+The feeder confirms it passes per-read CIGAR-derived `IntronChain`s and ignores 3' in the clustering path. I’m checking the `IntronChain` dataclass just enough to ground what “chain equality” means.
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+ succeeded in 5920ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:08[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:08[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:08[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> rg -n "class IntronChain|@dataclass" fin/candidates/d<ronChain|@dataclass" fin/candidates/da                                       <ronChain|@dataclass" fin/candidates/dataclasses.py[?2004l
+11:@dataclass(frozen=True)
+12:class IntronChain:
+29:@dataclass
+75:@dataclass
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:12[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hnl -ba fin/candidates/dataclasses.py | sed -n '1,90p'[?2004l
+     1	"""Data classes for transcript candidate discovery."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	from dataclasses import dataclass, field
+     6	from typing import Dict, List, Optional, Set, Tuple
+     7	
+     8	from fin.io.interval_manager import GenomicInterval
+     9	
+    10	
+    11	@dataclass(frozen=True)
+    12	class IntronChain:
+    13	    """Hashable representation of a transcript's intron structure.
+    14	
+    15	    Each intron is a (start, end) tuple in genomic coordinates.
+    16	    """
+    17	
+    18	    introns: Tuple[Tuple[int, int], ...]
+    19	
+    20	    @property
+    21	    def num_introns(self) -> int:
+    22	        return len(self.introns)
+    23	
+    24	    @property
+    25	    def is_single_exon(self) -> bool:
+    26	        return len(self.introns) == 0
+    27	
+    28	
+    29	@dataclass
+    30	class TranscriptCandidate:
+    31	    """A candidate transcript (from GTF annotation, novel discovery, or fusion).
+    32	
+    33	    Required fields (positional):
+    34	        candidate_id, intron_chain, three_prime_pos, sequence, source,
+    35	        supporting_read_ids, chrom, strand, start, end.
+    36	
+    37	    Optional fusion fields (populated only when source == "fusion"):
+    38	        fusion_junction: Tuple of (left_genomic_pos, right_genomic_pos) marking
+    39	            where the two parental transcripts are joined.
+    40	        breakpoint_left: (chrom, pos, strand) for the left fusion partner.
+    41	        breakpoint_right: (chrom, pos, strand) for the right fusion partner.
+    42	    """
+    43	
+    44	    candidate_id: str
+    45	    intron_chain: IntronChain
+    46	    three_prime_pos: int
+    47	    sequence: str
+    48	    source: str  # "gtf", "novel", or "fusion"
+    49	    supporting_read_ids: Set[str]
+    50	    chrom: str
+    51	    strand: str
+    52	    start: int
+    53	    end: int
+    54	
+    55	    # Fusion-specific (populated only when source == "fusion")
+    56	    fusion_junction: Optional[Tuple[int, int]] = None
+    57	    breakpoint_left: Optional[Tuple[str, int, str]] = None   # (chrom, pos, strand)
+    58	    breakpoint_right: Optional[Tuple[str, int, str]] = None
+    59	
+    60	    @property
+    61	    def length(self) -> int:
+    62	        # Fusion candidates set start=posA on chromA and end=posB on chromB.
+    63	        # Subtracting them is meaningless (and can be negative) so we fall
+    64	        # back to the assembled sequence length, which is the only thing
+    65	        # downstream code actually uses for fusion candidates.
+    66	        if self.source == "fusion":
+    67	            return len(self.sequence) if self.sequence else 0
+    68	        return self.end - self.start
+    69	
+    70	    @property
+    71	    def num_supporting_reads(self) -> int:
+    72	        return len(self.supporting_read_ids)
+    73	
+    74	
+    75	@dataclass
+    76	class CandidateSet:
+    77	    """Collection of transcript candidates for a genomic interval."""
+    78	
+    79	    interval: GenomicInterval
+    80	    candidates: List[TranscriptCandidate]
+    81	    read_ids: Set[str]
+    82	    # read_id -> primary-alignment query_sequence, scoped to reads fetched
+    83	    # within this interval. Populated by discover_candidates(); used by R1
+    84	    # ablation (mappy argmax bypass) and any path that needs read FASTA.
+    85	    read_sequences: Dict[str, str] = field(default_factory=dict)
+    86	    # Generation-cluster grouping for quant_mode="cluster": each inner list holds
+    87	    # the candidate_ids that belong to one generation cluster. Ids (not indices)
+    88	    # survive post-discovery gate drops/reorders (canonical/dominance/fusion), which
+    89	    # would invalidate positional indices. Populated only by the chain-cluster
+    90	    # discovery path; None means "not chain-cluster mode" (the quant-cluster dispatch
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:12[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+codex
+I’m checking whether the repo already has targeted tests for these predicates; that helps distinguish intended edge behavior from accidental behavior without expanding beyond clustering.
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+ succeeded in 5531ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:19[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:19[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:19[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> rg -n "cluster_read_chains|_wobble|_cassette|_contain<ead_chains|_wobble|_cassette|_contains                                       <ead_chains|_wobble|_cassette|_contains|fold_monoexon|fold_span_guard|ChainClu<old_monoexon|fold_span_guard|ChainClus                                       <old_monoexon|fold_span_guard|ChainCluster|chain_cluster" tests fin | head -n <r|chain_cluster" tests fin | head -n 2                                       <r|chain_cluster" tests fin | head -n 200[?2004l
+tests/all_unit_tests.txt:69:tests/unit/test_log_config.py::TestLoggerFormat::test_log_message_contains_timestamp PASSED [ 65%]
+tests/all_unit_tests.txt:70:tests/unit/test_log_config.py::TestLoggerFormat::test_log_message_contains_level PASSED [ 66%]
+tests/all_unit_tests.txt:71:tests/unit/test_log_config.py::TestLoggerFormat::test_log_message_contains_filename PASSED [ 67%]
+tests/all_unit_tests.txt:72:tests/unit/test_sequences.py::TestComplement::test_complement_contains_standard_bases PASSED [ 68%]
+tests/all_unit_tests.txt:73:tests/unit/test_sequences.py::TestComplement::test_complement_contains_lowercase_bases PASSED [ 69%]
+fin/candidates/discovery.py:186:def _chain_cluster_candidates(
+fin/candidates/discovery.py:189:    fold_monoexon_contained=False, fold_span_guard=False,
+fin/candidates/discovery.py:199:    from fin.candidates.chain_cluster import cluster_read_chains
+fin/candidates/discovery.py:213:    clusters = cluster_read_chains(
+fin/candidates/discovery.py:215:        fold_monoexon_contained=fold_monoexon_contained,
+fin/candidates/discovery.py:216:        fold_span_guard=fold_span_guard)
+fin/candidates/discovery.py:246:    # Record each ChainCluster's members by candidate_id (NOT list index): downstream
+fin/candidates/discovery.py:342:    denovo_wobble_tol: int = 0,
+fin/candidates/discovery.py:343:    denovo_wobble_shadow_ratio: float = 1.0,
+fin/candidates/discovery.py:351:    chain_cluster: bool = False,
+fin/candidates/discovery.py:352:    chain_cluster_wobble_bp: int = 6,
+fin/candidates/discovery.py:353:    chain_cluster_cassette_max_exon_bp: int = 70,
+fin/candidates/discovery.py:354:    chain_cluster_fold_monoexon: bool = False,
+fin/candidates/discovery.py:355:    chain_cluster_fold_span_guard: bool = False,
+fin/candidates/discovery.py:432:    if chain_cluster:
+fin/candidates/discovery.py:433:        return _chain_cluster_candidates(
+fin/candidates/discovery.py:436:            wobble_bp=chain_cluster_wobble_bp,
+fin/candidates/discovery.py:437:            cassette_max_exon_bp=chain_cluster_cassette_max_exon_bp,
+fin/candidates/discovery.py:438:            fold_monoexon_contained=chain_cluster_fold_monoexon,
+fin/candidates/discovery.py:439:            fold_span_guard=chain_cluster_fold_span_guard,
+fin/candidates/discovery.py:590:        candidates, threshold, wobble_tol=denovo_wobble_tol,
+fin/candidates/discovery.py:591:        wobble_shadow_ratio=denovo_wobble_shadow_ratio)
+fin/candidates/discovery.py:654:def _wobble_chain_match(a, b, tol: int) -> bool:
+fin/candidates/discovery.py:666:def _wobble_collapse_novel(
+fin/candidates/discovery.py:706:                    or not _wobble_chain_match(rep.intron_chain, cand.intron_chain, tol)):
+fin/candidates/discovery.py:763:    (:func:`_wobble_collapse_novel`) — so wobble-on is a STRICT SUPERSET of the
+fin/candidates/discovery.py:797:        collapsed_novel = _wobble_collapse_novel(
+fin/pipeline/runner.py:179:            chain_cluster=getattr(self.config, "chain_cluster_discovery", False),
+fin/pipeline/runner.py:180:            chain_cluster_wobble_bp=getattr(self.config, "chain_cluster_wobble_bp", 6),
+fin/pipeline/runner.py:181:            chain_cluster_cassette_max_exon_bp=getattr(
+fin/pipeline/runner.py:182:                self.config, "chain_cluster_cassette_max_exon_bp", 70),
+fin/pipeline/runner.py:183:            chain_cluster_fold_monoexon=(
+fin/pipeline/runner.py:184:                getattr(self.config, "chain_cluster_fold_monoexon", False)
+fin/pipeline/runner.py:187:            chain_cluster_fold_span_guard=getattr(
+fin/pipeline/runner.py:188:                self.config, "chain_cluster_fold_span_guard", False),
+fin/pipeline/runner.py:192:            denovo_wobble_tol=getattr(self.config, "denovo_wobble_tol", 0),
+fin/pipeline/runner.py:193:            denovo_wobble_shadow_ratio=getattr(
+fin/pipeline/runner.py:194:                self.config, "denovo_wobble_shadow_ratio", 1.0),
+fin/pipeline/selection.py:101:        from fin.scoring.m2_junction_nll import structural_wobble_clusters
+fin/pipeline/selection.py:110:                config, "m2_cluster_recheck_cassette_max_exon_bp", 0
+fin/pipeline/selection.py:112:            clusters = structural_wobble_clusters(
+fin/pipeline/selection.py:215:            wobble_bp=int(getattr(config, "containment_cluster_wobble_bp", 6)),
+fin/candidates/chain_cluster.py:54:class ChainCluster:
+fin/candidates/chain_cluster.py:93:def _wobble(a: Chain, b: Chain, bp: int) -> bool:
+fin/candidates/chain_cluster.py:101:def _contains(short: Chain, long_: Chain, bp: int) -> bool:
+fin/candidates/chain_cluster.py:113:def _cassette(a: Chain, b: Chain, bp: int, max_exon_bp: int) -> bool:
+fin/candidates/chain_cluster.py:138:    if _wobble(a, b, wobble_bp):
+fin/candidates/chain_cluster.py:142:        if _cassette(hi, lo, wobble_bp, cassette_max_exon_bp):
+fin/candidates/chain_cluster.py:144:        if _contains(lo, hi, wobble_bp):
+fin/candidates/chain_cluster.py:163:def cluster_read_chains(
+fin/candidates/chain_cluster.py:168:    fold_monoexon_contained: bool = False,
+fin/candidates/chain_cluster.py:169:    fold_span_guard: bool = False,
+fin/candidates/chain_cluster.py:170:) -> List[ChainCluster]:
+fin/candidates/chain_cluster.py:178:        fold_monoexon_contained: when True, a single-exon (chain-less) read whose
+fin/candidates/chain_cluster.py:185:        fold_span_guard: when True, a read only folds into an exact-sub-chain container
+fin/candidates/chain_cluster.py:193:        List of :class:`ChainCluster`. EVERY exact contiguous sub-chain is folded
+fin/candidates/chain_cluster.py:212:    if fold_span_guard or fold_monoexon_contained:
+fin/candidates/chain_cluster.py:221:    #    Default: UNCONDITIONAL (no read-support guard). With fold_span_guard, a read
+fin/candidates/chain_cluster.py:237:        if not fold_span_guard:
+fin/candidates/chain_cluster.py:268:    if fold_monoexon_contained and mono and multi:
+fin/candidates/chain_cluster.py:319:    clusters: List[ChainCluster] = []
+fin/candidates/chain_cluster.py:325:        clusters.append(ChainCluster(members=members, read_ids=union))
+fin/candidates/chain_cluster.py:328:        clusters.append(ChainCluster(members=[_mk(c)], read_ids=set(reads[c])))
+fin/pipeline/config.py:36:    chain_cluster_discovery: bool = True
+fin/pipeline/config.py:37:    chain_cluster_wobble_bp: int = 6
+fin/pipeline/config.py:38:    chain_cluster_cassette_max_exon_bp: int = 70
+fin/pipeline/config.py:39:    chain_cluster_fold_monoexon: bool = True  # fold single-exon reads wholly inside a multi-exon candidate's exon into that candidate (5'/3' degradation fragments) instead of emitting standalone mono candidates; intronic/uncontained mono reads stay separate. PRODUCTION DEFAULT (p00 m2_em: out 9581->9181, `=` 6323->6414, Pr 66.0->69.9 -- de-fragmentation both-axes win). --no- reverts to legacy standalone mono candidates.
+fin/pipeline/config.py:40:    chain_cluster_fold_span_guard: bool = True  # only fold a read into an exact-sub-chain container if its aligned span does NOT run exonically across one of the container's EXTRA introns; a read spanning such an intron (retained-intron / alternative isoform) is kept as its own candidate instead of being absorbed. PRODUCTION DEFAULT. --no- reverts to unconditional exact-sub-chain fold.
+fin/pipeline/config.py:42:    # reads are NOT folded into multi-exon candidates at generation (chain_cluster_fold_
+fin/pipeline/config.py:295:    m2_cluster_recheck_cassette_max_exon_bp: int = 70
+fin/pipeline/config.py:333:    # containment_cluster_wobble_bp per junction) of a longer candidate — the
+fin/pipeline/config.py:348:    containment_cluster_wobble_bp: int = 6
+fin/pipeline/config.py:394:    denovo_wobble_tol: int = 0
+fin/pipeline/config.py:402:    # denovo_wobble_tol > 0.
+fin/pipeline/config.py:403:    denovo_wobble_shadow_ratio: float = 0.5
+fin/cli.py:48:@click.option("--chain-cluster-discovery/--no-chain-cluster-discovery", "chain_cluster_discovery", default=True, show_default=True, help="PRODUCTION DEFAULT generation. Group reads by intron chain (3' IGNORED), collapse EXACT sub-chains, cluster wobble/cassette/containment keeping members; NO canonical-search shadows. Replaces the legacy 3'+exact-chain grouping + canonical expansion. p00 no-gates: raw candidates 175k->37k, c -73%, j -88%, structural precision 10->26%, at ~20% distinct-truth recall cost (92% from the exact sub-chain collapse). --no- reverts to the legacy discovery.")
+fin/cli.py:51:@click.option("--chain-cluster-fold-monoexon/--no-chain-cluster-fold-monoexon", "chain_cluster_fold_monoexon", default=True, show_default=True, help="(--chain-cluster-discovery) PRODUCTION DEFAULT. Fold a single-exon read whose aligned span lies wholly inside one exon of a multi-exon candidate INTO that candidate (a 5'/3' degradation fragment) instead of emitting a standalone single-exon candidate. Reads inside an intron (a different gene) or contained in no multi-exon candidate stay separate. Suppresses single-exon truncation FPs (p00 m2_em: out -400, `=` +91, Pr 66.0->69.9). --no- reverts to standalone mono candidates.")
+fin/cli.py:52:@click.option("--chain-cluster-fold-span-guard/--no-chain-cluster-fold-span-guard", "chain_cluster_fold_span_guard", default=True, show_default=True, help="(--chain-cluster-discovery) PRODUCTION DEFAULT. Only fold a read into an exact-sub-chain container if its aligned span does NOT run exonically across one of the container's EXTRA introns. A read that spans such an intron (retained-intron / alternative isoform) contradicts it and is kept as its own candidate instead of being absorbed. --no- reverts to the unconditional exact-sub-chain fold.")
+fin/cli.py:159:    chain_cluster_discovery,
+fin/cli.py:160:    chain_cluster_wobble_bp,
+fin/cli.py:161:    chain_cluster_cassette_max_exon_bp,
+fin/cli.py:162:    chain_cluster_fold_monoexon,
+fin/cli.py:163:    chain_cluster_fold_span_guard,
+fin/cli.py:176:    m2_cluster_recheck_cassette_max_exon_bp,
+fin/cli.py:186:    containment_cluster_wobble_bp,
+fin/cli.py:197:    denovo_wobble_tol,
+fin/cli.py:198:    denovo_wobble_shadow_ratio,
+fin/cli.py:315:        chain_cluster_discovery=chain_cluster_discovery,
+fin/cli.py:316:        chain_cluster_wobble_bp=chain_cluster_wobble_bp,
+fin/cli.py:317:        chain_cluster_cassette_max_exon_bp=chain_cluster_cassette_max_exon_bp,
+fin/cli.py:318:        chain_cluster_fold_monoexon=chain_cluster_fold_monoexon,
+fin/cli.py:319:        chain_cluster_fold_span_guard=chain_cluster_fold_span_guard,
+fin/cli.py:332:        m2_cluster_recheck_cassette_max_exon_bp=m2_cluster_recheck_cassette_max_exon_bp,
+fin/cli.py:342:        containment_cluster_wobble_bp=containment_cluster_wobble_bp,
+fin/cli.py:353:        denovo_wobble_tol=denovo_wobble_tol,
+fin/cli.py:354:        denovo_wobble_shadow_ratio=denovo_wobble_shadow_ratio,
+tests/log_config_test_results.txt:28:tests/unit/test_log_config.py::TestLoggerFormat::test_log_message_contains_timestamp PASSED [ 91%]
+tests/log_config_test_results.txt:29:tests/unit/test_log_config.py::TestLoggerFormat::test_log_message_contains_level PASSED [ 95%]
+tests/log_config_test_results.txt:30:tests/unit/test_log_config.py::TestLoggerFormat::test_log_message_contains_filename PASSED [100%]
+fin/scoring/m2_junction_nll.py:420:def structural_wobble_clusters(cands, bp: int, cassette_max_exon_bp: int = 0):
+fin/scoring/m2_junction_nll.py:561:        clusters: dict root_col -> [member cols] from structural_wobble_clusters.
+fin/scoring/m2_junction_nll.py:732:    overlapping no intron. Same geometry as chain_cluster._monoexon_in_exon."""
+fin/scoring/m2_junction_nll.py:818:    Extends the same-intron-count wobble clustering (:func:`structural_wobble_clusters`)
+fin/scoring/m3_junction_coherence.py:88:    chain_wobble: int = 20,
+fin/scoring/m3_junction_coherence.py:103:        chain_wobble: junction wobble tolerance (bp) for class clustering.
+fin/scoring/m3_junction_coherence.py:118:    classes = cluster_candidates_by_chain(candidates, chain_wobble=chain_wobble)
+tests/unit/test_m2_resolve_tie.py:44:def _wobble_pair():
+tests/unit/test_m2_resolve_tie.py:58:    a, _ = _wobble_pair()
+tests/unit/test_m2_resolve_tie.py:63:    a, b = _wobble_pair()
+tests/unit/test_m2_resolve_tie.py:91:    a, b = _wobble_pair()
+tests/unit/test_m2_resolve_tie.py:115:    a, b = _wobble_pair()
+tests/unit/test_m2_resolve_tie.py:126:    a, b = _wobble_pair()
+tests/unit/test_m2_resolve_tie.py:139:    a, b = _wobble_pair()
+tests/unit/test_m2_resolve_tie.py:150:    a, b = _wobble_pair()
+tests/unit/test_m2_resolve_tie.py:161:    a, b = _wobble_pair()
+tests/unit/test_m2_resolve_tie.py:177:    a, b = _wobble_pair()
+tests/unit/test_m2_resolve_tie.py:191:    a, b = _wobble_pair()
+tests/unit/test_m2_resolve_tie.py:205:    a, b = _wobble_pair()
+tests/unit/test_m2_resolve_tie.py:217:    a, b = _wobble_pair()
+fin/scoring/diff_region_dtw.py:36:    Same-class candidates differ only by per-junction wobble (≤ chain_wobble
+fin/scoring/diff_region_dtw.py:383:    chain_wobble: int = 6,
+fin/scoring/diff_region_dtw.py:389:      1. Cluster candidates by intron-chain wobble (``chain_wobble`` bp per
+fin/scoring/diff_region_dtw.py:426:        chain_wobble: ±bp tolerance per junction for class clustering.
+fin/scoring/diff_region_dtw.py:439:    classes = cluster_candidates_by_chain(candidates, chain_wobble=chain_wobble)
+fin/scoring/diff_region_dtw.py:551:def _chains_match_wobble(
+fin/scoring/diff_region_dtw.py:571:    chain_wobble: int = 6,
+fin/scoring/diff_region_dtw.py:576:    existing class whose representative chain matches within ``chain_wobble``
+fin/scoring/diff_region_dtw.py:583:        chain_wobble: ± bp tolerance per junction. Default 6.
+fin/scoring/diff_region_dtw.py:595:            if _chains_match_wobble(chain, rep, chain_wobble):
+fin/scoring/diff_region_dtw.py:663:    chain_wobble: int = 6,
+fin/scoring/diff_region_dtw.py:669:      1. Cluster ``candidates`` by intron-chain wobble (``chain_wobble`` bp).
+fin/scoring/diff_region_dtw.py:694:        chain_wobble: Junction wobble tolerance (bp) for clustering.
+fin/scoring/diff_region_dtw.py:709:    classes = cluster_candidates_by_chain(candidates, chain_wobble=chain_wobble)
+tests/unit/test_denovo_wobble_collapse.py:15:    _wobble_chain_match,
+tests/unit/test_denovo_wobble_collapse.py:16:    _wobble_collapse_novel,
+tests/unit/test_denovo_wobble_collapse.py:39:        assert _wobble_chain_match(a, b, 6)
+tests/unit/test_denovo_wobble_collapse.py:43:        assert _wobble_chain_match(a, b, 6)      # both boundaries within 6
+tests/unit/test_denovo_wobble_collapse.py:44:        assert not _wobble_chain_match(a, b, 2)  # 3 bp > tol=2
+tests/unit/test_denovo_wobble_collapse.py:48:        assert not _wobble_chain_match(a, b, 6)  # 10 bp shift
+tests/unit/test_denovo_wobble_collapse.py:53:        assert not _wobble_chain_match(a, b, 6)
+tests/unit/test_denovo_wobble_collapse.py:57:        assert _wobble_chain_match(a, b, 6)  # no junctions -> trivially match
+tests/unit/test_denovo_wobble_collapse.py:61:    def test_wobbled_pair_merges_to_consensus(self):
+tests/unit/test_denovo_wobble_collapse.py:72:    def test_off_keeps_wobbles_separate(self):
+tests/unit/test_denovo_wobble_collapse.py:97:        out = _wobble_collapse_novel([c1, c2], 24, 6, shadow_ratio=0.5)
+tests/unit/test_denovo_wobble_collapse.py:104:        out = _wobble_collapse_novel([rep, shadow], 24, 6, shadow_ratio=0.5)
+tests/unit/test_denovo_wobble_collapse.py:122:    def test_wobble_on_is_superset_of_exact(self):
+tests/unit/test_denovo_wobble_collapse.py:142:    def test_exact_chain_merges_under_wobble_even_comparable_support(self):
+tests/unit/test_denovo_wobble_collapse.py:148:        out = _wobble_collapse_novel([c1, c2], 24, 6, shadow_ratio=0.5)
+tests/unit/test_denovo_wobble_collapse.py:157:        a = _wobble_collapse_novel(build(), 24, 6, shadow_ratio=1.0)
+tests/unit/test_denovo_wobble_collapse.py:158:        b = _wobble_collapse_novel(list(reversed(build())), 24, 6, shadow_ratio=1.0)
+tests/unit/test_denovo_wobble_collapse.py:168:        r1 = _wobble_collapse_novel(build(), 24, 6)
+tests/unit/test_denovo_wobble_collapse.py:169:        r2 = _wobble_collapse_novel(list(reversed(build())), 24, 6)
+tests/unit/test_containment_cluster.py:52:    def test_wobble_tolerant_match(self):
+tests/unit/test_containment_cluster.py:58:    def test_beyond_wobble_not_matched(self):
+tests/unit/test_m2_junction_nll.py:89:def test_internal_diff_region_for_internal_wobble():
+tests/unit/test_m2_junction_nll.py:111:def test_diff_junction_windows_acceptor_wobble():
+tests/unit/test_m3_junction_coherence.py:70:        flank=2, chain_wobble=20, junction_k=10,
+tests/unit/test_cluster_quant.py:19:def test_differing_coords_wobble():
+tests/unit/test_m2_diff_cover.py:14:    structural_wobble_clusters,
+tests/unit/test_m2_diff_cover.py:36:    def test_donor_wobble(self):
+tests/unit/test_m2_diff_cover.py:42:    def test_acceptor_wobble(self):
+tests/unit/test_m2_diff_cover.py:58:    def test_exon_skip_counts_as_wobble(self):
+tests/unit/test_m2_diff_cover.py:101:    def test_wobble_within_bp_clusters(self):
+tests/unit/test_m2_diff_cover.py:106:        cl = structural_wobble_clusters(cs, bp=6)
+tests/unit/test_m2_diff_cover.py:111:        assert self._members(structural_wobble_clusters(cs, bp=6)) == []
+tests/unit/test_m2_diff_cover.py:115:        assert self._members(structural_wobble_clusters(cs, bp=6)) == []
+tests/unit/test_m2_diff_cover.py:119:        assert self._members(structural_wobble_clusters(cs, bp=6)) == []
+tests/unit/test_m2_diff_cover.py:123:        assert self._members(structural_wobble_clusters(cs, bp=6)) == []
+tests/unit/test_m2_diff_cover.py:130:        cl = structural_wobble_clusters([gtf, nov], bp=6)
+tests/unit/test_log_config.py:295:    def test_log_message_contains_timestamp(self):
+tests/unit/test_log_config.py:312:    def test_log_message_contains_level(self):
+tests/unit/test_log_config.py:329:    def test_log_message_contains_filename(self):
+tests/unit/test_junction_graph.py:15:    def test_wobbles_map_to_highest_count_consensus(self):
+tests/unit/test_junction_graph.py:67:    def test_wobbled_partials_assemble(self):
+tests/unit/test_canonical_search_v2.py:52:    def test_wobble_recovers_canonical_alternative(self):
+tests/unit/test_chain_cluster.py:1:"""Unit tests for generation-side chain clustering (chain_cluster).
+tests/unit/test_chain_cluster.py:10:from fin.candidates.chain_cluster import (
+tests/unit/test_chain_cluster.py:11:    cluster_read_chains, _exact_subchain, _wobble, _contains, _cassette, _related,
+tests/unit/test_chain_cluster.py:31:    def test_wobble(self):
+tests/unit/test_chain_cluster.py:32:        assert _wobble((J1, J2), ((102, 198), (301, 402)), bp=6)
+tests/unit/test_chain_cluster.py:33:        assert not _wobble((J1, J2), (J1, J2, J3), bp=6)
+tests/unit/test_chain_cluster.py:35:    def test_contains_tolerant(self):
+tests/unit/test_chain_cluster.py:36:        assert _contains(((302, 398), J3), (J1, J2, J3), bp=6)   # wobbled suffix
+tests/unit/test_chain_cluster.py:37:        assert not _contains(((330, 370), J3), (J1, J2, J3), bp=6)
+tests/unit/test_chain_cluster.py:39:    def test_cassette(self):
+tests/unit/test_chain_cluster.py:42:        assert _cassette(long_, short, bp=6, max_exon_bp=70)
+tests/unit/test_chain_cluster.py:43:        assert not _cassette(long_, short, bp=6, max_exon_bp=10)
+tests/unit/test_chain_cluster.py:50:        cl = cluster_read_chains(_rc(
+tests/unit/test_chain_cluster.py:61:        cl = cluster_read_chains(_rc(
+tests/unit/test_chain_cluster.py:71:        cl = cluster_read_chains(_rc(
+tests/unit/test_chain_cluster.py:81:    def test_wobble_variants_same_cluster_kept(self):
+tests/unit/test_chain_cluster.py:83:        cl = cluster_read_chains(
+tests/unit/test_chain_cluster.py:89:    def test_cassette_same_cluster_kept(self):
+tests/unit/test_chain_cluster.py:92:        cl = cluster_read_chains(_rc([("a", long_), ("b", short)]))
+tests/unit/test_chain_cluster.py:98:        cl = cluster_read_chains(
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:23[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+codex
+There are targeted unit tests for this file. I’m reading them only as corroboration for edge semantics like exact folding and mono handling, not as a separate analysis area.
+ succeeded in 5694ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:30[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:30[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:30[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> nl -ba tests/unit/test_chain_cluster.py | sed -n '1,1<t/test_chain_cluster.py | sed -n '1,18                                       <t/test_chain_cluster.py | sed -n '1,180p'[?2004l
+     1	"""Unit tests for generation-side chain clustering (chain_cluster).
+     2	
+     3	Group reads by EXACT chain (3' ignored); fold EXACT sub-chains into their container;
+     4	union-find the survivors into clusters by wobble / cassette / containment. Members
+     5	(distinct candidates) are kept; no snap, no shadow generation.
+     6	"""
+     7	from __future__ import annotations
+     8	
+     9	from fin.candidates.dataclasses import IntronChain
+    10	from fin.candidates.chain_cluster import (
+    11	    cluster_read_chains, _exact_subchain, _wobble, _contains, _cassette, _related,
+    12	)
+    13	
+    14	J1, J2, J3 = (100, 200), (300, 400), (500, 600)
+    15	
+    16	
+    17	def _rc(pairs):
+    18	    return [({"query_name": rid}, IntronChain(introns=introns)) for rid, introns in pairs]
+    19	
+    20	
+    21	def _member_chains(cluster):
+    22	    return {m.chain.introns for m in cluster.members}
+    23	
+    24	
+    25	class TestPredicates:
+    26	    def test_exact_subchain(self):
+    27	        assert _exact_subchain((J2, J3), (J1, J2, J3))
+    28	        assert not _exact_subchain(((302, 398), J3), (J1, J2, J3))  # wobbled -> not exact
+    29	        assert not _exact_subchain((J1, J2, J3), (J1, J2, J3))       # equal length
+    30	
+    31	    def test_wobble(self):
+    32	        assert _wobble((J1, J2), ((102, 198), (301, 402)), bp=6)
+    33	        assert not _wobble((J1, J2), (J1, J2, J3), bp=6)
+    34	
+    35	    def test_contains_tolerant(self):
+    36	        assert _contains(((302, 398), J3), (J1, J2, J3), bp=6)   # wobbled suffix
+    37	        assert not _contains(((330, 370), J3), (J1, J2, J3), bp=6)
+    38	
+    39	    def test_cassette(self):
+    40	        long_ = (J1, (300, 350), (370, 600))    # small exon 350..370
+    41	        short = (J1, (300, 600))
+    42	        assert _cassette(long_, short, bp=6, max_exon_bp=70)
+    43	        assert not _cassette(long_, short, bp=6, max_exon_bp=10)
+    44	
+    45	
+    46	class TestClustering:
+    47	    def test_low_support_exact_subchain_collapses(self):
+    48	        # exact suffix with FEW reads (1) vs a well-supported container (4 reads):
+    49	        # folded away (a truncation shadow).
+    50	        cl = cluster_read_chains(_rc(
+    51	            [("a1", (J1, J2, J3)), ("a2", (J1, J2, J3)), ("a3", (J1, J2, J3)),
+    52	             ("a4", (J1, J2, J3)), ("b", (J2, J3))]))
+    53	        assert len(cl) == 1
+    54	        assert _member_chains(cl[0]) == {(J1, J2, J3)}   # only the container survives
+    55	        assert cl[0].read_ids == {"a1", "a2", "a3", "a4", "b"}
+    56	
+    57	    def test_exact_subchain_always_folds_regardless_of_support(self):
+    58	        # UNCONDITIONAL fold: an exact contiguous sub-chain is folded into its
+    59	        # container even when well-supported. Whether it is a genuine short isoform
+    60	        # is NOT decided here -- that is a separate downstream recovery step.
+    61	        cl = cluster_read_chains(_rc(
+    62	            [("a1", (J1, J2, J3)), ("a2", (J1, J2, J3)),
+    63	             ("b1", (J2, J3)), ("b2", (J2, J3))]))
+    64	        assert len(cl) == 1
+    65	        assert _member_chains(cl[0]) == {(J1, J2, J3)}   # sub-chain folded away
+    66	        assert cl[0].read_ids == {"a1", "a2", "b1", "b2"}  # its reads pooled in
+    67	
+    68	    def test_folded_subchain_retained_as_shadow(self):
+    69	        # The folded sub-chain is kept as a SHADOW (provenance) on its container:
+    70	        # its own chain + its own reads, for the downstream recovery step.
+    71	        cl = cluster_read_chains(_rc(
+    72	            [("a1", (J1, J2, J3)), ("a2", (J1, J2, J3)),
+    73	             ("b1", (J2, J3)), ("b2", (J2, J3))]))
+    74	        (m,) = cl[0].members
+    75	        assert m.chain.introns == (J1, J2, J3)
+    76	        assert len(m.folded) == 1
+    77	        assert m.folded[0].chain.introns == (J2, J3)
+    78	        assert m.folded[0].read_ids == {"b1", "b2"}      # shadow's own reads
+    79	        assert m.read_ids == {"a1", "a2", "b1", "b2"}    # container still pools all
+    80	
+    81	    def test_wobble_variants_same_cluster_kept(self):
+    82	        # 2bp-wobbled sibling: NOT an exact subchain -> both KEPT, one cluster.
+    83	        cl = cluster_read_chains(
+    84	            _rc([("a", (J1, J2, J3)), ("b", (J1, (302, 398), J3))]))
+    85	        assert len(cl) == 1
+    86	        assert _member_chains(cl[0]) == {(J1, J2, J3), (J1, (302, 398), J3)}
+    87	        assert cl[0].read_ids == {"a", "b"}
+    88	
+    89	    def test_cassette_same_cluster_kept(self):
+    90	        long_ = (J1, (300, 350), (370, 600))
+    91	        short = (J1, (300, 600))
+    92	        cl = cluster_read_chains(_rc([("a", long_), ("b", short)]))
+    93	        assert len(cl) == 1
+    94	        assert _member_chains(cl[0]) == {long_, short}   # both kept
+    95	
+    96	    def test_tolerant_containment_same_cluster_kept(self):
+    97	        # a wobbled (non-exact) sub-chain -> clustered but KEPT (not collapsed).
+    98	        cl = cluster_read_chains(
+    99	            _rc([("a", (J1, J2, J3)), ("b", ((302, 398), J3))]))
+   100	        assert len(cl) == 1
+   101	        assert _member_chains(cl[0]) == {(J1, J2, J3), ((302, 398), J3)}
+   102	
+   103	    def test_distinct_chains_separate(self):
+   104	        far = ((1000, 1100), (1300, 1400))
+   105	        cl = cluster_read_chains(_rc([("a", (J1, J2, J3)), ("b", far)]))
+   106	        assert len(cl) == 2
+   107	
+   108	    def test_three_prime_ignored_same_chain_pools(self):
+   109	        cl = cluster_read_chains(
+   110	            _rc([("a", (J1, J2)), ("b", (J1, J2)), ("c", (J1, J2))]))
+   111	        assert len(cl) == 1
+   112	        assert len(cl[0].members) == 1
+   113	        assert cl[0].read_ids == {"a", "b", "c"}
+   114	
+   115	    def test_mono_exon_singleton(self):
+   116	        cl = cluster_read_chains(_rc([("a", ()), ("b", ()), ("m", (J1, J2))]))
+   117	        by = {tuple(c.members[0].chain.introns): c for c in cl}
+   118	        assert by[()].read_ids == {"a", "b"}
+   119	        assert by[(J1, J2)].read_ids == {"m"}
+   120	        assert len(cl) == 2
+   121	
+   122	    def test_representative_is_longest(self):
+   123	        # tolerant-containment cluster: 3-intron chain vs a wobbled 2-intron sub-chain
+   124	        # (kept, not collapsed) -> representative is the longer (3-intron) member.
+   125	        cl = cluster_read_chains(
+   126	            _rc([("a", (J1, J2, J3)), ("b", ((302, 398), J3))]))
+   127	        assert cl[0].representative.chain.introns == (J1, J2, J3)
+   128	
+   129	
+   130	def _rcs(entries):
+   131	    """entries: (rid, introns, ref_start, ref_end) -> read_chains with spans."""
+   132	    return [({"query_name": rid, "reference_start": s, "reference_end": e},
+   133	             IntronChain(introns=introns)) for rid, introns, s, e in entries]
+   134	
+   135	
+   136	class TestMonoexonFold:
+   137	    """fold_monoexon_contained: single-exon reads inside a multi-exon candidate's exon
+   138	    are folded into it; intronic / uncontained / junction-crossing mono reads stay."""
+   139	
+   140	    # multi candidate (J1,J2): exons [50,100) [200,300) [400,500); introns [100,200) [300,400)
+   141	    def _rc(self, mono):
+   142	        return _rcs([("m1", (J1, J2), 50, 500), ("m2", (J1, J2), 50, 500)] + mono)
+   143	
+   144	    def test_monoexon_in_exon_folds(self):
+   145	        cl = cluster_read_chains(self._rc([("s1", (), 210, 290)]),
+   146	                                 fold_monoexon_contained=True)
+   147	        assert len(cl) == 1                                   # no standalone mono
+   148	        assert _member_chains(cl[0]) == {(J1, J2)}
+   149	        assert "s1" in cl[0].read_ids                         # folded into the multi
+   150	
+   151	    def test_monoexon_in_intron_stays(self):
+   152	        cl = cluster_read_chains(self._rc([("s1", (), 120, 180)]),  # inside intron J1
+   153	                                 fold_monoexon_contained=True)
+   154	        assert any(m.chain.introns == () for c in cl for m in c.members)
+   155	
+   156	    def test_monoexon_outside_span_stays(self):
+   157	        cl = cluster_read_chains(self._rc([("s1", (), 600, 700)]),
+   158	                                 fold_monoexon_contained=True)
+   159	        assert any(m.chain.introns == () for c in cl for m in c.members)
+   160	
+   161	    def test_monoexon_crossing_junction_stays(self):
+   162	        cl = cluster_read_chains(self._rc([("s1", (), 250, 350)]),  # spans intron J2
+   163	                                 fold_monoexon_contained=True)
+   164	        assert any(m.chain.introns == () for c in cl for m in c.members)
+   165	
+   166	    def test_default_off_emits_standalone_mono(self):
+   167	        cl = cluster_read_chains(self._rc([("s1", (), 210, 290)]))  # flag off
+   168	        assert any(m.chain.introns == () for c in cl for m in c.members)
+   169	
+   170	
+   171	class TestFoldSpanGuard:
+   172	    """fold_span_guard: a read whose span runs exonically across a container's EXTRA
+   173	    intron (retained-intron / alt isoform) is kept as its own candidate, not folded."""
+   174	
+   175	    # container (J1,J2,J3): extra intron vs (J1,J2) is J3=(500,600).
+   176	    def _rc(self):
+   177	        return _rcs([
+   178	            ("big1", (J1, J2, J3), 50, 650),
+   179	            ("big2", (J1, J2, J3), 50, 650),
+   180	            ("trunc", (J1, J2), 50, 450),     # ends before J3 -> truncation (fold)
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:34[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+ succeeded in 5137ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:41[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:41[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:41[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> nl -ba tests/unit/test_chain_cluster.py | sed -n '171<t/test_chain_cluster.py | sed -n '171,                                       <t/test_chain_cluster.py | sed -n '171,260p'[?2004l
+   171	class TestFoldSpanGuard:
+   172	    """fold_span_guard: a read whose span runs exonically across a container's EXTRA
+   173	    intron (retained-intron / alt isoform) is kept as its own candidate, not folded."""
+   174	
+   175	    # container (J1,J2,J3): extra intron vs (J1,J2) is J3=(500,600).
+   176	    def _rc(self):
+   177	        return _rcs([
+   178	            ("big1", (J1, J2, J3), 50, 650),
+   179	            ("big2", (J1, J2, J3), 50, 650),
+   180	            ("trunc", (J1, J2), 50, 450),     # ends before J3 -> truncation (fold)
+   181	            ("retain", (J1, J2), 50, 650),    # spans across J3 -> retained (keep)
+   182	        ])
+   183	
+   184	    def test_guard_keeps_retained_intron_folds_truncation(self):
+   185	        cl = cluster_read_chains(self._rc(), fold_span_guard=True)
+   186	        members = {m.chain.introns: m for c in cl for m in c.members}
+   187	        assert (J1, J2, J3) in members
+   188	        assert (J1, J2) in members                          # retained-intron kept
+   189	        assert "retain" in members[(J1, J2)].read_ids
+   190	        assert "trunc" in members[(J1, J2, J3)].read_ids     # truncation folded in
+   191	        assert "retain" not in members[(J1, J2, J3)].read_ids
+   192	
+   193	    def test_default_off_folds_everything(self):
+   194	        cl = cluster_read_chains(self._rc())                # guard off (default)
+   195	        members = {m.chain.introns for c in cl for m in c.members}
+   196	        assert (J1, J2) not in members                       # unconditional fold
+   197	        assert (J1, J2, J3) in members
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:44[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+codex
+One nuance: the helper defaults and production config defaults differ for the optional mono/span folding flags. I’m pulling those lines so the report separates API behavior from the normal pipeline path.
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+ succeeded in 7033ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/16[30m)[36m─┐
+[36m└[34m─([33m16:59:56[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/16[30m)[36m─┐
+[36m└[34m─([33m16:59:56[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/16[30m)[36m─┐
+[36m└[34m─([33m16:59:56[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> nl -ba fin/pipeline/config.py | sed -n '30,45p'[?2004l
+    30	    # (3' ignored), collapse EXACT sub-chains, cluster wobble/cassette/containment
+    31	    # keeping members; NO canonical-search shadow generation. Replaces the legacy
+    32	    # 3'+exact-chain grouping + canonical expansion. On p00 (no gates, candidates = the
+    33	    # result) this cut raw candidates 175k->37k, c -73%, j -88%, structural precision
+    34	    # 10.1%->26.4% (2.6x), at a ~20% distinct-truth recall cost that is 92% attributable
+    35	    # to the exact sub-chain collapse (recoverable later by guarding the collapse).
+    36	    chain_cluster_discovery: bool = True
+    37	    chain_cluster_wobble_bp: int = 6
+    38	    chain_cluster_cassette_max_exon_bp: int = 70
+    39	    chain_cluster_fold_monoexon: bool = True  # fold single-exon reads wholly inside a multi-exon candidate's exon into that candidate (5'/3' degradation fragments) instead of emitting standalone mono candidates; intronic/uncontained mono reads stay separate. PRODUCTION DEFAULT (p00 m2_em: out 9581->9181, `=` 6323->6414, Pr 66.0->69.9 -- de-fragmentation both-axes win). --no- reverts to legacy standalone mono candidates.
+    40	    chain_cluster_fold_span_guard: bool = True  # only fold a read into an exact-sub-chain container if its aligned span does NOT run exonically across one of the container's EXTRA introns; a read spanning such an intron (retained-intron / alternative isoform) is kept as its own candidate instead of being absorbed. PRODUCTION DEFAULT. --no- reverts to unconditional exact-sub-chain fold.
+    41	    # Post-EM mono-exon resolution (quant_mode="m2_em" only). When True, single-exon
+    42	    # reads are NOT folded into multi-exon candidates at generation (chain_cluster_fold_
+    43	    # monoexon is forced off); instead, AFTER the multi-exon EM + structural gates, each
+    44	    # surviving mono candidate's reads are re-resolved against the SURVIVING multi-exon
+    45	    # candidates by strict strand-aware exonic containment: a read wholly inside one
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/16[30m)[36m─┐
+[36m└[34m─([33m17:00:02[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+ succeeded in 7162ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:56[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:56[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m16:59:56[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> nl -ba fin/pipeline/runner.py | sed -n '168,190p'[?2004l
+   168	        if self._genome_fasta and interval.chrom in self._genome_fasta:
+   169	            chrom_seq = self._genome_fasta[interval.chrom]
+   170	
+   171	        # --- Phase 1: Candidate discovery ---
+   172	        candidate_set = discover_candidates(
+   173	            interval=interval,
+   174	            bam_path=self.config.bam_path,
+   175	            gtf_reader=self._gtf_reader,
+   176	            genome_fasta=chrom_seq,
+   177	            threshold=self.config.three_prime_threshold,
+   178	            min_novel_reads=self.config.min_novel_reads,
+   179	            chain_cluster=getattr(self.config, "chain_cluster_discovery", False),
+   180	            chain_cluster_wobble_bp=getattr(self.config, "chain_cluster_wobble_bp", 6),
+   181	            chain_cluster_cassette_max_exon_bp=getattr(
+   182	                self.config, "chain_cluster_cassette_max_exon_bp", 70),
+   183	            chain_cluster_fold_monoexon=(
+   184	                getattr(self.config, "chain_cluster_fold_monoexon", False)
+   185	                # defer the mono fold to post-EM when mono_resolve_post_em is on
+   186	                and not getattr(self.config, "mono_resolve_post_em", False)),
+   187	            chain_cluster_fold_span_guard=getattr(
+   188	                self.config, "chain_cluster_fold_span_guard", False),
+   189	            canonical_search_bp=self.config.canonical_search_bp,
+   190	            max_chains_per_read=self.config.max_chains_per_read,
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:00:02[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+ succeeded in 7078ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/17[30m)[36m─┐
+[36m└[34m─([33m16:59:56[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/17[30m)[36m─┐
+[36m└[34m─([33m16:59:56[34m[00m on [32mdev[00m[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/17[30m)[36m─┐
+[36m└[34m─([33m16:59:56[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> nl -ba fin/cli.py | sed -n '46,54p'[?2004l
+    46	@click.option("--canonical-gate/--no-canonical-gate", "canonical_gate", default=True, show_default=True, help="Drop NOVEL multi-exon candidates whose junctions aren't all canonical (GTF/fusion/mono exempt). SIRV-tuned default ON.")
+    47	@click.option("--canonical-motifs", default="GT-AG,GC-AG,AT-AC", show_default=True, help="Comma-separated donor-acceptor motifs accepted by the canonical gate AND search.")
+    48	@click.option("--chain-cluster-discovery/--no-chain-cluster-discovery", "chain_cluster_discovery", default=True, show_default=True, help="PRODUCTION DEFAULT generation. Group reads by intron chain (3' IGNORED), collapse EXACT sub-chains, cluster wobble/cassette/containment keeping members; NO canonical-search shadows. Replaces the legacy 3'+exact-chain grouping + canonical expansion. p00 no-gates: raw candidates 175k->37k, c -73%, j -88%, structural precision 10->26%, at ~20% distinct-truth recall cost (92% from the exact sub-chain collapse). --no- reverts to the legacy discovery.")
+    49	@click.option("--chain-cluster-wobble-bp", default=6, show_default=True, type=int, help="(--chain-cluster-discovery) per-junction bp tolerance for the wobble/cassette/containment cluster joins.")
+    50	@click.option("--chain-cluster-cassette-max-exon-bp", default=70, show_default=True, type=int, help="(--chain-cluster-discovery) max skipped-exon length (bp) for a cassette (K vs K-1) cluster join. 0 disables cassette joins.")
+    51	@click.option("--chain-cluster-fold-monoexon/--no-chain-cluster-fold-monoexon", "chain_cluster_fold_monoexon", default=True, show_default=True, help="(--chain-cluster-discovery) PRODUCTION DEFAULT. Fold a single-exon read whose aligned span lies wholly inside one exon of a multi-exon candidate INTO that candidate (a 5'/3' degradation fragment) instead of emitting a standalone single-exon candidate. Reads inside an intron (a different gene) or contained in no multi-exon candidate stay separate. Suppresses single-exon truncation FPs (p00 m2_em: out -400, `=` +91, Pr 66.0->69.9). --no- reverts to standalone mono candidates.")
+    52	@click.option("--chain-cluster-fold-span-guard/--no-chain-cluster-fold-span-guard", "chain_cluster_fold_span_guard", default=True, show_default=True, help="(--chain-cluster-discovery) PRODUCTION DEFAULT. Only fold a read into an exact-sub-chain container if its aligned span does NOT run exonically across one of the container's EXTRA introns. A read that spans such an intron (retained-intron / alternative isoform) contradicts it and is kept as its own candidate instead of being absorbed. --no- reverts to the unconditional exact-sub-chain fold.")
+    53	@click.option("--mono-resolve-post-em/--no-mono-resolve-post-em", "mono_resolve_post_em", default=False, show_default=True, help="(quant_mode=m2_em) EXPERIMENT. Defer single-exon read resolution to AFTER the multi-exon EM: generation stops folding mono reads into multi (chain-cluster-fold-monoexon forced off); post-EM each surviving mono candidate's reads are re-resolved against SURVIVING multi candidates by strict strand-aware exonic containment (1 cover -> fold; several -> highest-EM-abundance; uncovered kept, mono dropped if < --mono-resolve-min-reads). Default OFF.")
+    54	@click.option("--mono-resolve-min-reads", default=2, show_default=True, type=int, help="(--mono-resolve-post-em) uncovered reads a mono candidate must retain to survive as a single-exon transcript.")
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/17[30m)[36m─┐
+[36m└[34m─([33m17:00:02[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+codex
+For the “can a read appear twice” question, the clustering function itself only deduplicates within an exact-chain bucket. I’m checking the immediately upstream interval read loop to avoid overstating a uniqueness guarantee.
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+ succeeded in 5603ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:00:15[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:00:15[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:00:15[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> nl -ba fin/candidates/discovery.py | sed -n '330,425p<dates/discovery.py | sed -n '330,425p'                                       <dates/discovery.py | sed -n '330,425p'[?2004l
+   330	
+   331	
+   332	def discover_candidates(
+   333	    interval: GenomicInterval,
+   334	    bam_path: str,
+   335	    gtf_reader,
+   336	    genome_fasta: str,
+   337	    threshold: int = 24,
+   338	    min_novel_reads: int = 1,
+   339	    canonical_search_bp: int = 0,
+   340	    max_chains_per_read: int = 16,
+   341	    canonical_motifs: tuple = ("GT-AG", "GC-AG", "AT-AC"),
+   342	    denovo_wobble_tol: int = 0,
+   343	    denovo_wobble_shadow_ratio: float = 1.0,
+   344	    denovo_graph: bool = False,
+   345	    denovo_graph_tol: int = 6,
+   346	    denovo_graph_min_edge_reads: int = 2,
+   347	    denovo_graph_tss_brake: bool = True,
+   348	    denovo_graph_tss_tol: int = 20,
+   349	    denovo_graph_tss_min_reads: int = 3,
+   350	    denovo_graph_tss_frac: float = 0.4,
+   351	    chain_cluster: bool = False,
+   352	    chain_cluster_wobble_bp: int = 6,
+   353	    chain_cluster_cassette_max_exon_bp: int = 70,
+   354	    chain_cluster_fold_monoexon: bool = False,
+   355	    chain_cluster_fold_span_guard: bool = False,
+   356	) -> CandidateSet:
+   357	    """Discover transcript candidates for a genomic interval.
+   358	
+   359	    Combines GTF-annotated transcripts with novel isoforms discovered
+   360	    from read alignments using intron chain + 3' end clustering.
+   361	
+   362	    Args:
+   363	        interval: Genomic interval to process.
+   364	        bam_path: Path to BAM file.
+   365	        gtf_reader: Opened GTFReader instance (already parsed).
+   366	        genome_fasta: Full chromosome sequence string for the interval's chromosome.
+   367	        threshold: 3' end clustering distance in bp.
+   368	        canonical_search_bp: If > 0, for every read scan ±N bp around each
+   369	            junction's CIGAR position for canonical GT-AG (donor/acceptor)
+   370	            motifs and emit the resulting chain alternatives in addition to
+   371	            the original chain. 0 disables.
+   372	        max_chains_per_read: Hard cap on the per-read alternative chain count
+   373	            during canonical search. Reads whose Cartesian-product expansion
+   374	            exceeds the cap fall back to their original chain.
+   375	
+   376	    Returns:
+   377	        CandidateSet with discovered candidates.
+   378	    """
+   379	    from fin.io.io_bam import BamReader
+   380	
+   381	    # 1. Fetch reads for interval, skip fusion reads
+   382	    all_read_ids: Set[str] = set()
+   383	    non_fusion_reads = []
+   384	    read_sequences: dict = {}
+   385	
+   386	    with BamReader(bam_path) as bam:
+   387	        for alignment in bam.fetch(
+   388	            reference=interval.chrom, start=interval.start, end=interval.end
+   389	        ):
+   390	            rd = bam.alignment_to_dict(alignment)
+   391	            if not rd or not rd.get("is_mapped"):
+   392	                continue
+   393	            # Honor strand-separated intervals. bam.fetch returns reads on BOTH
+   394	            # strands overlapping the region, but each read belongs to its own
+   395	            # mapped strand's interval. Without this guard an antisense interval
+   396	            # that spatially contains a sense interval swallows the sense reads,
+   397	            # corrupting strand assignment (a candidate emitted on the wrong
+   398	            # strand can never match) and read-to-candidate quantification.
+   399	            if interval.strand is not None:
+   400	                read_strand = "+" if rd.get("is_forward") else "-"
+   401	                if read_strand != interval.strand:
+   402	                    continue
+   403	            read_id = rd.get("query_name")
+   404	            if read_id:
+   405	                all_read_ids.add(read_id)
+   406	                # Capture primary-alignment sequence only — scope is this
+   407	                # interval's fetch, satisfying the per-interval read-set
+   408	                # constraint. Used by R1 mappy-argmax bypass.
+   409	                if not rd.get("is_secondary") and not rd.get("is_supplementary"):
+   410	                    seq = rd.get("query_sequence")
+   411	                    if seq:
+   412	                        read_sequences.setdefault(read_id, seq)
+   413	            if is_fusion_read(rd):
+   414	                continue
+   415	            non_fusion_reads.append(rd)
+   416	
+   417	    if not non_fusion_reads:
+   418	        return CandidateSet(
+   419	            interval=interval,
+   420	            candidates=[],
+   421	            read_ids=all_read_ids,
+   422	            read_sequences=read_sequences,
+   423	        )
+   424	
+   425	    # Determine strand from reads
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:00:19[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+codex
+One more narrow upstream check: `discover_candidates` stores primary sequence separately, but I need to see whether candidate discovery filters secondary/supplementary alignments before `non_fusion_reads`.
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+ succeeded in 5807ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:02:54[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:02:54[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:02:54[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> rg -n "def alignment_to_dict|is_secondary|is_suppleme<ment_to_dict|is_secondary|is_supplemen                                       <ment_to_dict|is_secondary|is_supplementary" fin/io/io_bam.py fin/io[?2004l
+fin/io/io_bam.py
+193:        if alignment.is_secondary:
+203:    def alignment_to_dict(self, alignment: pysam.AlignedSegment) -> Dict[str, Any]:
+220:            'is_secondary': alignment.is_secondary,
+222:            'is_supplementary': alignment.is_supplementary,
+300:                if alignment.is_unmapped or alignment.is_secondary or alignment.is_supplementary:
+
+fin/io/io_bam.py
+193:        if alignment.is_secondary:
+203:    def alignment_to_dict(self, alignment: pysam.AlignedSegment) -> Dict[str, Any]:
+220:            'is_secondary': alignment.is_secondary,
+222:            'is_supplementary': alignment.is_supplementary,
+300:                if alignment.is_unmapped or alignment.is_secondary or alignment.is_supplementary:
+
+fin/io/interval_manager.py
+146:    if read_dict.get('is_supplementary'):
+170:    # OR I can just use read_dict.get('is_supplementary')
+237:            if alignment.is_unmapped or alignment.is_secondary:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:02:59[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hnl -ba fin/io/io_bam.py | sed -n '1,160p'[?2004l
+     1	"""
+     2	BAM/SAM file format parser using pysam
+     3	"""
+     4	
+     5	from typing import List, Dict, Optional, Iterator, Tuple, Any, Generator
+     6	from pathlib import Path
+     7	import logging
+     8	
+     9	try:
+    10	    import pysam
+    11	except ImportError:
+    12	    raise ImportError(
+    13	        "pysam is required for BAM/SAM support. "
+    14	        "Install it with: pip install pysam"
+    15	    )
+    16	
+    17	
+    18	logger = logging.getLogger(__name__)
+    19	
+    20	
+    21	class BamReader:
+    22	    """Reader for BAM/SAM alignment files"""
+    23	
+    24	    def __init__(self, file_path: str, index: bool = True):
+    25	        """
+    26	        Initialize BAM/SAM reader
+    27	
+    28	        Args:
+    29	            file_path: Path to the BAM/SAM file
+    30	            index: Whether to load the index for random access
+    31	        """
+    32	        self.file_path = Path(file_path)
+    33	        if not self.file_path.exists():
+    34	            raise FileNotFoundError(f"BAM/SAM file not found: {file_path}")
+    35	
+    36	        self._alignment_file = None
+    37	        self._index = index
+    38	        self._is_open = False
+    39	
+    40	    def __enter__(self):
+    41	        """Context manager entry"""
+    42	        self.open()
+    43	        return self
+    44	
+    45	    def __exit__(self, exc_type, exc_val, exc_tb):
+    46	        """Context manager exit"""
+    47	        self.close()
+    48	
+    49	    def open(self):
+    50	        """Open the alignment file"""
+    51	        try:
+    52	            mode = 'rb' if self.file_path.suffix.lower() == '.bam' else 'r'
+    53	            self._alignment_file = pysam.AlignmentFile(str(self.file_path), mode, index_filename=str(self.file_path) + '.bai' if self._index else None)
+    54	            self._is_open = True
+    55	
+    56	            logger.info(f"Opened alignment file: {self.file_path}")
+    57	        except Exception as e:
+    58	            logger.error(f"Failed to open alignment file {self.file_path}: {e}")
+    59	            raise
+    60	
+    61	    def close(self):
+    62	        """Close the alignment file"""
+    63	        if self._alignment_file is not None:
+    64	            self._alignment_file.close()
+    65	            self._alignment_file = None
+    66	            self._is_open = False
+    67	            logger.info(f"Closed alignment file: {self.file_path}")
+    68	
+    69	    @property
+    70	    def is_open(self) -> bool:
+    71	        """Check if file is open"""
+    72	        return self._is_open
+    73	
+    74	    @property
+    75	    def header(self) -> Dict[str, Any]:
+    76	        """
+    77	        Get file header
+    78	
+    79	        Returns:
+    80	            Dictionary containing header information
+    81	        """
+    82	        if self._alignment_file is None:
+    83	            raise RuntimeError("Alignment file not opened. Call open() first.")
+    84	        return dict(self._alignment_file.header)
+    85	
+    86	    @property
+    87	    def references(self) -> List[Tuple[str, int]]:
+    88	        """
+    89	        Get list of reference sequences
+    90	
+    91	        Returns:
+    92	            List of tuples (reference_name, reference_length)
+    93	        """
+    94	        if self._alignment_file is None:
+    95	            raise RuntimeError("Alignment file not opened. Call open() first.")
+    96	
+    97	        return [(self._alignment_file.get_reference_name(i), self._alignment_file.get_reference_length(i))
+    98	                for i in range(self._alignment_file.nreferences)]
+    99	
+   100	    def count(self, region: Optional[str] = None, read_callback: str = 'all') -> int:
+   101	        """
+   102	        Count alignments
+   103	
+   104	        Args:
+   105	            region: Region to count (e.g., 'chr1:1000-2000')
+   106	            read_callback: Read filter (all, mapped, unmapped)
+   107	
+   108	        Returns:
+   109	            Number of alignments
+   110	        """
+   111	        if self._alignment_file is None:
+   112	            raise RuntimeError("Alignment file not opened. Call open() first.")
+   113	
+   114	        try:
+   115	            return self._alignment_file.count(region=region, read_callback=read_callback)
+   116	        except Exception as e:
+   117	            logger.error(f"Failed to count alignments: {e}")
+   118	            return 0
+   119	
+   120	    def fetch(self, reference: Optional[str] = None, start: Optional[int] = None,
+   121	              end: Optional[int] = None, region: Optional[str] = None,
+   122	              until_eof: bool = False) -> Iterator[pysam.AlignedSegment]:
+   123	        """
+   124	        Fetch alignments from a region
+   125	
+   126	        Args:
+   127	            reference: Reference name
+   128	            start: Start position (0-based)
+   129	            end: End position
+   130	            region: Region string (e.g., 'chr1:1000-2000')
+   131	            until_eof: Continue to end of file
+   132	
+   133	        Returns:
+   134	            Iterator over AlignedSegment objects
+   135	        """
+   136	        if self._alignment_file is None:
+   137	            raise RuntimeError("Alignment file not opened. Call open() first.")
+   138	
+   139	        try:
+   140	            # Pass by keyword: pysam.fetch's 5th positional parameter is `tid`,
+   141	            # not `until_eof`. Passing until_eof positionally lands it in the tid
+   142	            # slot, and tid=False (==0) overrides `contig`, so every region fetch
+   143	            # silently returns reads from reference 0 regardless of `reference`.
+   144	            return self._alignment_file.fetch(
+   145	                contig=reference, start=start, stop=end,
+   146	                region=region, until_eof=until_eof,
+   147	            )
+   148	        except Exception as e:
+   149	            logger.error(f"Failed to fetch alignments: {e}")
+   150	            return iter([])
+   151	
+   152	    def get_read(self, read_id: str) -> Optional[pysam.AlignedSegment]:
+   153	        """
+   154	        Get a specific read by name (requires indexed BAM)
+   155	
+   156	        Args:
+   157	            read_id: Read name/ID
+   158	
+   159	        Returns:
+   160	            AlignedSegment object or None if not found
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:02:59[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+ succeeded in 5097ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:03:04[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:03:04[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:03:04[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> nl -ba fin/io/io_bam.py | sed -n '184,226p'[?2004l
+   184	            raise ValueError(f"Invalid DNA base: {e}")
+   185	
+   186	    def reverse_complement(self,seq) -> str:
+   187	        if seq:
+   188	            return self.complement(seq)[::-1]
+   189	        else:
+   190	            return None
+   191	
+   192	    def get_reference_sequence(self, alignment:pysam.AlignedSegment) -> str:
+   193	        if alignment.is_secondary:
+   194	            return None
+   195	        try:
+   196	            forward_ref_seq = alignment.get_reference_sequence().upper()
+   197	        except ValueError:
+   198	            # MD tag not present in BAM (minimap2 without --MD).
+   199	            # Downstream consumers default to "" so we can return None safely.
+   200	            return None
+   201	        return forward_ref_seq if not alignment.is_reverse else self.reverse_complement(forward_ref_seq)
+   202	    
+   203	    def alignment_to_dict(self, alignment: pysam.AlignedSegment) -> Dict[str, Any]:
+   204	        """
+   205	        Convert AlignedSegment to dictionary
+   206	
+   207	        Args:
+   208	            alignment: AlignedSegment object
+   209	
+   210	        Returns:
+   211	            Dictionary representation
+   212	        """
+   213	        if alignment is None:
+   214	            return {}
+   215	
+   216	        return {
+   217	            'query_name': alignment.query_name,
+   218	            'flag': alignment.flag,
+   219	            'is_reverse': alignment.is_reverse,
+   220	            'is_secondary': alignment.is_secondary,
+   221	            'is_duplicate': alignment.is_duplicate,
+   222	            'is_supplementary': alignment.is_supplementary,
+   223	            'cigartuples': alignment.cigartuples,
+   224	            'reference_name': alignment.reference_name,
+   225	            'reference_id': alignment.reference_id,
+   226	            'reference_start': alignment.reference_start,
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:03:08[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+codex
+I found `non_fusion_reads` is not generally deduped by `query_name` in the discovery loop; it only stores all read IDs as a set separately. I’ll keep that as a caveat, not a main finding.
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+ succeeded in 6500ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:03:16[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:03:16[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:03:16[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> nl -ba fin/io/interval_manager.py | sed -n '130,175p'[?2004l
+   130	        with open(output_path, 'w') as f:
+   131	            f.write(bed_content)
+   132	        return None
+   133	
+   134	
+   135	def is_fusion_read(read_dict: Dict) -> bool:
+   136	    """
+   137	    Check if a read is a fusion candidate based on soft-clip length
+   138	
+   139	    Args:
+   140	        read_dict: Dictionary representation of the read from BamReader
+   141	
+   142	    Returns:
+   143	        True if read is a fusion candidate
+   144	    """
+   145	    
+   146	    if read_dict.get('is_supplementary'):
+   147	        return True
+   148	    
+   149	    SOFT_CLIP_THRESHOLD = 250
+   150	    # logger.debug(f'Checking Fusion reads:{read_dict.get("cigartuples")}')
+   151	    if not read_dict.get('cigartuples'):
+   152	        return False
+   153	
+   154	    # Check for long soft-clips at read ends
+   155	    cigartuples = read_dict['cigartuples']
+   156	    if not cigartuples:
+   157	        return False
+   158	
+   159	    # Check first and last CIGAR operations for soft-clips
+   160	    first_op, first_len = cigartuples[0]
+   161	    last_op, last_len = cigartuples[-1]
+   162	
+   163	    # Check if soft-clips exceed threshold at either end
+   164	    if first_op == 4 and first_len >= SOFT_CLIP_THRESHOLD:
+   165	        return True
+   166	    if last_op == 4 and last_len >= SOFT_CLIP_THRESHOLD:
+   167	        return True
+   168	    
+   169	    
+   170	    # OR I can just use read_dict.get('is_supplementary')
+   171	    return False
+   172	
+   173	
+   174	def extract_strand_from_read(read_dict: Dict) -> Optional[str]:
+   175	    """
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:03:21[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+exec
+/bin/bash -lc bash in /SSD/logan/dev/pyfin
+ succeeded in 8683ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:03:50[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:03:50[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:03:50[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> nl -ba fin/candidates/dataclasses.py | sed -n '84,110<dates/dataclasses.py | sed -n '84,110p                                       <dates/dataclasses.py | sed -n '84,110p'[?2004l
+    84	    # ablation (mappy argmax bypass) and any path that needs read FASTA.
+    85	    read_sequences: Dict[str, str] = field(default_factory=dict)
+    86	    # Generation-cluster grouping for quant_mode="cluster": each inner list holds
+    87	    # the candidate_ids that belong to one generation cluster. Ids (not indices)
+    88	    # survive post-discovery gate drops/reorders (canonical/dominance/fusion), which
+    89	    # would invalidate positional indices. Populated only by the chain-cluster
+    90	    # discovery path; None means "not chain-cluster mode" (the quant-cluster dispatch
+    91	    # then treats the whole candidate list as one unscoped cluster).
+    92	    clusters: Optional[List[List[str]]] = None
+    93	    # 5'-TSS short-isoform recovery provenance (chain-cluster path only). Maps a
+    94	    # container candidate_id to the SHADOW sub-chains folded into it during
+    95	    # generation: each shadow is (intron_chain_tuple, sorted_read_id_tuple). The
+    96	    # quant-cluster recovery step re-tests these folded truncations against the
+    97	    # container's read-5'-end pileup and re-activates real TSS peaks as short
+    98	    # isoforms. None means "not chain-cluster mode" (no recovery).
+    99	    shadows: Optional[
+   100	        Dict[str, List[Tuple[Tuple[Tuple[int, int], ...], Tuple[str, ...]]]]
+   101	    ] = None
+   102	    # read_id -> (genomic reference_start, reference_end) for reads fetched in this
+   103	    # interval. Populated by the chain-cluster discovery path; used by the post-EM
+   104	    # mono-exon resolution (quant_mode="m2_em", mono_resolve_post_em) to test whether a
+   105	    # single-exon read's genomic span lies inside a surviving multi-exon candidate's
+   106	    # exon. None means "not chain-cluster mode" (mono-resolution no-ops).
+   107	    read_spans: Optional[Dict[str, Tuple[int, int]]] = None
+   108	
+   109	    @property
+   110	    def num_candidates(self) -> int:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/15[30m)[36m─┐
+[36m└[34m─([33m17:03:57[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> [?2004hexit[?2004l
+
+codex
+Read-only deep dive completed. No files modified.
+
+**1. Input + Key**
+
+`cluster_read_chains` clusters per-read `(read_dict, IntronChain)` inputs, but the union-find vertices are **distinct intron-chain tuples**, not reads. The function immediately groups reads by exact raw intron tuple:
+
+`by_chain.setdefault(tuple(chain.introns), set()).add(rid)` at [fin/candidates/chain_cluster.py:201](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:201)-[207](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:207).
+
+So the first-level key is exactly `tuple(chain.introns)`. No 3' end, snapping, chrom, or strand key is used inside this function. The file says the clustering predicates assume a single interval/strand context at [fin/candidates/chain_cluster.py:69](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:69)-[70](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:70), and the caller strand-filters reads before this path at [fin/candidates/discovery.py:393](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:393)-[402](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:402).
+
+`_chain_cluster_candidates` feeds it by extracting one CIGAR-derived chain per `non_fusion_reads` item:
+
+[fin/candidates/discovery.py:201](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:201)-[216](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:216).
+
+**2. Join Relations**
+
+The union relations are applied only after exact-subchain folding, and only to `multi = [c for c in kept if len(c) >= 1]` at [fin/candidates/chain_cluster.py:260](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:260)-[262](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:262).
+
+`_wobble`: same intron count, every donor and acceptor coordinate within `bp`, inclusive `<= bp`. Length mismatch returns false. See [fin/candidates/chain_cluster.py:93](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:93)-[98](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:98).
+
+`_contains`: `short` must be non-empty, strictly shorter, and match a contiguous window of `long_` with every donor/acceptor within `bp`, inclusive. Empty short chains are never contained. See [fin/candidates/chain_cluster.py:101](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:101)-[110](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:110).
+
+`_cassette`: `a` must have exactly one more intron than `b`; prefix/suffix introns match within `bp`; `a[i]` donor matches `b[i]` donor and `a[i+1]` acceptor matches `b[i]` acceptor; skipped exon size is `cas = a[i + 1][0] - a[i][1]`. Boundary is **strict**: `0 < cas < max_exon_bp`, not `<=`. `max_exon_bp <= 0` disables it. See [fin/candidates/chain_cluster.py:113](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:113)-[132](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:132).
+
+`_related` tries wobble first, then normalizes shorter/longer and tries cassette, then tolerant containment: [fin/candidates/chain_cluster.py:136](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:136)-[146](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:146).
+
+The union-find is standard connected-components single-linkage over all multi-exon survivor pairs: parent init at [fin/candidates/chain_cluster.py:294](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:294), path-compressing `find` at [296](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:296)-[300](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:300), pair loop and union at [302](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:302)-[306](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:306), components at [308](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:308)-[310](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:310).
+
+**3. Fold vs Cluster Entanglement**
+
+Exact-subchain folding happens **before** union-find clustering. The file-level ordering says “COLLAPSE exact sub-chains” then “CLUSTER the survivors” at [fin/candidates/chain_cluster.py:6](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:6)-[15](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:15), and the code implements that at [220](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:220)-[259](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:259) before union-find starts at [294](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:294).
+
+Yes, folding changes which chains survive to be clustered. A strict exact contiguous subchain is not appended to `kept`; its reads are pooled into the first kept container and the subchain is stored only as a folded shadow: [fin/candidates/chain_cluster.py:231](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:231)-[240](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:240). With `fold_span_guard=True`, only some reads may fold and contradictory reads can keep the subchain alive as its own survivor: [fin/candidates/chain_cluster.py:241](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:241)-[258](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:258).
+
+Mono empty-chain reads are different. `_exact_subchain` rejects empty `short` chains at [fin/candidates/chain_cluster.py:74](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:74)-[76](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:76), and mono chains are excluded from union-find by the `multi`/`mono` split at [260](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:260)-[262](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:262). If `fold_monoexon_contained=True`, mono reads can be moved into multi-exon candidates before union components are emitted: [fin/candidates/chain_cluster.py:264](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:264)-[292](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:292). The function default is false, but production config defaults it true at [fin/pipeline/config.py:36](/SSD/logan/dev/pyfin/fin/pipeline/config.py:36)-[40](/SSD/logan/dev/pyfin/fin/pipeline/config.py:40), with runner pass-through at [fin/pipeline/runner.py:183](/SSD/logan/dev/pyfin/fin/pipeline/runner.py:183)-[188](/SSD/logan/dev/pyfin/fin/pipeline/runner.py:188).
+
+**4. What A Cluster Contains**
+
+`GenCandidate` is one surviving chain plus its `read_ids` and folded shadows: [fin/candidates/chain_cluster.py:35](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:35)-[46](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:46). `ChainCluster` contains `members` and a cluster-level `read_ids` union: [fin/candidates/chain_cluster.py:53](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:53)-[66](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:66).
+
+So reads are **not pooled into every member**. Each member keeps its own read set, possibly enlarged by exact-folded or mono-folded reads. The cluster separately stores the union at [fin/candidates/chain_cluster.py:319](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:319)-[325](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:325). Folded shadows retain their own original read sets at [312](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:312)-[317](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:317), but those reads are already included in the container member.
+
+Downstream discovery consumes clusters by iterating `cl.members`, using each member’s reads for span/support, not `cl.read_ids`: [fin/candidates/discovery.py:273](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:273)-[293](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:293). `CandidateSet.clusters` stores candidate-id lists, not cluster read pools: [fin/candidates/dataclasses.py:86](/SSD/logan/dev/pyfin/fin/candidates/dataclasses.py:86)-[92](/SSD/logan/dev/pyfin/fin/candidates/dataclasses.py:92).
+
+A read is in one cluster if the input has one alignment/chain per `query_name`. The function does not enforce global uniqueness: duplicate `query_name`s with different chains would be inserted into multiple `by_chain` sets at [fin/candidates/chain_cluster.py:203](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:203)-[207](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:207).
+
+**5. Soundness / Determinism**
+
+For fixed surviving multi-exon chains, the union-find is correct for connected components of the undirected `_related` graph. It checks all pairs and unions related components at [fin/candidates/chain_cluster.py:302](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:302)-[306](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:306). The partition is order-independent as graph connectivity, though root labels/member ordering are implementation details.
+
+Important edge: this is single-linkage. If A is wobble-related to B and B to C, all three merge even if A is not related to C. That can over-join relative to a stricter “all members mutually within tolerance” family definition.
+
+Identical chains never become separate vertices because they are pooled in `by_chain`. Single-read chains are valid vertices; clustering has no support threshold. Later discovery may drop low-support novel candidates and prune candidate-id cluster lists at [fin/candidates/discovery.py:308](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:308)-[318](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:318), but that is after clustering.
+
+Boundary behavior: wobble/contains use inclusive `<= bp`; cassette uses inclusive wobble matching but strict cassette size `0 < cas < max_exon_bp`, so a skipped exon exactly equal to `cassette_max_exon_bp` does **not** join.
+
+Determinism caveat: the multi-exon structural clustering is deterministic because chain order is sorted by `(-len, -support, tuple)` at [fin/candidates/chain_cluster.py:227](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:227). Optional mono folding iterates `reads[mc]`, a set, and chooses `best` using the current mutable `len(reads[c])` at [fin/candidates/chain_cluster.py:277](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:277)-[289](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:289). Ambiguous mono reads that hit multiple containers could therefore be assignment-order sensitive.
+
+**6. Distance From Target Design**
+
+Current code is not a clean “cluster reads first, then fold/path-complete/read-pool per cluster” model.
+
+It clusters **surviving distinct chains**, not raw reads. Exact-subchain folding happens before family construction and can remove chains that otherwise would have participated in the relation graph. Optional span-guard folding and mono-exon containment also make read-level biological calls inside `cluster_read_chains`.
+
+The reverse mismatch is mono handling: all empty-chain reads initially share one `()` chain, then discovery splits mono reads into spatial loci after clustering at [fin/candidates/discovery.py:294](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:294)-[305](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:305). That spatial split is arguably clustering/locus formation, but it lives in candidate emission.
+
+The closest existing piece to the target is `ChainCluster.read_ids`, but discovery does not preserve that as the downstream read pool. It emits per-member candidates and stores only candidate-id groups plus folded-shadow provenance.
+tokens used
+122,921
+Read-only deep dive completed. No files modified.
+
+**1. Input + Key**
+
+`cluster_read_chains` clusters per-read `(read_dict, IntronChain)` inputs, but the union-find vertices are **distinct intron-chain tuples**, not reads. The function immediately groups reads by exact raw intron tuple:
+
+`by_chain.setdefault(tuple(chain.introns), set()).add(rid)` at [fin/candidates/chain_cluster.py:201](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:201)-[207](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:207).
+
+So the first-level key is exactly `tuple(chain.introns)`. No 3' end, snapping, chrom, or strand key is used inside this function. The file says the clustering predicates assume a single interval/strand context at [fin/candidates/chain_cluster.py:69](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:69)-[70](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:70), and the caller strand-filters reads before this path at [fin/candidates/discovery.py:393](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:393)-[402](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:402).
+
+`_chain_cluster_candidates` feeds it by extracting one CIGAR-derived chain per `non_fusion_reads` item:
+
+[fin/candidates/discovery.py:201](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:201)-[216](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:216).
+
+**2. Join Relations**
+
+The union relations are applied only after exact-subchain folding, and only to `multi = [c for c in kept if len(c) >= 1]` at [fin/candidates/chain_cluster.py:260](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:260)-[262](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:262).
+
+`_wobble`: same intron count, every donor and acceptor coordinate within `bp`, inclusive `<= bp`. Length mismatch returns false. See [fin/candidates/chain_cluster.py:93](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:93)-[98](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:98).
+
+`_contains`: `short` must be non-empty, strictly shorter, and match a contiguous window of `long_` with every donor/acceptor within `bp`, inclusive. Empty short chains are never contained. See [fin/candidates/chain_cluster.py:101](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:101)-[110](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:110).
+
+`_cassette`: `a` must have exactly one more intron than `b`; prefix/suffix introns match within `bp`; `a[i]` donor matches `b[i]` donor and `a[i+1]` acceptor matches `b[i]` acceptor; skipped exon size is `cas = a[i + 1][0] - a[i][1]`. Boundary is **strict**: `0 < cas < max_exon_bp`, not `<=`. `max_exon_bp <= 0` disables it. See [fin/candidates/chain_cluster.py:113](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:113)-[132](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:132).
+
+`_related` tries wobble first, then normalizes shorter/longer and tries cassette, then tolerant containment: [fin/candidates/chain_cluster.py:136](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:136)-[146](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:146).
+
+The union-find is standard connected-components single-linkage over all multi-exon survivor pairs: parent init at [fin/candidates/chain_cluster.py:294](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:294), path-compressing `find` at [296](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:296)-[300](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:300), pair loop and union at [302](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:302)-[306](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:306), components at [308](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:308)-[310](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:310).
+
+**3. Fold vs Cluster Entanglement**
+
+Exact-subchain folding happens **before** union-find clustering. The file-level ordering says “COLLAPSE exact sub-chains” then “CLUSTER the survivors” at [fin/candidates/chain_cluster.py:6](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:6)-[15](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:15), and the code implements that at [220](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:220)-[259](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:259) before union-find starts at [294](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:294).
+
+Yes, folding changes which chains survive to be clustered. A strict exact contiguous subchain is not appended to `kept`; its reads are pooled into the first kept container and the subchain is stored only as a folded shadow: [fin/candidates/chain_cluster.py:231](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:231)-[240](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:240). With `fold_span_guard=True`, only some reads may fold and contradictory reads can keep the subchain alive as its own survivor: [fin/candidates/chain_cluster.py:241](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:241)-[258](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:258).
+
+Mono empty-chain reads are different. `_exact_subchain` rejects empty `short` chains at [fin/candidates/chain_cluster.py:74](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:74)-[76](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:76), and mono chains are excluded from union-find by the `multi`/`mono` split at [260](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:260)-[262](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:262). If `fold_monoexon_contained=True`, mono reads can be moved into multi-exon candidates before union components are emitted: [fin/candidates/chain_cluster.py:264](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:264)-[292](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:292). The function default is false, but production config defaults it true at [fin/pipeline/config.py:36](/SSD/logan/dev/pyfin/fin/pipeline/config.py:36)-[40](/SSD/logan/dev/pyfin/fin/pipeline/config.py:40), with runner pass-through at [fin/pipeline/runner.py:183](/SSD/logan/dev/pyfin/fin/pipeline/runner.py:183)-[188](/SSD/logan/dev/pyfin/fin/pipeline/runner.py:188).
+
+**4. What A Cluster Contains**
+
+`GenCandidate` is one surviving chain plus its `read_ids` and folded shadows: [fin/candidates/chain_cluster.py:35](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:35)-[46](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:46). `ChainCluster` contains `members` and a cluster-level `read_ids` union: [fin/candidates/chain_cluster.py:53](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:53)-[66](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:66).
+
+So reads are **not pooled into every member**. Each member keeps its own read set, possibly enlarged by exact-folded or mono-folded reads. The cluster separately stores the union at [fin/candidates/chain_cluster.py:319](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:319)-[325](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:325). Folded shadows retain their own original read sets at [312](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:312)-[317](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:317), but those reads are already included in the container member.
+
+Downstream discovery consumes clusters by iterating `cl.members`, using each member’s reads for span/support, not `cl.read_ids`: [fin/candidates/discovery.py:273](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:273)-[293](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:293). `CandidateSet.clusters` stores candidate-id lists, not cluster read pools: [fin/candidates/dataclasses.py:86](/SSD/logan/dev/pyfin/fin/candidates/dataclasses.py:86)-[92](/SSD/logan/dev/pyfin/fin/candidates/dataclasses.py:92).
+
+A read is in one cluster if the input has one alignment/chain per `query_name`. The function does not enforce global uniqueness: duplicate `query_name`s with different chains would be inserted into multiple `by_chain` sets at [fin/candidates/chain_cluster.py:203](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:203)-[207](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:207).
+
+**5. Soundness / Determinism**
+
+For fixed surviving multi-exon chains, the union-find is correct for connected components of the undirected `_related` graph. It checks all pairs and unions related components at [fin/candidates/chain_cluster.py:302](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:302)-[306](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:306). The partition is order-independent as graph connectivity, though root labels/member ordering are implementation details.
+
+Important edge: this is single-linkage. If A is wobble-related to B and B to C, all three merge even if A is not related to C. That can over-join relative to a stricter “all members mutually within tolerance” family definition.
+
+Identical chains never become separate vertices because they are pooled in `by_chain`. Single-read chains are valid vertices; clustering has no support threshold. Later discovery may drop low-support novel candidates and prune candidate-id cluster lists at [fin/candidates/discovery.py:308](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:308)-[318](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:318), but that is after clustering.
+
+Boundary behavior: wobble/contains use inclusive `<= bp`; cassette uses inclusive wobble matching but strict cassette size `0 < cas < max_exon_bp`, so a skipped exon exactly equal to `cassette_max_exon_bp` does **not** join.
+
+Determinism caveat: the multi-exon structural clustering is deterministic because chain order is sorted by `(-len, -support, tuple)` at [fin/candidates/chain_cluster.py:227](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:227). Optional mono folding iterates `reads[mc]`, a set, and chooses `best` using the current mutable `len(reads[c])` at [fin/candidates/chain_cluster.py:277](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:277)-[289](/SSD/logan/dev/pyfin/fin/candidates/chain_cluster.py:289). Ambiguous mono reads that hit multiple containers could therefore be assignment-order sensitive.
+
+**6. Distance From Target Design**
+
+Current code is not a clean “cluster reads first, then fold/path-complete/read-pool per cluster” model.
+
+It clusters **surviving distinct chains**, not raw reads. Exact-subchain folding happens before family construction and can remove chains that otherwise would have participated in the relation graph. Optional span-guard folding and mono-exon containment also make read-level biological calls inside `cluster_read_chains`.
+
+The reverse mismatch is mono handling: all empty-chain reads initially share one `()` chain, then discovery splits mono reads into spatial loci after clustering at [fin/candidates/discovery.py:294](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:294)-[305](/SSD/logan/dev/pyfin/fin/candidates/discovery.py:305). That spatial split is arguably clustering/locus formation, but it lives in candidate emission.
+
+The closest existing piece to the target is `ChainCluster.read_ids`, but discovery does not preserve that as the downstream read pool. It emits per-member candidates and stores only candidate-id groups plus folded-shadow provenance.

@@ -1,0 +1,248 @@
+Re-review a git commit in the pyfin repo with fresh, skeptical eyes. A PRIOR review by a weaker model (gpt-5.5) marked it CLEAN. Independently re-verify with the stronger model and catch anything it may have missed. Read the embedded diff (git show); use a PTY if the non-PTY shell returns blank stdout, but the diff below is self-contained.
+
+Commit: 1f75400 — refactor(pipeline): split finalize/writers into finalize.py (M4)
+Nature: BEHAVIOR-PRESERVING REFACTOR (byte-identical bar)
+
+Acceptance bar: BYTE-IDENTICAL behaviour. Verify the move/extraction changed NO behaviour: no reordered statements that matter, no changed default/threshold, no altered condition or control flow, preserved test/mock seams (patch.object / module-level patch targets), no import cycle, no lost local variable or import, sequential-survivor / lazy-build / fold semantics preserved. Flag ANY line that could shift output.
+
+Give a clear verdict for THIS commit: CLEAN or ISSUES (list them with line cites). Be concrete and skeptical. Review only; do not modify code.
+
+===== git show 1f75400 =====
+commit 1f75400707cc76185e21b4351555372b81a60cb1
+Author: loganylchen <yuelong.chen.btr@gmail.com>
+Date:   Thu Jul 23 15:45:23 2026 +0800
+
+    refactor(pipeline): split finalize/writers into finalize.py (M4)
+    
+    Move the pre-filter unfiltered-TSV diagnostic and the post-selection gene-id
+    resolution + GTF/TSV/BEDPE writers out of the runner into fin/pipeline/finalize.py
+    (write_unfiltered_diagnostic, finalize_outputs). The GLOBAL selection call
+    (select_global, M3) stays in the runner's orchestration, so _finalize_and_write is now
+    a 3-line wiring of three independent layers:
+      write_unfiltered_diagnostic(...) -> select_global(...) -> finalize_outputs(...)
+    
+    Byte-identical (Codex-verified): the a->h step order is preserved, both moves are
+    verbatim, and the two DIFFERENT gene-id loops are each kept intact (the diagnostic path
+    keeps an existing gene_id via `if tx and not qr.gene_id`; the final path overwrites from
+    the annotation via `if tx: qr.gene_id = tx.gene_id`). _finalize_and_write stays a runner
+    method (test_min_abundance_default calls it) passing _gtf_reader / _apply_polya5p_filter
+    at call time; finalize.py imports no runner (no cycle). 911 tests pass (unchanged).
+    
+    Completes the pipeline layer split: Evidence (evidence.py) / Generation (candidates/) /
+    Assignment (assignment.py) / Selection (selection.py, all 3 scopes) / Finalize
+    (finalize.py). runner.py 1971 -> 1266 lines.
+
+diff --git a/fin/pipeline/finalize.py b/fin/pipeline/finalize.py
+new file mode 100644
+index 0000000..0bc2f94
+--- /dev/null
++++ b/fin/pipeline/finalize.py
+@@ -0,0 +1,109 @@
++"""Finalize layer: gene-id resolution and output writers.
++
++The last stage of the pipeline, after GLOBAL selection (fin.pipeline.selection.select_global). This
++module is intentionally PURE-ish: it resolves gene_ids from the annotation and writes the GTF / TSV /
++BEDPE outputs, plus the optional pre-filter diagnostic TSV. No candidate is dropped here — selection
++is done by the time these run. Writers are the existing standalone ``fin.io`` functions; this module
++just wires them to the aggregated result and the config.
++
++Kept separate from selection so "which candidates survive" (selection.py) and "how survivors are
++written out" (finalize.py) are independent concerns — a change to a writer cannot change the result
++set, and a change to a filter cannot change output formatting. ``EndpointRefine`` (5'/3'-endpoint
++polishing) is the natural future hook here; it is a no-op stub for now.
++"""
++from __future__ import annotations
++
++import logging
++from pathlib import Path
++from typing import Dict, Optional
++
++logger = logging.getLogger(__name__)
++
++
++def write_unfiltered_diagnostic(
++    config, aggregated: Dict[str, "object"], output_tsv: Optional[str], gtf_reader
++) -> None:
++    """Write the pre-filter scoring TSV (diagnostic) when ``write_unfiltered_scores`` is set.
++
++    Runs BEFORE the GLOBAL selection cascade so downstream FN-root-cause analysis can distinguish
++    "candidate never reached EM" from "candidate dropped by a filter". Resolves gene_ids on the
++    unfiltered snapshot too (so the diagnostic TSV has no empty gene_id column). No-op unless both
++    ``write_unfiltered_scores`` and ``output_tsv`` are set. Byte-identical move of the former
++    ``_finalize_and_write`` diagnostic block.
++    """
++    if not (getattr(config, "write_unfiltered_scores", False) and output_tsv):
++        return
++    from fin.io.io_tsv import write_scoring_tsv
++
++    unfiltered_path = str(Path(output_tsv).with_suffix(".unfiltered.tsv"))
++    transcript_lengths_uf = {
++        cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
++        for cid, qr in aggregated.items()
++    }
++    # Resolve gene_ids on the unfiltered snapshot too so downstream
++    # consumers don't see empty gene_id columns.
++    for cid, qr in aggregated.items():
++        if qr.source == "gtf" and gtf_reader:
++            tx = gtf_reader.get_transcript(cid)
++            if tx and not qr.gene_id:
++                qr.gene_id = tx.gene_id
++        if not qr.gene_id:
++            qr.gene_id = qr.candidate_id
++    write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
++    logger.info(
++        "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
++        unfiltered_path,
++        len(aggregated),
++    )
++
++
++def finalize_outputs(
++    config,
++    aggregated: Dict[str, "object"],
++    output_gtf: Optional[str],
++    output_tsv: Optional[str],
++    gtf_reader,
++) -> Dict[str, "object"]:
++    """Resolve gene_ids and write the GTF / TSV / BEDPE outputs; return ``aggregated`` unchanged.
++
++    Byte-identical move of the runner's former ``_finalize_and_write`` tail (post-selection): the
++    gene-id resolution loop, the three optional writers, and the final "Pipeline complete" log. No
++    candidate is dropped here.
++    """
++    # Resolve gene_ids from GTF annotation
++    for cid, qr in aggregated.items():
++        if qr.source == "gtf" and gtf_reader:
++            tx = gtf_reader.get_transcript(cid)
++            if tx:
++                qr.gene_id = tx.gene_id
++        if not qr.gene_id:
++            qr.gene_id = qr.candidate_id
++
++    # Write GTF output
++    if output_gtf:
++        from fin.io.io_gtf import write_gtf
++
++        write_gtf(aggregated, output_gtf)
++        logger.info("Wrote GTF output: %s", output_gtf)
++
++    # US-013: Additional output writers
++    if output_tsv:
++        from fin.io.io_tsv import write_scoring_tsv
++
++        transcript_lengths = {
++            cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
++            for cid, qr in aggregated.items()
++        }
++        write_scoring_tsv(aggregated, transcript_lengths, output_tsv)
++        logger.info("Wrote TSV output: %s", output_tsv)
++
++    if config.fusion_enabled and config.output_bedpe:
++        from fin.io.io_bedpe import write_fusion_bedpe
++
++        write_fusion_bedpe(aggregated, config.output_bedpe)
++        logger.info("Wrote BEDPE output: %s", config.output_bedpe)
++
++    logger.info(
++        "Pipeline complete: %d transcripts quantified", len(aggregated)
++    )
++    return aggregated
+diff --git a/fin/pipeline/runner.py b/fin/pipeline/runner.py
+index 28b1849..186696f 100644
+--- a/fin/pipeline/runner.py
++++ b/fin/pipeline/runner.py
+@@ -23,6 +23,7 @@ from fin.candidates.discovery import discover_candidates, merge_fusion_candidate
+ from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+ from fin.pipeline.assignment import Assigner
+ from fin.pipeline.config import PipelineConfig
++from fin.pipeline.finalize import finalize_outputs, write_unfiltered_diagnostic
+ from fin.pipeline.selection import (
+     canonical_gate_select,
+     junction_dominance_select,
+@@ -135,77 +136,20 @@ class PipelineRunner:
+         output_gtf: Optional[str],
+         output_tsv: Optional[str],
+     ) -> Dict[str, QuantResult]:
+-        """Apply post-EM filters, resolve gene_ids, optionally write GTF/TSV."""
+-        # Diagnostic: write unfiltered scores TSV BEFORE the post-EM filter
+-        # cascade so downstream FN-root-cause analysis can distinguish
+-        # "candidate never reached EM" from "candidate dropped by a filter".
+-        if getattr(self.config, "write_unfiltered_scores", False) and output_tsv:
+-            from fin.io.io_tsv import write_scoring_tsv
+-
+-            unfiltered_path = str(Path(output_tsv).with_suffix(".unfiltered.tsv"))
+-            transcript_lengths_uf = {
+-                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+-                for cid, qr in aggregated.items()
+-            }
+-            # Resolve gene_ids on the unfiltered snapshot too so downstream
+-            # consumers don't see empty gene_id columns.
+-            for cid, qr in aggregated.items():
+-                if qr.source == "gtf" and self._gtf_reader:
+-                    tx = self._gtf_reader.get_transcript(cid)
+-                    if tx and not qr.gene_id:
+-                        qr.gene_id = tx.gene_id
+-                if not qr.gene_id:
+-                    qr.gene_id = qr.candidate_id
+-            write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
+-            logger.info(
+-                "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
+-                unfiltered_path,
+-                len(aggregated),
+-            )
++        """Finalize: diagnostic dump -> GLOBAL selection -> gene-id resolution + writers.
+ 
+-        # GLOBAL post-aggregate selection cascade (abundance floor / isoform-fraction /
+-        # soft-mass / mono / full-length / polyA). Lives in fin.pipeline.selection.
++        Thin orchestrator wiring three independent layers: the pre-filter diagnostic and the
++        output writers live in fin.pipeline.finalize; the GLOBAL selection cascade lives in
++        fin.pipeline.selection. Kept as a method so tests can call this seam directly."""
++        write_unfiltered_diagnostic(
++            self.config, aggregated, output_tsv, self._gtf_reader
++        )
+         aggregated, _global_outcomes = select_global(
+             self.config, aggregated, self._apply_polya5p_filter,
+         )
+-
+-        # Resolve gene_ids from GTF annotation
+-        for cid, qr in aggregated.items():
+-            if qr.source == "gtf" and self._gtf_reader:
+-                tx = self._gtf_reader.get_transcript(cid)
+-                if tx:
+-                    qr.gene_id = tx.gene_id
+-            if not qr.gene_id:
+-                qr.gene_id = qr.candidate_id
+-
+-        # Write GTF output
+-        if output_gtf:
+-            from fin.io.io_gtf import write_gtf
+-
+-            write_gtf(aggregated, output_gtf)
+-            logger.info("Wrote GTF output: %s", output_gtf)
+-
+-        # US-013: Additional output writers
+-        if output_tsv:
+-            from fin.io.io_tsv import write_scoring_tsv
+-
+-            transcript_lengths = {
+-                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+-                for cid, qr in aggregated.items()
+-            }
+-            write_scoring_tsv(aggregated, transcript_lengths, output_tsv)
+-            logger.info("Wrote TSV output: %s", output_tsv)
+-
+-        if self.config.fusion_enabled and self.config.output_bedpe:
+-            from fin.io.io_bedpe import write_fusion_bedpe
+-
+-            write_fusion_bedpe(aggregated, self.config.output_bedpe)
+-            logger.info("Wrote BEDPE output: %s", self.config.output_bedpe)
+-
+-        logger.info(
+-            "Pipeline complete: %d transcripts quantified", len(aggregated)
++        return finalize_outputs(
++            self.config, aggregated, output_gtf, output_tsv, self._gtf_reader,
+         )
+-        return aggregated
+ 
+     def process_interval(
+         self, interval: GenomicInterval

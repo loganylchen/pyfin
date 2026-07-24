@@ -1,0 +1,40 @@
+Deep-dive ONE narrow step in the pyfin repo (read-only; use a PTY if the non-PTY shell returns blank
+stdout). Focus ONLY on the CLUSTERING step within an interval: how the reads of one interval get
+grouped into clusters. The code is fin/candidates/chain_cluster.py — `cluster_read_chains` and its
+helper predicates `_exact_subchain`, `_subchain_offset`, `_wobble`, `_cassette`, `_contains`,
+`_related`, `_monoexon_in_exon`, plus the `GenCandidate` / `ChainCluster` dataclasses. Also note how
+`_chain_cluster_candidates` (fin/candidates/discovery.py) FEEDS it (the (read, IntronChain) list) and
+consumes the resulting clusters — but do NOT analyze emission/GTF/quant, just the clustering.
+
+Report precisely, with file:line cites:
+
+1. INPUT + GROUPING KEY: what exactly is clustered — reads, or distinct intron chains? What is the
+   first-level grouping key (exact intron-chain tuple? is 3' end used)? How are a chain's reads
+   tracked (by_chain)?
+
+2. THE THREE JOIN RELATIONS: define exactly what makes two chains land in the same cluster —
+   `_wobble` (same intron count, every junction within wobble_bp?), `_cassette` (one skipped exon,
+   size <= cassette_max_exon_bp?), `_contains` (tolerant containment?). Give the exact predicate
+   logic and the union-find that builds clusters (chain_cluster.py ~260).
+
+3. FOLD-VS-CLUSTER ENTANGLEMENT: the user wants "clustering" as a clean standalone step, separate
+   from folding. In the current code, WHERE does exact-sub-chain folding happen relative to the
+   union-find clustering (before? interleaved?), and does folding CHANGE which chains survive to be
+   clustered (i.e. does a folded sub-chain disappear from the cluster membership)? Quote the ordering.
+   Also: mono (empty-chain) reads — how are they handled vs multi-exon chains in clustering?
+
+4. WHAT A "CLUSTER" IS: after cluster_read_chains, what does one ChainCluster contain (members =
+   distinct surviving chains each with their own read set + folded shadows)? Are reads pooled across
+   the cluster or kept per-member? Is a read ever in more than one cluster?
+
+5. SOUNDNESS / DETERMINISM of the CLUSTERING itself: is the union-find correct and order-independent?
+   Any edge cases: single-read chains, identical chains, a chain that is wobble to two different
+   families (transitive merging that over-joins), empty chains, off-by-one in the wobble/cassette
+   boundary tests? Is clustering deterministic given the same input?
+
+6. Relative to the user's target design (clustering first, THEN per-cluster fold/path-completion/
+   read-pool): how far is the current code from a clean "cluster reads into families, keep the read
+   pool at cluster level" model? What is currently done at cluster-time that arguably belongs to a
+   later per-cluster step, and vice versa?
+
+Be concrete and scoped to clustering. Do not modify anything.

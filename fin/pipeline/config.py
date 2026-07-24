@@ -34,6 +34,7 @@ class PipelineConfig:
     # 10.1%->26.4% (2.6x), at a ~20% distinct-truth recall cost that is 92% attributable
     # to the exact sub-chain collapse (recoverable later by guarding the collapse).
     chain_cluster_discovery: bool = True
+    clustering: str = "read_chains"  # generation clustering primitive (--chain-cluster-discovery only). "read_chains" = legacy cluster_read_chains (fold+cluster inline, PRODUCTION DEFAULT). "families" = clustering redesign: cluster_families (grouping only, single-linkage) + collapse (explicit exact-subchain fold); mono reads deferred to a holding bucket (pair with --mono-resolve-post-em). Behavior change (NOT byte-identical); metric-validated before any default flip.
     chain_cluster_wobble_bp: int = 6
     chain_cluster_cassette_max_exon_bp: int = 70
     chain_cluster_fold_monoexon: bool = True  # fold single-exon reads wholly inside a multi-exon candidate's exon into that candidate (5'/3' degradation fragments) instead of emitting standalone mono candidates; intronic/uncontained mono reads stay separate. PRODUCTION DEFAULT (p00 m2_em: out 9581->9181, `=` 6323->6414, Pr 66.0->69.9 -- de-fragmentation both-axes win). --no- reverts to legacy standalone mono candidates.

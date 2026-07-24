@@ -1,0 +1,266 @@
+===== explore step REVIEW BUNDLE =====
+----- NEW: fin/candidates/explore.py -----
+     1	"""Explore step: family-local intron-graph path enumeration (additive candidate expansion).
+     2	
+     3	Runs AFTER clustering (fin.candidates.chain_cluster.cluster_families) and BEFORE any fold. It is a
+     4	pure RECALL step: it never drops or rewrites anything -- it ADDS assembled full-length candidates that
+     5	no single read produced, by tiling read-phased junction edges across reads within one family. The
+     6	downstream re-mapping / selection does the TP/FP discrimination, so generating many candidates here is
+     7	acceptable by design.
+     8	
+     9	Why it exists: a read's exact chain is only the introns THAT read spanned. dRNA 5' degradation means a
+    10	long transcript's reads are each partial (read A = [I1,I2], read B = [I2,I3]), so the full chain
+    11	[I1,I2,I3] is on NO single read and is therefore absent from the exact-chain candidate set. The union
+    12	of read-phased edges (I1->I2 from A, I2->I3 from B) DOES contain the full path; walking it reconstructs
+    13	the missing candidate. This is the dominant de-novo recall gap (measured ~74% of missed full-length-
+    14	supported truth are this cross-read-truncation case).
+    15	
+    16	Design (agreed with the user + Codex gpt-5.6-sol):
+    17	- NODES = every distinct OBSERVED intron coordinate in the family (wobble variants kept as SEPARATE
+    18	  nodes -- NO consensus collapse, NO coordinate rewrite).
+    19	- EDGES = ordered pairs (A, B) that appear CONSECUTIVELY in some variant chain (i.e. co-observed on the
+    20	  reads that produced that variant). Read-phased only: a path's every adjacency is read-backed. Genomic
+    21	  order + positive exon between introns make the graph a DAG (no cycles, no same-slot double-use).
+    22	- ENUMERATE maximal source->sink paths with a deterministic BOTTLENECK-FIRST beam (bounded), keeping
+    23	  N=1 edges (precision is a downstream gate, default 2). Emit only chains that are NOT already a variant
+    24	  (baseline exact variants are kept by the caller). Cap the assembled additions per family.
+    25	
+    26	CAVEAT (Codex): read-phased edges prevent LOCAL fabrication but NOT global recombination at a shared
+    27	node -- reads A-B-X-D and A-C-X-E also yield A-B-X-E / A-C-X-D whose every edge is observed but whose
+    28	whole chain is not. That is accepted for an additive, downstream-filtered generation step; the
+    29	per-path ``min_edge_support`` is exposed so downstream can weight it. Richer recombination/handoff
+    30	provenance is a follow-up.
+    31	"""
+    32	from __future__ import annotations
+    33	
+    34	from collections import Counter, defaultdict
+    35	from dataclasses import dataclass, field
+    36	from typing import Dict, List, Set, Tuple
+    37	
+    38	Chain = Tuple[Tuple[int, int], ...]
+    39	
+    40	
+    41	@dataclass
+    42	class ExploredPath:
+    43	    """One assembled candidate chain (not observed whole on any single read).
+    44	
+    45	    ``min_edge_support`` = the bottleneck (minimum over the path's edges of the number of reads that
+    46	    co-observed that adjacency) -- the key quality signal for downstream weighting. ``reads`` = union
+    47	    of the reads of every variant that is a contiguous sub-chain of this path (the reads that tile it).
+    48	    """
+    49	    chain: Chain
+    50	    min_edge_support: int
+    51	    n_edges: int
+    52	    reads: Set[str] = field(default_factory=set)
+    53	
+    54	
+    55	def _build_graph(family):
+    56	    """Return (node_support, edge_support, succ, pred) for a family's read-derived variants.
+    57	
+    58	    A read supports every intron in its variant chain and every consecutive pair. Reads are disjoint
+    59	    across variants (a read produces exactly one exact chain), so summing per-variant read counts is a
+    60	    true union count. Only genomically valid edges (positive exon between the two introns) are kept, so
+    61	    the graph is a DAG in genomic order.
+    62	    """
+    63	    node_support: Counter = Counter()
+    64	    edge_support: Counter = Counter()
+    65	    succ: Dict[Tuple[int, int], Set[Tuple[int, int]]] = defaultdict(set)
+    66	    pred: Dict[Tuple[int, int], Set[Tuple[int, int]]] = defaultdict(set)
+    67	    for v in family.variants:
+    68	        r = len(family.variant_reads.get(v, ()) or ())
+    69	        for intr in v:
+    70	            node_support[intr] += r
+    71	        for a, b in zip(v, v[1:]):
+    72	            if b[0] <= a[1]:            # require a real exon between introns (genomic order)
+    73	                continue
+    74	            edge_support[(a, b)] += r
+    75	            succ[a].add(b)
+    76	            pred[b].add(a)
+    77	    return node_support, edge_support, succ, pred
+    78	
+    79	
+    80	def explore_family_paths(
+    81	    family,
+    82	    *,
+    83	    beam_width: int = 256,
+    84	    max_new: int = 512,
+    85	) -> List[ExploredPath]:
+    86	    """Enumerate assembled full-length candidates for one :class:`ChainFamily`.
+    87	
+    88	    Builds the read-phased intron DAG, beam-enumerates maximal source->sink paths (deterministic,
+    89	    bottleneck-first), and returns the paths that are NOT already a variant of the family (the caller
+    90	    keeps all exact variants separately). Additive and reversible: with the graph empty or single-node
+    91	    families, returns []. Never mutates the family.
+    92	    """
+    93	    node_support, edge_support, succ, pred = _build_graph(family)
+    94	    if not node_support:
+    95	        return []
+    96	    variants_set = set(family.variants)
+    97	    nodes = set(node_support)
+    98	    sources = sorted(n for n in nodes if not pred.get(n))
+    99	    if not sources:
+   100	        return []  # a pure cycle is impossible (DAG); no source means nothing to walk
+   101	
+   102	    def _edge_scores(path: Tuple) -> Tuple[int, int]:
+   103	        if len(path) < 2:
+   104	            return (0, 0)
+   105	        e = [edge_support[(path[i], path[i + 1])] for i in range(len(path) - 1)]
+   106	        return (min(e), sum(e))            # bottleneck first, then cumulative
+   107	
+   108	    completed: List[Tuple] = []
+   109	    frontier: List[Tuple] = [(s,) for s in sources]
+   110	    # Bound total work: each layer extends the frontier then prunes to beam_width.
+   111	    while frontier and len(completed) <= max_new * 4:
+   112	        nxt: List[Tuple] = []
+   113	        for path in frontier:
+   114	            outs = sorted(succ.get(path[-1], ()))
+   115	            if not outs:
+   116	                completed.append(path)     # reached a sink -> a maximal path
+   117	                continue
+   118	            for b in outs:
+   119	                if b in path:              # never revisit a node (DAG guarantees, guard anyway)
+   120	                    continue
+   121	                nxt.append(path + (b,))
+   122	        if not nxt:
+   123	            break
+   124	        # deterministic prune: stable sort by coords, then by (bottleneck, cumulative) desc.
+   125	        nxt.sort()
+   126	        nxt.sort(key=_edge_scores, reverse=True)
+   127	        frontier = nxt[:beam_width]
+   128	
+   129	    # dedup + keep only NEW multi-intron assembled chains, rank by support then coords.
+   130	    seen: Set[Chain] = set()
+   131	    out: List[ExploredPath] = []
+   132	    for path in sorted(completed, key=lambda p: (-_edge_scores(p)[0], -_edge_scores(p)[1], p)):
+   133	        chain: Chain = tuple(path)
+   134	        if len(chain) < 2 or chain in variants_set or chain in seen:
+   135	            continue
+   136	        seen.add(chain)
+   137	        mn, _ = _edge_scores(path)
+   138	        reads: Set[str] = set()
+   139	        for v in family.variants:                     # reads of variants that tile this path
+   140	            if _is_subchain(v, chain):
+   141	                reads |= (family.variant_reads.get(v, set()) or set())
+   142	        out.append(ExploredPath(chain=chain, min_edge_support=mn,
+   143	                                n_edges=len(chain) - 1, reads=reads))
+   144	        if len(out) >= max_new:
+   145	            break
+   146	    return out
+   147	
+   148	
+   149	def _is_subchain(short: Chain, long_: Chain) -> bool:
+   150	    """True iff ``short`` is a contiguous exact sub-sequence of ``long_`` (or equal)."""
+   151	    n, m = len(long_), len(short)
+   152	    if m == 0 or m > n:
+   153	        return False
+   154	    return any(long_[o:o + m] == short for o in range(n - m + 1))
+
+----- NEW: tests/unit/test_explore.py -----
+     1	"""Unit tests for the explore step (family-local intron-graph path enumeration).
+     2	
+     3	explore_family_paths ADDS assembled full-length candidates that no single read produced, by tiling
+     4	read-phased junction edges across reads within one family. It must never drop/rewrite; it only emits
+     5	NEW (non-variant) maximal source->sink paths.
+     6	"""
+     7	from fin.candidates.chain_cluster import ChainFamily
+     8	from fin.candidates.explore import ExploredPath, explore_family_paths
+     9	
+    10	# convenient introns, genomically ordered with positive exons between
+    11	I1 = (1000, 2000)
+    12	I2 = (3000, 4000)
+    13	I3 = (5000, 6000)
+    14	I4 = (7000, 8000)
+    15	
+    16	
+    17	def _fam(variant_reads):
+    18	    """variant_reads: {chain_tuple: set(read_ids)} -> a ChainFamily."""
+    19	    variants = list(variant_reads)
+    20	    pool = set()
+    21	    for r in variant_reads.values():
+    22	        pool |= r
+    23	    return ChainFamily(variants=variants, read_pool=pool, variant_reads=dict(variant_reads))
+    24	
+    25	
+    26	def _chains(paths):
+    27	    return sorted(p.chain for p in paths)
+    28	
+    29	
+    30	class TestCrossReadAssembly:
+    31	    def test_truncated_reads_assemble_full_chain(self):
+    32	        # read A = [I1,I2], read B = [I2,I3]; NO read has [I1,I2,I3] -> assemble it.
+    33	        fam = _fam({(I1, I2): {"a1", "a2"}, (I2, I3): {"b1"}})
+    34	        out = explore_family_paths(fam)
+    35	        assert _chains(out) == [(I1, I2, I3)]
+    36	        p = out[0]
+    37	        assert p.min_edge_support == 1          # bottleneck = edge I2->I3 (1 read)
+    38	        assert p.n_edges == 2
+    39	        assert p.reads == {"a1", "a2", "b1"}     # union of tiling variants' reads
+    40	
+    41	    def test_three_way_tiling(self):
+    42	        fam = _fam({(I1, I2): {"a"}, (I2, I3): {"b"}, (I3, I4): {"c"}})
+    43	        out = explore_family_paths(fam)
+    44	        assert (I1, I2, I3, I4) in _chains(out)   # full 4-intron chain assembled
+    45	
+    46	    def test_single_variant_emits_nothing(self):
+    47	        fam = _fam({(I1, I2): {"a"}})
+    48	        assert explore_family_paths(fam) == []
+    49	
+    50	    def test_full_read_chain_not_re_emitted(self):
+    51	        # one read already spans the whole chain -> it's a variant -> explore adds nothing new.
+    52	        fam = _fam({(I1, I2, I3): {"a"}})
+    53	        assert explore_family_paths(fam) == []
+    54	
+    55	
+    56	class TestFrankensteinRecombination:
+    57	    # A-B-X-D and A-C-X-E share node X; read-phased edges also permit A-B-X-E / A-C-X-D
+    58	    # (each edge observed, whole chain not). Codex flagged this global recombination; we EMIT
+    59	    # them (recall-first) -- this test documents/pins that behaviour.
+    60	    A = (1000, 2000)
+    61	    B = (2500, 3000)
+    62	    C = (2500, 3100)
+    63	    X = (4000, 5000)
+    64	    D = (6000, 7000)
+    65	    E = (6000, 7100)
+    66	
+    67	    def test_recombinants_are_emitted(self):
+    68	        v1 = (self.A, self.B, self.X, self.D)
+    69	        v2 = (self.A, self.C, self.X, self.E)
+    70	        fam = _fam({v1: {"r1"}, v2: {"r2"}})
+    71	        out = _chains(explore_family_paths(fam))
+    72	        recomb1 = (self.A, self.B, self.X, self.E)
+    73	        recomb2 = (self.A, self.C, self.X, self.D)
+    74	        assert recomb1 in out and recomb2 in out   # both recombinants produced
+    75	        assert v1 not in out and v2 not in out      # variants are NOT re-emitted (kept by caller)
+    76	
+    77	
+    78	class TestBeamAndDeterminism:
+    79	    def test_deterministic_across_variant_order(self):
+    80	        d1 = {(I1, I2): {"a"}, (I2, I3): {"b"}}
+    81	        d2 = {(I2, I3): {"b"}, (I1, I2): {"a"}}
+    82	        assert _chains(explore_family_paths(_fam(d1))) == _chains(explore_family_paths(_fam(d2)))
+    83	
+    84	    def test_max_new_caps_output(self):
+    85	        A = (1000, 2000)
+    86	        B, C = (2500, 3000), (2500, 3100)
+    87	        X = (4000, 5000)
+    88	        D, E = (6000, 7000), (6000, 7100)
+    89	        fam = _fam({(A, B, X, D): {"r1"}, (A, C, X, E): {"r2"}})
+    90	        out = explore_family_paths(fam, max_new=1)
+    91	        assert len(out) == 1                        # capped
+    92	
+    93	    def test_returns_exploredpath_objects(self):
+    94	        fam = _fam({(I1, I2): {"a"}, (I2, I3): {"b"}})
+    95	        out = explore_family_paths(fam)
+    96	        assert all(isinstance(p, ExploredPath) for p in out)
+    97	
+    98	
+    99	class TestGeometryGuard:
+   100	    def test_no_edge_across_overlapping_introns(self):
+   101	        # a crafted (invalid) variant whose consecutive introns overlap must not form an edge,
+   102	        # so no assembled path bridges them.
+   103	        bad = ((1000, 4000), (3000, 5000))          # second donor 3000 <= first acceptor 4000
+   104	        other = ((3000, 5000), (6000, 7000))
+   105	        fam = _fam({bad: {"a"}, other: {"b"}})
+   106	        out = _chains(explore_family_paths(fam))
+   107	        # (1000,4000) has no valid outgoing edge -> cannot bridge into (6000,7000)
+   108	        assert ((1000, 4000), (3000, 5000), (6000, 7000)) not in out

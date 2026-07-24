@@ -186,7 +186,7 @@ def _graph_groups(non_fusion_reads, strand, tol, min_edge_reads,
 def _chain_cluster_candidates(
     interval, non_fusion_reads, all_read_ids, read_sequences, gtf_reader,
     genome_fasta, strand, min_novel_reads, *, wobble_bp, cassette_max_exon_bp,
-    fold_monoexon_contained=False, fold_span_guard=False,
+    fold_monoexon_contained=False, fold_span_guard=False, clustering="read_chains",
 ) -> CandidateSet:
     """NEW generation: build candidates via intron-chain clustering.
 
@@ -195,9 +195,16 @@ def _chain_cluster_candidates(
     candidate whose span is the UNION of its reads' extents and whose sequence is
     stitched from the genome. A novel chain that EXACTLY matches a GTF transcript's
     chain merges its reads into that GTF candidate instead. No canonical search.
-    """
-    from fin.candidates.chain_cluster import cluster_read_chains
 
+    ``clustering`` selects the clustering primitive (both yield the same downstream
+    ``ChainCluster`` contract, so the emission below is shared):
+      - ``"read_chains"`` (default): the legacy :func:`cluster_read_chains` (fold + cluster inline).
+      - ``"families"``: the clustering redesign -- :func:`cluster_families` (grouping only) then
+        :func:`collapse` per family (explicit exact-subchain fold). Mono reads go to a holding
+        bucket emitted as one empty-chain cluster (spatially split by the shared emission loop,
+        and optionally re-resolved post-EM by ``mono_resolve_post_em``). ``fold_monoexon_contained``
+        / ``fold_span_guard`` do not apply here (mono is deferred, not generation-folded).
+    """
     read_chains = []
     spans: dict = {}
     for rd in non_fusion_reads:
@@ -210,10 +217,23 @@ def _chain_cluster_candidates(
         if q is not None:
             spans[q] = (ref_start, rd.get("reference_end", ref_start))
 
-    clusters = cluster_read_chains(
-        read_chains, wobble_bp=wobble_bp, cassette_max_exon_bp=cassette_max_exon_bp,
-        fold_monoexon_contained=fold_monoexon_contained,
-        fold_span_guard=fold_span_guard)
+    if clustering == "families":
+        from fin.candidates.chain_cluster import (
+            ChainCluster, GenCandidate, cluster_families, collapse)
+        from fin.candidates.dataclasses import IntronChain
+        result = cluster_families(
+            read_chains, wobble_bp=wobble_bp, cassette_max_exon_bp=cassette_max_exon_bp)
+        clusters = [collapse(fam) for fam in result.families]
+        if result.mono_reads:            # mono holding bucket -> one empty-chain cluster
+            clusters.append(ChainCluster(
+                members=[GenCandidate(IntronChain(introns=()), set(result.mono_reads))],
+                read_ids=set(result.mono_reads)))
+    else:
+        from fin.candidates.chain_cluster import cluster_read_chains
+        clusters = cluster_read_chains(
+            read_chains, wobble_bp=wobble_bp, cassette_max_exon_bp=cassette_max_exon_bp,
+            fold_monoexon_contained=fold_monoexon_contained,
+            fold_span_guard=fold_span_guard)
 
     # GTF candidates (identical to the legacy path).
     gtf_candidates: List[TranscriptCandidate] = []
@@ -353,6 +373,7 @@ def discover_candidates(
     chain_cluster_cassette_max_exon_bp: int = 70,
     chain_cluster_fold_monoexon: bool = False,
     chain_cluster_fold_span_guard: bool = False,
+    clustering: str = "read_chains",
 ) -> CandidateSet:
     """Discover transcript candidates for a genomic interval.
 
@@ -437,6 +458,7 @@ def discover_candidates(
             cassette_max_exon_bp=chain_cluster_cassette_max_exon_bp,
             fold_monoexon_contained=chain_cluster_fold_monoexon,
             fold_span_guard=chain_cluster_fold_span_guard,
+            clustering=clustering,
         )
 
     # 2. Group reads by 3' + intron chain → novel candidate groups.

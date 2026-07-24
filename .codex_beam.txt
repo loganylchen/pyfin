@@ -1,0 +1,73 @@
+Design discussion (read-only; use a PTY if non-PTY shell returns blank stdout). pyfin de-novo
+transcript assembly, generation-stage recall. This CONTINUES a prior discussion where you recommended
+a family-local additive intron-graph that (a) collapses observed junction PAIRS to a modal consensus
+coordinate and (b) assembles only UNBRANCHED read-phased paths, STOPPING at any supported branch, to
+avoid over-merge.
+
+The user has refined the design and wants you to evaluate it decisively, reconciling with your prior
+recommendation. The user's design:
+
+1. Path-completion approved, strictly WITHIN one cluster/family (fin/candidates/chain_cluster.py
+   cluster_families already produces families with variants + variant_reads + a read pool; the graph
+   machinery exists in fin/candidates/junction_graph.py but is only reachable via the legacy branch,
+   NOT the production chain-cluster route -- discovery.py:428 vs :467).
+
+2. REJECT consensus-collapse. Instead KEEP every distinct OBSERVED junction (wobble variants stay as
+   SEPARATE graph nodes). Where reads disagree at a junction (e.g. some reads E2-I2-E3, others
+   E2'-I2'-E3), do NOT pick one -- ENUMERATE BOTH full-length paths (E1-E2-E3 AND E1-E2'-E3). Bound the
+   combinatorial explosion with BEAM SEARCH. Each enumerated maximal path is emitted as a candidate;
+   ALL are kept. This step's SOLE goal is RECALL (every expressed transcript at least present in the
+   set); TP/FP discrimination is a downstream step.
+   - The user's core assumption: "at each junction, at least one read is correct", so the true junction
+     coordinate is among the observed node variants, hence the true full path is enumerable.
+   - Critical constraint (please confirm/insist): graph EDGES must be READ-PHASED -- an edge
+     (junction_A -> junction_B) exists only if some single read observed A and B consecutively. So a
+     path's every adjacency is read-backed; enumeration cannot fabricate an unobserved donor/acceptor
+     pairing. The recall gain is CROSS-read assembly: no single read spans the full chain, but the
+     union of read-phased edges does.
+
+3. When GTF is present, add the GTF transcripts' junctions as additional graph NODES (additive
+   hypotheses). At p00 (no GTF) this is a no-op, preserving the no-annotation-snap advantage.
+
+EVALUATE, concretely, with code cites and decisive judgement:
+
+A. ENUMERATE+BEAM vs CONSENSUS/STOP-AT-BRANCH. Is the user right that "stop at branch" LOSES recall
+   (drops the true alternative-junction path)? Reconcile with your earlier over-merge concern: does
+   beam-bounded enumeration of read-phased maximal paths, with ALL variants kept and FP filtered
+   downstream, achieve higher recall WITHOUT the Frankenstein-path risk (because every edge is
+   read-phased)? State when enumeration is strictly better vs when consensus is safer.
+
+B. THE ASSUMPTION ">=1 read correct per junction". Validity and failure mode. Necessary-but-not-
+   sufficient: recall also needs every truth ADJACENCY (consecutive junction pair) co-observed in >=1
+   read (else no edge -> path not assemblable). So the real recoverable ceiling = missed truth whose
+   EVERY junction is observed within tol AND EVERY adjacency is read-phased. Is that the right ceiling?
+   How does keeping all observed junction NODES (vs consensus) change recall relative to the exact-chain
+   baseline (which already emits every fully-observed exact chain)? Confirm the gain is purely the
+   cross-read truncation case (74%) plus wobble paths where the true coord is observed but not full-
+   length on one read.
+
+C. BEAM SEARCH design. What score to rank partial paths (min edge read-support? cumulative? junction
+   support?), beam width vs recall guarantee (how wide to be near-certain the true path survives if its
+   junctions+adjacencies are all observed), DETERMINISM (ties), worst-case complexity, and the
+   recall/candidate-count/precision tradeoff. Is there a cheap dominance prune (drop a path strictly
+   worse-supported and structurally dominated)? How to cap candidates per family.
+
+D. COMBINATORIAL SAFETY. Confirm read-phased edges prevent unobserved junction pairings. But branches
+   still multiply: K branch points each with V variants -> V^K paths pre-beam. Any additional guard
+   beyond beam (e.g. require each emitted path's rarest edge >= N reads; forbid mixing two variants of
+   the SAME junction site in one path; single-linkage bridge guard so a wobble-family doesn't connect
+   two genuinely distinct loci into one path)?
+
+E. GTF JUNCTIONS AS NODES. How do GTF junctions enter WITHOUT becoming annotation-snap? As additional
+   node COORDINATES only (so a read wobbled near a GTF junction can also yield a path at the exact GTF
+   coord, as an ADDITIONAL tagged hypothesis)? Or also as EDGES (GTF chain adjacency -- which injects
+   annotation structure)? Recommend the safe form. Must stay additive + GTF-only-present + downstream-
+   filterable, never replacing read variants.
+
+F. MEASURE-FIRST. Recommend the exact "beam-assembly recoverable ceiling" measurement to run BEFORE
+   implementing: over the missed FL>=3 truth, fraction where every truth junction is observed (<=6bp)
+   by some family read AND every truth adjacency is read-phased -- split by the 74% truncated / 10%
+   wobble categories. This bounds the max recall this whole approach can deliver.
+
+Be decisive and concrete. Recommend the final generation-stage algorithm (nodes, edges, enumeration,
+beam, guards, GTF, provenance/source tags, reversibility flag). Do not modify code.

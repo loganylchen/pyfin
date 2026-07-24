@@ -1,0 +1,3320 @@
+Reading prompt from stdin...
+OpenAI Codex v0.142.0
+--------
+workdir: /SSD/logan/dev/pyfin
+model: gpt-5.6-sol
+provider: OpenAI
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019f923b-f0d0-7cc1-9aef-d0a95f7332f4
+--------
+user
+Re-review a git commit in the pyfin repo with fresh, skeptical eyes. A PRIOR review by a weaker model (gpt-5.5) marked it CLEAN. Independently re-verify with the stronger model and catch anything it may have missed. Read the embedded diff (git show); use a PTY if the non-PTY shell returns blank stdout, but the diff below is self-contained.
+
+Commit: bc39ce8 — refactor(pipeline): extract m2_em tie_nll into assignment layer (M2 Step A)
+Nature: BEHAVIOR-PRESERVING REFACTOR (byte-identical bar)
+
+Acceptance bar: BYTE-IDENTICAL behaviour. Verify the move/extraction changed NO behaviour: no reordered statements that matter, no changed default/threshold, no altered condition or control flow, preserved test/mock seams (patch.object / module-level patch targets), no import cycle, no lost local variable or import, sequential-survivor / lazy-build / fold semantics preserved. Flag ANY line that could shift output.
+
+Give a clear verdict for THIS commit: CLEAN or ISSUES (list them with line cites). Be concrete and skeptical. Review only; do not modify code.
+
+===== git show bc39ce8 =====
+commit bc39ce8b8820df9cc28233a83fed956e202bc991
+Author: loganylchen <yuelong.chen.btr@gmail.com>
+Date:   Thu Jul 23 14:47:00 2026 +0800
+
+    refactor(pipeline): extract m2_em tie_nll into assignment layer (M2 Step A)
+    
+    Move PipelineRunner._tie_nll verbatim into fin/pipeline/assignment.tie_nll,
+    with config passed explicitly (self.config -> config) and its module deps
+    (_M2_EM_FLANK=2, logger, function-local krill/scoring imports) relocated. The
+    runner keeps a thin _tie_nll delegate that forwards to the module function,
+    preserving the test mock seam (patch.object(PipelineRunner, "_tie_nll", ...))
+    and the self._tie_nll call site in _quant_m2_em.
+    
+    First cut of the assignment-layer extraction (plan M2). Behavior-preserving:
+    p00 m2_em output byte-identical to baseline (9146 tx, structural multiset
+    match ignoring random novel UUIDs); 900 unit tests pass (only the 3
+    pre-existing missing-fixture test_cli fails); runner.py 206 lines lighter.
+
+diff --git a/fin/pipeline/assignment.py b/fin/pipeline/assignment.py
+new file mode 100644
+index 0000000..b4702cd
+--- /dev/null
++++ b/fin/pipeline/assignment.py
+@@ -0,0 +1,220 @@
++"""Assignment layer: read-to-candidate assignment for quant_mode="m2_em".
++
++Extracted from the runner's ``_quant_m2_em`` so the M1/M2/EM assignment orchestration lives in
++its own module (intervals, clustering, EM, quantification are already standalone modules; this is
++the last piece that was glued into the runner).
++
++Step A (this file): ``tie_nll`` — the per-read best-AS tie junction-NLL scoring (moved verbatim
++from ``PipelineRunner._tie_nll``; ``self.config`` -> ``config``). Byte-identical.
++"""
++from __future__ import annotations
++
++import logging
++from typing import Dict, List, Tuple
++
++import numpy as np
++
++logger = logging.getLogger(__name__)
++
++# Junction-window flank (bp) for the M2 tie discrimination window (matches runner).
++_M2_EM_FLANK = 2
++
++
++def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
++    """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
++
++    For each read whose raw mappy AS is simultaneously best across >=2 candidates, build the
++    class junction-discrimination window over that tie set and score each tied candidate with the
++    per-event junction mean-NLL (non-HMM krill eventalign over the window). Only tied,
++    window-scorable cells are touched -- never the dense read×candidate matrix.
++
++    Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]}, n_ties, n_refined,
++    cover_by_read {i: bool}). ``cover_by_read`` is populated only when the diff-region coverage
++    gate (config.m2_diff_cover_gate) is ON; otherwise it is empty.
++    """
++    import krill
++
++    from fin.scoring.krill_aligner import (
++        krill_thread_count,
++        make_krill_aligner,
++    )
++    from fin.scoring.m2_junction_nll import (
++        _mean_nll_in_gset,
++        class_junction_window_set,
++        event_genomic_positions,
++        read_cand_mean_nll,
++        read_straddles,
++        wobble_diff_spans,
++    )
++    from fin.scoring.mappy_score import score_hit
++
++    gate = bool(getattr(config, "m2_diff_cover_gate", False))
++    num_threads = krill_thread_count()
++    n_c = len(cand_list)
++    nlls_by_read: Dict[int, Dict[int, float]] = {}
++    ties_by_read: Dict[int, List[int]] = {}
++    cover_by_read: Dict[int, bool] = {}
++    krill_aligner, eff_gpu = make_krill_aligner(
++        krill, config.krill_pore, config.use_gpu,
++        hmm_confidence=False, num_thread=num_threads,
++    )
++    if krill_aligner is None:
++        # No krill signal backend. Gate OFF: preserve the legacy behavior
++        # (empty ties -> _quant_m2_em leaves rows MISSING, byte-identical).
++        # Gate ON: still expose the AS tie sets (derivable from ``raw`` alone,
++        # no signal needed) so the gate's unique-best / drop logic is
++        # well-defined; without them every row would be all-MISSING and the
++        # EM would normalize each read to a spurious uniform vote.
++        if gate:
++            for i in range(len(kept_read_ids)):
++                row = raw[i]
++                finite = np.isfinite(row)
++                if not finite.any():
++                    continue
++                best_as = float(row[finite].max())
++                ties_by_read[i] = [
++                    j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9
++                ]
++        return nlls_by_read, ties_by_read, 0, 0, cover_by_read
++
++    k = config.m2_tiebreak_junction_k
++    pore = config.krill_pore
++    sig_path = config.signal_path
++
++    # --- Pass 1: tie detection + per-(read, candidate) mappy best-hit slices.
++    # Each tied cell is reduced to the SAME (sliced sequence, start offset)
++    # the singular read_cand_mean_nll would have eventaligned, so the batched
++    # eventalign below is byte-identical to the per-call path -- only the
++    # Python/GIL/per-call overhead is removed.
++    gset_by_read: Dict[int, set] = {}
++    spans_by_read: Dict[int, List[Tuple[int, int]]] = {}  # diff-cover gate spans
++    reads_variants: Dict[str, Dict[str, str]] = {}  # rid -> {cand_id: seq}
++    starts: Dict[str, Dict[str, int]] = {}          # rid -> {cand_id: r_st}
++    cidj_by_read: Dict[str, Dict[str, int]] = {}     # rid -> {cand_id: col j}
++    n_ties = 0
++    for i, rid in enumerate(kept_read_ids):
++        row = raw[i]
++        finite = np.isfinite(row)
++        if not finite.any():
++            continue
++        best_as = float(row[finite].max())
++        tie = [j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9]
++        ties_by_read[i] = tie
++        if len(tie) < 2:
++            continue
++        n_ties += 1
++        gset = class_junction_window_set(
++            [cand_list[j] for j in tie], flank=_M2_EM_FLANK, k=k
++        )
++        if not gset:
++            continue
++        if gate:
++            spans_by_read[i] = wobble_diff_spans(
++                [cand_list[j] for j in tie], flank=_M2_EM_FLANK
++            )
++        seq = read_seqs[rid]
++        per_seqs: Dict[str, str] = {}
++        per_starts: Dict[str, int] = {}
++        per_cidj: Dict[str, int] = {}
++        for j in tie:
++            aln = aligners[j]
++            if aln is None:
++                continue
++            best_hit = None
++            best_hit_as = None
++            for h in aln.map(seq):
++                v = score_hit(h)
++                if v is None:
++                    continue
++                if best_hit_as is None or v > best_hit_as:
++                    best_hit_as, best_hit = v, h
++            if best_hit is None:
++                continue
++            cand = cand_list[j]
++            per_seqs[cand.candidate_id] = cand.sequence[best_hit.r_st:best_hit.r_en]
++            per_starts[cand.candidate_id] = best_hit.r_st
++            per_cidj[cand.candidate_id] = j
++        if not per_seqs:
++            continue
++        gset_by_read[i] = gset
++        reads_variants[rid] = per_seqs
++        starts[rid] = per_starts
++        cidj_by_read[rid] = per_cidj
++
++    if not reads_variants:
++        return nlls_by_read, ties_by_read, n_ties, 0, cover_by_read
++
++    # --- Pass 2: ONE batched eventalign over every tied pair (per-pair start
++    # via the {label: offset} form); per-read singular fallback on absence or
++    # batch failure. Both branches score with the same _mean_nll_in_gset.
++    rid_to_i = {rid: i for i, rid in enumerate(kept_read_ids)}
++    n_refined = 0
++    use_batch = hasattr(krill, "align_reads_variants")
++    batch_out = None
++    if use_batch:
++        try:
++            batch_out = krill.align_reads_variants(
++                sig_path, reads_variants, pore=pore,
++                use_gpu=eff_gpu, num_thread=num_threads,
++                aligner=krill_aligner, start=starts,
++            )
++        except Exception as exc:  # noqa: BLE001 - krill raises broad errors
++            logger.warning("M2 batch eventalign failed (%s); per-read fallback", exc)
++            use_batch = False
++
++    if use_batch and batch_out is not None:
++        for rid, res_list in batch_out.items():
++            i = rid_to_i.get(rid)
++            if i is None:
++                continue
++            gset = gset_by_read.get(i)
++            if gset is None:
++                continue
++            by_label = {x.get("variant_label"): x for x in res_list}
++            nlls: Dict[int, float] = {}
++            spans = spans_by_read.get(i) if gate else None
++            span_cov = [False] * len(spans) if spans else None
++            for cid, j in cidj_by_read.get(rid, {}).items():
++                res = by_label.get(cid)
++                if res is None or res.get("status", -1) != 0:
++                    continue
++                nll, n_ev = _mean_nll_in_gset(res, cand_list[j], gset)
++                if n_ev > 0 and np.isfinite(nll):
++                    nlls[j] = float(nll)
++                if span_cov is not None:
++                    egp = event_genomic_positions(res, cand_list[j])
++                    if egp:
++                        for s_idx, (lo, hi) in enumerate(spans):
++                            if not span_cov[s_idx] and read_straddles(egp, lo, hi):
++                                span_cov[s_idx] = True
++            if nlls:
++                n_refined += 1
++                nlls_by_read[i] = nlls
++                if gate:
++                    # covered iff every wobbling diff span is straddled by the
++                    # read on >=1 candidate (empty spans -> vacuously covered).
++                    cover_by_read[i] = all(span_cov) if span_cov else True
++        return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
++
++    for rid, per_cidj in cidj_by_read.items():
++        i = rid_to_i.get(rid)
++        if i is None:
++            continue
++        gset = gset_by_read.get(i)
++        seq = read_seqs[rid]
++        nlls = {}
++        for j in per_cidj.values():
++            nll, n_ev = read_cand_mean_nll(
++                rid, seq, cand_list[j], [], krill_aligner, aligners[j],
++                sig_path, pore, gset=gset, use_gpu=eff_gpu,
++                num_thread=num_threads,
++            )
++            if n_ev > 0 and np.isfinite(nll):
++                nlls[j] = float(nll)
++        if nlls:
++            n_refined += 1
++            nlls_by_read[i] = nlls
++    # Per-read fallback path does not expose eventalign positions, so the
++    # coverage map is left empty here; the d_tx builder defaults missing reads
++    # to covered=True (recall-safe: never drops on the rare fallback path).
++    return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
+diff --git a/fin/pipeline/runner.py b/fin/pipeline/runner.py
+index f746973..a1625e7 100644
+--- a/fin/pipeline/runner.py
++++ b/fin/pipeline/runner.py
+@@ -1323,205 +1323,13 @@ class PipelineRunner:
+         return quant_results
+ 
+     def _tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+-        """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
+-
+-        For each read whose raw mappy AS is simultaneously best across >=2
+-        candidates, build the class junction-discrimination window over that tie
+-        set and score each tied candidate with the per-event junction mean-NLL
+-        (non-HMM krill eventalign over the window). Only tied, window-scorable
+-        cells are touched — never the dense read×candidate matrix.
+-
+-        Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]},
+-        n_ties, n_refined, cover_by_read {i: bool}). ``cover_by_read`` is populated
+-        only when the diff-region coverage gate (config.m2_diff_cover_gate) is ON;
+-        otherwise it is empty.
+-        """
+-        import krill
+-
+-        from fin.scoring.krill_aligner import (
+-            krill_thread_count,
+-            make_krill_aligner,
+-        )
+-        from fin.scoring.m2_junction_nll import (
+-            _mean_nll_in_gset,
+-            class_junction_window_set,
+-            event_genomic_positions,
+-            read_cand_mean_nll,
+-            read_straddles,
+-            wobble_diff_spans,
+-        )
+-        from fin.scoring.mappy_score import score_hit
+-
+-        gate = bool(getattr(self.config, "m2_diff_cover_gate", False))
+-        num_threads = krill_thread_count()
+-        n_c = len(cand_list)
+-        nlls_by_read: Dict[int, Dict[int, float]] = {}
+-        ties_by_read: Dict[int, List[int]] = {}
+-        cover_by_read: Dict[int, bool] = {}
+-        krill_aligner, eff_gpu = make_krill_aligner(
+-            krill, self.config.krill_pore, self.config.use_gpu,
+-            hmm_confidence=False, num_thread=num_threads,
+-        )
+-        if krill_aligner is None:
+-            # No krill signal backend. Gate OFF: preserve the legacy behavior
+-            # (empty ties -> _quant_m2_em leaves rows MISSING, byte-identical).
+-            # Gate ON: still expose the AS tie sets (derivable from ``raw`` alone,
+-            # no signal needed) so the gate's unique-best / drop logic is
+-            # well-defined; without them every row would be all-MISSING and the
+-            # EM would normalize each read to a spurious uniform vote.
+-            if gate:
+-                for i in range(len(kept_read_ids)):
+-                    row = raw[i]
+-                    finite = np.isfinite(row)
+-                    if not finite.any():
+-                        continue
+-                    best_as = float(row[finite].max())
+-                    ties_by_read[i] = [
+-                        j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9
+-                    ]
+-            return nlls_by_read, ties_by_read, 0, 0, cover_by_read
+-
+-        k = self.config.m2_tiebreak_junction_k
+-        pore = self.config.krill_pore
+-        sig_path = self.config.signal_path
+-
+-        # --- Pass 1: tie detection + per-(read, candidate) mappy best-hit slices.
+-        # Each tied cell is reduced to the SAME (sliced sequence, start offset)
+-        # the singular read_cand_mean_nll would have eventaligned, so the batched
+-        # eventalign below is byte-identical to the per-call path -- only the
+-        # Python/GIL/per-call overhead is removed.
+-        gset_by_read: Dict[int, set] = {}
+-        spans_by_read: Dict[int, List[Tuple[int, int]]] = {}  # diff-cover gate spans
+-        reads_variants: Dict[str, Dict[str, str]] = {}  # rid -> {cand_id: seq}
+-        starts: Dict[str, Dict[str, int]] = {}          # rid -> {cand_id: r_st}
+-        cidj_by_read: Dict[str, Dict[str, int]] = {}     # rid -> {cand_id: col j}
+-        n_ties = 0
+-        for i, rid in enumerate(kept_read_ids):
+-            row = raw[i]
+-            finite = np.isfinite(row)
+-            if not finite.any():
+-                continue
+-            best_as = float(row[finite].max())
+-            tie = [j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9]
+-            ties_by_read[i] = tie
+-            if len(tie) < 2:
+-                continue
+-            n_ties += 1
+-            gset = class_junction_window_set(
+-                [cand_list[j] for j in tie], flank=_M2_EM_FLANK, k=k
+-            )
+-            if not gset:
+-                continue
+-            if gate:
+-                spans_by_read[i] = wobble_diff_spans(
+-                    [cand_list[j] for j in tie], flank=_M2_EM_FLANK
+-                )
+-            seq = read_seqs[rid]
+-            per_seqs: Dict[str, str] = {}
+-            per_starts: Dict[str, int] = {}
+-            per_cidj: Dict[str, int] = {}
+-            for j in tie:
+-                aln = aligners[j]
+-                if aln is None:
+-                    continue
+-                best_hit = None
+-                best_hit_as = None
+-                for h in aln.map(seq):
+-                    v = score_hit(h)
+-                    if v is None:
+-                        continue
+-                    if best_hit_as is None or v > best_hit_as:
+-                        best_hit_as, best_hit = v, h
+-                if best_hit is None:
+-                    continue
+-                cand = cand_list[j]
+-                per_seqs[cand.candidate_id] = cand.sequence[best_hit.r_st:best_hit.r_en]
+-                per_starts[cand.candidate_id] = best_hit.r_st
+-                per_cidj[cand.candidate_id] = j
+-            if not per_seqs:
+-                continue
+-            gset_by_read[i] = gset
+-            reads_variants[rid] = per_seqs
+-            starts[rid] = per_starts
+-            cidj_by_read[rid] = per_cidj
+-
+-        if not reads_variants:
+-            return nlls_by_read, ties_by_read, n_ties, 0, cover_by_read
+-
+-        # --- Pass 2: ONE batched eventalign over every tied pair (per-pair start
+-        # via the {label: offset} form); per-read singular fallback on absence or
+-        # batch failure. Both branches score with the same _mean_nll_in_gset.
+-        rid_to_i = {rid: i for i, rid in enumerate(kept_read_ids)}
+-        n_refined = 0
+-        use_batch = hasattr(krill, "align_reads_variants")
+-        batch_out = None
+-        if use_batch:
+-            try:
+-                batch_out = krill.align_reads_variants(
+-                    sig_path, reads_variants, pore=pore,
+-                    use_gpu=eff_gpu, num_thread=num_threads,
+-                    aligner=krill_aligner, start=starts,
+-                )
+-            except Exception as exc:  # noqa: BLE001 - krill raises broad errors
+-                logger.warning("M2 batch eventalign failed (%s); per-read fallback", exc)
+-                use_batch = False
+-
+-        if use_batch and batch_out is not None:
+-            for rid, res_list in batch_out.items():
+-                i = rid_to_i.get(rid)
+-                if i is None:
+-                    continue
+-                gset = gset_by_read.get(i)
+-                if gset is None:
+-                    continue
+-                by_label = {x.get("variant_label"): x for x in res_list}
+-                nlls: Dict[int, float] = {}
+-                spans = spans_by_read.get(i) if gate else None
+-                span_cov = [False] * len(spans) if spans else None
+-                for cid, j in cidj_by_read.get(rid, {}).items():
+-                    res = by_label.get(cid)
+-                    if res is None or res.get("status", -1) != 0:
+-                        continue
+-                    nll, n_ev = _mean_nll_in_gset(res, cand_list[j], gset)
+-                    if n_ev > 0 and np.isfinite(nll):
+-                        nlls[j] = float(nll)
+-                    if span_cov is not None:
+-                        egp = event_genomic_positions(res, cand_list[j])
+-                        if egp:
+-                            for s_idx, (lo, hi) in enumerate(spans):
+-                                if not span_cov[s_idx] and read_straddles(egp, lo, hi):
+-                                    span_cov[s_idx] = True
+-                if nlls:
+-                    n_refined += 1
+-                    nlls_by_read[i] = nlls
+-                    if gate:
+-                        # covered iff every wobbling diff span is straddled by the
+-                        # read on >=1 candidate (empty spans -> vacuously covered).
+-                        cover_by_read[i] = all(span_cov) if span_cov else True
+-            return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
+-
+-        for rid, per_cidj in cidj_by_read.items():
+-            i = rid_to_i.get(rid)
+-            if i is None:
+-                continue
+-            gset = gset_by_read.get(i)
+-            seq = read_seqs[rid]
+-            nlls = {}
+-            for j in per_cidj.values():
+-                nll, n_ev = read_cand_mean_nll(
+-                    rid, seq, cand_list[j], [], krill_aligner, aligners[j],
+-                    sig_path, pore, gset=gset, use_gpu=eff_gpu,
+-                    num_thread=num_threads,
+-                )
+-                if n_ev > 0 and np.isfinite(nll):
+-                    nlls[j] = float(nll)
+-            if nlls:
+-                n_refined += 1
+-                nlls_by_read[i] = nlls
+-        # Per-read fallback path does not expose eventalign positions, so the
+-        # coverage map is left empty here; the d_tx builder defaults missing reads
+-        # to covered=True (recall-safe: never drops on the rare fallback path).
+-        return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
++        """Per-read best-AS tie junction-NLL. Delegates to the assignment layer
++        (fin.pipeline.assignment.tie_nll); kept as a thin method so tests can patch
++        this mock seam. Returns (nlls_by_read, ties_by_read, n_ties, n_refined,
++        cover_by_read)."""
++        from fin.pipeline.assignment import tie_nll
++        return tie_nll(
++            self.config, kept_read_ids, read_seqs, cand_list, aligners, raw)
+ 
+     def _observed_junctions(self, interval: GenomicInterval):
+         """Strand-keyed {strand: Counter{(donor, acceptor): n_reads}} of intron
+
+warning: Model metadata for `gpt-5.6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+codex
+I’ll independently inspect the commit, surrounding imports, and mock seams.
+  → Inspect commit and parent context
+  • Compare extracted function semantics
+  • Audit imports and patch seams
+  • Run focused verification tests
+  • Deliver skeptical commit verdict
+exec
+/bin/bash -lc 'git status --short && git show --stat --oneline bc39ce8 && git show --format=fuller --find-renames bc39ce8 -- fin/pipeline/assignment.py fin/pipeline/runner.py' in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+codex
+The non-PTY shell returned blank; retrying with a PTY now.
+exec
+/bin/bash -lc 'git status --short; git show --stat --oneline bc39ce8; git show --format=fuller --find-renames bc39ce8 -- fin/pipeline/assignment.py fin/pipeline/runner.py' in /SSD/logan/dev/pyfin
+exec
+/bin/bash -c 'git status --short; git --no-pager show --stat --oneline bc39ce8; git --no-pager show --format=fuller --find-renames bc39ce8 -- fin/pipeline/assignment.py fin/pipeline/runner.py' in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+?? .codex_holistic_out.txt
+?? .codex_holistic_prompt.txt
+?? .codex_q_cluster.txt
+?? .codex_q_cluster_out.txt
+?? .codex_q_design.txt
+?? .codex_q_design_out.txt
+?? .codex_q_gen.txt
+?? .codex_q_gen_out.txt
+?? .codex_q_gtf.txt
+?? .codex_q_gtf_out.txt
+?? .codex_q_interval.txt
+?? .codex_q_interval_out.txt
+?? .rereview/
+?? experiments/prod_validation/
+?? experiments/wobble_heya8/FINAL_REPORT_v3.md
+?? experiments/wobble_heya8/analyze_tpfp.py
+?? experiments/wobble_heya8/build_tables.py
+?? experiments/wobble_heya8/cassette_scan.py
+?? experiments/wobble_heya8/cf_measure/
+?? experiments/wobble_heya8/compute_fl.py
+?? experiments/wobble_heya8/diagnose_missed.py
+?? experiments/wobble_heya8/drop_attrib.py
+?? experiments/wobble_heya8/extract_subset_reads.py
+?? experiments/wobble_heya8/fl_missed_diagnose.py
+?? experiments/wobble_heya8/fp_phasing.py
+?? experiments/wobble_heya8/gffcmp.sh
+?? experiments/wobble_heya8/measure_cf.py
+?? experiments/wobble_heya8/pipeline_after_matrix.sh
+?? experiments/wobble_heya8/run_cassette_ablation.sh
+?? experiments/wobble_heya8/run_cf_measure.sbatch
+?? experiments/wobble_heya8/run_final.sh
+?? experiments/wobble_heya8/run_fl.sbatch
+?? experiments/wobble_heya8/run_fl_missed.sbatch
+?? experiments/wobble_heya8/run_matrix.sh
+?? experiments/wobble_heya8/run_prodfinal.sh
+?? experiments/wobble_heya8/run_v3.sh
+?? experiments/wobble_heya8/score_matrix.sh
+?? experiments/wobble_heya8/tpm_sweep.py
+?? scripts/
+bc39ce8 refactor(pipeline): extract m2_em tie_nll into assignment layer (M2 Step A)
+ fin/pipeline/assignment.py | 220 +++++++++++++++++++++++++++++++++++++++++++++
+ fin/pipeline/runner.py     | 206 ++----------------------------------------
+ 2 files changed, 227 insertions(+), 199 deletions(-)
+commit bc39ce8b8820df9cc28233a83fed956e202bc991
+Author:     loganylchen <yuelong.chen.btr@gmail.com>
+AuthorDate: Thu Jul 23 14:47:00 2026 +0800
+Commit:     loganylchen <yuelong.chen.btr@gmail.com>
+CommitDate: Thu Jul 23 14:47:00 2026 +0800
+
+    refactor(pipeline): extract m2_em tie_nll into assignment layer (M2 Step A)
+    
+    Move PipelineRunner._tie_nll verbatim into fin/pipeline/assignment.tie_nll,
+    with config passed explicitly (self.config -> config) and its module deps
+    (_M2_EM_FLANK=2, logger, function-local krill/scoring imports) relocated. The
+    runner keeps a thin _tie_nll delegate that forwards to the module function,
+    preserving the test mock seam (patch.object(PipelineRunner, "_tie_nll", ...))
+    and the self._tie_nll call site in _quant_m2_em.
+    
+    First cut of the assignment-layer extraction (plan M2). Behavior-preserving:
+    p00 m2_em output byte-identical to baseline (9146 tx, structural multiset
+    match ignoring random novel UUIDs); 900 unit tests pass (only the 3
+    pre-existing missing-fixture test_cli fails); runner.py 206 lines lighter.
+
+diff --git a/fin/pipeline/assignment.py b/fin/pipeline/assignment.py
+new file mode 100644
+index 0000000..b4702cd
+--- /dev/null
++++ b/fin/pipeline/assignment.py
+@@ -0,0 +1,220 @@
++"""Assignment layer: read-to-candidate assignment for quant_mode="m2_em".
++
++Extracted from the runner's ``_quant_m2_em`` so the M1/M2/EM assignment orchestration lives in
++its own module (intervals, clustering, EM, quantification are already standalone modules; this is
++the last piece that was glued into the runner).
++
++Step A (this file): ``tie_nll`` — the per-read best-AS tie junction-NLL scoring (moved verbatim
++from ``PipelineRunner._tie_nll``; ``self.config`` -> ``config``). Byte-identical.
++"""
++from __future__ import annotations
++
++import logging
++from typing import Dict, List, Tuple
++
++import numpy as np
++
++logger = logging.getLogger(__name__)
++
++# Junction-window flank (bp) for the M2 tie discrimination window (matches runner).
++_M2_EM_FLANK = 2
++
++
++def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
++    """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
++
++    For each read whose raw mappy AS is simultaneously best across >=2 candidates, build the
++    class junction-discrimination window over that tie set and score each tied candidate with the
++    per-event junction mean-NLL (non-HMM krill eventalign over the window). Only tied,
++    window-scorable cells are touched -- never the dense read×candidate matrix.
++
++    Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]}, n_ties, n_refined,
++    cover_by_read {i: bool}). ``cover_by_read`` is populated only when the diff-region coverage
++    gate (config.m2_diff_cover_gate) is ON; otherwise it is empty.
++    """
++    import krill
++
++    from fin.scoring.krill_aligner import (
++        krill_thread_count,
++        make_krill_aligner,
++    )
++    from fin.scoring.m2_junction_nll import (
++        _mean_nll_in_gset,
++        class_junction_window_set,
++        event_genomic_positions,
++        read_cand_mean_nll,
++        read_straddles,
++        wobble_diff_spans,
++    )
++    from fin.scoring.mappy_score import score_hit
++
++    gate = bool(getattr(config, "m2_diff_cover_gate", False))
++    num_threads = krill_thread_count()
++    n_c = len(cand_list)
++    nlls_by_read: Dict[int, Dict[int, float]] = {}
++    ties_by_read: Dict[int, List[int]] = {}
++    cover_by_read: Dict[int, bool] = {}
++    krill_aligner, eff_gpu = make_krill_aligner(
++        krill, config.krill_pore, config.use_gpu,
++        hmm_confidence=False, num_thread=num_threads,
++    )
++    if krill_aligner is None:
++        # No krill signal backend. Gate OFF: preserve the legacy behavior
++        # (empty ties -> _quant_m2_em leaves rows MISSING, byte-identical).
++        # Gate ON: still expose the AS tie sets (derivable from ``raw`` alone,
++        # no signal needed) so the gate's unique-best / drop logic is
++        # well-defined; without them every row would be all-MISSING and the
++        # EM would normalize each read to a spurious uniform vote.
++        if gate:
++            for i in range(len(kept_read_ids)):
++                row = raw[i]
++                finite = np.isfinite(row)
++                if not finite.any():
++                    continue
++                best_as = float(row[finite].max())
++                ties_by_read[i] = [
++                    j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9
++                ]
++        return nlls_by_read, ties_by_read, 0, 0, cover_by_read
++
++    k = config.m2_tiebreak_junction_k
++    pore = config.krill_pore
++    sig_path = config.signal_path
++
++    # --- Pass 1: tie detection + per-(read, candidate) mappy best-hit slices.
++    # Each tied cell is reduced to the SAME (sliced sequence, start offset)
++    # the singular read_cand_mean_nll would have eventaligned, so the batched
++    # eventalign below is byte-identical to the per-call path -- only the
++    # Python/GIL/per-call overhead is removed.
++    gset_by_read: Dict[int, set] = {}
++    spans_by_read: Dict[int, List[Tuple[int, int]]] = {}  # diff-cover gate spans
++    reads_variants: Dict[str, Dict[str, str]] = {}  # rid -> {cand_id: seq}
++    starts: Dict[str, Dict[str, int]] = {}          # rid -> {cand_id: r_st}
++    cidj_by_read: Dict[str, Dict[str, int]] = {}     # rid -> {cand_id: col j}
++    n_ties = 0
++    for i, rid in enumerate(kept_read_ids):
++        row = raw[i]
++        finite = np.isfinite(row)
++        if not finite.any():
++            continue
++        best_as = float(row[finite].max())
++        tie = [j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9]
++        ties_by_read[i] = tie
++        if len(tie) < 2:
++            continue
++        n_ties += 1
++        gset = class_junction_window_set(
++            [cand_list[j] for j in tie], flank=_M2_EM_FLANK, k=k
++        )
++        if not gset:
++            continue
++        if gate:
++            spans_by_read[i] = wobble_diff_spans(
++                [cand_list[j] for j in tie], flank=_M2_EM_FLANK
++            )
++        seq = read_seqs[rid]
++        per_seqs: Dict[str, str] = {}
++        per_starts: Dict[str, int] = {}
++        per_cidj: Dict[str, int] = {}
++        for j in tie:
++            aln = aligners[j]
++            if aln is None:
++                continue
++            best_hit = None
++            best_hit_as = None
++            for h in aln.map(seq):
++                v = score_hit(h)
++                if v is None:
++                    continue
++                if best_hit_as is None or v > best_hit_as:
++                    best_hit_as, best_hit = v, h
++            if best_hit is None:
++                continue
++            cand = cand_list[j]
++            per_seqs[cand.candidate_id] = cand.sequence[best_hit.r_st:best_hit.r_en]
++            per_starts[cand.candidate_id] = best_hit.r_st
++            per_cidj[cand.candidate_id] = j
++        if not per_seqs:
++            continue
++        gset_by_read[i] = gset
++        reads_variants[rid] = per_seqs
++        starts[rid] = per_starts
++        cidj_by_read[rid] = per_cidj
++
++    if not reads_variants:
++        return nlls_by_read, ties_by_read, n_ties, 0, cover_by_read
++
++    # --- Pass 2: ONE batched eventalign over every tied pair (per-pair start
++    # via the {label: offset} form); per-read singular fallback on absence or
++    # batch failure. Both branches score with the same _mean_nll_in_gset.
++    rid_to_i = {rid: i for i, rid in enumerate(kept_read_ids)}
++    n_refined = 0
++    use_batch = hasattr(krill, "align_reads_variants")
++    batch_out = None
++    if use_batch:
++        try:
++            batch_out = krill.align_reads_variants(
++                sig_path, reads_variants, pore=pore,
++                use_gpu=eff_gpu, num_thread=num_threads,
++                aligner=krill_aligner, start=starts,
++            )
++        except Exception as exc:  # noqa: BLE001 - krill raises broad errors
++            logger.warning("M2 batch eventalign failed (%s); per-read fallback", exc)
++            use_batch = False
++
++    if use_batch and batch_out is not None:
++        for rid, res_list in batch_out.items():
++            i = rid_to_i.get(rid)
++            if i is None:
++                continue
++            gset = gset_by_read.get(i)
++            if gset is None:
++                continue
++            by_label = {x.get("variant_label"): x for x in res_list}
++            nlls: Dict[int, float] = {}
++            spans = spans_by_read.get(i) if gate else None
++            span_cov = [False] * len(spans) if spans else None
++            for cid, j in cidj_by_read.get(rid, {}).items():
++                res = by_label.get(cid)
++                if res is None or res.get("status", -1) != 0:
++                    continue
++                nll, n_ev = _mean_nll_in_gset(res, cand_list[j], gset)
++                if n_ev > 0 and np.isfinite(nll):
++                    nlls[j] = float(nll)
++                if span_cov is not None:
++                    egp = event_genomic_positions(res, cand_list[j])
++                    if egp:
++                        for s_idx, (lo, hi) in enumerate(spans):
++                            if not span_cov[s_idx] and read_straddles(egp, lo, hi):
++                                span_cov[s_idx] = True
++            if nlls:
++                n_refined += 1
++                nlls_by_read[i] = nlls
++                if gate:
++                    # covered iff every wobbling diff span is straddled by the
++                    # read on >=1 candidate (empty spans -> vacuously covered).
++                    cover_by_read[i] = all(span_cov) if span_cov else True
++        return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
++
++    for rid, per_cidj in cidj_by_read.items():
++        i = rid_to_i.get(rid)
++        if i is None:
++            continue
++        gset = gset_by_read.get(i)
++        seq = read_seqs[rid]
++        nlls = {}
++        for j in per_cidj.values():
++            nll, n_ev = read_cand_mean_nll(
++                rid, seq, cand_list[j], [], krill_aligner, aligners[j],
++                sig_path, pore, gset=gset, use_gpu=eff_gpu,
++                num_thread=num_threads,
++            )
++            if n_ev > 0 and np.isfinite(nll):
++                nlls[j] = float(nll)
++        if nlls:
++            n_refined += 1
++            nlls_by_read[i] = nlls
++    # Per-read fallback path does not expose eventalign positions, so the
++    # coverage map is left empty here; the d_tx builder defaults missing reads
++    # to covered=True (recall-safe: never drops on the rare fallback path).
++    return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
+diff --git a/fin/pipeline/runner.py b/fin/pipeline/runner.py
+index f746973..a1625e7 100644
+--- a/fin/pipeline/runner.py
++++ b/fin/pipeline/runner.py
+@@ -1323,205 +1323,13 @@ class PipelineRunner:
+         return quant_results
+ 
+     def _tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+-        """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
+-
+-        For each read whose raw mappy AS is simultaneously best across >=2
+-        candidates, build the class junction-discrimination window over that tie
+-        set and score each tied candidate with the per-event junction mean-NLL
+-        (non-HMM krill eventalign over the window). Only tied, window-scorable
+-        cells are touched — never the dense read×candidate matrix.
+-
+-        Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]},
+-        n_ties, n_refined, cover_by_read {i: bool}). ``cover_by_read`` is populated
+-        only when the diff-region coverage gate (config.m2_diff_cover_gate) is ON;
+-        otherwise it is empty.
+-        """
+-        import krill
+-
+-        from fin.scoring.krill_aligner import (
+-            krill_thread_count,
+-            make_krill_aligner,
+-        )
+-        from fin.scoring.m2_junction_nll import (
+-            _mean_nll_in_gset,
+-            class_junction_window_set,
+-            event_genomic_positions,
+-            read_cand_mean_nll,
+-            read_straddles,
+-            wobble_diff_spans,
+-        )
+-        from fin.scoring.mappy_score import score_hit
+-
+-        gate = bool(getattr(self.config, "m2_diff_cover_gate", False))
+-        num_threads = krill_thread_count()
+-        n_c = len(cand_list)
+-        nlls_by_read: Dict[int, Dict[int, float]] = {}
+-        ties_by_read: Dict[int, List[int]] = {}
+-        cover_by_read: Dict[int, bool] = {}
+-        krill_aligner, eff_gpu = make_krill_aligner(
+-            krill, self.config.krill_pore, self.config.use_gpu,
+-            hmm_confidence=False, num_thread=num_threads,
+-        )
+-        if krill_aligner is None:
+-            # No krill signal backend. Gate OFF: preserve the legacy behavior
+-            # (empty ties -> _quant_m2_em leaves rows MISSING, byte-identical).
+-            # Gate ON: still expose the AS tie sets (derivable from ``raw`` alone,
+-            # no signal needed) so the gate's unique-best / drop logic is
+-            # well-defined; without them every row would be all-MISSING and the
+-            # EM would normalize each read to a spurious uniform vote.
+-            if gate:
+-                for i in range(len(kept_read_ids)):
+-                    row = raw[i]
+-                    finite = np.isfinite(row)
+-                    if not finite.any():
+-                        continue
+-                    best_as = float(row[finite].max())
+-                    ties_by_read[i] = [
+-                        j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9
+-                    ]
+-            return nlls_by_read, ties_by_read, 0, 0, cover_by_read
+-
+-        k = self.config.m2_tiebreak_junction_k
+-        pore = self.config.krill_pore
+-        sig_path = self.config.signal_path
+-
+-        # --- Pass 1: tie detection + per-(read, candidate) mappy best-hit slices.
+-        # Each tied cell is reduced to the SAME (sliced sequence, start offset)
+-        # the singular read_cand_mean_nll would have eventaligned, so the batched
+-        # eventalign below is byte-identical to the per-call path -- only the
+-        # Python/GIL/per-call overhead is removed.
+-        gset_by_read: Dict[int, set] = {}
+-        spans_by_read: Dict[int, List[Tuple[int, int]]] = {}  # diff-cover gate spans
+-        reads_variants: Dict[str, Dict[str, str]] = {}  # rid -> {cand_id: seq}
+-        starts: Dict[str, Dict[str, int]] = {}          # rid -> {cand_id: r_st}
+-        cidj_by_read: Dict[str, Dict[str, int]] = {}     # rid -> {cand_id: col j}
+-        n_ties = 0
+-        for i, rid in enumerate(kept_read_ids):
+-            row = raw[i]
+-            finite = np.isfinite(row)
+-            if not finite.any():
+-                continue
+-            best_as = float(row[finite].max())
+-            tie = [j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9]
+-            ties_by_read[i] = tie
+-            if len(tie) < 2:
+-                continue
+-            n_ties += 1
+-            gset = class_junction_window_set(
+-                [cand_list[j] for j in tie], flank=_M2_EM_FLANK, k=k
+-            )
+-            if not gset:
+-                continue
+-            if gate:
+-                spans_by_read[i] = wobble_diff_spans(
+-                    [cand_list[j] for j in tie], flank=_M2_EM_FLANK
+-                )
+-            seq = read_seqs[rid]
+-            per_seqs: Dict[str, str] = {}
+-            per_starts: Dict[str, int] = {}
+-            per_cidj: Dict[str, int] = {}
+-            for j in tie:
+-                aln = aligners[j]
+-                if aln is None:
+-                    continue
+-                best_hit = None
+-                best_hit_as = None
+-                for h in aln.map(seq):
+-                    v = score_hit(h)
+-                    if v is None:
+-                        continue
+-                    if best_hit_as is None or v > best_hit_as:
+-                        best_hit_as, best_hit = v, h
+-                if best_hit is None:
+-                    continue
+-                cand = cand_list[j]
+-                per_seqs[cand.candidate_id] = cand.sequence[best_hit.r_st:best_hit.r_en]
+-                per_starts[cand.candidate_id] = best_hit.r_st
+-                per_cidj[cand.candidate_id] = j
+-            if not per_seqs:
+-                continue
+-            gset_by_read[i] = gset
+-            reads_variants[rid] = per_seqs
+-            starts[rid] = per_starts
+-            cidj_by_read[rid] = per_cidj
+-
+-        if not reads_variants:
+-            return nlls_by_read, ties_by_read, n_ties, 0, cover_by_read
+-
+-        # --- Pass 2: ONE batched eventalign over every tied pair (per-pair start
+-        # via the {label: offset} form); per-read singular fallback on absence or
+-        # batch failure. Both branches score with the same _mean_nll_in_gset.
+-        rid_to_i = {rid: i for i, rid in enumerate(kept_read_ids)}
+-        n_refined = 0
+-        use_batch = hasattr(krill, "align_reads_variants")
+-        batch_out = None
+-        if use_batch:
+-            try:
+-                batch_out = krill.align_reads_variants(
+-                    sig_path, reads_variants, pore=pore,
+-                    use_gpu=eff_gpu, num_thread=num_threads,
+-                    aligner=krill_aligner, start=starts,
+-                )
+-            except Exception as exc:  # noqa: BLE001 - krill raises broad errors
+-                logger.warning("M2 batch eventalign failed (%s); per-read fallback", exc)
+-                use_batch = False
+-
+-        if use_batch and batch_out is not None:
+-            for rid, res_list in batch_out.items():
+-                i = rid_to_i.get(rid)
+-                if i is None:
+-                    continue
+-                gset = gset_by_read.get(i)
+-                if gset is None:
+-                    continue
+-                by_label = {x.get("variant_label"): x for x in res_list}
+-                nlls: Dict[int, float] = {}
+-                spans = spans_by_read.get(i) if gate else None
+-                span_cov = [False] * len(spans) if spans else None
+-                for cid, j in cidj_by_read.get(rid, {}).items():
+-                    res = by_label.get(cid)
+-                    if res is None or res.get("status", -1) != 0:
+-                        continue
+-                    nll, n_ev = _mean_nll_in_gset(res, cand_list[j], gset)
+-                    if n_ev > 0 and np.isfinite(nll):
+-                        nlls[j] = float(nll)
+-                    if span_cov is not None:
+-                        egp = event_genomic_positions(res, cand_list[j])
+-                        if egp:
+-                            for s_idx, (lo, hi) in enumerate(spans):
+-                                if not span_cov[s_idx] and read_straddles(egp, lo, hi):
+-                                    span_cov[s_idx] = True
+-                if nlls:
+-                    n_refined += 1
+-                    nlls_by_read[i] = nlls
+-                    if gate:
+-                        # covered iff every wobbling diff span is straddled by the
+-                        # read on >=1 candidate (empty spans -> vacuously covered).
+-                        cover_by_read[i] = all(span_cov) if span_cov else True
+-            return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
+-
+-        for rid, per_cidj in cidj_by_read.items():
+-            i = rid_to_i.get(rid)
+-            if i is None:
+-                continue
+-            gset = gset_by_read.get(i)
+-            seq = read_seqs[rid]
+-            nlls = {}
+-            for j in per_cidj.values():
+-                nll, n_ev = read_cand_mean_nll(
+-                    rid, seq, cand_list[j], [], krill_aligner, aligners[j],
+-                    sig_path, pore, gset=gset, use_gpu=eff_gpu,
+-                    num_thread=num_threads,
+-                )
+-                if n_ev > 0 and np.isfinite(nll):
+-                    nlls[j] = float(nll)
+-            if nlls:
+-                n_refined += 1
+-                nlls_by_read[i] = nlls
+-        # Per-read fallback path does not expose eventalign positions, so the
+-        # coverage map is left empty here; the d_tx builder defaults missing reads
+-        # to covered=True (recall-safe: never drops on the rare fallback path).
+-        return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
++        """Per-read best-AS tie junction-NLL. Delegates to the assignment layer
++        (fin.pipeline.assignment.tie_nll); kept as a thin method so tests can patch
++        this mock seam. Returns (nlls_by_read, ties_by_read, n_ties, n_refined,
++        cover_by_read)."""
++        from fin.pipeline.assignment import tie_nll
++        return tie_nll(
++            self.config, kept_read_ids, read_seqs, cand_list, aligners, raw)
+ 
+     def _observed_junctions(self, interval: GenomicInterval):
+         """Strand-keyed {strand: Counter{(donor, acceptor): n_reads}} of intron
+
+codex
+The diff is present. Next I’m checking exact code equivalence and module dependencies.
+  ✓ Inspect commit and parent context
+  → Compare extracted function semantics
+  • Audit imports and patch seams
+  • Run focused verification tests
+  • Deliver skeptical commit verdict
+exec
+/bin/bash -c "set -e
+printf '%s\\n' '--- AGENTS ---'
+find .. -name AGENTS.md -print
+printf '%s\\n' '--- parent runner imports/constants ---'
+git --no-pager show bc39ce8"'^:fin/pipeline/runner.py | sed -n '"'1,180p'
+printf '%s\\n' '--- commit runner imports/constants ---'
+git --no-pager show bc39ce8:fin/pipeline/runner.py | sed -n '1,180p'
+printf '%s\\n' '--- references to tie_nll/assignment/module patching ---'
+rg -n \"tie_nll|pipeline\\.assignment|runner\\.(logger|_M2_EM_FLANK)|patch(?:\\.object)?\\(["'^'"\\n]*(tie_nll|krill|make_krill|score_hit|class_junction)\" fin tests || true
+printf '%s\\n' '--- package init files ---'
+for f in fin/__init__.py fin/pipeline/__init__.py; do echo \"### "'$f"; git --no-pager show bc39ce8:"$f" 2>/dev/null || true; done' in /SSD/logan/dev/pyfin
+ exited 1 in 38156ms:
+^C
+exec
+/bin/bash -c "set -e
+printf '%s\\n' '--- AGENTS ---'
+(rg --files -g 'AGENTS.md' . .. 2>/dev/null | head -50) || true
+printf '%s\\n' '--- parent runner imports/constants ---'
+git --no-pager show bc39ce8"'^:fin/pipeline/runner.py | sed -n '"'1,180p'
+printf '%s\\n' '--- commit runner imports/constants ---'
+git --no-pager show bc39ce8:fin/pipeline/runner.py | sed -n '1,180p'
+printf '%s\\n' '--- references to tie_nll/assignment/module patching ---'
+rg -n \"tie_nll|pipeline\\.assignment|runner\\.(logger|_M2_EM_FLANK)|patch(?:\\.object)?\\(["'^'"\\n]*(tie_nll|krill|make_krill|score_hit|class_junction)\" fin tests || true
+printf '%s\\n' '--- package init files ---'
+for f in fin/__init__.py fin/pipeline/__init__.py; do echo \"### "'$f"; git --no-pager show bc39ce8:"$f" 2>/dev/null || true; done' in /SSD/logan/dev/pyfin
+ succeeded in 15805ms:
+../krill/tools/AGENTS.md
+../krill/tools/polya_rna004/AGENTS.md
+../krill/scripts/AGENTS.md
+../krill/AGENTS.md
+../krill/benchmarks/AGENTS.md
+../krill/docs/AGENTS.md
+../krill/src/AGENTS.md
+../krill/python/AGENTS.md
+../krill/python/krill/AGENTS.md
+../krill/src/dtw/AGENTS.md
+../krill/test/AGENTS.md
+--- parent runner imports/constants ---
+"""Pipeline orchestrator: interval -> candidates -> scoring -> EM -> quantification."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pysam
+
+from fin.analysis.assignments import em_with_coherence
+from fin.analysis.quantification import (
+    QuantResult,
+    _exons_from_candidate,
+    aggregate_across_intervals,
+    compute_fulllen_frac,
+    fulllen_fraction_drops,
+    isoform_fraction_drops,
+    mono_exon_drops,
+    soft_mass_ratio_drops,
+    polya5p_drops,
+    quantify_transcripts,
+)
+from fin.candidates.canonical import chain_all_canonical, parse_motifs
+from fin.candidates.dataclasses import CandidateSet
+from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+from fin.pipeline.config import PipelineConfig
+from fin.scoring.em_inputs import build_em_matrices
+from fin.scoring.krill_tiebreak import krill_tiebreak
+from fin.scoring.mappy_distance import compute_mappy_distance
+
+logger = logging.getLogger(__name__)
+
+# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+# K (transcript-bp each side of the wobbling junction) comes from the configurable
+# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+# an unscorable tie cell (a tied candidate the eventalign window could not score).
+_M2_EM_FLANK = 2
+_M2_EM_PAD = 1.0
+
+
+class PipelineRunner:
+    """Orchestrates the full pyfin pipeline."""
+
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+        self._gtf_reader = None
+        self._genome_fasta = None
+        self._signal_reader = None
+        # Genome-wide mappy aligner for fusion soft-clip arm re-alignment; built
+        # lazily on first fusion interval and cached (indexing is expensive).
+        self._fusion_genome_aligner = None
+        self._fusion_aligner_built = False
+
+    def setup(self):
+        """Open file handles and load references.
+
+        All signal scoring is in-memory krill (no f5c CLI / external-tool
+        validation / f5c index build required).
+        """
+        # Load GTF
+        if self.config.gtf_path:
+            from fin.io.io_gtf import GTFReader
+
+            self._gtf_reader = GTFReader(self.config.gtf_path)
+            self._gtf_reader.open()
+            self._gtf_reader.parse()
+
+        # Load genome FASTA (full sequence per chrom)
+        if self.config.genome_fasta_path:
+            self._genome_fasta = self._load_genome_fasta(self.config.genome_fasta_path)
+
+        # Open signal reader
+        if self.config.signal_path:
+            self._signal_reader = self._open_signal_reader()
+
+        # Create work directory
+        Path(self.config.work_dir).mkdir(parents=True, exist_ok=True)
+
+        logger.info("Pipeline setup complete")
+
+    def run(self) -> Dict[str, QuantResult]:
+        """Run the full pipeline across all intervals.
+
+        Returns:
+            Aggregated quantification results.
+        """
+        # Generate intervals
+        result = generate_isolated_intervals(
+            self.config.bam_path,
+            gtf_path=self.config.gtf_path,
+            max_gap=self.config.max_gap,
+            max_reads=self.config.max_reads,
+        )
+        intervals = result["intervals"]
+        logger.info("Generated %d intervals", len(intervals))
+
+        # Process each interval (serial by default; opt-in process parallelism).
+        all_quant_results: List[List[QuantResult]] = []
+        if self.config.threads <= 1:
+            for i, interval in enumerate(intervals):
+                logger.info("Processing interval %d/%d: %s", i + 1, len(intervals), interval.region_string)
+                quant = self.process_interval(interval)
+                if quant:
+                    all_quant_results.append(quant)
+        else:
+            from fin.pipeline.parallel import run_parallel
+
+            log_level = logging.getLevelName(logging.getLogger("fin").getEffectiveLevel())
+            all_quant_results = run_parallel(
+                self.config,
+                intervals,
+                self.config.threads,
+                self.config.gpu_workers,
+                log_level,
+            )
+
+        # Aggregate across intervals
+        aggregated = aggregate_across_intervals(all_quant_results)
+        return self._finalize_and_write(
+            aggregated,
+            output_gtf=self.config.output_gtf,
+            output_tsv=self.config.output_tsv,
+        )
+
+    def _finalize_and_write(
+        self,
+        aggregated: Dict[str, QuantResult],
+        output_gtf: Optional[str],
+        output_tsv: Optional[str],
+    ) -> Dict[str, QuantResult]:
+        """Apply post-EM filters, resolve gene_ids, optionally write GTF/TSV."""
+        # R5 ablation: enable_score_filter=False disables all post-EM filters so
+        # the ablation row sees unfiltered EM output (AC7).
+        _score_filter_on = getattr(self.config, "enable_score_filter", True)
+
+        # Diagnostic: write unfiltered scores TSV BEFORE the post-EM filter
+        # cascade so downstream FN-root-cause analysis can distinguish
+        # "candidate never reached EM" from "candidate dropped by a filter".
+        if getattr(self.config, "write_unfiltered_scores", False) and output_tsv:
+            from fin.io.io_tsv import write_scoring_tsv
+
+            unfiltered_path = str(Path(output_tsv).with_suffix(".unfiltered.tsv"))
+            transcript_lengths_uf = {
+                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+                for cid, qr in aggregated.items()
+            }
+            # Resolve gene_ids on the unfiltered snapshot too so downstream
+            # consumers don't see empty gene_id columns.
+            for cid, qr in aggregated.items():
+                if qr.source == "gtf" and self._gtf_reader:
+                    tx = self._gtf_reader.get_transcript(cid)
+                    if tx and not qr.gene_id:
+                        qr.gene_id = tx.gene_id
+                if not qr.gene_id:
+                    qr.gene_id = qr.candidate_id
+            write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
+            logger.info(
+                "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
+                unfiltered_path,
+                len(aggregated),
+            )
+
+        # A4: post-EM abundance floor with per-source thresholds (on soft EM
+        # abundance). NOVEL transcripts face min_abundance (the `fin` CLI defaults
+        # it to 3). GTF transcripts face their own lighter floor min_gtf_abundance
+        # (CLI default 1) so a GTF candidate whose EM soft-mass is below 1 read is
+        # dropped — pyfin is not a copy-annotation tool — while genuine annotated
+        # transcripts with real EM support are kept. When floor_gtf_abundance is
+        # set (--floor-gtf-abundance) GTF is raised to the NOVEL floor — precisely
+        # max(min_gtf_abundance, min_abundance) so the toggle never LOWERS an
+        # explicit GTF floor — reproducing the SIRV gffcompare T>=3 with-GTF
+        # operating point. Fusion is ALWAYS exempt so opt-in fusion calls are
+        # never silently dropped. SIRV-tuned: these floors are overfit and gut
+        # genuine low-abundance isoform recall on real data; disable via
+        # --min-abundance 0 / --min-gtf-abundance 0.
+        # NOTE: the separate ablation harness (fin/ablation/runner.py) keeps GTF
+        # exempt regardless — that divergence is intentional (no-GTF de novo).
+--- commit runner imports/constants ---
+"""Pipeline orchestrator: interval -> candidates -> scoring -> EM -> quantification."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pysam
+
+from fin.analysis.assignments import em_with_coherence
+from fin.analysis.quantification import (
+    QuantResult,
+    _exons_from_candidate,
+    aggregate_across_intervals,
+    compute_fulllen_frac,
+    fulllen_fraction_drops,
+    isoform_fraction_drops,
+    mono_exon_drops,
+    soft_mass_ratio_drops,
+    polya5p_drops,
+    quantify_transcripts,
+)
+from fin.candidates.canonical import chain_all_canonical, parse_motifs
+from fin.candidates.dataclasses import CandidateSet
+from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+from fin.pipeline.config import PipelineConfig
+from fin.scoring.em_inputs import build_em_matrices
+from fin.scoring.krill_tiebreak import krill_tiebreak
+from fin.scoring.mappy_distance import compute_mappy_distance
+
+logger = logging.getLogger(__name__)
+
+# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+# K (transcript-bp each side of the wobbling junction) comes from the configurable
+# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+# an unscorable tie cell (a tied candidate the eventalign window could not score).
+_M2_EM_FLANK = 2
+_M2_EM_PAD = 1.0
+
+
+class PipelineRunner:
+    """Orchestrates the full pyfin pipeline."""
+
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+        self._gtf_reader = None
+        self._genome_fasta = None
+        self._signal_reader = None
+        # Genome-wide mappy aligner for fusion soft-clip arm re-alignment; built
+        # lazily on first fusion interval and cached (indexing is expensive).
+        self._fusion_genome_aligner = None
+        self._fusion_aligner_built = False
+
+    def setup(self):
+        """Open file handles and load references.
+
+        All signal scoring is in-memory krill (no f5c CLI / external-tool
+        validation / f5c index build required).
+        """
+        # Load GTF
+        if self.config.gtf_path:
+            from fin.io.io_gtf import GTFReader
+
+            self._gtf_reader = GTFReader(self.config.gtf_path)
+            self._gtf_reader.open()
+            self._gtf_reader.parse()
+
+        # Load genome FASTA (full sequence per chrom)
+        if self.config.genome_fasta_path:
+            self._genome_fasta = self._load_genome_fasta(self.config.genome_fasta_path)
+
+        # Open signal reader
+        if self.config.signal_path:
+            self._signal_reader = self._open_signal_reader()
+
+        # Create work directory
+        Path(self.config.work_dir).mkdir(parents=True, exist_ok=True)
+
+        logger.info("Pipeline setup complete")
+
+    def run(self) -> Dict[str, QuantResult]:
+        """Run the full pipeline across all intervals.
+
+        Returns:
+            Aggregated quantification results.
+        """
+        # Generate intervals
+        result = generate_isolated_intervals(
+            self.config.bam_path,
+            gtf_path=self.config.gtf_path,
+            max_gap=self.config.max_gap,
+            max_reads=self.config.max_reads,
+        )
+        intervals = result["intervals"]
+        logger.info("Generated %d intervals", len(intervals))
+
+        # Process each interval (serial by default; opt-in process parallelism).
+        all_quant_results: List[List[QuantResult]] = []
+        if self.config.threads <= 1:
+            for i, interval in enumerate(intervals):
+                logger.info("Processing interval %d/%d: %s", i + 1, len(intervals), interval.region_string)
+                quant = self.process_interval(interval)
+                if quant:
+                    all_quant_results.append(quant)
+        else:
+            from fin.pipeline.parallel import run_parallel
+
+            log_level = logging.getLevelName(logging.getLogger("fin").getEffectiveLevel())
+            all_quant_results = run_parallel(
+                self.config,
+                intervals,
+                self.config.threads,
+                self.config.gpu_workers,
+                log_level,
+            )
+
+        # Aggregate across intervals
+        aggregated = aggregate_across_intervals(all_quant_results)
+        return self._finalize_and_write(
+            aggregated,
+            output_gtf=self.config.output_gtf,
+            output_tsv=self.config.output_tsv,
+        )
+
+    def _finalize_and_write(
+        self,
+        aggregated: Dict[str, QuantResult],
+        output_gtf: Optional[str],
+        output_tsv: Optional[str],
+    ) -> Dict[str, QuantResult]:
+        """Apply post-EM filters, resolve gene_ids, optionally write GTF/TSV."""
+        # R5 ablation: enable_score_filter=False disables all post-EM filters so
+        # the ablation row sees unfiltered EM output (AC7).
+        _score_filter_on = getattr(self.config, "enable_score_filter", True)
+
+        # Diagnostic: write unfiltered scores TSV BEFORE the post-EM filter
+        # cascade so downstream FN-root-cause analysis can distinguish
+        # "candidate never reached EM" from "candidate dropped by a filter".
+        if getattr(self.config, "write_unfiltered_scores", False) and output_tsv:
+            from fin.io.io_tsv import write_scoring_tsv
+
+            unfiltered_path = str(Path(output_tsv).with_suffix(".unfiltered.tsv"))
+            transcript_lengths_uf = {
+                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+                for cid, qr in aggregated.items()
+            }
+            # Resolve gene_ids on the unfiltered snapshot too so downstream
+            # consumers don't see empty gene_id columns.
+            for cid, qr in aggregated.items():
+                if qr.source == "gtf" and self._gtf_reader:
+                    tx = self._gtf_reader.get_transcript(cid)
+                    if tx and not qr.gene_id:
+                        qr.gene_id = tx.gene_id
+                if not qr.gene_id:
+                    qr.gene_id = qr.candidate_id
+            write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
+            logger.info(
+                "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
+                unfiltered_path,
+                len(aggregated),
+            )
+
+        # A4: post-EM abundance floor with per-source thresholds (on soft EM
+        # abundance). NOVEL transcripts face min_abundance (the `fin` CLI defaults
+        # it to 3). GTF transcripts face their own lighter floor min_gtf_abundance
+        # (CLI default 1) so a GTF candidate whose EM soft-mass is below 1 read is
+        # dropped — pyfin is not a copy-annotation tool — while genuine annotated
+        # transcripts with real EM support are kept. When floor_gtf_abundance is
+        # set (--floor-gtf-abundance) GTF is raised to the NOVEL floor — precisely
+        # max(min_gtf_abundance, min_abundance) so the toggle never LOWERS an
+        # explicit GTF floor — reproducing the SIRV gffcompare T>=3 with-GTF
+        # operating point. Fusion is ALWAYS exempt so opt-in fusion calls are
+        # never silently dropped. SIRV-tuned: these floors are overfit and gut
+        # genuine low-abundance isoform recall on real data; disable via
+        # --min-abundance 0 / --min-gtf-abundance 0.
+        # NOTE: the separate ablation harness (fin/ablation/runner.py) keeps GTF
+        # exempt regardless — that divergence is intentional (no-GTF de novo).
+--- references to tie_nll/assignment/module patching ---
+fin/pipeline/assignment.py
+7:- Step A: ``tie_nll`` — the per-read best-AS tie junction-NLL scoring (moved verbatim from
+8:  ``PipelineRunner._tie_nll``; ``self.config`` -> ``config``).
+10:  ``tie_nll`` -> d_tx skeleton -> optional M3 coherence -> EM -> optional krill tie-break ->
+17:Byte-identical extraction. The runner keeps thin ``_tie_nll`` / ``_eff_lengths`` methods (passed into
+43:def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
+273:    Holds the pipeline config. ``assign`` receives the runner's ``_tie_nll`` / ``_eff_lengths`` bound
+274:    methods at call time (``tie_nll_fn`` / ``eff_lengths_fn``) so the ``patch.object(PipelineRunner,
+286:        tie_nll_fn: Callable,
+351:        nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read = tie_nll_fn(
+411:                # with EXPLICIT coverage: the per-read _tie_nll fallback leaves
+
+fin/pipeline/runner.py
+24:from fin.pipeline.assignment import Assigner
+59:        # m2_em assignment layer (mappy AS -> tie_nll -> d_tx -> EM -> quantify).
+1107:    def _tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+1109:        (fin.pipeline.assignment.tie_nll); kept as a thin method so tests can patch
+1112:        from fin.pipeline.assignment import tie_nll
+1113:        return tie_nll(
+1159:            tie_nll_fn=self._tie_nll, eff_lengths_fn=self._eff_lengths,
+
+tests/integration/test_pipeline_integration.py
+4:real BAM/krill/CUDA. The pure tie-break junction-NLL seed (``_tie_nll``), the
+38:    every read as kept. The tie sets still come from the mocked ``_tie_nll``, so
+48:def _fake_tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+163:        "tie_nll": patch.object(PipelineRunner, "_tie_nll", _fake_tie_nll),
+172:            "fin.pipeline.assignment.em_with_coherence",
+176:            "fin.pipeline.assignment.quantify_transcripts",
+198:         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+218:         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+236:         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+254:         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+306:         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+328:         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+
+tests/unit/test_cluster_quant.py
+109:def test_straddling_tie_nll_tie_stays_ambiguous():
+
+tests/unit/test_m2_em_pure_seed.py
+19:These tests mock the I/O boundaries (mappy multimap, the krill ``_tie_nll`` pass,
+41:# Per-read tie sets + scored junction-NLLs injected via the mocked _tie_nll.
+84:    actual AS values are irrelevant because _tie_nll is mocked to drive ties."""
+93:def _fake_tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+100:def _run(cfg, captured, m3_matrix=None, tie_nll_fn=_fake_tie_nll):
+118:    ), patch.object(PipelineRunner, "_tie_nll", tie_nll_fn), patch.object(
+121:        "fin.pipeline.assignment.em_with_coherence", side_effect=_fake_em
+123:        "fin.pipeline.assignment.quantify_transcripts", return_value=[]
+195:def _fake_tie_nll_on(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+209:def _fake_tie_nll_on2(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+222:        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on)
+260:        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on2)
+299:def _fake_tie_nll_on4(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+313:        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on4)
+332:ON3_COVER: dict = {}  # empty -> mimics the per-read _tie_nll fallback path
+335:def _fake_tie_nll_on3(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+350:        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on3)
+366:    """When krill has no aligner, _tie_nll still exposes AS tie sets on the gate-ON
+387:            return runner._tie_nll(kept, read_seqs, cands, [None] * N_C, raw)
+--- package init files ---
+### fin/__init__.py
+"""
+fin - A Python package for nanopore Direct RNA-seq data analysis
+"""
+
+__version__ = "0.1.0"
+__author__ = "loganylchen"
+
+# Import submodules
+from . import io
+from .utils.log_config import setup_logger, get_package_logger
+
+# Try to import _dtw extension (optional CUDA DTW)
+try:
+    from ._dtw import dtw_distance, dtw_pairwise, cleanup, is_available as dtw_is_available
+
+    _DTW_IMPORT_ERROR = None
+    _DTW_AVAILABLE = True
+except ImportError as e:
+    _DTW_AVAILABLE = False
+    dtw_distance = None
+    dtw_pairwise = None
+    cleanup = None
+    def dtw_is_available() -> bool:
+        return False
+    _DTW_IMPORT_ERROR = str(e)
+
+# Try CuPy for GPU-accelerated EM
+try:
+    import cupy  # noqa: F401  # availability probe
+    _CUPY_AVAILABLE = True
+except ImportError:
+    _CUPY_AVAILABLE = False
+
+# Initialize package logger
+package_logger = get_package_logger(__name__, level="INFO")
+
+# Log package initialization
+package_logger.info(f"Package initialized - version {__version__}")
+
+if not _DTW_AVAILABLE:
+    package_logger.info(
+        f"_dtw CUDA extension not available (optional). Error: {_DTW_IMPORT_ERROR}"
+    )
+
+if _CUPY_AVAILABLE:
+    package_logger.info("CuPy GPU acceleration available for EM algorithm")
+
+__all__ = [
+    "io",
+    "setup_logger",
+    "get_package_logger",
+]
+
+if _DTW_AVAILABLE:
+    __all__.extend(["dtw_distance", "dtw_pairwise", "cleanup", "dtw_is_available"])
+### fin/pipeline/__init__.py
+"""Pipeline orchestration modules."""
+
+from .config import PipelineConfig
+from .runner import PipelineRunner
+
+__all__ = [
+    "PipelineConfig",
+    "PipelineRunner",
+]
+
+exec
+/bin/bash -c "python - <<'PY'
+import ast, subprocess
+
+def blob(spec):
+    return subprocess.check_output(['git','show',spec], text=True)
+old_src=blob('bc39ce8"'^:fin/pipeline/runner.py'"')
+new_src=blob('bc39ce8:fin/pipeline/assignment.py')
+old=ast.parse(old_src)
+new=ast.parse(new_src)
+old_fn=next(n for n in ast.walk(old) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name=='_tie_nll')
+new_fn=next(n for n in ast.walk(new) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name=='tie_nll')
+# Normalize expected extraction changes.
+old_fn.name='tie_nll'
+old_fn.args.args=old_fn.args.args[1:]
+old_fn.args.args.insert(0, ast.arg(arg='config'))
+class Normalize(ast.NodeTransformer):
+    def visit_Attribute(self,node):
+        self.generic_visit(node)
+        if isinstance(node.value, ast.Name) and node.value.id=='self' and node.attr=='config':
+            return ast.copy_location(ast.Name(id='config',ctx=node.ctx),node)
+        return node
+Normalize().visit(old_fn)
+# Ignore docstring text only, since it was intentionally reformatted.
+def strip_doc(fn):
+    if fn.body and isinstance(fn.body[0], ast.Expr) and isinstance(fn.body[0].value, ast.Constant) and isinstance(fn.body[0].value.value,str):
+        fn.body=fn.body[1:]
+strip_doc(old_fn); strip_doc(new_fn)
+old_dump=ast.dump(old_fn, include_attributes=False, indent=2)
+new_dump=ast.dump(new_fn, include_attributes=False, indent=2)
+print('AST_EQUIVALENT_AFTER_EXPECTED_NORMALIZATION=', old_dump==new_dump)
+if old_dump"'!=new_dump:
+    import difflib
+    print('"''.join(difflib.unified_diff(old_dump.splitlines(True),new_dump.splitlines(True),fromfile='old',tofile='new')))
+PY
+printf '%s\\n' '--- exact commit constants/imports ---'
+git --no-pager show bc39ce8:fin/pipeline/runner.py | sed -n '1,55p'
+printf '%s\\n' '--- git grep commit tests and consumers ---'
+git grep -n -E '(_tie_nll|tie_nll|_M2_EM_FLANK|pipeline\\.runner\\.logger|pipeline\\.runner\\.np|pipeline\\.assignment)' bc39ce8 -- ':"'!fin/pipeline/assignment.py'"' ':"'!fin/pipeline/runner.py'"' || true
+printf '%s\\n' '--- packaging config ---'
+git --no-pager show bc39ce8:pyproject.toml 2>/dev/null | sed -n '1,220p' || true
+git --no-pager show bc39ce8:setup.py 2>/dev/null | sed -n '1,180p' || true
+git --no-pager show bc39ce8:setup.cfg 2>/dev/null | sed -n '1,180p' || true" in /SSD/logan/dev/pyfin
+ succeeded in 136ms:
+bc39ce8:tests/integration/test_pipeline_integration.py:4:real BAM/krill/CUDA. The pure tie-break junction-NLL seed (``_tie_nll``), the
+bc39ce8:tests/integration/test_pipeline_integration.py:38:    every read as kept. The tie sets still come from the mocked ``_tie_nll``, so
+bc39ce8:tests/integration/test_pipeline_integration.py:48:def _fake_tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+bc39ce8:tests/integration/test_pipeline_integration.py:163:        "tie_nll": patch.object(PipelineRunner, "_tie_nll", _fake_tie_nll),
+bc39ce8:tests/integration/test_pipeline_integration.py:198:         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+bc39ce8:tests/integration/test_pipeline_integration.py:218:         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+bc39ce8:tests/integration/test_pipeline_integration.py:236:         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+bc39ce8:tests/integration/test_pipeline_integration.py:254:         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+bc39ce8:tests/integration/test_pipeline_integration.py:306:         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+bc39ce8:tests/integration/test_pipeline_integration.py:328:         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+bc39ce8:tests/unit/test_cluster_quant.py:109:def test_straddling_tie_nll_tie_stays_ambiguous():
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:19:These tests mock the I/O boundaries (mappy multimap, the krill ``_tie_nll`` pass,
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:41:# Per-read tie sets + scored junction-NLLs injected via the mocked _tie_nll.
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:84:    actual AS values are irrelevant because _tie_nll is mocked to drive ties."""
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:93:def _fake_tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:100:def _run(cfg, captured, m3_matrix=None, tie_nll_fn=_fake_tie_nll):
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:118:    ), patch.object(PipelineRunner, "_tie_nll", tie_nll_fn), patch.object(
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:195:def _fake_tie_nll_on(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:209:def _fake_tie_nll_on2(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:222:        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on)
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:260:        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on2)
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:299:def _fake_tie_nll_on4(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:313:        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on4)
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:332:ON3_COVER: dict = {}  # empty -> mimics the per-read _tie_nll fallback path
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:335:def _fake_tie_nll_on3(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:350:        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on3)
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:366:    """When krill has no aligner, _tie_nll still exposes AS tie sets on the gate-ON
+bc39ce8:tests/unit/test_m2_em_pure_seed.py:387:            return runner._tie_nll(kept, read_seqs, cands, [None] * N_C, raw)
+--- packaging config ---
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "numpy>=1.21.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "py-fin"
+version = "0.1.0"
+description = "A Python package for nanopore Direct RNA-seq data analysis and transcriptome assembly"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "loganylchen", email = "yuelong.chen.btr@gmail.com"},
+]
+keywords = ["nanopore", "RNA-seq", "bioinformatics", "transcriptomics", "DTW", "alignment"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    # Core scientific computing
+    "numpy>=1.21.0",
+    "pandas>=1.3.0",
+    "scipy>=1.7.0",
+    # File I/O handling - format parsers
+    "ont-fast5-api>=4.0.0",
+    "pyslow5>=0.3.0",
+    "pod5>=0.2.0",
+    "pysam>=0.21.0",
+    "mappy>=2.24",
+    "h5py>=3.0.0",
+    # CLI and progress
+    "click>=8.0.0",
+    "tqdm>=4.62.0",
+    # Visualization
+    "matplotlib>=3.4.0",
+    "seaborn>=0.11.0",
+    # Configuration
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0.0",
+    "pytest-cov",
+    "black",
+    "flake8",
+]
+gpu = [
+    # GPU acceleration dependencies
+    "cupy>=12.0.0",
+    "numba>=0.56.0",
+]
+all = [
+    "py-fin[dev,gpu]",
+]
+
+[project.urls]
+Homepage = "https://github.com/loganylchen/pyfin"
+Repository = "https://github.com/loganylchen/pyfin.git"
+Issues = "https://github.com/loganylchen/pyfin/issues"
+
+[project.scripts]
+fin = "fin.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fin*", "fin.*"]
+
+[tool.setuptools.package-data]
+fin = ["*.py", "*.cu", "*.c", "*.h", "*.cuh", "*.yaml", "*.yml"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/integration"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--verbose",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests that require GPU",
+    "integration: marks tests as integration tests",
+]
+
+[tool.ruff]
+# Lint the package, real test suites, and benchmarks.
+# Legacy debug/example scripts in tests/ root are not part of the package.
+include = [
+    "fin/**/*.py",
+    "tests/unit/**/*.py",
+    "tests/integration/**/*.py",
+    "benchmarks/**/*.py",
+]
+extend-exclude = [
+    "tests/*.py",
+    "tests/*.ipynb",
+    "**/__pycache__",
+]
+line-length = 120
+"""
+Setup script for py-fin package with f5c integration
+
+This script builds the f5c eventalign module as a Python extension.
+CUDA extension (_dtw) is optional and requires nvcc.
+"""
+
+import os
+import sys
+import shutil
+import subprocess
+from pathlib import Path
+from setuptools import setup, Extension
+from setuptools.command.build_ext import build_ext
+
+# f5c source directory (relative to setup.py)
+# Use relative paths for all sources to comply with setuptools requirements
+
+
+def detect_cuda_arch():
+    """Detect GPU compute capability and return nvcc arch flags.
+
+    Falls back to PTX compute_70 for forward compatibility if detection fails.
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Take the first GPU's compute capability (e.g., "8.6")
+            cap = result.stdout.strip().split("\n")[0].strip()
+            major, minor = cap.split(".")
+            sm = f"{major}{minor}"
+            print(f"Detected GPU compute capability: {cap} (sm_{sm})")
+            return [f"--generate-code=arch=compute_{sm},code=sm_{sm}"]
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        pass
+
+    print(
+        "GPU not detected, building fat binary for Pascal/Volta/Turing/Ampere/Ada/Hopper "
+        "(sm_61, sm_70, sm_75, sm_80, sm_86, sm_89, sm_90) + PTX forward-compat"
+    )
+    # NOTE on PTX JIT compatibility: a PTX module compiled for virtual arch
+    # compute_X.Y can JIT-target any device with sm >= X.Y, but never downward.
+    # So compute_89 PTX cannot run on sm_80 (A100). We therefore ship cubins
+    # for every common deployed architecture (incl. sm_80 for A100, sm_90 for
+    # H100) and add compute_90 PTX as forward-compat for sm_100+ (Blackwell).
+    return [
+        "--generate-code=arch=compute_61,code=sm_61",   # Pascal: GTX 1050/1060/1070/1080, Tesla P100
+        "--generate-code=arch=compute_70,code=sm_70",   # Volta: V100, Titan V
+        "--generate-code=arch=compute_75,code=sm_75",   # Turing: RTX 2060-2080, T4
+        "--generate-code=arch=compute_80,code=sm_80",   # Ampere data-center: A100, A30
+        "--generate-code=arch=compute_86,code=sm_86",   # Ampere consumer: RTX 3060-3090, A40
+        "--generate-code=arch=compute_89,code=sm_89",   # Ada Lovelace: RTX 4060-4090, L40
+        "--generate-code=arch=compute_90,code=sm_90",   # Hopper: H100, H200
+        "--generate-code=arch=compute_90,code=compute_90",  # PTX forward-compat for Blackwell (sm_100+)
+    ]
+
+
+def find_cuda_home():
+    """Find CUDA installation directory"""
+    # Check environment variable first
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if cuda_home and os.path.exists(cuda_home):
+        return cuda_home
+
+    # Try to find nvcc
+    nvcc_path = shutil.which("nvcc")
+    if nvcc_path:
+        # nvcc is typically in $CUDA_HOME/bin/nvcc
+        return os.path.dirname(os.path.dirname(os.path.realpath(nvcc_path)))
+
+    # Common installation paths
+    for path in ["/usr/local/cuda", "/usr/cuda", "/opt/cuda"]:
+        if os.path.exists(path):
+            return path
+
+    return None
+
+
+# --------------------------
+# Custom Build Extension
+# --------------------------
+
+
+class CUDAExtension(Extension):
+    """Custom Extension class that uses nvcc to compile CUDA code"""
+
+    pass
+
+
+class MultiExt(build_ext):
+    def build_extensions(self):
+        # Filter out CUDA extensions if CUDA is not available
+        cuda_available = find_cuda_home() is not None and shutil.which("nvcc") is not None
+
+        extensions_to_build = []
+        for ext in self.extensions:
+            if not hasattr(ext, "ext_type"):
+                raise ValueError(
+                    f"Extension {ext.name} must have 'ext_type' attribute!"
+                )
+
+            if ext.ext_type == "dtw":
+                if not cuda_available:
+                    print(f"WARNING: Skipping CUDA extension {ext.name} - nvcc not found")
+                    print("Install CUDA Toolkit to enable GPU acceleration features")
+                    continue
+                self._configure_dtw_cuda_extension(ext)
+            else:
+                raise ValueError(
+                    f"Unknown ext_type: {ext.ext_type} (must be dtw)"
+                )
+
+            extensions_to_build.append(ext)
+
+        self.extensions = extensions_to_build
+        super().build_extensions()
+
+    def _configure_dtw_cuda_extension(self, ext):
+        """Configure CUDA extension compilation"""
+        cuda_home = find_cuda_home()
+        if not cuda_home:
+            raise RuntimeError("CUDA_HOME not found")
+
+        # Get Python and NumPy include directories
+        import sysconfig
+        import numpy
+
+        python_include = sysconfig.get_path("include")
+        numpy_include = numpy.get_include()
+
+        # Add CUDA, Python, and NumPy include paths
+        ext.include_dirs.append(os.path.join(cuda_home, "include"))
+        ext.include_dirs.append(python_include)
+        ext.include_dirs.append(numpy_include)
+        ext.include_dirs.append("fin/_dtw")  # Add local include directory
+
+        ext.library_dirs = [os.path.join(cuda_home, "lib64")]
+        ext.libraries = ["cudart"]
+
+        # Set compiler flags for nvcc
+        arch_flags = detect_cuda_arch()
+        ext.extra_compile_args = [
+            "-x",
+            "cu",  # Treat input as CUDA
+            "--compiler-options",
+            "-fPIC",
+            "-std=c++11",
+            "-O3",
+        ] + arch_flags
+
+        ext.extra_link_args = [
+            f'-L{os.path.join(cuda_home, "lib64")}',
+            "-lcudart",
+        ]
+
+    def build_extension(self, ext):
+        # Use nvcc for CUDA extensions
+        if hasattr(ext, "ext_type") and ext.ext_type == "dtw":
+            self._compile_cuda_extension(ext)
+        else:
+            super().build_extension(ext)
+
+    def _compile_cuda_extension(self, ext):
+        """Compile CUDA extension using nvcc directly"""
+        nvcc_path = shutil.which("nvcc")
+        if not nvcc_path:
+            raise RuntimeError("nvcc not found!")
+
+        # Get output paths
+        build_temp = Path(self.build_temp)
+        build_lib = Path(self.build_lib)
+
+        # Create directories
+        build_temp.mkdir(parents=True, exist_ok=True)
+        ext_path = build_lib / self.get_ext_filename(ext.name)
+        ext_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+codex
+The function body is AST-identical after `self.config → config`. I’m now probing observable seams the move may still alter.
+  ✓ Inspect commit and parent context
+  ✓ Compare extracted function semantics
+  → Audit imports and patch seams
+  • Run focused verification tests
+  • Deliver skeptical commit verdict
+exec
+/bin/bash -c "set -e
+printf '%s\\n' '--- assignment numbered ---'
+git --no-pager show bc39ce8:fin/pipeline/assignment.py | nl -ba | sed -n '1,220p'
+printf '%s\\n' '--- runner delegate numbered ---'
+git --no-pager show bc39ce8:fin/pipeline/runner.py | nl -ba | sed -n '25,45p;1315,1345p'
+printf '%s\\n' '--- parent corresponding numbered ---'
+git --no-pager show bc39ce8"'^:fin/pipeline/runner.py | nl -ba | sed -n '"'25,45p;1320,1535p'
+printf '%s\\n' '--- logger configuration ---'
+git grep -n -E '(Formatter|format=|log_format|LOG_FORMAT|%(name\\)|getLogger)' bc39ce8 -- fin | head -120
+printf '%s\\n' '--- exact patch targets in commit tests ---'
+git grep -n -E 'patch(\\.object)?\\(["'^'"\\n]*(runner\\.(logger|np|_M2_EM_FLANK)|fin\\.pipeline\\.runner\\.(logger|np|_M2_EM_FLANK))' bc39ce8 -- tests || true
+printf '%s\\n' '--- imports of runner private constant ---'
+git grep -n '_M2_EM_FLANK' bc39ce8 -- ':"'!fin/pipeline/assignment.py'"' ':"'!fin/pipeline/runner.py'"' || true" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- assignment numbered ---
+     1	"""Assignment layer: read-to-candidate assignment for quant_mode="m2_em".
+     2	
+     3	Extracted from the runner's ``_quant_m2_em`` so the M1/M2/EM assignment orchestration lives in
+     4	its own module (intervals, clustering, EM, quantification are already standalone modules; this is
+     5	the last piece that was glued into the runner).
+     6	
+     7	Step A (this file): ``tie_nll`` — the per-read best-AS tie junction-NLL scoring (moved verbatim
+     8	from ``PipelineRunner._tie_nll``; ``self.config`` -> ``config``). Byte-identical.
+     9	"""
+    10	from __future__ import annotations
+    11	
+    12	import logging
+    13	from typing import Dict, List, Tuple
+    14	
+    15	import numpy as np
+    16	
+    17	logger = logging.getLogger(__name__)
+    18	
+    19	# Junction-window flank (bp) for the M2 tie discrimination window (matches runner).
+    20	_M2_EM_FLANK = 2
+    21	
+    22	
+    23	def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
+    24	    """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
+    25	
+    26	    For each read whose raw mappy AS is simultaneously best across >=2 candidates, build the
+    27	    class junction-discrimination window over that tie set and score each tied candidate with the
+    28	    per-event junction mean-NLL (non-HMM krill eventalign over the window). Only tied,
+    29	    window-scorable cells are touched -- never the dense read×candidate matrix.
+    30	
+    31	    Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]}, n_ties, n_refined,
+    32	    cover_by_read {i: bool}). ``cover_by_read`` is populated only when the diff-region coverage
+    33	    gate (config.m2_diff_cover_gate) is ON; otherwise it is empty.
+    34	    """
+    35	    import krill
+    36	
+    37	    from fin.scoring.krill_aligner import (
+    38	        krill_thread_count,
+    39	        make_krill_aligner,
+    40	    )
+    41	    from fin.scoring.m2_junction_nll import (
+    42	        _mean_nll_in_gset,
+    43	        class_junction_window_set,
+    44	        event_genomic_positions,
+    45	        read_cand_mean_nll,
+    46	        read_straddles,
+    47	        wobble_diff_spans,
+    48	    )
+    49	    from fin.scoring.mappy_score import score_hit
+    50	
+    51	    gate = bool(getattr(config, "m2_diff_cover_gate", False))
+    52	    num_threads = krill_thread_count()
+    53	    n_c = len(cand_list)
+    54	    nlls_by_read: Dict[int, Dict[int, float]] = {}
+    55	    ties_by_read: Dict[int, List[int]] = {}
+    56	    cover_by_read: Dict[int, bool] = {}
+    57	    krill_aligner, eff_gpu = make_krill_aligner(
+    58	        krill, config.krill_pore, config.use_gpu,
+    59	        hmm_confidence=False, num_thread=num_threads,
+    60	    )
+    61	    if krill_aligner is None:
+    62	        # No krill signal backend. Gate OFF: preserve the legacy behavior
+    63	        # (empty ties -> _quant_m2_em leaves rows MISSING, byte-identical).
+    64	        # Gate ON: still expose the AS tie sets (derivable from ``raw`` alone,
+    65	        # no signal needed) so the gate's unique-best / drop logic is
+    66	        # well-defined; without them every row would be all-MISSING and the
+    67	        # EM would normalize each read to a spurious uniform vote.
+    68	        if gate:
+    69	            for i in range(len(kept_read_ids)):
+    70	                row = raw[i]
+    71	                finite = np.isfinite(row)
+    72	                if not finite.any():
+    73	                    continue
+    74	                best_as = float(row[finite].max())
+    75	                ties_by_read[i] = [
+    76	                    j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9
+    77	                ]
+    78	        return nlls_by_read, ties_by_read, 0, 0, cover_by_read
+    79	
+    80	    k = config.m2_tiebreak_junction_k
+    81	    pore = config.krill_pore
+    82	    sig_path = config.signal_path
+    83	
+    84	    # --- Pass 1: tie detection + per-(read, candidate) mappy best-hit slices.
+    85	    # Each tied cell is reduced to the SAME (sliced sequence, start offset)
+    86	    # the singular read_cand_mean_nll would have eventaligned, so the batched
+    87	    # eventalign below is byte-identical to the per-call path -- only the
+    88	    # Python/GIL/per-call overhead is removed.
+    89	    gset_by_read: Dict[int, set] = {}
+    90	    spans_by_read: Dict[int, List[Tuple[int, int]]] = {}  # diff-cover gate spans
+    91	    reads_variants: Dict[str, Dict[str, str]] = {}  # rid -> {cand_id: seq}
+    92	    starts: Dict[str, Dict[str, int]] = {}          # rid -> {cand_id: r_st}
+    93	    cidj_by_read: Dict[str, Dict[str, int]] = {}     # rid -> {cand_id: col j}
+    94	    n_ties = 0
+    95	    for i, rid in enumerate(kept_read_ids):
+    96	        row = raw[i]
+    97	        finite = np.isfinite(row)
+    98	        if not finite.any():
+    99	            continue
+   100	        best_as = float(row[finite].max())
+   101	        tie = [j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9]
+   102	        ties_by_read[i] = tie
+   103	        if len(tie) < 2:
+   104	            continue
+   105	        n_ties += 1
+   106	        gset = class_junction_window_set(
+   107	            [cand_list[j] for j in tie], flank=_M2_EM_FLANK, k=k
+   108	        )
+   109	        if not gset:
+   110	            continue
+   111	        if gate:
+   112	            spans_by_read[i] = wobble_diff_spans(
+   113	                [cand_list[j] for j in tie], flank=_M2_EM_FLANK
+   114	            )
+   115	        seq = read_seqs[rid]
+   116	        per_seqs: Dict[str, str] = {}
+   117	        per_starts: Dict[str, int] = {}
+   118	        per_cidj: Dict[str, int] = {}
+   119	        for j in tie:
+   120	            aln = aligners[j]
+   121	            if aln is None:
+   122	                continue
+   123	            best_hit = None
+   124	            best_hit_as = None
+   125	            for h in aln.map(seq):
+   126	                v = score_hit(h)
+   127	                if v is None:
+   128	                    continue
+   129	                if best_hit_as is None or v > best_hit_as:
+   130	                    best_hit_as, best_hit = v, h
+   131	            if best_hit is None:
+   132	                continue
+   133	            cand = cand_list[j]
+   134	            per_seqs[cand.candidate_id] = cand.sequence[best_hit.r_st:best_hit.r_en]
+   135	            per_starts[cand.candidate_id] = best_hit.r_st
+   136	            per_cidj[cand.candidate_id] = j
+   137	        if not per_seqs:
+   138	            continue
+   139	        gset_by_read[i] = gset
+   140	        reads_variants[rid] = per_seqs
+   141	        starts[rid] = per_starts
+   142	        cidj_by_read[rid] = per_cidj
+   143	
+   144	    if not reads_variants:
+   145	        return nlls_by_read, ties_by_read, n_ties, 0, cover_by_read
+   146	
+   147	    # --- Pass 2: ONE batched eventalign over every tied pair (per-pair start
+   148	    # via the {label: offset} form); per-read singular fallback on absence or
+   149	    # batch failure. Both branches score with the same _mean_nll_in_gset.
+   150	    rid_to_i = {rid: i for i, rid in enumerate(kept_read_ids)}
+   151	    n_refined = 0
+   152	    use_batch = hasattr(krill, "align_reads_variants")
+   153	    batch_out = None
+   154	    if use_batch:
+   155	        try:
+   156	            batch_out = krill.align_reads_variants(
+   157	                sig_path, reads_variants, pore=pore,
+   158	                use_gpu=eff_gpu, num_thread=num_threads,
+   159	                aligner=krill_aligner, start=starts,
+   160	            )
+   161	        except Exception as exc:  # noqa: BLE001 - krill raises broad errors
+   162	            logger.warning("M2 batch eventalign failed (%s); per-read fallback", exc)
+   163	            use_batch = False
+   164	
+   165	    if use_batch and batch_out is not None:
+   166	        for rid, res_list in batch_out.items():
+   167	            i = rid_to_i.get(rid)
+   168	            if i is None:
+   169	                continue
+   170	            gset = gset_by_read.get(i)
+   171	            if gset is None:
+   172	                continue
+   173	            by_label = {x.get("variant_label"): x for x in res_list}
+   174	            nlls: Dict[int, float] = {}
+   175	            spans = spans_by_read.get(i) if gate else None
+   176	            span_cov = [False] * len(spans) if spans else None
+   177	            for cid, j in cidj_by_read.get(rid, {}).items():
+   178	                res = by_label.get(cid)
+   179	                if res is None or res.get("status", -1) != 0:
+   180	                    continue
+   181	                nll, n_ev = _mean_nll_in_gset(res, cand_list[j], gset)
+   182	                if n_ev > 0 and np.isfinite(nll):
+   183	                    nlls[j] = float(nll)
+   184	                if span_cov is not None:
+   185	                    egp = event_genomic_positions(res, cand_list[j])
+   186	                    if egp:
+   187	                        for s_idx, (lo, hi) in enumerate(spans):
+   188	                            if not span_cov[s_idx] and read_straddles(egp, lo, hi):
+   189	                                span_cov[s_idx] = True
+   190	            if nlls:
+   191	                n_refined += 1
+   192	                nlls_by_read[i] = nlls
+   193	                if gate:
+   194	                    # covered iff every wobbling diff span is straddled by the
+   195	                    # read on >=1 candidate (empty spans -> vacuously covered).
+   196	                    cover_by_read[i] = all(span_cov) if span_cov else True
+   197	        return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
+   198	
+   199	    for rid, per_cidj in cidj_by_read.items():
+   200	        i = rid_to_i.get(rid)
+   201	        if i is None:
+   202	            continue
+   203	        gset = gset_by_read.get(i)
+   204	        seq = read_seqs[rid]
+   205	        nlls = {}
+   206	        for j in per_cidj.values():
+   207	            nll, n_ev = read_cand_mean_nll(
+   208	                rid, seq, cand_list[j], [], krill_aligner, aligners[j],
+   209	                sig_path, pore, gset=gset, use_gpu=eff_gpu,
+   210	                num_thread=num_threads,
+   211	            )
+   212	            if n_ev > 0 and np.isfinite(nll):
+   213	                nlls[j] = float(nll)
+   214	        if nlls:
+   215	            n_refined += 1
+   216	            nlls_by_read[i] = nlls
+   217	    # Per-read fallback path does not expose eventalign positions, so the
+   218	    # coverage map is left empty here; the d_tx builder defaults missing reads
+   219	    # to covered=True (recall-safe: never drops on the rare fallback path).
+   220	    return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
+--- runner delegate numbered ---
+    25	from fin.candidates.canonical import chain_all_canonical, parse_motifs
+    26	from fin.candidates.dataclasses import CandidateSet
+    27	from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+    28	from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+    29	from fin.pipeline.config import PipelineConfig
+    30	from fin.scoring.em_inputs import build_em_matrices
+    31	from fin.scoring.krill_tiebreak import krill_tiebreak
+    32	from fin.scoring.mappy_distance import compute_mappy_distance
+    33	
+    34	logger = logging.getLogger(__name__)
+    35	
+    36	# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+    37	# K (transcript-bp each side of the wobbling junction) comes from the configurable
+    38	# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+    39	# an unscorable tie cell (a tied candidate the eventalign window could not score).
+    40	_M2_EM_FLANK = 2
+    41	_M2_EM_PAD = 1.0
+    42	
+    43	
+    44	class PipelineRunner:
+    45	    """Orchestrates the full pyfin pipeline."""
+  1315	            R, hard_assignments, cand_list, kept_read_ids
+  1316	        )
+  1317	        for j, qr in enumerate(quant_results):
+  1318	            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
+  1319	        logger.info(
+  1320	            "m1_em interval %s: %d reads -> %d candidates",
+  1321	            interval.region_string, len(read_ids), len(cand_list),
+  1322	        )
+  1323	        return quant_results
+  1324	
+  1325	    def _tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+  1326	        """Per-read best-AS tie junction-NLL. Delegates to the assignment layer
+  1327	        (fin.pipeline.assignment.tie_nll); kept as a thin method so tests can patch
+  1328	        this mock seam. Returns (nlls_by_read, ties_by_read, n_ties, n_refined,
+  1329	        cover_by_read)."""
+  1330	        from fin.pipeline.assignment import tie_nll
+  1331	        return tie_nll(
+  1332	            self.config, kept_read_ids, read_seqs, cand_list, aligners, raw)
+  1333	
+  1334	    def _observed_junctions(self, interval: GenomicInterval):
+  1335	        """Strand-keyed {strand: Counter{(donor, acceptor): n_reads}} of intron
+  1336	        junctions directly observed in the interval's primary-read CIGARs.
+  1337	
+  1338	        Delegates to ``evidence.compute_observed_junctions`` (the Evidence layer) with a
+  1339	        single-entry per-interval memo: this map is consumed by up to three gates within one
+  1340	        interval (cluster-recheck GTF guard, Lever-2 per-junction support gate,
+  1341	        junction-dominance / guided support gate), which used to each re-open the BAM;
+  1342	        computing it once here is byte-identical. Returns None on empty/unreadable BAM so every
+  1343	        support gate self-disables (fail-open). See fin/pipeline/evidence.py for the caveat.
+  1344	        """
+  1345	        from fin.pipeline.evidence import compute_observed_junctions
+--- parent corresponding numbered ---
+    25	from fin.candidates.canonical import chain_all_canonical, parse_motifs
+    26	from fin.candidates.dataclasses import CandidateSet
+    27	from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+    28	from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+    29	from fin.pipeline.config import PipelineConfig
+    30	from fin.scoring.em_inputs import build_em_matrices
+    31	from fin.scoring.krill_tiebreak import krill_tiebreak
+    32	from fin.scoring.mappy_distance import compute_mappy_distance
+    33	
+    34	logger = logging.getLogger(__name__)
+    35	
+    36	# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+    37	# K (transcript-bp each side of the wobbling junction) comes from the configurable
+    38	# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+    39	# an unscorable tie cell (a tied candidate the eventalign window could not score).
+    40	_M2_EM_FLANK = 2
+    41	_M2_EM_PAD = 1.0
+    42	
+    43	
+    44	class PipelineRunner:
+    45	    """Orchestrates the full pyfin pipeline."""
+  1320	            "m1_em interval %s: %d reads -> %d candidates",
+  1321	            interval.region_string, len(read_ids), len(cand_list),
+  1322	        )
+  1323	        return quant_results
+  1324	
+  1325	    def _tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+  1326	        """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
+  1327	
+  1328	        For each read whose raw mappy AS is simultaneously best across >=2
+  1329	        candidates, build the class junction-discrimination window over that tie
+  1330	        set and score each tied candidate with the per-event junction mean-NLL
+  1331	        (non-HMM krill eventalign over the window). Only tied, window-scorable
+  1332	        cells are touched — never the dense read×candidate matrix.
+  1333	
+  1334	        Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]},
+  1335	        n_ties, n_refined, cover_by_read {i: bool}). ``cover_by_read`` is populated
+  1336	        only when the diff-region coverage gate (config.m2_diff_cover_gate) is ON;
+  1337	        otherwise it is empty.
+  1338	        """
+  1339	        import krill
+  1340	
+  1341	        from fin.scoring.krill_aligner import (
+  1342	            krill_thread_count,
+  1343	            make_krill_aligner,
+  1344	        )
+  1345	        from fin.scoring.m2_junction_nll import (
+  1346	            _mean_nll_in_gset,
+  1347	            class_junction_window_set,
+  1348	            event_genomic_positions,
+  1349	            read_cand_mean_nll,
+  1350	            read_straddles,
+  1351	            wobble_diff_spans,
+  1352	        )
+  1353	        from fin.scoring.mappy_score import score_hit
+  1354	
+  1355	        gate = bool(getattr(self.config, "m2_diff_cover_gate", False))
+  1356	        num_threads = krill_thread_count()
+  1357	        n_c = len(cand_list)
+  1358	        nlls_by_read: Dict[int, Dict[int, float]] = {}
+  1359	        ties_by_read: Dict[int, List[int]] = {}
+  1360	        cover_by_read: Dict[int, bool] = {}
+  1361	        krill_aligner, eff_gpu = make_krill_aligner(
+  1362	            krill, self.config.krill_pore, self.config.use_gpu,
+  1363	            hmm_confidence=False, num_thread=num_threads,
+  1364	        )
+  1365	        if krill_aligner is None:
+  1366	            # No krill signal backend. Gate OFF: preserve the legacy behavior
+  1367	            # (empty ties -> _quant_m2_em leaves rows MISSING, byte-identical).
+  1368	            # Gate ON: still expose the AS tie sets (derivable from ``raw`` alone,
+  1369	            # no signal needed) so the gate's unique-best / drop logic is
+  1370	            # well-defined; without them every row would be all-MISSING and the
+  1371	            # EM would normalize each read to a spurious uniform vote.
+  1372	            if gate:
+  1373	                for i in range(len(kept_read_ids)):
+  1374	                    row = raw[i]
+  1375	                    finite = np.isfinite(row)
+  1376	                    if not finite.any():
+  1377	                        continue
+  1378	                    best_as = float(row[finite].max())
+  1379	                    ties_by_read[i] = [
+  1380	                        j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9
+  1381	                    ]
+  1382	            return nlls_by_read, ties_by_read, 0, 0, cover_by_read
+  1383	
+  1384	        k = self.config.m2_tiebreak_junction_k
+  1385	        pore = self.config.krill_pore
+  1386	        sig_path = self.config.signal_path
+  1387	
+  1388	        # --- Pass 1: tie detection + per-(read, candidate) mappy best-hit slices.
+  1389	        # Each tied cell is reduced to the SAME (sliced sequence, start offset)
+  1390	        # the singular read_cand_mean_nll would have eventaligned, so the batched
+  1391	        # eventalign below is byte-identical to the per-call path -- only the
+  1392	        # Python/GIL/per-call overhead is removed.
+  1393	        gset_by_read: Dict[int, set] = {}
+  1394	        spans_by_read: Dict[int, List[Tuple[int, int]]] = {}  # diff-cover gate spans
+  1395	        reads_variants: Dict[str, Dict[str, str]] = {}  # rid -> {cand_id: seq}
+  1396	        starts: Dict[str, Dict[str, int]] = {}          # rid -> {cand_id: r_st}
+  1397	        cidj_by_read: Dict[str, Dict[str, int]] = {}     # rid -> {cand_id: col j}
+  1398	        n_ties = 0
+  1399	        for i, rid in enumerate(kept_read_ids):
+  1400	            row = raw[i]
+  1401	            finite = np.isfinite(row)
+  1402	            if not finite.any():
+  1403	                continue
+  1404	            best_as = float(row[finite].max())
+  1405	            tie = [j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9]
+  1406	            ties_by_read[i] = tie
+  1407	            if len(tie) < 2:
+  1408	                continue
+  1409	            n_ties += 1
+  1410	            gset = class_junction_window_set(
+  1411	                [cand_list[j] for j in tie], flank=_M2_EM_FLANK, k=k
+  1412	            )
+  1413	            if not gset:
+  1414	                continue
+  1415	            if gate:
+  1416	                spans_by_read[i] = wobble_diff_spans(
+  1417	                    [cand_list[j] for j in tie], flank=_M2_EM_FLANK
+  1418	                )
+  1419	            seq = read_seqs[rid]
+  1420	            per_seqs: Dict[str, str] = {}
+  1421	            per_starts: Dict[str, int] = {}
+  1422	            per_cidj: Dict[str, int] = {}
+  1423	            for j in tie:
+  1424	                aln = aligners[j]
+  1425	                if aln is None:
+  1426	                    continue
+  1427	                best_hit = None
+  1428	                best_hit_as = None
+  1429	                for h in aln.map(seq):
+  1430	                    v = score_hit(h)
+  1431	                    if v is None:
+  1432	                        continue
+  1433	                    if best_hit_as is None or v > best_hit_as:
+  1434	                        best_hit_as, best_hit = v, h
+  1435	                if best_hit is None:
+  1436	                    continue
+  1437	                cand = cand_list[j]
+  1438	                per_seqs[cand.candidate_id] = cand.sequence[best_hit.r_st:best_hit.r_en]
+  1439	                per_starts[cand.candidate_id] = best_hit.r_st
+  1440	                per_cidj[cand.candidate_id] = j
+  1441	            if not per_seqs:
+  1442	                continue
+  1443	            gset_by_read[i] = gset
+  1444	            reads_variants[rid] = per_seqs
+  1445	            starts[rid] = per_starts
+  1446	            cidj_by_read[rid] = per_cidj
+  1447	
+  1448	        if not reads_variants:
+  1449	            return nlls_by_read, ties_by_read, n_ties, 0, cover_by_read
+  1450	
+  1451	        # --- Pass 2: ONE batched eventalign over every tied pair (per-pair start
+  1452	        # via the {label: offset} form); per-read singular fallback on absence or
+  1453	        # batch failure. Both branches score with the same _mean_nll_in_gset.
+  1454	        rid_to_i = {rid: i for i, rid in enumerate(kept_read_ids)}
+  1455	        n_refined = 0
+  1456	        use_batch = hasattr(krill, "align_reads_variants")
+  1457	        batch_out = None
+  1458	        if use_batch:
+  1459	            try:
+  1460	                batch_out = krill.align_reads_variants(
+  1461	                    sig_path, reads_variants, pore=pore,
+  1462	                    use_gpu=eff_gpu, num_thread=num_threads,
+  1463	                    aligner=krill_aligner, start=starts,
+  1464	                )
+  1465	            except Exception as exc:  # noqa: BLE001 - krill raises broad errors
+  1466	                logger.warning("M2 batch eventalign failed (%s); per-read fallback", exc)
+  1467	                use_batch = False
+  1468	
+  1469	        if use_batch and batch_out is not None:
+  1470	            for rid, res_list in batch_out.items():
+  1471	                i = rid_to_i.get(rid)
+  1472	                if i is None:
+  1473	                    continue
+  1474	                gset = gset_by_read.get(i)
+  1475	                if gset is None:
+  1476	                    continue
+  1477	                by_label = {x.get("variant_label"): x for x in res_list}
+  1478	                nlls: Dict[int, float] = {}
+  1479	                spans = spans_by_read.get(i) if gate else None
+  1480	                span_cov = [False] * len(spans) if spans else None
+  1481	                for cid, j in cidj_by_read.get(rid, {}).items():
+  1482	                    res = by_label.get(cid)
+  1483	                    if res is None or res.get("status", -1) != 0:
+  1484	                        continue
+  1485	                    nll, n_ev = _mean_nll_in_gset(res, cand_list[j], gset)
+  1486	                    if n_ev > 0 and np.isfinite(nll):
+  1487	                        nlls[j] = float(nll)
+  1488	                    if span_cov is not None:
+  1489	                        egp = event_genomic_positions(res, cand_list[j])
+  1490	                        if egp:
+  1491	                            for s_idx, (lo, hi) in enumerate(spans):
+  1492	                                if not span_cov[s_idx] and read_straddles(egp, lo, hi):
+  1493	                                    span_cov[s_idx] = True
+  1494	                if nlls:
+  1495	                    n_refined += 1
+  1496	                    nlls_by_read[i] = nlls
+  1497	                    if gate:
+  1498	                        # covered iff every wobbling diff span is straddled by the
+  1499	                        # read on >=1 candidate (empty spans -> vacuously covered).
+  1500	                        cover_by_read[i] = all(span_cov) if span_cov else True
+  1501	            return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
+  1502	
+  1503	        for rid, per_cidj in cidj_by_read.items():
+  1504	            i = rid_to_i.get(rid)
+  1505	            if i is None:
+  1506	                continue
+  1507	            gset = gset_by_read.get(i)
+  1508	            seq = read_seqs[rid]
+  1509	            nlls = {}
+  1510	            for j in per_cidj.values():
+  1511	                nll, n_ev = read_cand_mean_nll(
+  1512	                    rid, seq, cand_list[j], [], krill_aligner, aligners[j],
+  1513	                    sig_path, pore, gset=gset, use_gpu=eff_gpu,
+  1514	                    num_thread=num_threads,
+  1515	                )
+  1516	                if n_ev > 0 and np.isfinite(nll):
+  1517	                    nlls[j] = float(nll)
+  1518	            if nlls:
+  1519	                n_refined += 1
+  1520	                nlls_by_read[i] = nlls
+  1521	        # Per-read fallback path does not expose eventalign positions, so the
+  1522	        # coverage map is left empty here; the d_tx builder defaults missing reads
+  1523	        # to covered=True (recall-safe: never drops on the rare fallback path).
+  1524	        return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
+  1525	
+  1526	    def _observed_junctions(self, interval: GenomicInterval):
+  1527	        """Strand-keyed {strand: Counter{(donor, acceptor): n_reads}} of intron
+  1528	        junctions directly observed in the interval's primary-read CIGARs.
+  1529	
+  1530	        Delegates to ``evidence.compute_observed_junctions`` (the Evidence layer) with a
+  1531	        single-entry per-interval memo: this map is consumed by up to three gates within one
+  1532	        interval (cluster-recheck GTF guard, Lever-2 per-junction support gate,
+  1533	        junction-dominance / guided support gate), which used to each re-open the BAM;
+  1534	        computing it once here is byte-identical. Returns None on empty/unreadable BAM so every
+  1535	        support gate self-disables (fail-open). See fin/pipeline/evidence.py for the caveat.
+--- logger configuration ---
+fatal: command line, '(Formatter|format=|log_format|LOG_FORMAT|%(name\)|getLogger)': Unmatched ( or \(
+--- exact patch targets in commit tests ---
+--- imports of runner private constant ---
+
+exec
+/bin/bash -c "git grep -n -e 'Formatter' -e '%(name)' -e 'log_format' -e 'getLogger' bc39ce8 -- fin | head -160
+printf '%s\\n' '--- commit assignment warning lines ---'
+git --no-pager show bc39ce8:fin/pipeline/assignment.py | nl -ba | sed -n '145,180p'
+printf '%s\\n' '--- commit runner delegate lines ---'
+git --no-pager show bc39ce8:fin/pipeline/runner.py | nl -ba | sed -n '1320,1342p'
+printf '%s\\n' '--- parent logger warning lines ---'
+git --no-pager show bc39ce8"'^:fin/pipeline/runner.py | nl -ba | sed -n '"'1455,1470p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+bc39ce8:fin/_dtw/__init__.py:26:logger = logging.getLogger(__name__)
+bc39ce8:fin/ablation/io.py:12:logger = logging.getLogger(__name__)
+bc39ce8:fin/ablation/mappy_argmax.py:22:logger = logging.getLogger(__name__)
+bc39ce8:fin/analysis/assignments.py:10:logger = logging.getLogger(__name__)
+bc39ce8:fin/analysis/quantification.py:14:logger = logging.getLogger(__name__)
+bc39ce8:fin/candidates/discovery.py:22:logger = logging.getLogger(__name__)
+bc39ce8:fin/candidates/intron_chains.py:12:logger = logging.getLogger(__name__)
+bc39ce8:fin/fusion/arm_assembly.py:32:logger = logging.getLogger(__name__)
+bc39ce8:fin/fusion/chimeric.py:26:logger = logging.getLogger(__name__)
+bc39ce8:fin/fusion/stitch.py:35:logger = logging.getLogger(__name__)
+bc39ce8:fin/io/io_bam.py:18:logger = logging.getLogger(__name__)
+bc39ce8:fin/io/io_bed.py:11:logger = logging.getLogger(__name__)
+bc39ce8:fin/io/io_bedpe.py:10:logger = logging.getLogger(__name__)
+bc39ce8:fin/io/io_fast5.py:19:logger = logging.getLogger(__name__)
+bc39ce8:fin/io/io_fasta.py:19:logger = logging.getLogger(__name__)
+bc39ce8:fin/io/io_fastq.py:10:logger = logging.getLogger(__name__)
+bc39ce8:fin/io/io_gtf.py:15:logger = logging.getLogger(__name__)
+bc39ce8:fin/io/io_pod5.py:16:logger = logging.getLogger(__name__)
+bc39ce8:fin/io/io_slow5.py:18:logger = logging.getLogger(__name__)
+bc39ce8:fin/io/io_tsv.py:10:logger = logging.getLogger(__name__)
+bc39ce8:fin/pipeline/assignment.py:17:logger = logging.getLogger(__name__)
+bc39ce8:fin/pipeline/evidence.py:24:logger = logging.getLogger(__name__)
+bc39ce8:fin/pipeline/parallel.py:34:logger = logging.getLogger(__name__)
+bc39ce8:fin/pipeline/runner.py:34:logger = logging.getLogger(__name__)
+bc39ce8:fin/pipeline/runner.py:111:            log_level = logging.getLevelName(logging.getLogger("fin").getEffectiveLevel())
+bc39ce8:fin/scoring/diff_region_dtw.py:27:logger = logging.getLogger(__name__)
+bc39ce8:fin/scoring/em_inputs.py:17:logger = logging.getLogger(__name__)
+bc39ce8:fin/scoring/eventalign_parser.py:13:logger = logging.getLogger(__name__)
+bc39ce8:fin/scoring/krill_aligner.py:17:logger = logging.getLogger(__name__)
+bc39ce8:fin/scoring/krill_tiebreak.py:20:logger = logging.getLogger(__name__)
+bc39ce8:fin/scoring/m2_junction_nll.py:36:logger = logging.getLogger(__name__)
+bc39ce8:fin/scoring/m3_junction_coherence.py:42:logger = logging.getLogger(__name__)
+bc39ce8:fin/scoring/mappy_distance.py:32:logger = logging.getLogger(__name__)
+bc39ce8:fin/scoring/polya.py:15:logger = logging.getLogger(__name__)
+bc39ce8:fin/scoring/signal_dtw.py:15:logger = logging.getLogger(__name__)
+bc39ce8:fin/utils/log_config.py:45:    logger = logging.getLogger(name)
+bc39ce8:fin/utils/log_config.py:61:    formatter = logging.Formatter(format_string, datefmt='%Y-%m-%d %H:%M:%S')
+bc39ce8:fin/utils/log_config.py:66:        console_handler.setFormatter(formatter)
+bc39ce8:fin/utils/log_config.py:74:        file_handler.setFormatter(formatter)
+--- commit assignment warning lines ---
+   145	        return nlls_by_read, ties_by_read, n_ties, 0, cover_by_read
+   146	
+   147	    # --- Pass 2: ONE batched eventalign over every tied pair (per-pair start
+   148	    # via the {label: offset} form); per-read singular fallback on absence or
+   149	    # batch failure. Both branches score with the same _mean_nll_in_gset.
+   150	    rid_to_i = {rid: i for i, rid in enumerate(kept_read_ids)}
+   151	    n_refined = 0
+   152	    use_batch = hasattr(krill, "align_reads_variants")
+   153	    batch_out = None
+   154	    if use_batch:
+   155	        try:
+   156	            batch_out = krill.align_reads_variants(
+   157	                sig_path, reads_variants, pore=pore,
+   158	                use_gpu=eff_gpu, num_thread=num_threads,
+   159	                aligner=krill_aligner, start=starts,
+   160	            )
+   161	        except Exception as exc:  # noqa: BLE001 - krill raises broad errors
+   162	            logger.warning("M2 batch eventalign failed (%s); per-read fallback", exc)
+   163	            use_batch = False
+   164	
+   165	    if use_batch and batch_out is not None:
+   166	        for rid, res_list in batch_out.items():
+   167	            i = rid_to_i.get(rid)
+   168	            if i is None:
+   169	                continue
+   170	            gset = gset_by_read.get(i)
+   171	            if gset is None:
+   172	                continue
+   173	            by_label = {x.get("variant_label"): x for x in res_list}
+   174	            nlls: Dict[int, float] = {}
+   175	            spans = spans_by_read.get(i) if gate else None
+   176	            span_cov = [False] * len(spans) if spans else None
+   177	            for cid, j in cidj_by_read.get(rid, {}).items():
+   178	                res = by_label.get(cid)
+   179	                if res is None or res.get("status", -1) != 0:
+   180	                    continue
+--- commit runner delegate lines ---
+  1320	            "m1_em interval %s: %d reads -> %d candidates",
+  1321	            interval.region_string, len(read_ids), len(cand_list),
+  1322	        )
+  1323	        return quant_results
+  1324	
+  1325	    def _tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+  1326	        """Per-read best-AS tie junction-NLL. Delegates to the assignment layer
+  1327	        (fin.pipeline.assignment.tie_nll); kept as a thin method so tests can patch
+  1328	        this mock seam. Returns (nlls_by_read, ties_by_read, n_ties, n_refined,
+  1329	        cover_by_read)."""
+  1330	        from fin.pipeline.assignment import tie_nll
+  1331	        return tie_nll(
+  1332	            self.config, kept_read_ids, read_seqs, cand_list, aligners, raw)
+  1333	
+  1334	    def _observed_junctions(self, interval: GenomicInterval):
+  1335	        """Strand-keyed {strand: Counter{(donor, acceptor): n_reads}} of intron
+  1336	        junctions directly observed in the interval's primary-read CIGARs.
+  1337	
+  1338	        Delegates to ``evidence.compute_observed_junctions`` (the Evidence layer) with a
+  1339	        single-entry per-interval memo: this map is consumed by up to three gates within one
+  1340	        interval (cluster-recheck GTF guard, Lever-2 per-junction support gate,
+  1341	        junction-dominance / guided support gate), which used to each re-open the BAM;
+  1342	        computing it once here is byte-identical. Returns None on empty/unreadable BAM so every
+--- parent logger warning lines ---
+  1455	        n_refined = 0
+  1456	        use_batch = hasattr(krill, "align_reads_variants")
+  1457	        batch_out = None
+  1458	        if use_batch:
+  1459	            try:
+  1460	                batch_out = krill.align_reads_variants(
+  1461	                    sig_path, reads_variants, pore=pore,
+  1462	                    use_gpu=eff_gpu, num_thread=num_threads,
+  1463	                    aligner=krill_aligner, start=starts,
+  1464	                )
+  1465	            except Exception as exc:  # noqa: BLE001 - krill raises broad errors
+  1466	                logger.warning("M2 batch eventalign failed (%s); per-read fallback", exc)
+  1467	                use_batch = False
+  1468	
+  1469	        if use_batch and batch_out is not None:
+  1470	            for rid, res_list in batch_out.items():
+
+exec
+/bin/bash -c "git --no-pager show bc39ce8:fin/utils/log_config.py | nl -ba | sed -n '35,82p'
+printf '%s\\n' '--- setup package discovery ---'
+git --no-pager show bc39ce8:setup.py | rg -n \"find_packages|packages=|py_modules\" || true
+git --no-pager show bc39ce8:pyproject.toml 2>/dev/null | rg -n \"packages|include|find\" || true
+printf '%s\\n' '--- assignment import graph ---'
+git --no-pager show bc39ce8:fin/pipeline/assignment.py | rg '"'^from fin|''^import '"'
+printf '%s\\n' '--- runner references after extraction ---'
+git --no-pager show bc39ce8:fin/pipeline/runner.py | rg -n \"_M2_EM_FLANK|_M2_EM_PAD|\\bTuple\\b|\\bnp\\.\" | head -80" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+    35	        format_string: Custom format string (optional)
+    36	
+    37	    Returns:
+    38	        Configured logger instance
+    39	
+    40	    Example:
+    41	        >>> logger = setup_logger(__name__, level='DEBUG', log_file='fin.log')
+    42	        >>> logger.info("Process started")
+    43	    """
+    44	    # Create logger
+    45	    logger = logging.getLogger(name)
+    46	    logger.setLevel(getattr(logging, level.upper()))
+    47	
+    48	    # Clear existing handlers to avoid duplicates
+    49	    logger.handlers.clear()
+    50	
+    51	    # Define format
+    52	    if format_string is None:
+    53	        # Default format with datetime and filename
+    54	        format_string = (
+    55	            "%(asctime)s | "
+    56	            "%(levelname)-8s | "
+    57	            "%(filename)s:%(lineno)d | "
+    58	            "%(message)s"
+    59	        )
+    60	
+    61	    formatter = logging.Formatter(format_string, datefmt='%Y-%m-%d %H:%M:%S')
+    62	
+    63	    # Console handler
+    64	    if console:
+    65	        console_handler = logging.StreamHandler(sys.stdout)
+    66	        console_handler.setFormatter(formatter)
+    67	        logger.addHandler(console_handler)
+    68	
+    69	    # File handler
+    70	    if log_file:
+    71	        log_path = Path(log_file)
+    72	        log_path.parent.mkdir(parents=True, exist_ok=True)
+    73	        file_handler = logging.FileHandler(log_path, mode=file_mode)
+    74	        file_handler.setFormatter(formatter)
+    75	        logger.addHandler(file_handler)
+    76	
+    77	    return logger
+    78	
+    79	
+    80	def get_package_logger(name: str, **kwargs) -> logging.Logger:
+    81	    """
+    82	    Get a logger instance configured for the py-fin package
+--- setup package discovery ---
+330:        packages=[
+75:[tool.setuptools.packages.find]
+77:include = ["fin*", "fin.*"]
+85:include = '\.pyi?$'
+119:include = [
+--- assignment import graph ---
+import logging
+import numpy as np
+--- runner references after extraction ---
+7:from typing import Dict, List, Optional, Tuple
+40:_M2_EM_FLANK = 2
+41:_M2_EM_PAD = 1.0
+799:        spans: Dict[str, Tuple[int, int]] = {}
+981:                    prop_shadow: Dict[int, Tuple[tuple, tuple]] = {}
+1121:        read_ends: Dict[str, Tuple[int, int]] = {}
+1141:    ) -> Tuple[Dict[str, str], Dict[str, Tuple[int, int]]]:
+1149:        read_ends: Dict[str, Tuple[int, int]] = {}
+1219:    def _adaptive_sigma(self, dist_read_to_tx: np.ndarray) -> float:
+1230:            adaptive = float(np.median(d_max - d_min))
+1231:            return float(np.clip(
+1238:    def _eff_lengths(self, cand_list) -> Optional[np.ndarray]:
+1246:        lengths = np.array(
+1284:        m2_dummy = np.zeros((n_reads_em, n_cands_em), dtype=np.float32)
+1285:        m3_dummy = np.zeros((n_reads_em, n_reads_em), dtype=np.float32)
+1289:        dist_read_to_read = np.zeros((n_reads_em, n_reads_em), dtype=np.float32)
+1407:        raw_all = np.full((len(all_ids), n_c), -np.inf, dtype=np.float64)
+1447:        d_tx = np.full((n_r, n_c), MISSING, dtype=np.float64)
+1464:                miss = (hi - lo) + _M2_EM_PAD
+1469:            sigma2 = max(float(np.median(diffs)) if diffs.size else 1.0, 1e-3)
+1480:            covered_vote = np.zeros(n_c, dtype=np.float64)
+1523:                masses = np.array([covered_vote[j] for j in tie], dtype=np.float64)
+1529:                            d_tx[i, j] = -float(np.log(p[idx]))
+1536:        d_tx = d_tx.astype(np.float32)
+1544:            winner_col = np.asarray(d_tx).argmin(axis=1).astype(np.int64)
+1545:            no_data = np.asarray(d_tx).min(axis=1) >= 1e5  # all-MISSING rows
+1550:                junction_k=self.config.m2_tiebreak_junction_k, flank=_M2_EM_FLANK,
+1554:            sigma3 = max(float(np.median(nz)) if nz.size else 1.0, 1e-3)
+1555:            dist_read_to_read = (dist_read_to_read / sigma3).astype(np.float32)
+1558:            dist_read_to_read = np.zeros((n_r, n_r), dtype=np.float32)
+1607:                em_ab = np.asarray(R).sum(axis=0)
+1702:            em_ab_c = np.asarray(R).sum(axis=0)
+1741:            em_ab_c = np.asarray(R).sum(axis=0)
+1790:                cand_list, quant_results, np.asarray(R).sum(axis=0),
+
+codex
+Core math and control flow match. I found observable logging and constant-patching risks; validating them against the commit snapshot.
+  ✓ Inspect commit and parent context
+  ✓ Compare extracted function semantics
+  ✓ Audit imports and patch seams
+  → Run focused verification tests
+  • Deliver skeptical commit verdict
+exec
+/bin/bash -c 'set -e
+rm -rf /tmp/pyfin-bc39ce8-review
+mkdir -p /tmp/pyfin-bc39ce8-review
+git archive bc39ce8 | tar -x -C /tmp/pyfin-bc39ce8-review
+python -m pytest -q tests/unit/test_m2_em_pure_seed.py tests/integration/test_pipeline_integration.py' in /tmp/pyfin-bc39ce8-review
+ exited 2 in 0ms:
+fatal: not a git repository (or any parent up to mount point /home)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).
+tar: This does not look like a tar archive
+tar: Exiting with failure status due to previous errors
+
+exec
+/bin/bash -c 'set -e
+rm -rf /tmp/pyfin-bc39ce8-review
+mkdir -p /tmp/pyfin-bc39ce8-review
+git -C /SSD/logan/dev/pyfin archive bc39ce8 | tar -x -C /tmp/pyfin-bc39ce8-review
+cd /tmp/pyfin-bc39ce8-review
+python -m pytest -q tests/unit/test_m2_em_pure_seed.py tests/integration/test_pipeline_integration.py' in /SSD/logan/dev/pyfin
+ exited 1 in 0ms:
+/SSD/logan/miniforge3/bin/python: No module named pytest
+
+exec
+/bin/bash -c 'command -v pytest || true
+command -v uv || true
+command -v poetry || true
+conda env list 2>/dev/null || true
+ls -1 .venv/bin/pytest venv/bin/pytest 2>/dev/null || true
+rg -n "pytest" pyproject.toml requirements*.txt environment*.yml setup.cfg tox.ini 2>/dev/null | head -80 || true' in /SSD/logan/dev/pyfin
+ succeeded in 780ms:
+
+# conda environments:
+#
+base                 * /SSD/logan/miniforge3
+ambf-py                /SSD/logan/miniforge3/envs/ambf-py
+ambf-r                 /SSD/logan/miniforge3/envs/ambf-r
+bonito                 /SSD/logan/miniforge3/envs/bonito
+eventalign             /SSD/logan/miniforge3/envs/eventalign
+fin_deepseek           /SSD/logan/miniforge3/envs/fin_deepseek
+fin_doubao             /SSD/logan/miniforge3/envs/fin_doubao
+fin_qwen               /SSD/logan/miniforge3/envs/fin_qwen
+nanofusion             /SSD/logan/miniforge3/envs/nanofusion
+py-baleen              /SSD/logan/miniforge3/envs/py-baleen
+py-baleen-dev          /SSD/logan/miniforge3/envs/py-baleen-dev
+pybaleen               /SSD/logan/miniforge3/envs/pybaleen
+pyfin                  /SSD/logan/miniforge3/envs/pyfin
+snakemake              /SSD/logan/miniforge3/envs/snakemake
+testnanopolish         /SSD/logan/miniforge3/envs/testnanopolish
+tex                    /SSD/logan/miniforge3/envs/tex
+                       /SSD/logan/projects/baleen_benchmarking/.snakemake/conda/00b7ac16540f871cde4123f161674d6b_
+                       /SSD/logan/projects/baleen_benchmarking/.snakemake/conda/7bdb1605f32331cab4b0b35d9925efb0_
+
+requirements.txt:25:pytest>=6.0.0
+requirements.txt:26:pytest-cov
+pyproject.toml:53:    "pytest>=6.0.0",
+pyproject.toml:54:    "pytest-cov",
+pyproject.toml:100:[tool.pytest.ini_options]
+
+exec
+/bin/bash -c 'set -e
+cd /tmp/pyfin-bc39ce8-review
+/SSD/logan/miniforge3/envs/pyfin/bin/python -m pytest -q tests/unit/test_m2_em_pure_seed.py tests/integration/test_pipeline_integration.py' in /SSD/logan/dev/pyfin
+ exited 2 in 833ms:
+============================= test session starts ==============================
+platform linux -- Python 3.10.19, pytest-9.0.2, pluggy-1.6.0
+rootdir: /tmp/pyfin-bc39ce8-review
+configfile: pyproject.toml
+collecting ... collected 0 items / 2 errors                                                   
+
+==================================== ERRORS ====================================
+_____________ ERROR collecting tests/unit/test_m2_em_pure_seed.py ______________
+ImportError while importing test module '/tmp/pyfin-bc39ce8-review/tests/unit/test_m2_em_pure_seed.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/SSD/logan/miniforge3/envs/pyfin/lib/python3.10/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests/unit/test_m2_em_pure_seed.py:32: in <module>
+    from fin.pipeline.config import PipelineConfig
+fin/pipeline/__init__.py:4: in <module>
+    from .runner import PipelineRunner
+fin/pipeline/runner.py:31: in <module>
+    from fin.scoring.krill_tiebreak import krill_tiebreak
+fin/scoring/krill_tiebreak.py:15: in <module>
+    import mappy
+E   ModuleNotFoundError: No module named 'mappy'
+------------------------------- Captured stdout --------------------------------
+2026-07-24 11:51:04 | INFO     | __init__.py:38 | Package initialized - version 0.1.0
+_______ ERROR collecting tests/integration/test_pipeline_integration.py ________
+ImportError while importing test module '/tmp/pyfin-bc39ce8-review/tests/integration/test_pipeline_integration.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/SSD/logan/miniforge3/envs/pyfin/lib/python3.10/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests/integration/test_pipeline_integration.py:24: in <module>
+    from fin.pipeline.runner import PipelineRunner
+fin/pipeline/__init__.py:4: in <module>
+    from .runner import PipelineRunner
+fin/pipeline/runner.py:31: in <module>
+    from fin.scoring.krill_tiebreak import krill_tiebreak
+fin/scoring/krill_tiebreak.py:15: in <module>
+    import mappy
+E   ModuleNotFoundError: No module named 'mappy'
+=========================== short test summary info ============================
+ERROR tests/unit/test_m2_em_pure_seed.py
+ERROR tests/integration/test_pipeline_integration.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!
+============================== 2 errors in 0.52s ===============================
+
+exec
+/bin/bash -c 'for env in pyfin fin_deepseek fin_doubao fin_qwen; do p=/SSD/logan/miniforge3/envs/$env/bin/python; printf '"'%s: ' \""'$env"; "$p" - <<'"'PY' 2>/dev/null || true
+import importlib.util
+print('pytest',bool(importlib.util.find_spec('pytest')),'mappy',bool(importlib.util.find_spec('mappy')),'pysam',bool(importlib.util.find_spec('pysam')))
+PY
+done" in /SSD/logan/dev/pyfin
+ succeeded in 163ms:
+pytest True mappy False pysam False
+fin_qwen: pytest True mappy False pysam False
+
+exec
+/bin/bash -c "/SSD/logan/miniforge3/envs/pyfin/bin/python - <<'PY'
+import importlib.util
+for x in ['krill','mappy','pysam','numpy']:
+ print(x, importlib.util.find_spec(x))
+PY
+git --no-pager show bc39ce8:fin/scoring/krill_tiebreak.py | sed -n '1,90p'
+git --no-pager show bc39ce8:fin/scoring/mappy_distance.py | sed -n '1,70p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+krill None
+mappy None
+pysam ModuleSpec(name='pysam', loader=<_frozen_importlib_external.SourceFileLoader object at 0x7a46ad079db0>, origin='/SSD/logan/miniforge3/envs/pyfin/lib/python3.10/site-packages/pysam/__init__.py', submodule_search_locations=['/SSD/logan/miniforge3/envs/pyfin/lib/python3.10/site-packages/pysam'])
+numpy ModuleSpec(name='numpy', loader=<_frozen_importlib_external.SourceFileLoader object at 0x7a46ad079de0>, origin='/SSD/logan/miniforge3/envs/pyfin/lib/python3.10/site-packages/numpy/__init__.py', submodule_search_locations=['/SSD/logan/miniforge3/envs/pyfin/lib/python3.10/site-packages/numpy'])
+"""krill-based tiebreak: resolve M1 ties using in-memory eventalign match score.
+
+For ambiguous reads (R_best < threshold):
+  1. For each tied candidate, run krill align with candidate's mapped region
+  2. Compute match score = matched_events / max_events_across_candidates
+     - matched = events with |z| < 2 AND model_kmer != NNNNN
+     - FAIL (status!=0) → matched = 0
+  3. Redistribute R proportionally by match scores, preserving original row sum
+"""
+from __future__ import annotations
+
+import logging
+from typing import Dict, List, Optional
+
+import mappy
+import numpy as np
+
+from fin.candidates.dataclasses import TranscriptCandidate
+
+logger = logging.getLogger(__name__)
+
+
+def _build_m2_krill(
+    read_ids: List[str],
+    read_seqs: Dict[str, str],
+    candidates: List,
+    signal_path: str,
+    pore: str = "rna002",
+    as_distance: bool = True,
+    use_gpu: bool = True,
+) -> np.ndarray:
+    """Build (n_reads, n_cands) matrix from krill match scores.
+
+    If as_distance=True: distance = 1 - (matched/max_ev). Lower = better.
+    If as_distance=False: returns row-normalized match scores (sum=1 per row).
+        Can be used directly as R matrix.
+    FAIL → 0.
+    """
+    n_reads = len(read_ids)
+    n_cands = len(candidates)
+    dist = np.ones((n_reads, n_cands), dtype=np.float32)
+    try:
+        import krill
+
+        from fin.scoring.krill_aligner import make_krill_aligner
+    except Exception as exc:  # krill not importable -> default (max) distances
+        logger.warning("_build_m2_krill: krill import failed (%s); skipping", exc)
+        return dist
+
+    # Build mappy aligners
+    cand_aligners = {}
+    for j, c in enumerate(candidates):
+        seq = c.sequence if hasattr(c, 'sequence') else None
+        if seq and len(seq) > 20:
+            a = mappy.Aligner(seq=seq, preset="map-ont")
+            if a:
+                cand_aligners[j] = a
+
+    # Build per-read mapped sequences for all reads at once
+    reads_variants = {}   # {rid: {cand_id: seq}}
+    rid_cand_idx = {}     # {rid: {cand_id: j}}
+
+    for i, rid in enumerate(read_ids):
+        rseq = read_seqs.get(rid, "")
+        if not rseq:
+            continue
+        per_read = {}
+        per_read_j = {}
+        for j, a in cand_aligners.items():
+            best = None
+            for hit in a.map(rseq):
+                if best is None or hit.mlen > best.mlen:
+                    best = hit
+            if best:
+                cid = candidates[j].candidate_id
+                per_read[cid] = candidates[j].sequence[best.r_st:best.r_en]
+                per_read_j[cid] = j
+        if per_read:
+            reads_variants[rid] = per_read
+            rid_cand_idx[rid] = per_read_j
+
+    if not reads_variants:
+        return dist
+
+    # Try batch API first (align_reads_variants, plural), fall back to per-read
+    import os
+    num_threads = int(os.environ.get("KRILL_THREADS", "0"))
+    aligner, use_gpu = make_krill_aligner(
+        krill, pore, use_gpu, hmm_confidence=True, num_thread=num_threads
+    )
+"""M1: read×candidate distance via mappy (minimap2) alignment scores.
+
+Provides ``compute_mappy_distance`` which aligns each read sequence against
+every candidate transcript using ``mappy.Aligner`` (preset ``map-ont``) and
+returns a non-negative distance matrix suitable for ``em_with_coherence``:
+
+    d[i, j] = max_score_across_candidates - score(read_i, cand_j)
+
+where ``score`` is the best primary-alignment score for the read against
+candidate j (``hit.score`` when available, falling back to ``hit.mlen``).
+Reads with no hit against a candidate get the row max (worst), so they are
+not penalised relative to candidates they failed against.
+
+The transform to a *distance* keeps the same monotonic ordering as the raw
+mappy AS (higher AS = closer), guarantees ``d >= 0`` (required by EM), and
+is invariant to the absolute AS scale per read.
+
+Public function:
+    compute_mappy_distance(read_seqs, candidates, read_ids) -> np.ndarray
+"""
+from __future__ import annotations
+
+import logging
+from typing import Dict, List
+
+import numpy as np
+
+from fin.candidates.dataclasses import TranscriptCandidate
+from fin.scoring.mappy_preset import get_m1_preset
+from fin.scoring.mappy_score import score_hit
+
+logger = logging.getLogger(__name__)
+
+
+def compute_mappy_distance(
+    read_seqs: Dict[str, str],
+    candidates: List[TranscriptCandidate],
+    read_ids: List[str],
+) -> np.ndarray:
+    """Return (n_reads, n_cands) distance matrix from mappy alignments.
+
+    Args:
+        read_seqs: Mapping read_id -> sequence (already strand-corrected).
+        candidates: Ordered list of TranscriptCandidate (axis 1).
+        read_ids: Ordered read IDs (axis 0). Reads not in ``read_seqs`` get
+            a row of zeros (i.e. uninformative; will be reweighted in EM).
+
+    Returns:
+        np.ndarray float32 shape (len(read_ids), len(candidates)). All
+        entries are non-negative.
+    """
+    import mappy
+
+    n_r = len(read_ids)
+    n_c = len(candidates)
+    if n_r == 0 or n_c == 0:
+        return np.zeros((n_r, n_c), dtype=np.float32)
+
+    # Build per-candidate aligners once.
+    aligners: List[mappy.Aligner | None] = []
+    for c in candidates:
+        if not c.sequence:
+            aligners.append(None)
+            continue
+        a = mappy.Aligner(seq=c.sequence, preset=get_m1_preset())
+        aligners.append(a if a else None)
+
+    # Raw AS matrix; missing entries get -inf so we can compute per-row max.
+    raw = np.full((n_r, n_c), -np.inf, dtype=np.float64)
+    for i, rid in enumerate(read_ids):
+
+exec
+/bin/bash -c "set -e
+mkdir -p /tmp/pyfin-review-stubs
+cat > /tmp/pyfin-review-stubs/mappy.py <<'PY'
+class Aligner:
+    def __init__(self, *args, **kwargs):
+        pass
+    def __bool__(self):
+        return True
+    def map(self, *args, **kwargs):
+        return []
+PY
+cd /tmp/pyfin-bc39ce8-review
+PYTHONPATH=/tmp/pyfin-review-stubs:/tmp/pyfin-bc39ce8-review /SSD/logan/miniforge3/envs/pyfin/bin/python -m pytest -q tests/unit/test_m2_em_pure_seed.py tests/integration/test_pipeline_integration.py" in /SSD/logan/dev/pyfin
+ exited 1 in 627ms:
+============================= test session starts ==============================
+platform linux -- Python 3.10.19, pytest-9.0.2, pluggy-1.6.0
+rootdir: /tmp/pyfin-bc39ce8-review
+configfile: pyproject.toml
+collecting ... collected 26 items                                                             
+
+tests/unit/test_m2_em_pure_seed.py .................FF.                  [ 76%]
+tests/integration/test_pipeline_integration.py ......                    [100%]
+
+=================================== FAILURES ===================================
+_______ TestTieNllKrillUnavailable.test_gate_on_populates_ties_from_raw ________
+
+self = <unit.test_m2_em_pure_seed.TestTieNllKrillUnavailable object at 0x7b371657b4f0>
+
+    def test_gate_on_populates_ties_from_raw(self):
+>       nlls, ties, n_ties, n_ref, cover = self._call(gate=True)
+
+tests/unit/test_m2_em_pure_seed.py:390: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_m2_em_pure_seed.py:387: in _call
+    return runner._tie_nll(kept, read_seqs, cands, [None] * N_C, raw)
+fin/pipeline/runner.py:1331: in _tie_nll
+    return tie_nll(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = PipelineConfig(bam_path='/tmp/x.bam', gtf_path=None, genome_fasta_path='', fastq_path='', signal_path='', signal_forma...e, fusion_enabled=False, fusion_min_support=2, fusion_max_dist=500, fusion_flank_bp=500, fusion_max_internal_gap_bp=30)
+kept_read_ids = ['r0', 'r1']
+read_seqs = {'r0': 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'r1': 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'}
+cand_list = [TranscriptCandidate(candidate_id='c0', intron_chain=IntronChain(introns=()), three_prime_pos=0, sequence='ACGTACGTACG...=set(), chrom='chr1', strand='+', start=0, end=100, fusion_junction=None, breakpoint_left=None, breakpoint_right=None)]
+aligners = [None, None, None]
+raw = array([[-inf,   5., -inf],
+       [  3., -inf,   3.]])
+
+    def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
+        """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
+    
+        For each read whose raw mappy AS is simultaneously best across >=2 candidates, build the
+        class junction-discrimination window over that tie set and score each tied candidate with the
+        per-event junction mean-NLL (non-HMM krill eventalign over the window). Only tied,
+        window-scorable cells are touched -- never the dense read×candidate matrix.
+    
+        Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]}, n_ties, n_refined,
+        cover_by_read {i: bool}). ``cover_by_read`` is populated only when the diff-region coverage
+        gate (config.m2_diff_cover_gate) is ON; otherwise it is empty.
+        """
+>       import krill
+E       ModuleNotFoundError: No module named 'krill'
+
+fin/pipeline/assignment.py:35: ModuleNotFoundError
+__________ TestTieNllKrillUnavailable.test_gate_off_leaves_ties_empty __________
+
+self = <unit.test_m2_em_pure_seed.TestTieNllKrillUnavailable object at 0x7b371657b7c0>
+
+    def test_gate_off_leaves_ties_empty(self):
+>       nlls, ties, n_ties, n_ref, cover = self._call(gate=False)
+
+tests/unit/test_m2_em_pure_seed.py:395: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/unit/test_m2_em_pure_seed.py:387: in _call
+    return runner._tie_nll(kept, read_seqs, cands, [None] * N_C, raw)
+fin/pipeline/runner.py:1331: in _tie_nll
+    return tie_nll(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+config = PipelineConfig(bam_path='/tmp/x.bam', gtf_path=None, genome_fasta_path='', fastq_path='', signal_path='', signal_forma...e, fusion_enabled=False, fusion_min_support=2, fusion_max_dist=500, fusion_flank_bp=500, fusion_max_internal_gap_bp=30)
+kept_read_ids = ['r0', 'r1']
+read_seqs = {'r0': 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'r1': 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'}
+cand_list = [TranscriptCandidate(candidate_id='c0', intron_chain=IntronChain(introns=()), three_prime_pos=0, sequence='ACGTACGTACG...=set(), chrom='chr1', strand='+', start=0, end=100, fusion_junction=None, breakpoint_left=None, breakpoint_right=None)]
+aligners = [None, None, None]
+raw = array([[-inf,   5., -inf],
+       [  3., -inf,   3.]])
+
+    def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
+        """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
+    
+        For each read whose raw mappy AS is simultaneously best across >=2 candidates, build the
+        class junction-discrimination window over that tie set and score each tied candidate with the
+        per-event junction mean-NLL (non-HMM krill eventalign over the window). Only tied,
+        window-scorable cells are touched -- never the dense read×candidate matrix.
+    
+        Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]}, n_ties, n_refined,
+        cover_by_read {i: bool}). ``cover_by_read`` is populated only when the diff-region coverage
+        gate (config.m2_diff_cover_gate) is ON; otherwise it is empty.
+        """
+>       import krill
+E       ModuleNotFoundError: No module named 'krill'
+
+fin/pipeline/assignment.py:35: ModuleNotFoundError
+=========================== short test summary info ============================
+FAILED tests/unit/test_m2_em_pure_seed.py::TestTieNllKrillUnavailable::test_gate_on_populates_ties_from_raw
+FAILED tests/unit/test_m2_em_pure_seed.py::TestTieNllKrillUnavailable::test_gate_off_leaves_ties_empty
+========================= 2 failed, 24 passed in 0.40s =========================
+
+exec
+/bin/bash -c "sed -n '350,405p' /tmp/pyfin-bc39ce8-review/tests/unit/test_m2_em_pure_seed.py | nl -ba
+printf '%s\\n' '--- parent version same test ---'
+git --no-pager show bc39ce8"'^:tests/unit/test_m2_em_pure_seed.py | sed -n '"'350,405p' | nl -ba" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+     1	        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on3)
+     2	        self.d_tx = np.asarray(self.captured["dist_read_to_tx"])
+     3	
+     4	    def test_distinguishing_read_still_hard_assigns(self):
+     5	        assert self.d_tx[0, 0] == pytest.approx(0.0)
+     6	        assert self.d_tx[0, 1] == pytest.approx(MISSING)
+     7	
+     8	    def test_fuzzy_reads_flat_not_biased_by_unverified_coverage(self):
+     9	        # r0's coverage is unknown -> no prior -> r1/r2/r3 fuzzy -> flat 1/K.
+    10	        for i in (1, 2, 3):
+    11	            assert self.d_tx[i, 0] == pytest.approx(0.0)
+    12	            assert self.d_tx[i, 1] == pytest.approx(0.0)
+    13	            assert self.d_tx[i, 2] == pytest.approx(MISSING)
+    14	
+    15	
+    16	class TestTieNllKrillUnavailable:
+    17	    """When krill has no aligner, _tie_nll still exposes AS tie sets on the gate-ON
+    18	    path (so the gate's unique-best/drop logic is well-defined), but leaves them
+    19	    empty on the gate-OFF path (legacy byte-identical behavior)."""
+    20	
+    21	    def _call(self, gate):
+    22	        cands = [_cand(f"c{j}") for j in range(N_C)]
+    23	        kept = ["r0", "r1"]
+    24	        read_seqs = {"r0": "ACGT" * 25, "r1": "ACGT" * 25}
+    25	        # r0 unique-best on candidate 1; r1 ties candidates {0, 2}.
+    26	        raw = np.array(
+    27	            [[-np.inf, 5.0, -np.inf], [3.0, -np.inf, 3.0]], dtype=np.float64
+    28	        )
+    29	        cfg = PipelineConfig(
+    30	            bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
+    31	            m2_diff_cover_gate=gate,
+    32	        )
+    33	        runner = PipelineRunner(cfg)
+    34	        with patch(
+    35	            "fin.scoring.krill_aligner.make_krill_aligner",
+    36	            return_value=(None, False),
+    37	        ):
+    38	            return runner._tie_nll(kept, read_seqs, cands, [None] * N_C, raw)
+    39	
+    40	    def test_gate_on_populates_ties_from_raw(self):
+    41	        nlls, ties, n_ties, n_ref, cover = self._call(gate=True)
+    42	        assert ties == {0: [1], 1: [0, 2]}
+    43	        assert nlls == {} and cover == {}
+    44	
+    45	    def test_gate_off_leaves_ties_empty(self):
+    46	        nlls, ties, n_ties, n_ref, cover = self._call(gate=False)
+    47	        assert ties == {}
+    48	        assert nlls == {} and cover == {}
+    49	
+    50	
+    51	class TestM3Gate:
+    52	    """m3_coherence=True turns on the DTW term at beta=em_beta."""
+    53	
+    54	    def test_m3_on_calls_build_and_uses_em_beta(self):
+    55	        captured = {}
+    56	        # Non-zero DTW so the sigma3 normalization path runs.
+--- parent version same test ---
+     1	        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on3)
+     2	        self.d_tx = np.asarray(self.captured["dist_read_to_tx"])
+     3	
+     4	    def test_distinguishing_read_still_hard_assigns(self):
+     5	        assert self.d_tx[0, 0] == pytest.approx(0.0)
+     6	        assert self.d_tx[0, 1] == pytest.approx(MISSING)
+     7	
+     8	    def test_fuzzy_reads_flat_not_biased_by_unverified_coverage(self):
+     9	        # r0's coverage is unknown -> no prior -> r1/r2/r3 fuzzy -> flat 1/K.
+    10	        for i in (1, 2, 3):
+    11	            assert self.d_tx[i, 0] == pytest.approx(0.0)
+    12	            assert self.d_tx[i, 1] == pytest.approx(0.0)
+    13	            assert self.d_tx[i, 2] == pytest.approx(MISSING)
+    14	
+    15	
+    16	class TestTieNllKrillUnavailable:
+    17	    """When krill has no aligner, _tie_nll still exposes AS tie sets on the gate-ON
+    18	    path (so the gate's unique-best/drop logic is well-defined), but leaves them
+    19	    empty on the gate-OFF path (legacy byte-identical behavior)."""
+    20	
+    21	    def _call(self, gate):
+    22	        cands = [_cand(f"c{j}") for j in range(N_C)]
+    23	        kept = ["r0", "r1"]
+    24	        read_seqs = {"r0": "ACGT" * 25, "r1": "ACGT" * 25}
+    25	        # r0 unique-best on candidate 1; r1 ties candidates {0, 2}.
+    26	        raw = np.array(
+    27	            [[-np.inf, 5.0, -np.inf], [3.0, -np.inf, 3.0]], dtype=np.float64
+    28	        )
+    29	        cfg = PipelineConfig(
+    30	            bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
+    31	            m2_diff_cover_gate=gate,
+    32	        )
+    33	        runner = PipelineRunner(cfg)
+    34	        with patch(
+    35	            "fin.scoring.krill_aligner.make_krill_aligner",
+    36	            return_value=(None, False),
+    37	        ):
+    38	            return runner._tie_nll(kept, read_seqs, cands, [None] * N_C, raw)
+    39	
+    40	    def test_gate_on_populates_ties_from_raw(self):
+    41	        nlls, ties, n_ties, n_ref, cover = self._call(gate=True)
+    42	        assert ties == {0: [1], 1: [0, 2]}
+    43	        assert nlls == {} and cover == {}
+    44	
+    45	    def test_gate_off_leaves_ties_empty(self):
+    46	        nlls, ties, n_ties, n_ref, cover = self._call(gate=False)
+    47	        assert ties == {}
+    48	        assert nlls == {} and cover == {}
+    49	
+    50	
+    51	class TestM3Gate:
+    52	    """m3_coherence=True turns on the DTW term at beta=em_beta."""
+    53	
+    54	    def test_m3_on_calls_build_and_uses_em_beta(self):
+    55	        captured = {}
+    56	        # Non-zero DTW so the sigma3 normalization path runs.
+
+exec
+/bin/bash -c "set -e
+cat > /tmp/pyfin-review-stubs/krill.py <<'PY'
+# Test-only import stub; focused tests patch all used boundaries.
+PY
+cd /tmp/pyfin-bc39ce8-review
+PYTHONPATH=/tmp/pyfin-review-stubs:/tmp/pyfin-bc39ce8-review /SSD/logan/miniforge3/envs/pyfin/bin/python -m pytest -q tests/unit/test_m2_em_pure_seed.py tests/integration/test_pipeline_integration.py
+PYTHONPATH=/tmp/pyfin-review-stubs:/tmp/pyfin-bc39ce8-review /SSD/logan/miniforge3/envs/pyfin/bin/python - <<'PY'
+from types import SimpleNamespace
+from unittest.mock import patch
+import numpy as np
+import fin.pipeline.runner as runner_mod
+import fin.pipeline.assignment as assignment_mod
+from fin.pipeline.runner import PipelineRunner
+
+seen = []
+config = SimpleNamespace(
+    m2_diff_cover_gate=False,
+    krill_pore='rna002', use_gpu=False,
+    m2_tiebreak_junction_k=5, signal_path='x',
+)
+cands = [SimpleNamespace(candidate_id='a', sequence='AAAA'), SimpleNamespace(candidate_id='b', sequence='AAAA')]
+runner = PipelineRunner(config)
+with patch.object(runner_mod, '_M2_EM_FLANK', 99), \\
+     patch('fin.scoring.krill_aligner.krill_thread_count', return_value=1), \\
+     patch('fin.scoring.krill_aligner.make_krill_aligner', return_value=(object(), False)), \\
+     patch('fin.scoring.m2_junction_nll.class_junction_window_set', side_effect=lambda cs, flank, k: seen.append(flank) or set()):
+    runner._tie_nll(['r'], {'r':'AAAA'}, cands, [None, None], np.array([[1.0, 1.0]]))
+print('runner_constant=', runner_mod._M2_EM_FLANK)
+print('assignment_constant=', assignment_mod._M2_EM_FLANK)
+print('flank_observed_by_extracted_tie_nll=', seen)
+print('runner_logger=', runner_mod.logger.name)
+print('assignment_logger=', assignment_mod.logger.name)
+PY" in /SSD/logan/dev/pyfin
+ succeeded in 660ms:
+============================= test session starts ==============================
+platform linux -- Python 3.10.19, pytest-9.0.2, pluggy-1.6.0
+rootdir: /tmp/pyfin-bc39ce8-review
+configfile: pyproject.toml
+collecting ... collected 26 items                                                             
+
+tests/unit/test_m2_em_pure_seed.py ....................                  [ 76%]
+tests/integration/test_pipeline_integration.py ......                    [100%]
+
+============================== 26 passed in 0.24s ==============================
+2026-07-24 11:52:00 | INFO     | __init__.py:38 | Package initialized - version 0.1.0
+runner_constant= 2
+assignment_constant= 2
+flank_observed_by_extracted_tie_nll= [2]
+runner_logger= fin.pipeline.runner
+assignment_logger= fin.pipeline.assignment
+
+exec
+/bin/bash -c "PYTHONPATH=/tmp/pyfin-review-stubs:/tmp/pyfin-bc39ce8-review /SSD/logan/miniforge3/envs/pyfin/bin/python - <<'PY'
+from types import SimpleNamespace
+from unittest.mock import patch
+import numpy as np
+import fin.pipeline.runner as runner_mod
+import fin.pipeline.assignment as assignment_mod
+from fin.pipeline.runner import PipelineRunner
+seen=[]
+config=SimpleNamespace(m2_diff_cover_gate=False,krill_pore='rna002',use_gpu=False,m2_tiebreak_junction_k=5,signal_path='x')
+cands=[SimpleNamespace(candidate_id='a',sequence='AAAA'),SimpleNamespace(candidate_id='b',sequence='AAAA')]
+with patch.object(runner_mod,'_M2_EM_FLANK',99), patch('fin.scoring.krill_aligner.krill_thread_count',return_value=1), patch('fin.scoring.krill_aligner.make_krill_aligner',return_value=(object(),False)), patch('fin.scoring.m2_junction_nll.class_junction_window_set',side_effect=lambda cs,flank,k: seen.append(flank) or set()):
+    PipelineRunner(config)._tie_nll(['r'],{'r':'AAAA'},cands,[None,None],np.array([[1.,1.]]))
+    print('patched_runner_constant=',runner_mod._M2_EM_FLANK)
+    print('independent_assignment_constant=',assignment_mod._M2_EM_FLANK)
+    print('actual_flank_used=',seen[0])
+PY" in /SSD/logan/dev/pyfin
+ succeeded in 168ms:
+2026-07-24 11:52:11 | INFO     | __init__.py:38 | Package initialized - version 0.1.0
+patched_runner_constant= 99
+independent_assignment_constant= 2
+actual_flank_used= 2
+
+codex
+Verification is complete: core results match, but the byte-identical acceptance bar is not met.
+  ✓ Inspect commit and parent context
+  ✓ Compare extracted function semantics
+  ✓ Audit imports and patch seams
+  ✓ Run focused verification tests
+  ✓ Deliver skeptical commit verdict
+codex
+**Verdict: ISSUES**
+
+- **Logging output is not byte-identical.** The fallback warning now originates from the new `fin.pipeline.assignment` logger and `assignment.py` callsite (`fin/pipeline/assignment.py:17`, `fin/pipeline/assignment.py:162`), rather than `fin.pipeline.runner` / `runner.py`. The default formatter includes `%(filename)s:%(lineno)d`, so batch-eventalign failure logs change from `runner.py:1466` to `assignment.py:162`. Logger-specific filters, handlers, and patches against `fin.pipeline.runner.logger` also stop observing this warning.
+- **The `_M2_EM_FLANK` module patch seam is broken.** Tie scoring now reads a separate constant at `fin/pipeline/assignment.py:20`, reached through the delegate at `fin/pipeline/runner.py:1330`. The original constant remains at `fin/pipeline/runner.py:40` for other M2/M3 behavior. Previously, patching `fin.pipeline.runner._M2_EM_FLANK` affected tie scoring; now it does not. A probe with the runner constant patched to `99` confirmed extracted `tie_nll` still used `2`.
+
+The computational body is otherwise AST-identical after normalizing `self.config` to `config`; ordering, thresholds, branches, lazy imports, fallback, coverage, and survivor semantics are preserved. Focused tests passed: **26/26** in the exported commit snapshot using import-only stubs for unavailable `mappy`/`krill`.
+tokens used
+75,164
+**Verdict: ISSUES**
+
+- **Logging output is not byte-identical.** The fallback warning now originates from the new `fin.pipeline.assignment` logger and `assignment.py` callsite (`fin/pipeline/assignment.py:17`, `fin/pipeline/assignment.py:162`), rather than `fin.pipeline.runner` / `runner.py`. The default formatter includes `%(filename)s:%(lineno)d`, so batch-eventalign failure logs change from `runner.py:1466` to `assignment.py:162`. Logger-specific filters, handlers, and patches against `fin.pipeline.runner.logger` also stop observing this warning.
+- **The `_M2_EM_FLANK` module patch seam is broken.** Tie scoring now reads a separate constant at `fin/pipeline/assignment.py:20`, reached through the delegate at `fin/pipeline/runner.py:1330`. The original constant remains at `fin/pipeline/runner.py:40` for other M2/M3 behavior. Previously, patching `fin.pipeline.runner._M2_EM_FLANK` affected tie scoring; now it does not. A probe with the runner constant patched to `99` confirmed extracted `tie_nll` still used `2`.
+
+The computational body is otherwise AST-identical after normalizing `self.config` to `config`; ordering, thresholds, branches, lazy imports, fallback, coverage, and survivor semantics are preserved. Focused tests passed: **26/26** in the exported commit snapshot using import-only stubs for unavailable `mappy`/`krill`.

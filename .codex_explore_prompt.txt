@@ -1,0 +1,50 @@
+Review a NEW, ADDITIVE primitive in the pyfin repo (read-only; use a PTY if non-PTY shell returns
+blank stdout). Read `.codex_explore_diff.txt` at repo root: the full new file
+fin/candidates/explore.py and its test file. It is NOT wired into production (nothing in fin/ imports
+it; verified). This implements the "explore" step we designed with you: family-local intron-graph path
+enumeration that ADDS assembled full-length candidates (cross-read truncation recovery), keeping all
+exact variants (caller keeps those). Downstream re-mapping does TP/FP discrimination, so generating
+many candidates here is intentional (pure recall step).
+
+The agreed design: NODES = distinct observed introns; EDGES = consecutive intron pairs within a
+variant chain (read-phased), only when genomically valid (positive exon); enumerate maximal
+source->sink paths with a deterministic BOTTLENECK-FIRST beam; N=1 edges (precision is downstream);
+emit only NON-variant chains; cap per family. You previously noted read-phased edges do NOT prevent
+GLOBAL recombination (A-B-X-D + A-C-X-E also yield A-B-X-E / A-C-X-D) -- that is ACCEPTED here and a
+test pins it; min_edge_support is exposed for downstream weighting.
+
+Verify, concretely, with line cites:
+
+1. CORRECTNESS of the cross-read assembly: does _build_graph correctly build the read-phased DAG
+   (node/edge support = read counts; disjoint reads across variants so summing == union; the
+   `b[0] <= a[1]` guard drops non-genomic edges)? Does explore_family_paths enumerate maximal
+   source->sink paths and emit exactly the NON-variant chains? Confirm the truncation case
+   [I1,I2]+[I2,I3] -> [I1,I2,I3] and that full-read chains / single variants add nothing.
+
+2. DETERMINISM: is the output order-independent of variant/read input order? Check `sources` sorted,
+   the beam prune (stable `nxt.sort()` then `nxt.sort(key=_edge_scores, reverse=True)`), and the final
+   ranking sort. Any residual nondeterminism (sets iterated in a way that affects output; ties)?
+
+3. TERMINATION / NO CYCLES: the graph is claimed a DAG (genomic order). Confirm no infinite loop:
+   the `while frontier` extends only to strictly-later introns, `if b in path` guards revisits, and
+   the `len(completed) <= max_new*4` bound. Is there any family shape that loops or explodes past the
+   beam/cap? Is the beam applied per-layer correctly (paths of different lengths coexist in frontier)?
+
+4. MAXIMALITY vs SHORT ISOFORMS: paths complete only at sinks (no successor). Confirm this does NOT
+   drop exact variants (caller keeps them) but DOES mean a short assembled isoform whose 3' end has a
+   successor is not emitted. Is that an acceptable v1 limitation (note it), and does it ever DROP a
+   real exact variant? (It must not -- variants are the caller's, not explore's.)
+
+5. min_edge_support / reads provenance: is min_edge_support the true bottleneck (min over path edges)?
+   Is `reads` the union of variant_reads for variants that are contiguous sub-chains of the path
+   (_is_subchain correct)? Any off-by-one / wrong-tiling?
+
+6. ADDITIVITY / SAFETY: pure function, no mutation of the family, no shared-state, no import cycle,
+   deterministic, and cannot affect production (not imported). Any dataclass mutable-default or
+   aliasing bug?
+
+7. TEST QUALITY: do the tests pin the contract (assembly, recombination emitted, single-variant no-op,
+   full-read no-op, determinism, cap, geometry guard)? Missing edges worth adding (empty family; a node
+   that is both a variant-terminal and has a successor; beam width forcing a true path out)?
+
+Verdict: CLEAN (safe to commit) / ISSUES (list them). Review only; do not modify code.

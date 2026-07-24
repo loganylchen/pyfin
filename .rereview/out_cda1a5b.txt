@@ -1,0 +1,2246 @@
+Reading prompt from stdin...
+OpenAI Codex v0.142.0
+--------
+workdir: /SSD/logan/dev/pyfin
+model: gpt-5.6-sol
+provider: OpenAI
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019f923f-ba6a-70c0-b449-710405df9780
+--------
+user
+Re-review a git commit in the pyfin repo with fresh, skeptical eyes. A PRIOR review by a weaker model (gpt-5.5) marked it CLEAN. Independently re-verify with the stronger model and catch anything it may have missed. Read the embedded diff (git show); use a PTY if the non-PTY shell returns blank stdout, but the diff below is self-contained.
+
+Commit: cda1a5b — refactor(pipeline): unify PRE_ASSIGN gates into selection.py (M3 Step 3)
+Nature: BEHAVIOR-PRESERVING REFACTOR (byte-identical bar)
+
+Acceptance bar: BYTE-IDENTICAL behaviour. Verify the move/extraction changed NO behaviour: no reordered statements that matter, no changed default/threshold, no altered condition or control flow, preserved test/mock seams (patch.object / module-level patch targets), no import cycle, no lost local variable or import, sequential-survivor / lazy-build / fold semantics preserved. Flag ANY line that could shift output.
+
+Give a clear verdict for THIS commit: CLEAN or ISSUES (list them with line cites). Be concrete and skeptical. Review only; do not modify code.
+
+===== git show cda1a5b =====
+commit cda1a5b46bcd939b5989a6ce004404e47f4cd87f
+Author: loganylchen <yuelong.chen.btr@gmail.com>
+Date:   Thu Jul 23 15:39:14 2026 +0800
+
+    refactor(pipeline): unify PRE_ASSIGN gates into selection.py (M3 Step 3)
+    
+    Move the pre-EM gate bodies out of the runner into fin/pipeline/selection.py:
+    _apply_canonical_gate -> canonical_gate_select, _apply_junction_dominance_gate ->
+    junction_dominance_select. The runner keeps both as thin delegates because
+    test_canonical_gate / test_junction_dominance_gate call them directly (seam);
+    junction_dominance_select receives self._observed_junctions at call time so
+    patch.object(PipelineRunner, "_observed_junctions") still intercepts.
+    
+    Byte-identical move (Codex-verified): the canonical exempt/mono/motif loop and the
+    junction-dominance drop comprehension are unchanged, and both logs still read the
+    ORIGINAL candidate count before the `= kept` reassignment. Each drop emits a
+    SelectionOutcome(scope="pre_assign"). Removed the now-unused top-level
+    `chain_all_canonical, parse_motifs` runner import (the fusion path keeps its own local).
+    
+    This completes the M3 Selection unification: all three scopes — PRE_ASSIGN (canonical,
+    junction-dominance), INTERVAL (drop_cols cascade + folds), GLOBAL (finalize filters) —
+    now live in fin/pipeline/selection.py with a uniform SelectionOutcome record. "Which
+    candidates are real" finally has one home. 911 tests pass (unchanged); Codex CLEAN.
+
+diff --git a/fin/pipeline/runner.py b/fin/pipeline/runner.py
+index 24b4d78..28b1849 100644
+--- a/fin/pipeline/runner.py
++++ b/fin/pipeline/runner.py
+@@ -18,13 +18,17 @@ from fin.analysis.quantification import (
+     polya5p_drops,
+     quantify_transcripts,
+ )
+-from fin.candidates.canonical import chain_all_canonical, parse_motifs
+ from fin.candidates.dataclasses import CandidateSet
+ from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+ from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+ from fin.pipeline.assignment import Assigner
+-from fin.pipeline.selection import select_global, select_m2_interval
+ from fin.pipeline.config import PipelineConfig
++from fin.pipeline.selection import (
++    canonical_gate_select,
++    junction_dominance_select,
++    select_global,
++    select_m2_interval,
++)
+ from fin.scoring.em_inputs import build_em_matrices
+ from fin.scoring.krill_tiebreak import krill_tiebreak
+ from fin.scoring.mappy_distance import compute_mappy_distance
+@@ -1277,74 +1281,20 @@ class PipelineRunner:
+     def _apply_canonical_gate(
+         self, candidate_set: CandidateSet, chrom_seq: str
+     ) -> None:
+-        """Stage B: drop NOVEL multi-exon candidates with non-canonical junctions.
+-
+-        Mutates ``candidate_set.candidates`` in place, keeping a candidate iff:
+-          - it is GTF-passthrough (source="gtf") or fusion (source="fusion") — EXEMPT;
+-          - it is single-exon (empty intron chain) — trivially canonical;
+-          - every internal junction's (donor,acceptor) motif is in canonical_motifs.
+-
+-        ``candidate_set.read_ids`` is left untouched so reads off a dropped
+-        candidate are simply re-competed in quantification (they will land on a
+-        surviving candidate by argmin).
+-        """
+-        if not chrom_seq:
+-            # No genome sequence → cannot evaluate motifs; skip the gate rather
+-            # than drop everything.
+-            return
+-        motif_set = parse_motifs(self.config.canonical_motifs)
+-        kept: List = []
+-        dropped = 0
+-        for c in candidate_set.candidates:
+-            if c.source in ("gtf", "fusion"):
+-                kept.append(c)
+-                continue
+-            introns = c.intron_chain.introns
+-            if not introns:
+-                kept.append(c)  # mono: no internal junction
+-                continue
+-            if chain_all_canonical(introns, chrom_seq, c.strand, motif_set):
+-                kept.append(c)
+-            else:
+-                dropped += 1
+-        if dropped:
+-            logger.info(
+-                "Canonical gate: dropped %d/%d novel candidates (interval %s)",
+-                dropped,
+-                len(candidate_set.candidates),
+-                candidate_set.interval.region_string,
+-            )
+-        candidate_set.candidates = kept
++        """Stage B canonical-junction gate. Delegates to the selection layer
++        (fin.pipeline.selection.canonical_gate_select); kept as a method so tests can
++        call this seam directly. Mutates ``candidate_set.candidates`` in place."""
++        canonical_gate_select(self.config, candidate_set, chrom_seq)
+ 
+     def _apply_junction_dominance_gate(
+         self, candidate_set: CandidateSet, interval: GenomicInterval
+     ) -> None:
+-        """Pre-EM junction-first gate: drop NOVEL candidates with a weak or
+-        non-dominant junction (mutates candidate_set.candidates in place).
+-
+-        Builds the directly-observed read junctions (reopens BAM) and drops a
+-        novel multi-exon candidate if any junction has < min_reads reads or is
+-        dominated by a stronger DIFFERENT junction within the window. read_ids is
+-        left untouched (reads off a dropped candidate re-compete in quant).
+-        """
+-        from fin.scoring.m2_junction_nll import dominant_junction_drops
+-
+-        observed = self._observed_junctions(interval)
+-        drops = dominant_junction_drops(
+-            candidate_set.candidates, observed,
+-            min_reads=int(self.config.junction_dominance_min_reads),
+-            window=int(self.config.junction_dominance_window_bp),
+-            tol=int(getattr(self.config, "junction_dominance_tol_bp", 2)),
++        """Pre-EM junction-dominance gate. Delegates to the selection layer
++        (fin.pipeline.selection.junction_dominance_select); kept as a method so tests can
++        call this seam directly. Mutates ``candidate_set.candidates`` in place."""
++        junction_dominance_select(
++            self.config, candidate_set, interval, self._observed_junctions
+         )
+-        if drops:
+-            kept = [c for i, c in enumerate(candidate_set.candidates)
+-                    if i not in drops]
+-            logger.info(
+-                "Junction-dominance gate: dropped %d/%d novel candidates "
+-                "(interval %s)", len(drops), len(candidate_set.candidates),
+-                interval.region_string,
+-            )
+-            candidate_set.candidates = kept
+ 
+     def cleanup(self):
+         """Close file handles."""
+diff --git a/fin/pipeline/selection.py b/fin/pipeline/selection.py
+index a22dbbc..6919ab5 100644
+--- a/fin/pipeline/selection.py
++++ b/fin/pipeline/selection.py
+@@ -523,3 +523,85 @@ def select_global(
+         _record(before_keys - set(aggregated), "polya5p")
+ 
+     return aggregated, outcomes
++
++
++def canonical_gate_select(config, candidate_set, chrom_seq: str) -> List[SelectionOutcome]:
++    """PRE_ASSIGN Stage B: drop NOVEL multi-exon candidates with non-canonical junctions.
++
++    Byte-identical move of the runner's former ``_apply_canonical_gate`` body. Mutates
++    ``candidate_set.candidates`` in place, keeping a candidate iff it is GTF/fusion (EXEMPT),
++    single-exon (trivially canonical), or every internal junction motif is canonical. ``read_ids``
++    is left untouched (reads off a dropped candidate re-compete in quant). Returns the drop outcomes.
++    """
++    from fin.candidates.canonical import chain_all_canonical, parse_motifs
++
++    outcomes: List[SelectionOutcome] = []
++    if not chrom_seq:
++        # No genome sequence → cannot evaluate motifs; skip the gate rather
++        # than drop everything.
++        return outcomes
++    motif_set = parse_motifs(config.canonical_motifs)
++    kept: List = []
++    dropped = 0
++    for c in candidate_set.candidates:
++        if c.source in ("gtf", "fusion"):
++            kept.append(c)
++            continue
++        introns = c.intron_chain.introns
++        if not introns:
++            kept.append(c)  # mono: no internal junction
++            continue
++        if chain_all_canonical(introns, chrom_seq, c.strand, motif_set):
++            kept.append(c)
++        else:
++            dropped += 1
++            outcomes.append(SelectionOutcome(
++                c.candidate_id, "drop", "canonical_gate", scope="pre_assign",
++            ))
++    if dropped:
++        logger.info(
++            "Canonical gate: dropped %d/%d novel candidates (interval %s)",
++            dropped,
++            len(candidate_set.candidates),
++            candidate_set.interval.region_string,
++        )
++    candidate_set.candidates = kept
++    return outcomes
++
++
++def junction_dominance_select(
++    config, candidate_set, interval, observed_junctions_fn: Callable
++) -> List[SelectionOutcome]:
++    """PRE_ASSIGN junction-first gate: drop NOVEL candidates with a weak or non-dominant junction.
++
++    Byte-identical move of the runner's former ``_apply_junction_dominance_gate`` body. Builds the
++    directly-observed read junctions (via ``observed_junctions_fn``, passed at call time so the test
++    seam survives) and drops a novel multi-exon candidate whose junction has < min_reads reads or is
++    dominated by a stronger DIFFERENT junction within the window. Mutates ``candidate_set.candidates``
++    in place; ``read_ids`` untouched. Returns the drop outcomes.
++    """
++    from fin.scoring.m2_junction_nll import dominant_junction_drops
++
++    outcomes: List[SelectionOutcome] = []
++    observed = observed_junctions_fn(interval)
++    drops = dominant_junction_drops(
++        candidate_set.candidates, observed,
++        min_reads=int(config.junction_dominance_min_reads),
++        window=int(config.junction_dominance_window_bp),
++        tol=int(getattr(config, "junction_dominance_tol_bp", 2)),
++    )
++    if drops:
++        kept = [c for i, c in enumerate(candidate_set.candidates)
++                if i not in drops]
++        for i, c in enumerate(candidate_set.candidates):
++            if i in drops:
++                outcomes.append(SelectionOutcome(
++                    c.candidate_id, "drop", "junction_dominance", scope="pre_assign",
++                ))
++        logger.info(
++            "Junction-dominance gate: dropped %d/%d novel candidates "
++            "(interval %s)", len(drops), len(candidate_set.candidates),
++            interval.region_string,
++        )
++        candidate_set.candidates = kept
++    return outcomes
+
+warning: Model metadata for `gpt-5.6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+codex
+I’ll independently trace the moved logic, call sites, imports, and mock seams, then compare parent-versus-commit behavior.
+  → Inspect commit and repository guidance
+  • Compare moved logic against parent
+  • Trace call sites and mock seams
+  • Check imports and selection semantics
+  • Run focused tests and verdict
+exec
+/bin/bash -lc "printf '%s\\n' '--- status ---'; git status --short; printf '%s\\n' '--- guidance ---'; find .. -name AGENTS.md -print; printf '%s\\n' '--- commit ---'; git show --stat --oneline --decorate --no-renames cda1a5b; printf '%s\\n' '--- files ---'; git diff-tree --no-commit-id --name-only -r cda1a5b" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+codex
+The non-PTY shell returned blank, so I’m rerunning repository inspection through a PTY as requested.
+exec
+/bin/bash -lc "printf '%s\\n' '--- status ---'; git status --short; printf '%s\\n' '--- guidance ---'; find .. -name AGENTS.md -print; printf '%s\\n' '--- commit ---'; git show --stat --oneline --decorate --no-renames cda1a5b; printf '%s\\n' '--- files ---'; git diff-tree --no-commit-id --name-only -r cda1a5b" in /SSD/logan/dev/pyfin
+exec
+/bin/bash -c "printf '%s\\n' '--- status ---'; git status --short; printf '%s\\n' '--- guidance ---'; find .. -name AGENTS.md -print; printf '%s\\n' '--- commit ---'; git show --stat --oneline --decorate --no-renames cda1a5b; printf '%s\\n' '--- files ---'; git diff-tree --no-commit-id --name-only -r cda1a5b" in /SSD/logan/dev/pyfin
+ exited 1 in 14333ms:
+^C
+exec
+/bin/bash -c "printf '%s\\n' '--- guidance ---'; (rg --files -g 'AGENTS.md' -g '"'!experiments/**'"' . .. 2>/dev/null | head -50); printf '%s\\n' '--- commit ---'; PAGER=cat git show --stat --oneline --no-renames cda1a5b; printf '%s\\n' '--- files ---'; git diff-tree --no-commit-id --name-only -r cda1a5b" in /SSD/logan/dev/pyfin
+ exited 1 in 6985ms:
+^C
+exec
+/bin/bash -c "printf '%s\\n' '--- guidance ---'; find . -name AGENTS.md -print -quit; printf '%s\\n' '--- commit ---'; GIT_PAGER=cat git --no-pager show --stat --oneline --no-renames cda1a5b; printf '%s\\n' '--- files ---'; git diff-tree --no-commit-id --name-only -r cda1a5b" in /SSD/logan/dev/pyfin
+ exited 1 in 4817ms:
+^C
+exec
+/bin/bash -c 'git --no-pager show --stat --oneline --no-renames cda1a5b' in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+cda1a5b refactor(pipeline): unify PRE_ASSIGN gates into selection.py (M3 Step 3)
+ fin/pipeline/runner.py    | 80 +++++++++------------------------------------
+ fin/pipeline/selection.py | 82 +++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 97 insertions(+), 65 deletions(-)
+
+codex
+Commit scope is only the runner and selection module. Next I’m comparing exact parent/commit bodies and surrounding type/import context.
+  ✓ Inspect commit and repository guidance
+  → Compare moved logic against parent
+  • Trace call sites and mock seams
+  • Check imports and selection semantics
+  • Run focused tests and verdict
+exec
+/bin/bash -c "echo '--- selection header @ commit ---'; git show cda1a5b:fin/pipeline/selection.py | sed -n '1,100p'; echo '--- selection new functions with line numbers ---'; git show cda1a5b:fin/pipeline/selection.py | nl -ba | sed -n '515,620p'; echo '--- runner delegates with line numbers ---'; git show cda1a5b:fin/pipeline/runner.py | nl -ba | sed -n '1260,1315p'; echo '--- parent old bodies ---'; git show cda1a5b"'^:fin/pipeline/runner.py | nl -ba | sed -n '"'1260,1365p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- selection header @ commit ---
+"""Selection layer: decide which candidates survive, in one place.
+
+Historically "which candidates are real" had no single home — it was smeared across three
+incompatible mechanisms: pre-EM gates mutating the candidate list, a post-EM ``drop_cols`` column
+set buried inside ``_quant_m2_em``, and finalize-time dict deletion. This module is the single home
+for the post-EM INTERVAL scope (M3 Step 1): the cascade that runs after assignment, within one
+interval, over the ``QuantOutput`` of the m2_em Assigner.
+
+Design (behavior-preserving; see the pipeline reorganization plan + Codex review 2):
+- ``SelectionOutcome`` is the uniform record of every keep/drop/fold decision (free FN/FP-attribution
+  provenance, replacing the ad-hoc ``logger.info`` drop counters).
+- ``select_m2_interval`` reproduces the CURRENT sequential cascade EXACTLY — each gate evaluates
+  against the survivor set left by the earlier gates (``exclude=drop_cols``), the two folds
+  (containment-collapse, mono-resolve) move reads/mass into their parent before the final apply, and
+  ordering is load-bearing (it is the byte-identity guarantee). The cleaner "evaluate all on one base
+  snapshot + declared precedence" model is a separate, behavior-CHANGING follow-up, not this step.
+
+Scope: the DEFAULT ``m2_em`` path only. ``argmax`` / ``m1_em`` / ``cluster`` keep their own survival
+handling. The PRE_ASSIGN (canonical / junction-dominance) and GLOBAL (finalize filters) scopes move
+here in later M3 steps.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
+
+import numpy as np
+
+from fin.analysis.quantification import (
+    fulllen_fraction_drops,
+    isoform_fraction_drops,
+    mono_exon_drops,
+    soft_mass_ratio_drops,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SelectionOutcome:
+    """One keep/drop/fold decision for a candidate.
+
+    ``action`` is ``"drop"`` or ``"fold"`` (surviving candidates are simply not recorded).
+    ``fold_into`` is the parent candidate_id for a fold. ``scope`` is the selection phase
+    (``"interval"`` here). ``reason`` names the gate that made the decision.
+    """
+
+    candidate_id: str
+    action: str
+    reason: str
+    scope: str = "interval"
+    fold_into: Optional[str] = None
+
+
+def select_m2_interval(
+    config,
+    qo,
+    candidate_set,
+    interval,
+    observed_junctions_fn: Callable,
+) -> Tuple[List, List[SelectionOutcome]]:
+    """Run the post-EM INTERVAL selection cascade over an m2_em ``QuantOutput``.
+
+    Byte-identical move of the runner's former ``_quant_m2_em`` selection tail. Returns
+    ``(surviving_quant_results, outcomes)``. ``observed_junctions_fn`` is the runner's
+    ``_observed_junctions`` bound method (passed at call time so the test seam survives); it is
+    invoked lazily and only when a gate actually needs directly-observed read junctions.
+    """
+    cand_list = qo.cand_list
+    R = qo.R
+    ties_by_read = qo.ties_by_read
+    nlls_by_read = qo.nlls_by_read
+    quant_results = qo.quant_results
+
+    outcomes: List[SelectionOutcome] = []
+    drop_cols: set = set()
+
+    def _record_drops(cols, reason: str) -> None:
+        for j in cols:
+            outcomes.append(SelectionOutcome(
+                cand_list[j].candidate_id, "drop", reason,
+            ))
+
+    # --- Cluster-internal wobble recheck (post-EM, data-layer shadow kill).
+    #     Cluster ALL multi-exon candidates by structure (same intron count +
+    #     every junction within +-bp); within a cluster the highest-EM-abundance
+    #     candidate anchors (often the true isoform, frequently a GTF
+    #     passthrough), and a NOVEL sibling whose abundance/anchor < fraction is
+    #     a wobble shadow -> drop. GTF/fusion never dropped (they only anchor).
+    #     Pure abundance evidence: GTF participates in the abundance race but is
+    #     NOT used as a correctness oracle, so this stays robust when the
+    #     annotation is wrong (and self-disables with no GTF: a real novel
+    #     anchors its own cluster). OFF -> no drops (byte-identical). ---
+    # Strand-keyed {strand: Counter{(donor,acceptor): n_reads}} of directly-
+    # observed read junctions; built lazily (reopens BAM) and shared by the
+    # cluster-recheck GTF guard and the Lever-2 junction-support gate.
+    observed_jct = None
+    if getattr(config, "m2_cluster_recheck", False):
+--- selection new functions with line numbers ---
+   515	    if (
+   516	        _score_filter_on
+   517	        and getattr(config, "min_polya5p_reads", 0) > 0
+   518	        and config.signal_path
+   519	        and Path(config.signal_path).exists()
+   520	    ):
+   521	        before_keys = set(aggregated)
+   522	        aggregated = apply_polya5p_fn(aggregated)
+   523	        _record(before_keys - set(aggregated), "polya5p")
+   524	
+   525	    return aggregated, outcomes
+   526	
+   527	
+   528	def canonical_gate_select(config, candidate_set, chrom_seq: str) -> List[SelectionOutcome]:
+   529	    """PRE_ASSIGN Stage B: drop NOVEL multi-exon candidates with non-canonical junctions.
+   530	
+   531	    Byte-identical move of the runner's former ``_apply_canonical_gate`` body. Mutates
+   532	    ``candidate_set.candidates`` in place, keeping a candidate iff it is GTF/fusion (EXEMPT),
+   533	    single-exon (trivially canonical), or every internal junction motif is canonical. ``read_ids``
+   534	    is left untouched (reads off a dropped candidate re-compete in quant). Returns the drop outcomes.
+   535	    """
+   536	    from fin.candidates.canonical import chain_all_canonical, parse_motifs
+   537	
+   538	    outcomes: List[SelectionOutcome] = []
+   539	    if not chrom_seq:
+   540	        # No genome sequence → cannot evaluate motifs; skip the gate rather
+   541	        # than drop everything.
+   542	        return outcomes
+   543	    motif_set = parse_motifs(config.canonical_motifs)
+   544	    kept: List = []
+   545	    dropped = 0
+   546	    for c in candidate_set.candidates:
+   547	        if c.source in ("gtf", "fusion"):
+   548	            kept.append(c)
+   549	            continue
+   550	        introns = c.intron_chain.introns
+   551	        if not introns:
+   552	            kept.append(c)  # mono: no internal junction
+   553	            continue
+   554	        if chain_all_canonical(introns, chrom_seq, c.strand, motif_set):
+   555	            kept.append(c)
+   556	        else:
+   557	            dropped += 1
+   558	            outcomes.append(SelectionOutcome(
+   559	                c.candidate_id, "drop", "canonical_gate", scope="pre_assign",
+   560	            ))
+   561	    if dropped:
+   562	        logger.info(
+   563	            "Canonical gate: dropped %d/%d novel candidates (interval %s)",
+   564	            dropped,
+   565	            len(candidate_set.candidates),
+   566	            candidate_set.interval.region_string,
+   567	        )
+   568	    candidate_set.candidates = kept
+   569	    return outcomes
+   570	
+   571	
+   572	def junction_dominance_select(
+   573	    config, candidate_set, interval, observed_junctions_fn: Callable
+   574	) -> List[SelectionOutcome]:
+   575	    """PRE_ASSIGN junction-first gate: drop NOVEL candidates with a weak or non-dominant junction.
+   576	
+   577	    Byte-identical move of the runner's former ``_apply_junction_dominance_gate`` body. Builds the
+   578	    directly-observed read junctions (via ``observed_junctions_fn``, passed at call time so the test
+   579	    seam survives) and drops a novel multi-exon candidate whose junction has < min_reads reads or is
+   580	    dominated by a stronger DIFFERENT junction within the window. Mutates ``candidate_set.candidates``
+   581	    in place; ``read_ids`` untouched. Returns the drop outcomes.
+   582	    """
+   583	    from fin.scoring.m2_junction_nll import dominant_junction_drops
+   584	
+   585	    outcomes: List[SelectionOutcome] = []
+   586	    observed = observed_junctions_fn(interval)
+   587	    drops = dominant_junction_drops(
+   588	        candidate_set.candidates, observed,
+   589	        min_reads=int(config.junction_dominance_min_reads),
+   590	        window=int(config.junction_dominance_window_bp),
+   591	        tol=int(getattr(config, "junction_dominance_tol_bp", 2)),
+   592	    )
+   593	    if drops:
+   594	        kept = [c for i, c in enumerate(candidate_set.candidates)
+   595	                if i not in drops]
+   596	        for i, c in enumerate(candidate_set.candidates):
+   597	            if i in drops:
+   598	                outcomes.append(SelectionOutcome(
+   599	                    c.candidate_id, "drop", "junction_dominance", scope="pre_assign",
+   600	                ))
+   601	        logger.info(
+   602	            "Junction-dominance gate: dropped %d/%d novel candidates "
+   603	            "(interval %s)", len(drops), len(candidate_set.candidates),
+   604	            interval.region_string,
+   605	        )
+   606	        candidate_set.candidates = kept
+   607	    return outcomes
+--- runner delegates with line numbers ---
+  1260	            read_dicts = bam.get_reads_in_region(interval.region_string)
+  1261	        if not read_dicts:
+  1262	            return candidate_set
+  1263	
+  1264	        fusion_cands = detect_fusion_candidates(
+  1265	            read_dicts,
+  1266	            aligner,
+  1267	            self._genome_fasta or {},
+  1268	            gtf_reader=self._gtf_reader,
+  1269	            motif_set=parse_motifs(self.config.canonical_motifs),
+  1270	            max_internal_gap_bp=self.config.fusion_max_internal_gap_bp,
+  1271	            max_dist=self.config.fusion_max_dist,
+  1272	            search_bp=self.config.canonical_search_bp,
+  1273	            max_chains_per_read=self.config.max_chains_per_read,
+  1274	            min_support=self.config.fusion_min_support,
+  1275	        )
+  1276	        if not fusion_cands:
+  1277	            return candidate_set
+  1278	
+  1279	        return merge_fusion_candidates(candidate_set, fusion_cands)
+  1280	
+  1281	    def _apply_canonical_gate(
+  1282	        self, candidate_set: CandidateSet, chrom_seq: str
+  1283	    ) -> None:
+  1284	        """Stage B canonical-junction gate. Delegates to the selection layer
+  1285	        (fin.pipeline.selection.canonical_gate_select); kept as a method so tests can
+  1286	        call this seam directly. Mutates ``candidate_set.candidates`` in place."""
+  1287	        canonical_gate_select(self.config, candidate_set, chrom_seq)
+  1288	
+  1289	    def _apply_junction_dominance_gate(
+  1290	        self, candidate_set: CandidateSet, interval: GenomicInterval
+  1291	    ) -> None:
+  1292	        """Pre-EM junction-dominance gate. Delegates to the selection layer
+  1293	        (fin.pipeline.selection.junction_dominance_select); kept as a method so tests can
+  1294	        call this seam directly. Mutates ``candidate_set.candidates`` in place."""
+  1295	        junction_dominance_select(
+  1296	            self.config, candidate_set, interval, self._observed_junctions
+  1297	        )
+  1298	
+  1299	    def cleanup(self):
+  1300	        """Close file handles."""
+  1301	        if self._gtf_reader:
+  1302	            self._gtf_reader.close()
+  1303	        if self._signal_reader:
+  1304	            self._signal_reader.close()
+  1305	
+  1306	    def _load_genome_fasta(self, path: str) -> Dict[str, str]:
+  1307	        """Load genome FASTA into a dict of chrom -> sequence."""
+  1308	        from fin.io.io_fasta import FASTAReader
+  1309	
+  1310	        seqs = {}
+  1311	        with FASTAReader(path) as reader:
+  1312	            for record in reader.iterate_records():
+  1313	                seqs[record.id] = record.sequence
+  1314	        return seqs
+  1315	
+--- parent old bodies ---
+  1260	        fusion_cands = detect_fusion_candidates(
+  1261	            read_dicts,
+  1262	            aligner,
+  1263	            self._genome_fasta or {},
+  1264	            gtf_reader=self._gtf_reader,
+  1265	            motif_set=parse_motifs(self.config.canonical_motifs),
+  1266	            max_internal_gap_bp=self.config.fusion_max_internal_gap_bp,
+  1267	            max_dist=self.config.fusion_max_dist,
+  1268	            search_bp=self.config.canonical_search_bp,
+  1269	            max_chains_per_read=self.config.max_chains_per_read,
+  1270	            min_support=self.config.fusion_min_support,
+  1271	        )
+  1272	        if not fusion_cands:
+  1273	            return candidate_set
+  1274	
+  1275	        return merge_fusion_candidates(candidate_set, fusion_cands)
+  1276	
+  1277	    def _apply_canonical_gate(
+  1278	        self, candidate_set: CandidateSet, chrom_seq: str
+  1279	    ) -> None:
+  1280	        """Stage B: drop NOVEL multi-exon candidates with non-canonical junctions.
+  1281	
+  1282	        Mutates ``candidate_set.candidates`` in place, keeping a candidate iff:
+  1283	          - it is GTF-passthrough (source="gtf") or fusion (source="fusion") — EXEMPT;
+  1284	          - it is single-exon (empty intron chain) — trivially canonical;
+  1285	          - every internal junction's (donor,acceptor) motif is in canonical_motifs.
+  1286	
+  1287	        ``candidate_set.read_ids`` is left untouched so reads off a dropped
+  1288	        candidate are simply re-competed in quantification (they will land on a
+  1289	        surviving candidate by argmin).
+  1290	        """
+  1291	        if not chrom_seq:
+  1292	            # No genome sequence → cannot evaluate motifs; skip the gate rather
+  1293	            # than drop everything.
+  1294	            return
+  1295	        motif_set = parse_motifs(self.config.canonical_motifs)
+  1296	        kept: List = []
+  1297	        dropped = 0
+  1298	        for c in candidate_set.candidates:
+  1299	            if c.source in ("gtf", "fusion"):
+  1300	                kept.append(c)
+  1301	                continue
+  1302	            introns = c.intron_chain.introns
+  1303	            if not introns:
+  1304	                kept.append(c)  # mono: no internal junction
+  1305	                continue
+  1306	            if chain_all_canonical(introns, chrom_seq, c.strand, motif_set):
+  1307	                kept.append(c)
+  1308	            else:
+  1309	                dropped += 1
+  1310	        if dropped:
+  1311	            logger.info(
+  1312	                "Canonical gate: dropped %d/%d novel candidates (interval %s)",
+  1313	                dropped,
+  1314	                len(candidate_set.candidates),
+  1315	                candidate_set.interval.region_string,
+  1316	            )
+  1317	        candidate_set.candidates = kept
+  1318	
+  1319	    def _apply_junction_dominance_gate(
+  1320	        self, candidate_set: CandidateSet, interval: GenomicInterval
+  1321	    ) -> None:
+  1322	        """Pre-EM junction-first gate: drop NOVEL candidates with a weak or
+  1323	        non-dominant junction (mutates candidate_set.candidates in place).
+  1324	
+  1325	        Builds the directly-observed read junctions (reopens BAM) and drops a
+  1326	        novel multi-exon candidate if any junction has < min_reads reads or is
+  1327	        dominated by a stronger DIFFERENT junction within the window. read_ids is
+  1328	        left untouched (reads off a dropped candidate re-compete in quant).
+  1329	        """
+  1330	        from fin.scoring.m2_junction_nll import dominant_junction_drops
+  1331	
+  1332	        observed = self._observed_junctions(interval)
+  1333	        drops = dominant_junction_drops(
+  1334	            candidate_set.candidates, observed,
+  1335	            min_reads=int(self.config.junction_dominance_min_reads),
+  1336	            window=int(self.config.junction_dominance_window_bp),
+  1337	            tol=int(getattr(self.config, "junction_dominance_tol_bp", 2)),
+  1338	        )
+  1339	        if drops:
+  1340	            kept = [c for i, c in enumerate(candidate_set.candidates)
+  1341	                    if i not in drops]
+  1342	            logger.info(
+  1343	                "Junction-dominance gate: dropped %d/%d novel candidates "
+  1344	                "(interval %s)", len(drops), len(candidate_set.candidates),
+  1345	                interval.region_string,
+  1346	            )
+  1347	            candidate_set.candidates = kept
+  1348	
+  1349	    def cleanup(self):
+  1350	        """Close file handles."""
+  1351	        if self._gtf_reader:
+  1352	            self._gtf_reader.close()
+  1353	        if self._signal_reader:
+  1354	            self._signal_reader.close()
+  1355	
+  1356	    def _load_genome_fasta(self, path: str) -> Dict[str, str]:
+  1357	        """Load genome FASTA into a dict of chrom -> sequence."""
+  1358	        from fin.io.io_fasta import FASTAReader
+  1359	
+  1360	        seqs = {}
+  1361	        with FASTAReader(path) as reader:
+  1362	            for record in reader.iterate_records():
+  1363	                seqs[record.id] = record.sequence
+  1364	        return seqs
+  1365	
+
+exec
+/bin/bash -c "echo '--- exact new functions ---'; git show cda1a5b:fin/pipeline/selection.py | nl -ba | sed -n '525,620p'; echo '--- exact delegates ---'; git show cda1a5b:fin/pipeline/runner.py | nl -ba | sed -n '1270,1310p'; echo '--- call sites ---'; git grep -n -E '_apply_canonical_gate|_apply_junction_dominance_gate|canonical_gate_select|junction_dominance_select' cda1a5b -- ':"'!*.pyc'"'; echo '--- patch/mock references in commit tree ---'; git grep -n -E 'patch(\\.object)?\\(|monkeypatch|canonical_gate|junction_dominance|chain_all_canonical|parse_motifs|dominant_junction_drops' cda1a5b -- 'tests/**' | head -300" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- exact new functions ---
+   525	    return aggregated, outcomes
+   526	
+   527	
+   528	def canonical_gate_select(config, candidate_set, chrom_seq: str) -> List[SelectionOutcome]:
+   529	    """PRE_ASSIGN Stage B: drop NOVEL multi-exon candidates with non-canonical junctions.
+   530	
+   531	    Byte-identical move of the runner's former ``_apply_canonical_gate`` body. Mutates
+   532	    ``candidate_set.candidates`` in place, keeping a candidate iff it is GTF/fusion (EXEMPT),
+   533	    single-exon (trivially canonical), or every internal junction motif is canonical. ``read_ids``
+   534	    is left untouched (reads off a dropped candidate re-compete in quant). Returns the drop outcomes.
+   535	    """
+   536	    from fin.candidates.canonical import chain_all_canonical, parse_motifs
+   537	
+   538	    outcomes: List[SelectionOutcome] = []
+   539	    if not chrom_seq:
+   540	        # No genome sequence → cannot evaluate motifs; skip the gate rather
+   541	        # than drop everything.
+   542	        return outcomes
+   543	    motif_set = parse_motifs(config.canonical_motifs)
+   544	    kept: List = []
+   545	    dropped = 0
+   546	    for c in candidate_set.candidates:
+   547	        if c.source in ("gtf", "fusion"):
+   548	            kept.append(c)
+   549	            continue
+   550	        introns = c.intron_chain.introns
+   551	        if not introns:
+   552	            kept.append(c)  # mono: no internal junction
+   553	            continue
+   554	        if chain_all_canonical(introns, chrom_seq, c.strand, motif_set):
+   555	            kept.append(c)
+   556	        else:
+   557	            dropped += 1
+   558	            outcomes.append(SelectionOutcome(
+   559	                c.candidate_id, "drop", "canonical_gate", scope="pre_assign",
+   560	            ))
+   561	    if dropped:
+   562	        logger.info(
+   563	            "Canonical gate: dropped %d/%d novel candidates (interval %s)",
+   564	            dropped,
+   565	            len(candidate_set.candidates),
+   566	            candidate_set.interval.region_string,
+   567	        )
+   568	    candidate_set.candidates = kept
+   569	    return outcomes
+   570	
+   571	
+   572	def junction_dominance_select(
+   573	    config, candidate_set, interval, observed_junctions_fn: Callable
+   574	) -> List[SelectionOutcome]:
+   575	    """PRE_ASSIGN junction-first gate: drop NOVEL candidates with a weak or non-dominant junction.
+   576	
+   577	    Byte-identical move of the runner's former ``_apply_junction_dominance_gate`` body. Builds the
+   578	    directly-observed read junctions (via ``observed_junctions_fn``, passed at call time so the test
+   579	    seam survives) and drops a novel multi-exon candidate whose junction has < min_reads reads or is
+   580	    dominated by a stronger DIFFERENT junction within the window. Mutates ``candidate_set.candidates``
+   581	    in place; ``read_ids`` untouched. Returns the drop outcomes.
+   582	    """
+   583	    from fin.scoring.m2_junction_nll import dominant_junction_drops
+   584	
+   585	    outcomes: List[SelectionOutcome] = []
+   586	    observed = observed_junctions_fn(interval)
+   587	    drops = dominant_junction_drops(
+   588	        candidate_set.candidates, observed,
+   589	        min_reads=int(config.junction_dominance_min_reads),
+   590	        window=int(config.junction_dominance_window_bp),
+   591	        tol=int(getattr(config, "junction_dominance_tol_bp", 2)),
+   592	    )
+   593	    if drops:
+   594	        kept = [c for i, c in enumerate(candidate_set.candidates)
+   595	                if i not in drops]
+   596	        for i, c in enumerate(candidate_set.candidates):
+   597	            if i in drops:
+   598	                outcomes.append(SelectionOutcome(
+   599	                    c.candidate_id, "drop", "junction_dominance", scope="pre_assign",
+   600	                ))
+   601	        logger.info(
+   602	            "Junction-dominance gate: dropped %d/%d novel candidates "
+   603	            "(interval %s)", len(drops), len(candidate_set.candidates),
+   604	            interval.region_string,
+   605	        )
+   606	        candidate_set.candidates = kept
+   607	    return outcomes
+--- exact delegates ---
+  1270	            max_internal_gap_bp=self.config.fusion_max_internal_gap_bp,
+  1271	            max_dist=self.config.fusion_max_dist,
+  1272	            search_bp=self.config.canonical_search_bp,
+  1273	            max_chains_per_read=self.config.max_chains_per_read,
+  1274	            min_support=self.config.fusion_min_support,
+  1275	        )
+  1276	        if not fusion_cands:
+  1277	            return candidate_set
+  1278	
+  1279	        return merge_fusion_candidates(candidate_set, fusion_cands)
+  1280	
+  1281	    def _apply_canonical_gate(
+  1282	        self, candidate_set: CandidateSet, chrom_seq: str
+  1283	    ) -> None:
+  1284	        """Stage B canonical-junction gate. Delegates to the selection layer
+  1285	        (fin.pipeline.selection.canonical_gate_select); kept as a method so tests can
+  1286	        call this seam directly. Mutates ``candidate_set.candidates`` in place."""
+  1287	        canonical_gate_select(self.config, candidate_set, chrom_seq)
+  1288	
+  1289	    def _apply_junction_dominance_gate(
+  1290	        self, candidate_set: CandidateSet, interval: GenomicInterval
+  1291	    ) -> None:
+  1292	        """Pre-EM junction-dominance gate. Delegates to the selection layer
+  1293	        (fin.pipeline.selection.junction_dominance_select); kept as a method so tests can
+  1294	        call this seam directly. Mutates ``candidate_set.candidates`` in place."""
+  1295	        junction_dominance_select(
+  1296	            self.config, candidate_set, interval, self._observed_junctions
+  1297	        )
+  1298	
+  1299	    def cleanup(self):
+  1300	        """Close file handles."""
+  1301	        if self._gtf_reader:
+  1302	            self._gtf_reader.close()
+  1303	        if self._signal_reader:
+  1304	            self._signal_reader.close()
+  1305	
+  1306	    def _load_genome_fasta(self, path: str) -> Dict[str, str]:
+  1307	        """Load genome FASTA into a dict of chrom -> sequence."""
+  1308	        from fin.io.io_fasta import FASTAReader
+  1309	
+  1310	        seqs = {}
+--- call sites ---
+cda1a5b:fin/pipeline/runner.py:27:    canonical_gate_select,
+cda1a5b:fin/pipeline/runner.py:28:    junction_dominance_select,
+cda1a5b:fin/pipeline/runner.py:275:            self._apply_canonical_gate(candidate_set, chrom_seq)
+cda1a5b:fin/pipeline/runner.py:284:            self._apply_junction_dominance_gate(candidate_set, interval)
+cda1a5b:fin/pipeline/runner.py:1281:    def _apply_canonical_gate(
+cda1a5b:fin/pipeline/runner.py:1285:        (fin.pipeline.selection.canonical_gate_select); kept as a method so tests can
+cda1a5b:fin/pipeline/runner.py:1287:        canonical_gate_select(self.config, candidate_set, chrom_seq)
+cda1a5b:fin/pipeline/runner.py:1289:    def _apply_junction_dominance_gate(
+cda1a5b:fin/pipeline/runner.py:1293:        (fin.pipeline.selection.junction_dominance_select); kept as a method so tests can
+cda1a5b:fin/pipeline/runner.py:1295:        junction_dominance_select(
+cda1a5b:fin/pipeline/selection.py:528:def canonical_gate_select(config, candidate_set, chrom_seq: str) -> List[SelectionOutcome]:
+cda1a5b:fin/pipeline/selection.py:531:    Byte-identical move of the runner's former ``_apply_canonical_gate`` body. Mutates
+cda1a5b:fin/pipeline/selection.py:572:def junction_dominance_select(
+cda1a5b:fin/pipeline/selection.py:577:    Byte-identical move of the runner's former ``_apply_junction_dominance_gate`` body. Builds the
+cda1a5b:tests/unit/test_canonical_gate.py:66:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:73:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:79:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:84:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:90:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:96:        _runner()._apply_canonical_gate(cs, "")
+cda1a5b:tests/unit/test_canonical_gate.py:105:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:112:        _runner()._apply_canonical_gate(cs, genome)
+cda1a5b:tests/unit/test_canonical_gate.py:119:        _runner(canonical_motifs=("GT-AG",))._apply_canonical_gate(cs, genome)
+cda1a5b:tests/unit/test_canonical_gate.py:128:        _runner()._apply_canonical_gate(cs, genome)
+--- patch/mock references in commit tree ---
+cda1a5b:tests/integration/test_pipeline_integration.py:154:        "discover_candidates": patch(
+cda1a5b:tests/integration/test_pipeline_integration.py:158:        "mappy_multimap_responsibilities": patch(
+cda1a5b:tests/integration/test_pipeline_integration.py:162:        "mappy_aligner": patch("mappy.Aligner", _FakeAligner),
+cda1a5b:tests/integration/test_pipeline_integration.py:163:        "tie_nll": patch.object(PipelineRunner, "_tie_nll", _fake_tie_nll),
+cda1a5b:tests/integration/test_pipeline_integration.py:164:        "eff_lengths": patch.object(
+cda1a5b:tests/integration/test_pipeline_integration.py:167:        "build_m3_coherence": patch(
+cda1a5b:tests/integration/test_pipeline_integration.py:171:        "em_with_coherence": patch(
+cda1a5b:tests/integration/test_pipeline_integration.py:175:        "quantify_transcripts": patch(
+cda1a5b:tests/integration/test_pipeline_integration.py:298:    patches["discover_candidates"] = patch(
+cda1a5b:tests/integration/test_pipeline_integration.py:309:         patch.object(runner, "_get_fusion_genome_aligner", return_value=object()), \
+cda1a5b:tests/integration/test_pipeline_integration.py:310:         patch("fin.io.io_bam.BamReader", fake_bam), \
+cda1a5b:tests/integration/test_pipeline_integration.py:311:         patch("fin.fusion.detect_fusion_candidates",
+cda1a5b:tests/integration/test_pipeline_integration.py:331:         patch("fin.fusion.detect_fusion_candidates") as det:
+cda1a5b:tests/region_transcript_analysis_workflow.py:1942:                        ax.add_patch(rect)
+cda1a5b:tests/region_transcript_analysis_workflow.py:1954:                        ax.add_patch(rect)
+cda1a5b:tests/region_transcript_analysis_workflow.py:1995:                        ax.add_patch(rect)
+cda1a5b:tests/test_eventalign.py:86:        ax2.add_patch(rect)
+cda1a5b:tests/unit/test_canonical_gate.py:66:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:73:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:79:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:84:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:90:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:96:        _runner()._apply_canonical_gate(cs, "")
+cda1a5b:tests/unit/test_canonical_gate.py:105:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:112:        _runner()._apply_canonical_gate(cs, genome)
+cda1a5b:tests/unit/test_canonical_gate.py:119:        _runner(canonical_motifs=("GT-AG",))._apply_canonical_gate(cs, genome)
+cda1a5b:tests/unit/test_canonical_gate.py:128:        _runner()._apply_canonical_gate(cs, genome)
+cda1a5b:tests/unit/test_canonical_search_v2.py:15:# Genome layout (0-based), mirrors test_canonical_gate:
+cda1a5b:tests/unit/test_canonical_shared.py:3:Covers ``fin.candidates.canonical``: ``parse_motifs``, ``canonical_intron_alts``
+cda1a5b:tests/unit/test_canonical_shared.py:4:and ``chain_all_canonical`` (the candidate-independent pure chain version).
+cda1a5b:tests/unit/test_canonical_shared.py:17:    chain_all_canonical,
+cda1a5b:tests/unit/test_canonical_shared.py:18:    parse_motifs,
+cda1a5b:tests/unit/test_canonical_shared.py:34:# parse_motifs
+cda1a5b:tests/unit/test_canonical_shared.py:36:def test_parse_motifs_default_empty():
+cda1a5b:tests/unit/test_canonical_shared.py:37:    assert parse_motifs([]) == GTAG
+cda1a5b:tests/unit/test_canonical_shared.py:38:    assert parse_motifs(None) == GTAG
+cda1a5b:tests/unit/test_canonical_shared.py:41:def test_parse_motifs_multi_and_uppercase():
+cda1a5b:tests/unit/test_canonical_shared.py:42:    got = parse_motifs(["gt-ag", "GC-AG", "AT-AC"])
+cda1a5b:tests/unit/test_canonical_shared.py:46:def test_parse_motifs_invalid_token():
+cda1a5b:tests/unit/test_canonical_shared.py:48:        parse_motifs(["GTAG"])
+cda1a5b:tests/unit/test_canonical_shared.py:50:        parse_motifs(["G-AG"])
+cda1a5b:tests/unit/test_canonical_shared.py:52:        parse_motifs(["GT-A-AG"])
+cda1a5b:tests/unit/test_canonical_shared.py:87:# chain_all_canonical
+cda1a5b:tests/unit/test_canonical_shared.py:90:    assert chain_all_canonical((), _genome_single(), "+") is True
+cda1a5b:tests/unit/test_canonical_shared.py:94:    assert chain_all_canonical([(10, 20)], _genome_single(), "+", GTAG) is True
+cda1a5b:tests/unit/test_canonical_shared.py:98:    assert chain_all_canonical([(5, 15)], _genome_single(), "+", GTAG) is False
+cda1a5b:tests/unit/test_canonical_shared.py:102:    assert chain_all_canonical([(0, 1)], _genome_single(), "+", GTAG) is False
+cda1a5b:tests/unit/test_canonical_shared.py:103:    assert chain_all_canonical([(38, 60)], _genome_single(), "+", GTAG) is False
+cda1a5b:tests/unit/test_canonical_shared.py:107:    assert chain_all_canonical([(10, 20)], "", "+", GTAG) is False
+cda1a5b:tests/unit/test_canonical_shared.py:116:    assert chain_all_canonical([(10, 20)], genome, "+", GTAG) is False
+cda1a5b:tests/unit/test_canonical_shared.py:117:    assert chain_all_canonical([(10, 20)], genome, "+", MOTIFS_EXTENDED) is True
+cda1a5b:tests/unit/test_cli.py:76:def test_default_help_shows_junction_dominance_flags():
+cda1a5b:tests/unit/test_junction_dominance_gate.py:3:``dominant_junction_drops`` drops a NOVEL multi-exon candidate if any junction is
+cda1a5b:tests/unit/test_junction_dominance_gate.py:13:from fin.scoring.m2_junction_nll import dominant_junction_drops
+cda1a5b:tests/unit/test_junction_dominance_gate.py:37:    return dominant_junction_drops(cands, obs, **kw)
+cda1a5b:tests/unit/test_m2_em_pure_seed.py:116:    with patch("mappy.Aligner", _FakeAligner), patch(
+cda1a5b:tests/unit/test_m2_em_pure_seed.py:118:    ), patch.object(PipelineRunner, "_tie_nll", tie_nll_fn), patch.object(
+cda1a5b:tests/unit/test_m2_em_pure_seed.py:120:    ), patch(
+cda1a5b:tests/unit/test_m2_em_pure_seed.py:122:    ), patch(
+cda1a5b:tests/unit/test_m2_em_pure_seed.py:124:    ), patch(
+cda1a5b:tests/unit/test_m2_em_pure_seed.py:383:        with patch(
+cda1a5b:tests/unit/test_m2_resolve_tie.py:5:monkeypatching ``read_cand_mean_nll`` (the krill leg is validated end-to-end
+cda1a5b:tests/unit/test_m2_resolve_tie.py:75:# --- decision aggregation (monkeypatched scorer) --------------------------
+cda1a5b:tests/unit/test_m2_resolve_tie.py:78:def _patch_scores(monkeypatch, scores):
+cda1a5b:tests/unit/test_m2_resolve_tie.py:85:    monkeypatch.setattr(m2, "read_cand_mean_nll", fake)
+cda1a5b:tests/unit/test_m2_resolve_tie.py:88:def test_summed_llr_metric_uses_tight_window_and_picks_lower(monkeypatch):
+cda1a5b:tests/unit/test_m2_resolve_tie.py:92:    _patch_scores(monkeypatch, {"a": (3.0, 8), "b": (9.0, 8)})
+cda1a5b:tests/unit/test_m2_resolve_tie.py:102:def test_summed_llr_unanimous_returns_none(monkeypatch):
+cda1a5b:tests/unit/test_m2_resolve_tie.py:106:    _patch_scores(monkeypatch, {"a": (3.0, 8), "d": (9.0, 8)})
+cda1a5b:tests/unit/test_m2_resolve_tie.py:114:def test_two_way_picks_lower_nll_with_margin(monkeypatch):
+cda1a5b:tests/unit/test_m2_resolve_tie.py:116:    _patch_scores(monkeypatch, {"a": (1.0, 5), "b": (2.5, 5)})
+cda1a5b:tests/unit/test_m2_resolve_tie.py:125:def test_winner_is_global_min_regardless_of_order(monkeypatch):
+cda1a5b:tests/unit/test_m2_resolve_tie.py:127:    _patch_scores(monkeypatch, {"a": (3.0, 5), "b": (0.5, 5)})
+cda1a5b:tests/unit/test_m2_resolve_tie.py:136:def test_single_covered_candidate_is_infinite_margin(monkeypatch):
+cda1a5b:tests/unit/test_m2_resolve_tie.py:140:    _patch_scores(monkeypatch, {"a": (1.2, 7), "b": (float("nan"), 0)})
+cda1a5b:tests/unit/test_m2_resolve_tie.py:149:def test_no_candidate_covered_returns_none(monkeypatch):
+cda1a5b:tests/unit/test_m2_resolve_tie.py:151:    _patch_scores(monkeypatch, {"a": (float("nan"), 0), "b": (float("nan"), 0)})
+cda1a5b:tests/unit/test_m2_resolve_tie.py:159:def test_none_mappy_aligner_skips_candidate(monkeypatch):
+cda1a5b:tests/unit/test_m2_resolve_tie.py:162:    _patch_scores(monkeypatch, {"a": (1.0, 5), "b": (0.1, 5)})
+cda1a5b:tests/unit/test_m2_resolve_tie.py:175:def test_return_scored_both_scored_best_first(monkeypatch):
+cda1a5b:tests/unit/test_m2_resolve_tie.py:178:    _patch_scores(monkeypatch, {"a": (2.5, 5), "b": (1.0, 5)})
+cda1a5b:tests/unit/test_m2_resolve_tie.py:189:def test_return_scored_mixed_excludes_unscored(monkeypatch):
+cda1a5b:tests/unit/test_m2_resolve_tie.py:192:    _patch_scores(monkeypatch, {"a": (1.2, 7), "b": (float("nan"), 0)})
+cda1a5b:tests/unit/test_m2_resolve_tie.py:203:def test_return_scored_none_scored_empty_list(monkeypatch):
+cda1a5b:tests/unit/test_m2_resolve_tie.py:206:    _patch_scores(monkeypatch, {"a": (float("nan"), 0), "b": (float("nan"), 0)})
+cda1a5b:tests/unit/test_pipeline_config.py:53:def test_config_junction_dominance_gate_defaults_off():
+cda1a5b:tests/unit/test_pipeline_config.py:55:    assert c.junction_dominance_filter is False
+cda1a5b:tests/unit/test_pipeline_config.py:56:    assert c.junction_dominance_min_reads == 2
+cda1a5b:tests/unit/test_pipeline_config.py:57:    assert c.junction_dominance_window_bp == 20
+cda1a5b:tests/unit/test_pipeline_config.py:58:    assert c.junction_dominance_tol_bp == 2
+cda1a5b:tests/unit/test_polya5p_filter.py:191:def _runner_with(monkeypatch, polya_map, *, min_polya5p_reads=1,
+cda1a5b:tests/unit/test_polya5p_filter.py:208:    monkeypatch.setattr(
+cda1a5b:tests/unit/test_polya5p_filter.py:211:    monkeypatch.setattr(
+cda1a5b:tests/unit/test_polya5p_filter.py:218:def test_apply_filter_drops_unsupported(monkeypatch):
+cda1a5b:tests/unit/test_polya5p_filter.py:219:    runner = _runner_with(monkeypatch, {"r1": (20.0, "PASS"), "r2": (5.0, "PASS")})
+cda1a5b:tests/unit/test_polya5p_filter.py:228:def test_apply_filter_noop_when_krill_empty(monkeypatch):
+cda1a5b:tests/unit/test_polya5p_filter.py:229:    runner = _runner_with(monkeypatch, {})
+cda1a5b:tests/unit/test_polya5p_filter.py:270:def test_compute_polya_import_failure_returns_empty(monkeypatch):
+cda1a5b:tests/unit/test_polya5p_filter.py:274:    monkeypatch.setitem(sys.modules, "krill", None)
+cda1a5b:tests/unit/test_polya5p_filter.py:278:def test_compute_polya_gpu_init_falls_back_to_cpu(monkeypatch):
+cda1a5b:tests/unit/test_polya5p_filter.py:285:    monkeypatch.setitem(sys.modules, "krill", fake)
+cda1a5b:tests/unit/test_polya5p_filter.py:291:def test_compute_polya_first_batch_error_returns_empty(monkeypatch):
+cda1a5b:tests/unit/test_polya5p_filter.py:295:    monkeypatch.setitem(sys.modules, "krill", fake)
+cda1a5b:tests/unit/test_polya5p_filter.py:300:def test_compute_polya_partial_batch_failure_disables_filter(monkeypatch):
+cda1a5b:tests/unit/test_polya5p_filter.py:307:    monkeypatch.setitem(sys.modules, "krill", fake)
+cda1a5b:tests/unit/test_polya5p_filter.py:312:def test_compute_polya_cpu_init_failure_returns_empty(monkeypatch):
+cda1a5b:tests/unit/test_polya5p_filter.py:316:    monkeypatch.setitem(sys.modules, "krill", fake)
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:8:monkeypatched so the test needs no real BAM file.
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:87:def _patch_bam(monkeypatch, reads):
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:88:    monkeypatch.setattr(
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:102:    def test_returns_one_result_per_candidate(self, monkeypatch):
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:114:        _patch_bam(monkeypatch, [
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:123:    def test_containment_read_em_concentrates_on_anchor(self, monkeypatch):
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:138:        _patch_bam(monkeypatch, [
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:148:    def test_clusters_none_falls_back_to_single_cluster(self, monkeypatch):
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:160:        _patch_bam(monkeypatch, [_FakeRead("r1", 0, len(FULL))])
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:168:    def test_unreferenced_candidate_scored_via_extra_cluster(self, monkeypatch):
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:182:        _patch_bam(monkeypatch, [
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:191:    def test_clusters_threaded_from_candidate_set(self, monkeypatch):
+cda1a5b:tests/unit/test_quant_cluster_dispatch.py:204:        _patch_bam(monkeypatch, [
+cda1a5b:tests/unit/test_recovery_wiring.py:86:def _patch_bam(monkeypatch, reads):
+cda1a5b:tests/unit/test_recovery_wiring.py:87:    monkeypatch.setattr(
+cda1a5b:tests/unit/test_recovery_wiring.py:101:def test_recovery_activates_short_isoform(monkeypatch):
+cda1a5b:tests/unit/test_recovery_wiring.py:134:    _patch_bam(monkeypatch, reads)
+cda1a5b:tests/unit/test_runner_outputs.py:63:        patch(f"{runner_mod}.generate_isolated_intervals", return_value={"intervals": []}),
+cda1a5b:tests/unit/test_runner_outputs.py:64:        patch(f"{runner_mod}.aggregate_across_intervals", return_value=aggregated),
+cda1a5b:tests/unit/test_runner_outputs.py:79:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:81:             patch("fin.pipeline.runner.aggregate_across_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:83:             patch("fin.io.io_tsv.write_scoring_tsv") as mock_tsv:
+cda1a5b:tests/unit/test_runner_outputs.py:98:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:100:             patch("fin.pipeline.runner.aggregate_across_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:102:             patch("fin.io.io_tsv.write_scoring_tsv") as mock_tsv:
+cda1a5b:tests/unit/test_runner_outputs.py:115:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:117:             patch("fin.pipeline.runner.aggregate_across_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:119:             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+cda1a5b:tests/unit/test_runner_outputs.py:130:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:132:             patch("fin.pipeline.runner.aggregate_across_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:134:             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+cda1a5b:tests/unit/test_runner_outputs.py:144:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:146:             patch("fin.pipeline.runner.aggregate_across_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:148:             patch("fin.io.io_bedpe.write_fusion_bedpe") as mock_bedpe:
+cda1a5b:tests/unit/test_runner_outputs.py:161:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:163:             patch("fin.pipeline.runner.aggregate_across_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:165:             patch("fin.io.io_gtf.write_gtf") as mock_gtf:
+cda1a5b:tests/unit/test_runner_outputs.py:175:        with patch("fin.pipeline.runner.generate_isolated_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:177:             patch("fin.pipeline.runner.aggregate_across_intervals",
+cda1a5b:tests/unit/test_runner_outputs.py:179:             patch("fin.io.io_gtf.write_gtf") as mock_gtf:
+
+exec
+/bin/bash -c "echo '--- gate tests/files ---'; git ls-tree -r --name-only cda1a5b tests | rg 'canonical|junction|selection|pipeline'; echo '--- exact gate references ---'; git grep -n -E '_apply_canonical_gate|_apply_junction_dominance_gate|canonical_gate_select|junction_dominance_select|runner\\.chain_all_canonical|runner\\.parse_motifs|selection\\.chain_all_canonical|selection\\.parse_motifs' cda1a5b -- 'tests/**'; echo '--- candidate_id model ---'; git grep -n -E 'class Candidate|candidate_id' cda1a5b -- fin/candidates/dataclasses.py tests/unit/test_canonical_gate.py tests/unit/test_junction_dominance_gate.py 2>/dev/null" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- gate tests/files ---
+tests/integration/test_pipeline_integration.py
+tests/unit/test_canonical_gate.py
+tests/unit/test_canonical_search_v2.py
+tests/unit/test_canonical_shared.py
+tests/unit/test_guided_junction_support_gate.py
+tests/unit/test_junction_dominance_gate.py
+tests/unit/test_junction_graph.py
+tests/unit/test_junction_support_gate.py
+tests/unit/test_m2_junction_nll.py
+tests/unit/test_m3_junction_coherence.py
+tests/unit/test_pipeline_config.py
+--- exact gate references ---
+cda1a5b:tests/unit/test_canonical_gate.py:66:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:73:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:79:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:84:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:90:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:96:        _runner()._apply_canonical_gate(cs, "")
+cda1a5b:tests/unit/test_canonical_gate.py:105:        _runner()._apply_canonical_gate(cs, GENOME)
+cda1a5b:tests/unit/test_canonical_gate.py:112:        _runner()._apply_canonical_gate(cs, genome)
+cda1a5b:tests/unit/test_canonical_gate.py:119:        _runner(canonical_motifs=("GT-AG",))._apply_canonical_gate(cs, genome)
+cda1a5b:tests/unit/test_canonical_gate.py:128:        _runner()._apply_canonical_gate(cs, genome)
+--- candidate_id model ---
+cda1a5b:fin/candidates/dataclasses.py:34:        candidate_id, intron_chain, three_prime_pos, sequence, source,
+cda1a5b:fin/candidates/dataclasses.py:44:    candidate_id: str
+cda1a5b:fin/candidates/dataclasses.py:76:class CandidateSet:
+cda1a5b:fin/candidates/dataclasses.py:87:    # the candidate_ids that belong to one generation cluster. Ids (not indices)
+cda1a5b:fin/candidates/dataclasses.py:94:    # container candidate_id to the SHADOW sub-chains folded into it during
+cda1a5b:fin/candidates/dataclasses.py:113:    def get_candidate(self, candidate_id: str) -> Optional[TranscriptCandidate]:
+cda1a5b:fin/candidates/dataclasses.py:115:            if c.candidate_id == candidate_id:
+cda1a5b:fin/candidates/dataclasses.py:119:    def candidate_ids(self) -> List[str]:
+cda1a5b:fin/candidates/dataclasses.py:120:        return [c.candidate_id for c in self.candidates]
+cda1a5b:tests/unit/test_canonical_gate.py:34:        candidate_id=cid,
+cda1a5b:tests/unit/test_canonical_gate.py:51:        read_ids={c.candidate_id for c in cands},
+cda1a5b:tests/unit/test_canonical_gate.py:67:        ids = cs.candidate_ids()
+cda1a5b:tests/unit/test_canonical_gate.py:74:        assert cs.candidate_ids() == ["good"]
+cda1a5b:tests/unit/test_canonical_gate.py:80:        assert cs.candidate_ids() == ["gtf_tx"]
+cda1a5b:tests/unit/test_canonical_gate.py:85:        assert cs.candidate_ids() == ["fus"]
+cda1a5b:tests/unit/test_canonical_gate.py:91:        assert cs.candidate_ids() == ["mono"]
+cda1a5b:tests/unit/test_canonical_gate.py:97:        assert cs.candidate_ids() == ["bad"]
+cda1a5b:tests/unit/test_canonical_gate.py:113:        assert cs.candidate_ids() == ["gc"]
+cda1a5b:tests/unit/test_canonical_gate.py:120:        assert cs.candidate_ids() == []
+cda1a5b:tests/unit/test_canonical_gate.py:129:        assert cs.candidate_ids() == ["m"]
+cda1a5b:tests/unit/test_junction_dominance_gate.py:18:        candidate_id=cid,
+
+exec
+/bin/bash -c "echo '--- production call sites ---'; git grep -n -C 5 -E '_apply_canonical_gate\\(|_apply_junction_dominance_gate\\(' cda1a5b -- fin/pipeline/runner.py; echo '--- canonical tests ---'; git show cda1a5b:tests/unit/test_canonical_gate.py | nl -ba | sed -n '1,170p'; echo '--- dominance tests ---'; git show cda1a5b:tests/unit/test_junction_dominance_gate.py | nl -ba | sed -n '1,220p'; echo '--- dominant return contract ---'; git show cda1a5b:fin/scoring/m2_junction_nll.py | nl -ba | rg -n -C 8 'def dominant_junction_drops|return drops'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- production call sites ---
+cda1a5b:fin/pipeline/runner.py-270-        # --- Phase 1.6: Canonical-motif gate (Stage B) ---
+cda1a5b:fin/pipeline/runner.py-271-        # Drop NOVEL multi-exon candidates whose intron chain isn't all-canonical.
+cda1a5b:fin/pipeline/runner.py-272-        # GTF-passthrough and fusion candidates are exempt (annotated junctions
+cda1a5b:fin/pipeline/runner.py-273-        # are trusted); mono candidates trivially pass.
+cda1a5b:fin/pipeline/runner.py-274-        if getattr(self.config, "canonical_gate", False):
+cda1a5b:fin/pipeline/runner.py:275:            self._apply_canonical_gate(candidate_set, chrom_seq)
+cda1a5b:fin/pipeline/runner.py-276-
+cda1a5b:fin/pipeline/runner.py-277-        # --- Phase 1.7: Junction-dominance gate (PRE-EM, junction-first) ---
+cda1a5b:fin/pipeline/runner.py-278-        # Drop NOVEL multi-exon candidates with a junction that is weak
+cda1a5b:fin/pipeline/runner.py-279-        # (< min_reads observed) or non-dominant (a different observed junction
+cda1a5b:fin/pipeline/runner.py-280-        # within window bp carries strictly more reads). Removes multi-read wobble
+cda1a5b:fin/pipeline/runner.py-281-        # shadows before EM so they never compete for reads. gtf/fusion/mono
+cda1a5b:fin/pipeline/runner.py-282-        # exempt. OFF (default) -> no drops (byte-identical).
+cda1a5b:fin/pipeline/runner.py-283-        if getattr(self.config, "junction_dominance_filter", False):
+cda1a5b:fin/pipeline/runner.py:284:            self._apply_junction_dominance_gate(candidate_set, interval)
+cda1a5b:fin/pipeline/runner.py-285-
+cda1a5b:fin/pipeline/runner.py-286-        if candidate_set.num_candidates == 0:
+cda1a5b:fin/pipeline/runner.py-287-            logger.info("No candidates for interval %s", interval.region_string)
+cda1a5b:fin/pipeline/runner.py-288-            return None
+cda1a5b:fin/pipeline/runner.py-289-
+--
+cda1a5b:fin/pipeline/runner.py-1276-        if not fusion_cands:
+cda1a5b:fin/pipeline/runner.py-1277-            return candidate_set
+cda1a5b:fin/pipeline/runner.py-1278-
+cda1a5b:fin/pipeline/runner.py-1279-        return merge_fusion_candidates(candidate_set, fusion_cands)
+cda1a5b:fin/pipeline/runner.py-1280-
+cda1a5b:fin/pipeline/runner.py:1281:    def _apply_canonical_gate(
+cda1a5b:fin/pipeline/runner.py-1282-        self, candidate_set: CandidateSet, chrom_seq: str
+cda1a5b:fin/pipeline/runner.py-1283-    ) -> None:
+cda1a5b:fin/pipeline/runner.py-1284-        """Stage B canonical-junction gate. Delegates to the selection layer
+cda1a5b:fin/pipeline/runner.py-1285-        (fin.pipeline.selection.canonical_gate_select); kept as a method so tests can
+cda1a5b:fin/pipeline/runner.py-1286-        call this seam directly. Mutates ``candidate_set.candidates`` in place."""
+cda1a5b:fin/pipeline/runner.py-1287-        canonical_gate_select(self.config, candidate_set, chrom_seq)
+cda1a5b:fin/pipeline/runner.py-1288-
+cda1a5b:fin/pipeline/runner.py:1289:    def _apply_junction_dominance_gate(
+cda1a5b:fin/pipeline/runner.py-1290-        self, candidate_set: CandidateSet, interval: GenomicInterval
+cda1a5b:fin/pipeline/runner.py-1291-    ) -> None:
+cda1a5b:fin/pipeline/runner.py-1292-        """Pre-EM junction-dominance gate. Delegates to the selection layer
+cda1a5b:fin/pipeline/runner.py-1293-        (fin.pipeline.selection.junction_dominance_select); kept as a method so tests can
+cda1a5b:fin/pipeline/runner.py-1294-        call this seam directly. Mutates ``candidate_set.candidates`` in place."""
+--- canonical tests ---
+     1	"""Tests for the production canonical-motif gate (Stage B).
+     2	
+     3	The gate drops NOVEL multi-exon candidates whose intron chain is not
+     4	all-canonical. GTF-passthrough (source="gtf") and fusion (source="fusion")
+     5	candidates are EXEMPT; single-exon (mono) candidates trivially pass.
+     6	"""
+     7	
+     8	from __future__ import annotations
+     9	
+    10	from fin.candidates.dataclasses import (
+    11	    CandidateSet,
+    12	    IntronChain,
+    13	    TranscriptCandidate,
+    14	)
+    15	from fin.io.interval_manager import GenomicInterval
+    16	from fin.pipeline.config import PipelineConfig
+    17	from fin.pipeline.runner import PipelineRunner
+    18	
+    19	# Genome layout (0-based):
+    20	#   0-4   "AAAAA"
+    21	#   5-6   "GT"      <- canonical donor
+    22	#   7-12  "CCCCCC"
+    23	#   13-14 "AG"      <- canonical acceptor
+    24	#   15-19 "AAAAA"
+    25	# Canonical + strand intron = (5, 15): genome[5:7]="GT", genome[13:15]="AG".
+    26	GENOME = "AAAAA" + "GT" + "CCCCCC" + "AG" + "AAAAA"
+    27	CANON_INTRON = (5, 15)
+    28	# Non-canonical: donor genome[6:8]="TC".
+    29	NONCANON_INTRON = (6, 15)
+    30	
+    31	
+    32	def _cand(cid, introns, source, strand="+"):
+    33	    return TranscriptCandidate(
+    34	        candidate_id=cid,
+    35	        intron_chain=IntronChain(introns=tuple(introns)),
+    36	        three_prime_pos=15,
+    37	        sequence="ACGT",
+    38	        source=source,
+    39	        supporting_read_ids={f"r_{cid}"},
+    40	        chrom="chr1",
+    41	        strand=strand,
+    42	        start=0,
+    43	        end=20,
+    44	    )
+    45	
+    46	
+    47	def _make_set(cands):
+    48	    return CandidateSet(
+    49	        interval=GenomicInterval(chrom="chr1", start=0, end=20, strand="+"),
+    50	        candidates=list(cands),
+    51	        read_ids={c.candidate_id for c in cands},
+    52	    )
+    53	
+    54	
+    55	def _runner(**cfg_kwargs):
+    56	    cfg = PipelineConfig(bam_path="/fake/reads.bam", **cfg_kwargs)
+    57	    return PipelineRunner(cfg)
+    58	
+    59	
+    60	class TestCanonicalGate:
+    61	    def test_drops_noncanonical_novel_multiexon(self):
+    62	        cs = _make_set([
+    63	            _cand("good", [CANON_INTRON], "novel"),
+    64	            _cand("bad", [NONCANON_INTRON], "novel"),
+    65	        ])
+    66	        _runner()._apply_canonical_gate(cs, GENOME)
+    67	        ids = cs.candidate_ids()
+    68	        assert "good" in ids
+    69	        assert "bad" not in ids
+    70	
+    71	    def test_keeps_canonical_novel_multiexon(self):
+    72	        cs = _make_set([_cand("good", [CANON_INTRON], "novel")])
+    73	        _runner()._apply_canonical_gate(cs, GENOME)
+    74	        assert cs.candidate_ids() == ["good"]
+    75	
+    76	    def test_exempts_gtf_passthrough(self):
+    77	        # A non-canonical chain survives if it came from the GTF.
+    78	        cs = _make_set([_cand("gtf_tx", [NONCANON_INTRON], "gtf")])
+    79	        _runner()._apply_canonical_gate(cs, GENOME)
+    80	        assert cs.candidate_ids() == ["gtf_tx"]
+    81	
+    82	    def test_exempts_fusion(self):
+    83	        cs = _make_set([_cand("fus", [NONCANON_INTRON], "fusion")])
+    84	        _runner()._apply_canonical_gate(cs, GENOME)
+    85	        assert cs.candidate_ids() == ["fus"]
+    86	
+    87	    def test_mono_novel_trivially_passes(self):
+    88	        # Single-exon candidate has no internal junction -> always kept.
+    89	        cs = _make_set([_cand("mono", [], "novel")])
+    90	        _runner()._apply_canonical_gate(cs, GENOME)
+    91	        assert cs.candidate_ids() == ["mono"]
+    92	
+    93	    def test_empty_genome_skips_gate(self):
+    94	        # No genome sequence -> cannot evaluate motifs -> keep everything.
+    95	        cs = _make_set([_cand("bad", [NONCANON_INTRON], "novel")])
+    96	        _runner()._apply_canonical_gate(cs, "")
+    97	        assert cs.candidate_ids() == ["bad"]
+    98	
+    99	    def test_read_ids_untouched(self):
+   100	        cs = _make_set([
+   101	            _cand("good", [CANON_INTRON], "novel"),
+   102	            _cand("bad", [NONCANON_INTRON], "novel"),
+   103	        ])
+   104	        before = set(cs.read_ids)
+   105	        _runner()._apply_canonical_gate(cs, GENOME)
+   106	        assert cs.read_ids == before
+   107	
+   108	    def test_extended_motifs_keep_gc_ag(self):
+   109	        # GC-AG intron: donor genome[s:s+2]="GC". Default motifs include GC-AG.
+   110	        genome = "AAAAA" + "GC" + "CCCCCC" + "AG" + "AAAAA"
+   111	        cs = _make_set([_cand("gc", [(5, 15)], "novel")])
+   112	        _runner()._apply_canonical_gate(cs, genome)
+   113	        assert cs.candidate_ids() == ["gc"]
+   114	
+   115	    def test_strict_motifs_drop_gc_ag(self):
+   116	        # With strict GT-AG only, a GC-AG novel intron is dropped.
+   117	        genome = "AAAAA" + "GC" + "CCCCCC" + "AG" + "AAAAA"
+   118	        cs = _make_set([_cand("gc", [(5, 15)], "novel")])
+   119	        _runner(canonical_motifs=("GT-AG",))._apply_canonical_gate(cs, genome)
+   120	        assert cs.candidate_ids() == []
+   121	
+   122	    def test_minus_strand_canonical(self):
+   123	        # - strand intron (s,e): donor = revcomp(genome[e-2:e]),
+   124	        # acceptor = revcomp(genome[s:s+2]). For GT-AG we need
+   125	        # genome[e-2:e]=revcomp("GT")="AC" and genome[s:s+2]=revcomp("AG")="CT".
+   126	        genome = "AAAAA" + "CT" + "CCCCCC" + "AC" + "AAAAA"
+   127	        cs = _make_set([_cand("m", [(5, 15)], "novel", strand="-")])
+   128	        _runner()._apply_canonical_gate(cs, genome)
+   129	        assert cs.candidate_ids() == ["m"]
+--- dominance tests ---
+     1	"""Unit tests for the pre-EM junction-dominance gate (junction-first idea).
+     2	
+     3	``dominant_junction_drops`` drops a NOVEL multi-exon candidate if any junction is
+     4	(a) supported by < min_reads observed reads, OR (b) not locally dominant — a
+     5	DIFFERENT observed junction within `window` bp (beyond `tol`) has strictly more
+     6	reads. gtf/fusion/mono exempt; min_reads<=0 or empty observed disables.
+     7	"""
+     8	from __future__ import annotations
+     9	
+    10	from collections import Counter
+    11	
+    12	from fin.candidates.dataclasses import IntronChain, TranscriptCandidate
+    13	from fin.scoring.m2_junction_nll import dominant_junction_drops
+    14	
+    15	
+    16	def _cand(introns, *, source="novel", strand="+", cid="c"):
+    17	    return TranscriptCandidate(
+    18	        candidate_id=cid,
+    19	        intron_chain=IntronChain(introns=tuple(introns)),
+    20	        three_prime_pos=(introns[-1][1] + 100) if introns else 200,
+    21	        sequence="ACGT" * 50,
+    22	        source=source,
+    23	        supporting_read_ids=set(),
+    24	        chrom="chr1",
+    25	        strand=strand,
+    26	        start=1,
+    27	        end=(introns[-1][1] + 100) if introns else 200,
+    28	    )
+    29	
+    30	
+    31	def _obs(strand, pairs):
+    32	    return {strand: Counter(pairs)}
+    33	
+    34	
+    35	def _drop(cands, obs, **kw):
+    36	    kw.setdefault("tol", 2)
+    37	    return dominant_junction_drops(cands, obs, **kw)
+    38	
+    39	
+    40	class TestDisabled:
+    41	    def test_min_reads_zero(self):
+    42	        c = _cand([(100, 200)])
+    43	        assert _drop([c], _obs("+", {(100, 200): 0}), min_reads=0, window=20) == set()
+    44	
+    45	    def test_empty_observed(self):
+    46	        c = _cand([(100, 200)])
+    47	        assert _drop([c], {}, min_reads=2, window=20) == set()
+    48	        assert _drop([c], None, min_reads=2, window=20) == set()
+    49	
+    50	
+    51	class TestDominance:
+    52	    def test_dominant_junction_kept(self):
+    53	        # the candidate's junction is the strongest in its neighborhood
+    54	        c = _cand([(100, 200)])
+    55	        obs = _obs("+", {(100, 200): 5, (108, 205): 1})  # neighbor weaker
+    56	        assert _drop([c], obs, min_reads=2, window=20) == set()
+    57	
+    58	    def test_dominated_shadow_dropped(self):
+    59	        # the candidate IS the weak shadow; a different junction 8bp away is stronger
+    60	        c = _cand([(108, 205)])
+    61	        obs = _obs("+", {(100, 200): 9, (108, 205): 2})  # true junction dominates
+    62	        assert _drop([c], obs, min_reads=2, window=20) == {0}
+    63	
+    64	    def test_tie_kept(self):
+    65	        # equal-support neighbor does NOT demote (needs STRICTLY more)
+    66	        c = _cand([(108, 205)])
+    67	        obs = _obs("+", {(100, 200): 3, (108, 205): 3})
+    68	        assert _drop([c], obs, min_reads=2, window=20) == set()
+    69	
+    70	    def test_stronger_junction_beyond_window_does_not_demote(self):
+    71	        c = _cand([(108, 205)])
+    72	        # the stronger junction is 100bp away -> outside window -> no demotion
+    73	        obs = _obs("+", {(300, 405): 9, (108, 205): 3})
+    74	        assert _drop([c], obs, min_reads=2, window=20) == set()
+    75	
+    76	
+    77	class TestCount:
+    78	    def test_weak_junction_dropped(self):
+    79	        c = _cand([(100, 200)])
+    80	        obs = _obs("+", {(100, 200): 1})  # below min_reads=2, no competitor
+    81	        assert _drop([c], obs, min_reads=2, window=20) == {0}
+    82	
+    83	
+    84	class TestExemptions:
+    85	    def test_gtf_exempt(self):
+    86	        c = _cand([(108, 205)], source="gtf", cid="ENST1")
+    87	        obs = _obs("+", {(100, 200): 9, (108, 205): 1})
+    88	        assert _drop([c], obs, min_reads=2, window=20) == set()
+    89	
+    90	    def test_fusion_exempt(self):
+    91	        c = _cand([(108, 205)], source="fusion")
+    92	        obs = _obs("+", {(100, 200): 9, (108, 205): 1})
+    93	        assert _drop([c], obs, min_reads=2, window=20) == set()
+    94	
+    95	    def test_mono_exempt(self):
+    96	        c = _cand([], source="novel")
+    97	        assert _drop([c], {}, min_reads=2, window=20) == set()
+--- dominant return contract ---
+409-   409	    drops: set = set()
+410-   410	    for j, c in enumerate(cands):
+411-   411	        if c.source == "fusion":
+412-   412	            continue
+413-   413	        if len(c.intron_chain.introns) < 1:
+414-   414	            continue  # mono-exon exempt (no junction to validate)
+415-   415	        if j not in supported:
+416-   416	            drops.add(j)
+417:   417	    return drops
+418-   418	
+419-   419	
+420-   420	def structural_wobble_clusters(cands, bp: int, cassette_max_exon_bp: int = 0):
+421-   421	    """Union-find clusters of candidates that differ only by junction wobble.
+422-   422	
+423-   423	    Two multi-exon candidates join iff same chrom/strand and EITHER:
+424-   424	      (a) same intron count and every intron boundary within ``bp`` of the other's
+425-   425	          (classic wobble), OR
+--
+611-   611	                # GTF shares every junction with the anchor (same intron chain,
+612-   612	                # differing only in 5'/3' ends — a real alt-TSS/TES isoform whose
+613-   613	                # junctions are all read-supported via the anchor). No distinguishing
+614-   614	                # junction => no failed-support evidence => keep (recall-safe).
+615-   615	                continue
+616-   616	            strand = cands[j].strand
+617-   617	            if min(jct_support(x, strand) for x in diff) < gtf_min_jct_reads:
+618-   618	                drops.add(j)
+619:   619	    return drops
+620-   620	
+621-   621	
+622-   622	def containment_shadow_drops(cands, em_ab, *, tol_bp, min_ratio, exclude=None):
+623-   623	    """Map NOVEL 5'-truncation containment shadows to the longer parent to fold into.
+624-   624	
+625-   625	    A candidate ``a`` is a 5'-truncation shadow of a longer candidate ``b`` iff
+626-   626	    they share the same chrom/strand and ``a``'s intron chain is a STRICT, exact
+627-   627	    3' SUFFIX of ``b``'s chain (i.e. ``a`` has fewer introns, all equal to ``b``'s
+--
+765-   765	    """
+766-   766	    exclude = set(exclude or ())
+767-   767	    multi = [(j, c) for j, c in enumerate(cands)
+768-   768	             if c.intron_chain.introns and j not in exclude]
+769-   769	    mono = [(j, c) for j, c in enumerate(cands)
+770-   770	            if not c.intron_chain.introns and j not in exclude]
+771-   771	    drops = set()
+772-   772	    if not (multi and mono):
+773:   773	        return drops
+774-   774	    qr_by_id = {q.candidate_id: q for q in quant_results}
+775-   775	    for jm, cm in mono:
+776-   776	        mq = qr_by_id.get(cm.candidate_id)
+777-   777	        if mq is None:
+778-   778	            continue
+779-   779	        kept = []
+780-   780	        for rid in mq.assigned_read_ids:
+781-   781	            sp = read_spans.get(rid)
+--
+801-   801	            pq.num_assigned_reads = len(pq.assigned_read_ids)
+802-   802	            pq.abundance += 1.0                     # one fragment read, mass ~1
+803-   803	        if len(kept) < min_reads:
+804-   804	            drops.add(jm)
+805-   805	        else:
+806-   806	            mq.assigned_read_ids = tuple(sorted(kept))
+807-   807	            mq.num_assigned_reads = len(kept)
+808-   808	            mq.abundance = float(len(kept))
+809:   809	    return drops
+810-   810	
+811-   811	
+812-   812	def containment_cluster_drops(cands, em_ab, read_counts, *, wobble_bp,
+813-   813	                              min_ab_ratio, min_read_ratio, max_shadow_reads=0,
+814-   814	                              exclude=None):
+815-   815	    """Drop a NOVEL candidate whose intron chain is a contiguous SUB-CHAIN of a longer
+816-   816	    candidate, when it is a low-support shadow.
+817-   817	
+--
+898-   898	            # risk that makes default-ON safe.
+899-   899	            if max_shadow_reads and read_counts[a] > max_shadow_reads:
+900-   900	                continue
+901-   901	            if any(b != a and sub_of(a, b)
+902-   902	                   and em_ab[a] <= em_ab[b] * min_ab_ratio
+903-   903	                   and read_counts[a] <= read_counts[b] * min_read_ratio
+904-   904	                   for b in cols):
+905-   905	                drops.add(a)
+906:   906	    return drops
+907-   907	
+908-   908	
+909-   909	def junction_support_drops(cands, observed_jct, *, min_reads, tol):
+910-   910	    """Columns to drop: NOVEL multi-exon candidates with an under-supported junction.
+911-   911	
+912-   912	    Every junction (intron) of a NOVEL multi-exon candidate must be directly
+913-   913	    spliced by ``>= min_reads`` reads observed in the interval — i.e. a novel
+914-   914	    junction has to be carried by at least N independent reads, not just one. The
+--
+940-   940	        if c.source != "novel":
+941-   941	            continue
+942-   942	        introns = c.intron_chain.introns
+943-   943	        if len(introns) < 1:
+944-   944	            continue  # mono: no junctions to support
+945-   945	        strand = c.strand
+946-   946	        if any(support(d, a, strand) < min_reads for (d, a) in introns):
+947-   947	            drops.add(j)
+948:   948	    return drops
+949-   949	
+950-   950	
+951-   951	def guided_junction_support_drops(cands, observed_jct, *, min_reads, tol):
+952-   952	    """Columns to drop: GTF-guided multi-exon candidates with an under-supported junction.
+953-   953	
+954-   954	    The mirror of :func:`junction_support_drops` for ``source == "gtf"`` (guided)
+955-   955	    candidates: every junction (intron) of a guided multi-exon candidate must be
+956-   956	    directly spliced by ``>= min_reads`` reads observed in the interval, i.e.
+--
+1003-  1003	        if c.source != "gtf":
+1004-  1004	            continue
+1005-  1005	        introns = c.intron_chain.introns
+1006-  1006	        if len(introns) < 1:
+1007-  1007	            continue  # mono: no junctions to support
+1008-  1008	        strand = c.strand
+1009-  1009	        if any(support(d, a, strand) < min_reads for (d, a) in introns):
+1010-  1010	            drops.add(j)
+1011:  1011	    return drops
+1012-  1012	
+1013-  1013	
+1014:  1014	def dominant_junction_drops(cands, observed_jct, *, min_reads, window, tol=2):
+1015-  1015	    """Columns to drop: NOVEL candidates with a weak OR non-dominant junction.
+1016-  1016	
+1017-  1017	    The "junction-first" gate: a candidate junction (donor, acceptor) is VALID
+1018-  1018	    iff BOTH
+1019-  1019	      - it has ``>= min_reads`` directly-observed reads within ``tol`` bp
+1020-  1020	        (``observed_jct`` = strand-keyed ``{strand: {(d,a): n}}`` from CIGARs), AND
+1021-  1021	      - it is LOCALLY DOMINANT: no DIFFERENT observed junction within ``window`` bp
+1022-  1022	        (beyond the ``tol`` "same-junction" zone) carries STRICTLY more reads.
+--
+1060-  1060	        if len(introns) < 1:
+1061-  1061	            continue
+1062-  1062	        strand = c.strand
+1063-  1063	        for (d, a) in introns:
+1064-  1064	            s = support(d, a, strand)
+1065-  1065	            if s < min_reads or s < competitor(d, a, strand):
+1066-  1066	                drops.add(j)
+1067-  1067	                break
+1068:  1068	    return drops
+1069-  1069	
+1070-  1070	
+1071-  1071	def gtf_guard_needed(cands, em_ab, clusters, frac):
+1072-  1072	    """True iff any cluster has a non-anchor GTF sibling below ``frac`` * anchor.
+1073-  1073	
+1074-  1074	    Cheap pre-check (no read I/O) so the caller only builds the observed-junction
+1075-  1075	    map — which reopens the BAM — when a clustered low-abundance GTF candidate
+1076-  1076	    could actually be dropped by the read-support guard. Mirrors the anchor/frac
+
+codex
+The core predicates and thresholds match, but I’m now probing observable seams the move can silently alter: logger identity, patch targets, exception timing, and object access.
+  ✓ Inspect commit and repository guidance
+  ✓ Compare moved logic against parent
+  → Trace call sites and mock seams
+  • Check imports and selection semantics
+  • Run focused tests and verdict
+exec
+/bin/bash -c "echo '--- runner symbol references at commit ---'; git grep -n -E '\\b(chain_all_canonical|parse_motifs|canonical_gate_select|junction_dominance_select)\\b' cda1a5b -- fin/pipeline/runner.py; echo '--- logger definitions ---'; git show cda1a5b"'^:fin/pipeline/runner.py | nl -ba | sed -n '"'1,55p'; git show cda1a5b:fin/pipeline/selection.py | nl -ba | sed -n '20,38p'; echo '--- direct mock/patch names across all tracked code ---'; git grep -n -E '(patch|setattr).*?(chain_all_canonical|parse_motifs|canonical_gate_select|junction_dominance_select|pipeline\\.runner\\.logger|pipeline\\.selection\\.logger)' cda1a5b -- '*.py' || true; echo '--- selection imported by dependencies? ---'; for f in fin/candidates/canonical.py fin/scoring/m2_junction_nll.py fin/analysis/quantification.py; do echo \"["'$f]"; git show cda1a5b:$f | rg -n '"'fin\\.pipeline|from fin\\.pipeline|import fin\\.pipeline' || true; done; echo '--- commit parent-to-child normalized bodies ---'; git diff cda1a5b"'^ cda1a5b --word-diff=porcelain -- fin/pipeline/runner.py fin/pipeline/selection.py | sed -n '"'1,260p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- runner symbol references at commit ---
+cda1a5b:fin/pipeline/runner.py:27:    canonical_gate_select,
+cda1a5b:fin/pipeline/runner.py:28:    junction_dominance_select,
+cda1a5b:fin/pipeline/runner.py:1251:        from fin.candidates.canonical import parse_motifs
+cda1a5b:fin/pipeline/runner.py:1269:            motif_set=parse_motifs(self.config.canonical_motifs),
+cda1a5b:fin/pipeline/runner.py:1285:        (fin.pipeline.selection.canonical_gate_select); kept as a method so tests can
+cda1a5b:fin/pipeline/runner.py:1287:        canonical_gate_select(self.config, candidate_set, chrom_seq)
+cda1a5b:fin/pipeline/runner.py:1293:        (fin.pipeline.selection.junction_dominance_select); kept as a method so tests can
+cda1a5b:fin/pipeline/runner.py:1295:        junction_dominance_select(
+--- logger definitions ---
+     1	"""Pipeline orchestrator: interval -> candidates -> scoring -> EM -> quantification."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import logging
+     6	from pathlib import Path
+     7	from typing import Dict, List, Optional, Tuple
+     8	
+     9	import numpy as np
+    10	import pysam
+    11	
+    12	from fin.analysis.assignments import em_with_coherence
+    13	from fin.analysis.quantification import (
+    14	    QuantResult,
+    15	    _exons_from_candidate,
+    16	    aggregate_across_intervals,
+    17	    compute_fulllen_frac,
+    18	    polya5p_drops,
+    19	    quantify_transcripts,
+    20	)
+    21	from fin.candidates.canonical import chain_all_canonical, parse_motifs
+    22	from fin.candidates.dataclasses import CandidateSet
+    23	from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+    24	from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+    25	from fin.pipeline.assignment import Assigner
+    26	from fin.pipeline.selection import select_global, select_m2_interval
+    27	from fin.pipeline.config import PipelineConfig
+    28	from fin.scoring.em_inputs import build_em_matrices
+    29	from fin.scoring.krill_tiebreak import krill_tiebreak
+    30	from fin.scoring.mappy_distance import compute_mappy_distance
+    31	
+    32	logger = logging.getLogger(__name__)
+    33	
+    34	# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+    35	# K (transcript-bp each side of the wobbling junction) comes from the configurable
+    36	# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+    37	# an unscorable tie cell (a tied candidate the eventalign window could not score).
+    38	_M2_EM_FLANK = 2
+    39	_M2_EM_PAD = 1.0
+    40	
+    41	
+    42	class PipelineRunner:
+    43	    """Orchestrates the full pyfin pipeline."""
+    44	
+    45	    def __init__(self, config: PipelineConfig):
+    46	        self.config = config
+    47	        self._gtf_reader = None
+    48	        self._genome_fasta = None
+    49	        self._signal_reader = None
+    50	        # Genome-wide mappy aligner for fusion soft-clip arm re-alignment; built
+    51	        # lazily on first fusion interval and cached (indexing is expensive).
+    52	        self._fusion_genome_aligner = None
+    53	        self._fusion_aligner_built = False
+    54	        # m2_em assignment layer (mappy AS -> tie_nll -> d_tx -> EM -> quantify).
+    55	        self._assigner = Assigner(config)
+    20	here in later M3 steps.
+    21	"""
+    22	from __future__ import annotations
+    23	
+    24	import logging
+    25	from dataclasses import dataclass
+    26	from pathlib import Path
+    27	from typing import Callable, Dict, List, Optional, Tuple
+    28	
+    29	import numpy as np
+    30	
+    31	from fin.analysis.quantification import (
+    32	    fulllen_fraction_drops,
+    33	    isoform_fraction_drops,
+    34	    mono_exon_drops,
+    35	    soft_mass_ratio_drops,
+    36	)
+    37	
+    38	logger = logging.getLogger(__name__)
+--- direct mock/patch names across all tracked code ---
+--- selection imported by dependencies? ---
+[fin/candidates/canonical.py]
+[fin/scoring/m2_junction_nll.py]
+[fin/analysis/quantification.py]
+--- commit parent-to-child normalized bodies ---
+diff --git a/fin/pipeline/runner.py b/fin/pipeline/runner.py
+index 24b4d78..28b1849 100644
+--- a/fin/pipeline/runner.py
++++ b/fin/pipeline/runner.py
+@@ -18,13 +18,17 @@ from fin.analysis.quantification import (
+     polya5p_drops,
+~
+     quantify_transcripts,
+~
+ )
+~
+-from fin.candidates.canonical import chain_all_canonical, parse_motifs
+~
+ from fin.candidates.dataclasses import CandidateSet
+~
+ from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+~
+ from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+~
+ from fin.pipeline.assignment import Assigner
+~
+-from fin.pipeline.selection import select_global, select_m2_interval
+~
+ from fin.pipeline.config import PipelineConfig
+~
++from fin.pipeline.selection import (
+~
++    canonical_gate_select,
+~
++    junction_dominance_select,
+~
++    select_global,
+~
++    select_m2_interval,
+~
++)
+~
+ from fin.scoring.em_inputs import build_em_matrices
+~
+ from fin.scoring.krill_tiebreak import krill_tiebreak
+~
+ from fin.scoring.mappy_distance import compute_mappy_distance
+~
+@@ -1277,74 +1281,20 @@ class PipelineRunner:
+     def _apply_canonical_gate(
+~
+         self, candidate_set: CandidateSet, chrom_seq: str
+~
+     ) -> None:
+~
+         """Stage 
+-B: drop NOVEL multi-exon candidates with non-canonical junctions.
+~
+~
+-        Mutates ``candidate_set.candidates`` in place, keeping
++B canonical-junction gate. Delegates to the selection layer
+~
++        (fin.pipeline.selection.canonical_gate_select); kept as
+  a 
+-candidate iff:
+~
+-          - it is GTF-passthrough (source="gtf") or fusion (source="fusion") — EXEMPT;
+~
+-          - it is single-exon (empty intron chain) — trivially canonical;
+~
+-          - every internal junction's (donor,acceptor) motif is in canonical_motifs.
+~
+~
+-        ``candidate_set.read_ids`` is left untouched
++method
+  so 
+-reads off a dropped
+~
+-        candidate are simply re-competed in quantification (they will land on a
+~
+-        surviving candidate by argmin).
+~
+-        """
+~
+-        if not chrom_seq:
+~
+-            # No genome sequence → cannot evaluate motifs; skip the gate rather
+~
+-            # than drop everything.
+~
+-            return
+~
+-        motif_set = parse_motifs(self.config.canonical_motifs)
+~
+-        kept: List = []
+~
+-        dropped = 0
+~
+-        for c in candidate_set.candidates:
+~
+-            if c.source
++tests can
+~
++        call this seam directly. Mutates ``candidate_set.candidates``
+  in 
+-("gtf", "fusion"):
+~
+-                kept.append(c)
+~
+-                continue
+~
+-            introns = c.intron_chain.introns
+~
+-            if not introns:
+~
+-                kept.append(c)  # mono: no internal junction
+~
+-                continue
+~
+-            if chain_all_canonical(introns, chrom_seq, c.strand, motif_set):
+~
+-                kept.append(c)
+~
+-            else:
+~
+-                dropped += 1
+~
+-        if dropped:
+~
+-            logger.info(
+~
+-                "Canonical gate: dropped %d/%d novel candidates (interval %s)",
+~
+-                dropped,
+~
+-                len(candidate_set.candidates),
+~
+-                candidate_set.interval.region_string,
+~
+-            )
+~
+-        candidate_set.candidates = kept
++place."""
+~
++        canonical_gate_select(self.config, candidate_set, chrom_seq)
+~
+ 
+~
+     def _apply_junction_dominance_gate(
+~
+         self, candidate_set: CandidateSet, interval: GenomicInterval
+~
+     ) -> None:
+~
+         """Pre-EM 
+-junction-first gate: drop NOVEL candidates with a weak or
+~
+-        non-dominant junction (mutates candidate_set.candidates in place).
+~
+~
+-        Builds the directly-observed read junctions (reopens BAM) and drops a
+~
+-        novel multi-exon candidate if any junction has < min_reads reads or is
+~
+-        dominated by a stronger DIFFERENT junction within
++junction-dominance gate. Delegates to
+  the 
+-window. read_ids is
+~
+-        left untouched (reads off
++selection layer
+~
++        (fin.pipeline.selection.junction_dominance_select); kept as
+  a 
+-dropped candidate re-compete
++method so tests can
+~
++        call this seam directly. Mutates ``candidate_set.candidates``
+  in 
+-quant).
+~
+-        """
+~
+-        from fin.scoring.m2_junction_nll import dominant_junction_drops
+~
+~
+-        observed = self._observed_junctions(interval)
+~
+-        drops = dominant_junction_drops(
+~
+-            candidate_set.candidates, observed,
+~
+-            min_reads=int(self.config.junction_dominance_min_reads),
+~
+-            window=int(self.config.junction_dominance_window_bp),
+~
+-            tol=int(getattr(self.config, "junction_dominance_tol_bp", 2)),
++place."""
+~
++        junction_dominance_select(
+~
++            self.config, candidate_set, interval, self._observed_junctions
+~
+         )
+~
+-        if drops:
+~
+-            kept = [c for i, c in enumerate(candidate_set.candidates)
+~
+-                    if i not in drops]
+~
+-            logger.info(
+~
+-                "Junction-dominance gate: dropped %d/%d novel candidates "
+~
+-                "(interval %s)", len(drops), len(candidate_set.candidates),
+~
+-                interval.region_string,
+~
+-            )
+~
+-            candidate_set.candidates = kept
+~
+ 
+~
+     def cleanup(self):
+~
+         """Close file handles."""
+~
+diff --git a/fin/pipeline/selection.py b/fin/pipeline/selection.py
+index a22dbbc..6919ab5 100644
+--- a/fin/pipeline/selection.py
++++ b/fin/pipeline/selection.py
+@@ -523,3 +523,85 @@ def select_global(
+         _record(before_keys - set(aggregated), "polya5p")
+~
+ 
+~
+     return aggregated, outcomes
+~
+~
+~
++def canonical_gate_select(config, candidate_set, chrom_seq: str) -> List[SelectionOutcome]:
+~
++    """PRE_ASSIGN Stage B: drop NOVEL multi-exon candidates with non-canonical junctions.
+~
+~
++    Byte-identical move of the runner's former ``_apply_canonical_gate`` body. Mutates
+~
++    ``candidate_set.candidates`` in place, keeping a candidate iff it is GTF/fusion (EXEMPT),
+~
++    single-exon (trivially canonical), or every internal junction motif is canonical. ``read_ids``
+~
++    is left untouched (reads off a dropped candidate re-compete in quant). Returns the drop outcomes.
+~
++    """
+~
++    from fin.candidates.canonical import chain_all_canonical, parse_motifs
+~
+~
++    outcomes: List[SelectionOutcome] = []
+~
++    if not chrom_seq:
+~
++        # No genome sequence → cannot evaluate motifs; skip the gate rather
+
+exec
+/bin/bash -c 'echo HEAD=$(git rev-parse --short HEAD); echo TARGET=$(git rev-parse --short cda1a5b); echo BRANCH=$(git branch --show-current); echo '"'--- exact commit diff check ---'; git diff --check cda1a5b"'^ cda1a5b; echo '"'--- import smoke at target tree via current checkout status ---'; python - <<'PY'
+import fin.pipeline.runner as runner
+import fin.pipeline.selection as selection
+print(runner.__name__, selection.__name__)
+print(hasattr(runner, 'chain_all_canonical'), hasattr(runner, 'parse_motifs'))
+print(runner.logger.name, selection.logger.name)
+PY" in /SSD/logan/dev/pyfin
+ exited 1 in 140ms:
+2026-07-24 11:53:53 | INFO     | __init__.py:38 | Package initialized - version 0.1.0
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/SSD/logan/dev/pyfin/fin/pipeline/__init__.py", line 4, in <module>
+    from .runner import PipelineRunner
+  File "/SSD/logan/dev/pyfin/fin/pipeline/runner.py", line 24, in <module>
+    from fin.pipeline.assignment import Assigner
+  File "/SSD/logan/dev/pyfin/fin/pipeline/assignment.py", line 31, in <module>
+    from fin.scoring.krill_tiebreak import krill_tiebreak
+  File "/SSD/logan/dev/pyfin/fin/scoring/krill_tiebreak.py", line 15, in <module>
+    import mappy
+ModuleNotFoundError: No module named 'mappy'
+
+codex
+The exact commit predates current `HEAD`, and runtime import is blocked by missing `mappy`. I’ll use history plus isolated source-level probes to verify whether later fixes expose regressions.
+  ✓ Inspect commit and repository guidance
+  ✓ Compare moved logic against parent
+  ✓ Trace call sites and mock seams
+  → Check imports and selection semantics
+  • Run focused tests and verdict
+exec
+/bin/bash -c "echo '--- later history touching files ---'; git --no-pager log --oneline --decorate cda1a5b..HEAD -- fin/pipeline/runner.py fin/pipeline/selection.py; echo '--- later diffs around gate functions ---'; git diff cda1a5b..HEAD -- fin/pipeline/runner.py fin/pipeline/selection.py | rg -n -C 8 'canonical_gate_select|junction_dominance_select|canonical_gate|junction_dominance|SelectionOutcome|logger'; echo '--- blame new lines as of target/current ---'; git blame -L 528,607 cda1a5b -- fin/pipeline/selection.py; echo '--- package import graph (static) ---'; git grep -n -E 'from fin\\.pipeline\\.selection|import fin\\.pipeline\\.selection|from fin\\.pipeline import' cda1a5b -- 'fin/**/*.py'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- later history touching files ---
+1f75400 refactor(pipeline): split finalize/writers into finalize.py (M4)
+--- later diffs around gate functions ---
+3---- a/fin/pipeline/runner.py
+4-+++ b/fin/pipeline/runner.py
+5-@@ -23,6 +23,7 @@ from fin.candidates.discovery import discover_candidates, merge_fusion_candidate
+6- from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+7- from fin.pipeline.assignment import Assigner
+8- from fin.pipeline.config import PipelineConfig
+9-+from fin.pipeline.finalize import finalize_outputs, write_unfiltered_diagnostic
+10- from fin.pipeline.selection import (
+11:     canonical_gate_select,
+12:     junction_dominance_select,
+13-@@ -135,77 +136,20 @@ class PipelineRunner:
+14-         output_gtf: Optional[str],
+15-         output_tsv: Optional[str],
+16-     ) -> Dict[str, QuantResult]:
+17--        """Apply post-EM filters, resolve gene_ids, optionally write GTF/TSV."""
+18--        # Diagnostic: write unfiltered scores TSV BEFORE the post-EM filter
+19--        # cascade so downstream FN-root-cause analysis can distinguish
+20--        # "candidate never reached EM" from "candidate dropped by a filter".
+--
+31--            for cid, qr in aggregated.items():
+32--                if qr.source == "gtf" and self._gtf_reader:
+33--                    tx = self._gtf_reader.get_transcript(cid)
+34--                    if tx and not qr.gene_id:
+35--                        qr.gene_id = tx.gene_id
+36--                if not qr.gene_id:
+37--                    qr.gene_id = qr.candidate_id
+38--            write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
+39:-            logger.info(
+40--                "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
+41--                unfiltered_path,
+42--                len(aggregated),
+43--            )
+44-+        """Finalize: diagnostic dump -> GLOBAL selection -> gene-id resolution + writers.
+45- 
+46--        # GLOBAL post-aggregate selection cascade (abundance floor / isoform-fraction /
+47--        # soft-mass / mono / full-length / polyA). Lives in fin.pipeline.selection.
+--
+64--            if not qr.gene_id:
+65--                qr.gene_id = qr.candidate_id
+66--
+67--        # Write GTF output
+68--        if output_gtf:
+69--            from fin.io.io_gtf import write_gtf
+70--
+71--            write_gtf(aggregated, output_gtf)
+72:-            logger.info("Wrote GTF output: %s", output_gtf)
+73--
+74--        # US-013: Additional output writers
+75--        if output_tsv:
+76--            from fin.io.io_tsv import write_scoring_tsv
+77--
+78--            transcript_lengths = {
+79--                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+80--                for cid, qr in aggregated.items()
+81--            }
+82--            write_scoring_tsv(aggregated, transcript_lengths, output_tsv)
+83:-            logger.info("Wrote TSV output: %s", output_tsv)
+84--
+85--        if self.config.fusion_enabled and self.config.output_bedpe:
+86--            from fin.io.io_bedpe import write_fusion_bedpe
+87--
+88--            write_fusion_bedpe(aggregated, self.config.output_bedpe)
+89:-            logger.info("Wrote BEDPE output: %s", self.config.output_bedpe)
+90--
+91:-        logger.info(
+92--            "Pipeline complete: %d transcripts quantified", len(aggregated)
+93-+        return finalize_outputs(
+94-+            self.config, aggregated, output_gtf, output_tsv, self._gtf_reader,
+95-         )
+96--        return aggregated
+97- 
+98-     def process_interval(
+99-         self, interval: GenomicInterval
+--- blame new lines as of target/current ---
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 528) def canonical_gate_select(config, candidate_set, chrom_seq: str) -> List[SelectionOutcome]:
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 529)     """PRE_ASSIGN Stage B: drop NOVEL multi-exon candidates with non-canonical junctions.
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 530) 
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 531)     Byte-identical move of the runner's former ``_apply_canonical_gate`` body. Mutates
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 532)     ``candidate_set.candidates`` in place, keeping a candidate iff it is GTF/fusion (EXEMPT),
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 533)     single-exon (trivially canonical), or every internal junction motif is canonical. ``read_ids``
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 534)     is left untouched (reads off a dropped candidate re-compete in quant). Returns the drop outcomes.
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 535)     """
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 536)     from fin.candidates.canonical import chain_all_canonical, parse_motifs
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 537) 
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 538)     outcomes: List[SelectionOutcome] = []
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 539)     if not chrom_seq:
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 540)         # No genome sequence → cannot evaluate motifs; skip the gate rather
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 541)         # than drop everything.
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 542)         return outcomes
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 543)     motif_set = parse_motifs(config.canonical_motifs)
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 544)     kept: List = []
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 545)     dropped = 0
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 546)     for c in candidate_set.candidates:
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 547)         if c.source in ("gtf", "fusion"):
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 548)             kept.append(c)
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 549)             continue
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 550)         introns = c.intron_chain.introns
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 551)         if not introns:
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 552)             kept.append(c)  # mono: no internal junction
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 553)             continue
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 554)         if chain_all_canonical(introns, chrom_seq, c.strand, motif_set):
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 555)             kept.append(c)
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 556)         else:
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 557)             dropped += 1
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 558)             outcomes.append(SelectionOutcome(
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 559)                 c.candidate_id, "drop", "canonical_gate", scope="pre_assign",
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 560)             ))
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 561)     if dropped:
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 562)         logger.info(
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 563)             "Canonical gate: dropped %d/%d novel candidates (interval %s)",
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 564)             dropped,
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 565)             len(candidate_set.candidates),
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 566)             candidate_set.interval.region_string,
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 567)         )
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 568)     candidate_set.candidates = kept
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 569)     return outcomes
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 570) 
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 571) 
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 572) def junction_dominance_select(
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 573)     config, candidate_set, interval, observed_junctions_fn: Callable
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 574) ) -> List[SelectionOutcome]:
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 575)     """PRE_ASSIGN junction-first gate: drop NOVEL candidates with a weak or non-dominant junction.
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 576) 
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 577)     Byte-identical move of the runner's former ``_apply_junction_dominance_gate`` body. Builds the
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 578)     directly-observed read junctions (via ``observed_junctions_fn``, passed at call time so the test
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 579)     seam survives) and drops a novel multi-exon candidate whose junction has < min_reads reads or is
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 580)     dominated by a stronger DIFFERENT junction within the window. Mutates ``candidate_set.candidates``
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 581)     in place; ``read_ids`` untouched. Returns the drop outcomes.
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 582)     """
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 583)     from fin.scoring.m2_junction_nll import dominant_junction_drops
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 584) 
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 585)     outcomes: List[SelectionOutcome] = []
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 586)     observed = observed_junctions_fn(interval)
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 587)     drops = dominant_junction_drops(
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 588)         candidate_set.candidates, observed,
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 589)         min_reads=int(config.junction_dominance_min_reads),
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 590)         window=int(config.junction_dominance_window_bp),
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 591)         tol=int(getattr(config, "junction_dominance_tol_bp", 2)),
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 592)     )
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 593)     if drops:
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 594)         kept = [c for i, c in enumerate(candidate_set.candidates)
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 595)                 if i not in drops]
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 596)         for i, c in enumerate(candidate_set.candidates):
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 597)             if i in drops:
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 598)                 outcomes.append(SelectionOutcome(
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 599)                     c.candidate_id, "drop", "junction_dominance", scope="pre_assign",
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 600)                 ))
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 601)         logger.info(
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 602)             "Junction-dominance gate: dropped %d/%d novel candidates "
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 603)             "(interval %s)", len(drops), len(candidate_set.candidates),
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 604)             interval.region_string,
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 605)         )
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 606)         candidate_set.candidates = kept
+cda1a5b4 (loganylchen 2026-07-23 15:39:14 +0800 607)     return outcomes
+--- package import graph (static) ---
+cda1a5b:fin/pipeline/runner.py:26:from fin.pipeline.selection import (
+
+codex
+I found two seam-level behavior changes despite matching survivor logic. I’m doing one focused test run and a direct logger/patchability check before finalizing.
+  ✓ Inspect commit and repository guidance
+  ✓ Compare moved logic against parent
+  ✓ Trace call sites and mock seams
+  ✓ Check imports and selection semantics
+  → Run focused tests and verdict
+exec
+/bin/bash -c 'set -o pipefail
+pytest -q tests/unit/test_canonical_gate.py tests/unit/test_junction_dominance_gate.py' in /SSD/logan/dev/pyfin
+ exited 2 in 336ms:
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-9.0.2, pluggy-1.6.0
+rootdir: /SSD/logan/dev/pyfin
+configfile: pyproject.toml
+collecting ... collected 0 items / 2 errors                                                   
+
+==================================== ERRORS ====================================
+______________ ERROR collecting tests/unit/test_canonical_gate.py ______________
+ImportError while importing test module '/SSD/logan/dev/pyfin/tests/unit/test_canonical_gate.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+fin/io/io_bam.py:10: in <module>
+    import pysam
+E   ModuleNotFoundError: No module named 'pysam'
+
+During handling of the above exception, another exception occurred:
+/usr/lib/python3.10/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests/unit/test_canonical_gate.py:10: in <module>
+    from fin.candidates.dataclasses import (
+fin/__init__.py:9: in <module>
+    from . import io
+fin/io/__init__.py:13: in <module>
+    from .interval_manager import (
+fin/io/interval_manager.py:21: in <module>
+    from .io_bam import BamReader
+fin/io/io_bam.py:12: in <module>
+    raise ImportError(
+E   ImportError: pysam is required for BAM/SAM support. Install it with: pip install pysam
+_________ ERROR collecting tests/unit/test_junction_dominance_gate.py __________
+ImportError while importing test module '/SSD/logan/dev/pyfin/tests/unit/test_junction_dominance_gate.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+fin/io/io_bam.py:10: in <module>
+    import pysam
+E   ModuleNotFoundError: No module named 'pysam'
+
+During handling of the above exception, another exception occurred:
+/usr/lib/python3.10/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests/unit/test_junction_dominance_gate.py:12: in <module>
+    from fin.candidates.dataclasses import IntronChain, TranscriptCandidate
+fin/__init__.py:9: in <module>
+    from . import io
+fin/io/__init__.py:13: in <module>
+    from .interval_manager import (
+fin/io/interval_manager.py:21: in <module>
+    from .io_bam import BamReader
+fin/io/io_bam.py:12: in <module>
+    raise ImportError(
+E   ImportError: pysam is required for BAM/SAM support. Install it with: pip install pysam
+=========================== short test summary info ============================
+ERROR tests/unit/test_canonical_gate.py
+ERROR tests/unit/test_junction_dominance_gate.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!
+============================== 2 errors in 0.16s ===============================
+
+exec
+/bin/bash -c "echo '--- target import lines ---'; git show cda1a5b:fin/pipeline/runner.py | nl -ba | sed -n '18,34p'; echo '--- target delegates ---'; git show cda1a5b:fin/pipeline/runner.py | nl -ba | sed -n '1280,1300p'; echo '--- target selection logger/outcomes ---'; git show cda1a5b:fin/pipeline/selection.py | nl -ba | sed -n '34,40p;534,570p;583,608p'; echo '--- parent canonical imports/logger/use ---'; git show cda1a5b"'^:fin/pipeline/runner.py | nl -ba | sed -n '"'18,34p;1290,1318p;1330,1348p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- target import lines ---
+    18	    polya5p_drops,
+    19	    quantify_transcripts,
+    20	)
+    21	from fin.candidates.dataclasses import CandidateSet
+    22	from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+    23	from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+    24	from fin.pipeline.assignment import Assigner
+    25	from fin.pipeline.config import PipelineConfig
+    26	from fin.pipeline.selection import (
+    27	    canonical_gate_select,
+    28	    junction_dominance_select,
+    29	    select_global,
+    30	    select_m2_interval,
+    31	)
+    32	from fin.scoring.em_inputs import build_em_matrices
+    33	from fin.scoring.krill_tiebreak import krill_tiebreak
+    34	from fin.scoring.mappy_distance import compute_mappy_distance
+--- target delegates ---
+  1280	
+  1281	    def _apply_canonical_gate(
+  1282	        self, candidate_set: CandidateSet, chrom_seq: str
+  1283	    ) -> None:
+  1284	        """Stage B canonical-junction gate. Delegates to the selection layer
+  1285	        (fin.pipeline.selection.canonical_gate_select); kept as a method so tests can
+  1286	        call this seam directly. Mutates ``candidate_set.candidates`` in place."""
+  1287	        canonical_gate_select(self.config, candidate_set, chrom_seq)
+  1288	
+  1289	    def _apply_junction_dominance_gate(
+  1290	        self, candidate_set: CandidateSet, interval: GenomicInterval
+  1291	    ) -> None:
+  1292	        """Pre-EM junction-dominance gate. Delegates to the selection layer
+  1293	        (fin.pipeline.selection.junction_dominance_select); kept as a method so tests can
+  1294	        call this seam directly. Mutates ``candidate_set.candidates`` in place."""
+  1295	        junction_dominance_select(
+  1296	            self.config, candidate_set, interval, self._observed_junctions
+  1297	        )
+  1298	
+  1299	    def cleanup(self):
+  1300	        """Close file handles."""
+--- target selection logger/outcomes ---
+    34	    mono_exon_drops,
+    35	    soft_mass_ratio_drops,
+    36	)
+    37	
+    38	logger = logging.getLogger(__name__)
+    39	
+    40	
+   534	    is left untouched (reads off a dropped candidate re-compete in quant). Returns the drop outcomes.
+   535	    """
+   536	    from fin.candidates.canonical import chain_all_canonical, parse_motifs
+   537	
+   538	    outcomes: List[SelectionOutcome] = []
+   539	    if not chrom_seq:
+   540	        # No genome sequence → cannot evaluate motifs; skip the gate rather
+   541	        # than drop everything.
+   542	        return outcomes
+   543	    motif_set = parse_motifs(config.canonical_motifs)
+   544	    kept: List = []
+   545	    dropped = 0
+   546	    for c in candidate_set.candidates:
+   547	        if c.source in ("gtf", "fusion"):
+   548	            kept.append(c)
+   549	            continue
+   550	        introns = c.intron_chain.introns
+   551	        if not introns:
+   552	            kept.append(c)  # mono: no internal junction
+   553	            continue
+   554	        if chain_all_canonical(introns, chrom_seq, c.strand, motif_set):
+   555	            kept.append(c)
+   556	        else:
+   557	            dropped += 1
+   558	            outcomes.append(SelectionOutcome(
+   559	                c.candidate_id, "drop", "canonical_gate", scope="pre_assign",
+   560	            ))
+   561	    if dropped:
+   562	        logger.info(
+   563	            "Canonical gate: dropped %d/%d novel candidates (interval %s)",
+   564	            dropped,
+   565	            len(candidate_set.candidates),
+   566	            candidate_set.interval.region_string,
+   567	        )
+   568	    candidate_set.candidates = kept
+   569	    return outcomes
+   570	
+   583	    from fin.scoring.m2_junction_nll import dominant_junction_drops
+   584	
+   585	    outcomes: List[SelectionOutcome] = []
+   586	    observed = observed_junctions_fn(interval)
+   587	    drops = dominant_junction_drops(
+   588	        candidate_set.candidates, observed,
+   589	        min_reads=int(config.junction_dominance_min_reads),
+   590	        window=int(config.junction_dominance_window_bp),
+   591	        tol=int(getattr(config, "junction_dominance_tol_bp", 2)),
+   592	    )
+   593	    if drops:
+   594	        kept = [c for i, c in enumerate(candidate_set.candidates)
+   595	                if i not in drops]
+   596	        for i, c in enumerate(candidate_set.candidates):
+   597	            if i in drops:
+   598	                outcomes.append(SelectionOutcome(
+   599	                    c.candidate_id, "drop", "junction_dominance", scope="pre_assign",
+   600	                ))
+   601	        logger.info(
+   602	            "Junction-dominance gate: dropped %d/%d novel candidates "
+   603	            "(interval %s)", len(drops), len(candidate_set.candidates),
+   604	            interval.region_string,
+   605	        )
+   606	        candidate_set.candidates = kept
+   607	    return outcomes
+--- parent canonical imports/logger/use ---
+    18	    polya5p_drops,
+    19	    quantify_transcripts,
+    20	)
+    21	from fin.candidates.canonical import chain_all_canonical, parse_motifs
+    22	from fin.candidates.dataclasses import CandidateSet
+    23	from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+    24	from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+    25	from fin.pipeline.assignment import Assigner
+    26	from fin.pipeline.selection import select_global, select_m2_interval
+    27	from fin.pipeline.config import PipelineConfig
+    28	from fin.scoring.em_inputs import build_em_matrices
+    29	from fin.scoring.krill_tiebreak import krill_tiebreak
+    30	from fin.scoring.mappy_distance import compute_mappy_distance
+    31	
+    32	logger = logging.getLogger(__name__)
+    33	
+    34	# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+  1290	        """
+  1291	        if not chrom_seq:
+  1292	            # No genome sequence → cannot evaluate motifs; skip the gate rather
+  1293	            # than drop everything.
+  1294	            return
+  1295	        motif_set = parse_motifs(self.config.canonical_motifs)
+  1296	        kept: List = []
+  1297	        dropped = 0
+  1298	        for c in candidate_set.candidates:
+  1299	            if c.source in ("gtf", "fusion"):
+  1300	                kept.append(c)
+  1301	                continue
+  1302	            introns = c.intron_chain.introns
+  1303	            if not introns:
+  1304	                kept.append(c)  # mono: no internal junction
+  1305	                continue
+  1306	            if chain_all_canonical(introns, chrom_seq, c.strand, motif_set):
+  1307	                kept.append(c)
+  1308	            else:
+  1309	                dropped += 1
+  1310	        if dropped:
+  1311	            logger.info(
+  1312	                "Canonical gate: dropped %d/%d novel candidates (interval %s)",
+  1313	                dropped,
+  1314	                len(candidate_set.candidates),
+  1315	                candidate_set.interval.region_string,
+  1316	            )
+  1317	        candidate_set.candidates = kept
+  1318	
+  1330	        from fin.scoring.m2_junction_nll import dominant_junction_drops
+  1331	
+  1332	        observed = self._observed_junctions(interval)
+  1333	        drops = dominant_junction_drops(
+  1334	            candidate_set.candidates, observed,
+  1335	            min_reads=int(self.config.junction_dominance_min_reads),
+  1336	            window=int(self.config.junction_dominance_window_bp),
+  1337	            tol=int(getattr(self.config, "junction_dominance_tol_bp", 2)),
+  1338	        )
+  1339	        if drops:
+  1340	            kept = [c for i, c in enumerate(candidate_set.candidates)
+  1341	                    if i not in drops]
+  1342	            logger.info(
+  1343	                "Junction-dominance gate: dropped %d/%d novel candidates "
+  1344	                "(interval %s)", len(drops), len(candidate_set.candidates),
+  1345	                interval.region_string,
+  1346	            )
+  1347	            candidate_set.candidates = kept
+  1348	
+
+  ✓ Inspect commit and repository guidance
+  ✓ Compare moved logic against parent
+  ✓ Trace call sites and mock seams
+  ✓ Check imports and selection semantics
+  ✓ Run focused tests and verdict
+codex
+**Verdict: ISSUES**
+
+- **Broken canonical-gate patch targets:** The refactor removes the module-level `fin.pipeline.runner.chain_all_canonical` and `fin.pipeline.runner.parse_motifs` attributes, replacing them with function-local imports in `selection.py`. Existing `patch("fin.pipeline.runner.chain_all_canonical")` or `patch.object(runner_module, "parse_motifs")` seams now fail or no longer intercept execution. This directly violates the module-level patch-target requirement. `fin/pipeline/runner.py:21`, `fin/pipeline/selection.py:536`
+- **Logger identity and logging seam changed:** Gate messages previously came from `fin.pipeline.runner.logger`; they now come from `fin.pipeline.selection.logger`. Per-module logging levels, handlers, logger-name formatting, and mocks of `fin.pipeline.runner.logger.info` therefore behave differently. The message text is unchanged, but emitted log output is not byte-identical when logger identity is included or filtered. `fin/pipeline/selection.py:38`, `fin/pipeline/selection.py:562`, `fin/pipeline/selection.py:601`
+- **New failure path before candidate mutation:** Both extracted functions now read `c.candidate_id` to construct outcomes, although the runner discards those outcomes. A candidate double—or candidate-like object—with the fields previously required by these gates but no `candidate_id` now raises instead of completing the drop. In the junction gate, this happens after `kept` is computed but before `candidate_set.candidates = kept`, changing exception and mutation semantics. `fin/pipeline/selection.py:558`, `fin/pipeline/selection.py:598`, `fin/pipeline/selection.py:606`
+
+The core survivor predicates, thresholds/defaults, ordering, original-count logging arguments, and `_observed_junctions` call-time seam are otherwise preserved. I found no static import cycle. Focused tests could not collect in this environment because `pysam` is unavailable.
+tokens used
+57,672
+**Verdict: ISSUES**
+
+- **Broken canonical-gate patch targets:** The refactor removes the module-level `fin.pipeline.runner.chain_all_canonical` and `fin.pipeline.runner.parse_motifs` attributes, replacing them with function-local imports in `selection.py`. Existing `patch("fin.pipeline.runner.chain_all_canonical")` or `patch.object(runner_module, "parse_motifs")` seams now fail or no longer intercept execution. This directly violates the module-level patch-target requirement. `fin/pipeline/runner.py:21`, `fin/pipeline/selection.py:536`
+- **Logger identity and logging seam changed:** Gate messages previously came from `fin.pipeline.runner.logger`; they now come from `fin.pipeline.selection.logger`. Per-module logging levels, handlers, logger-name formatting, and mocks of `fin.pipeline.runner.logger.info` therefore behave differently. The message text is unchanged, but emitted log output is not byte-identical when logger identity is included or filtered. `fin/pipeline/selection.py:38`, `fin/pipeline/selection.py:562`, `fin/pipeline/selection.py:601`
+- **New failure path before candidate mutation:** Both extracted functions now read `c.candidate_id` to construct outcomes, although the runner discards those outcomes. A candidate double—or candidate-like object—with the fields previously required by these gates but no `candidate_id` now raises instead of completing the drop. In the junction gate, this happens after `kept` is computed but before `candidate_set.candidates = kept`, changing exception and mutation semantics. `fin/pipeline/selection.py:558`, `fin/pipeline/selection.py:598`, `fin/pipeline/selection.py:606`
+
+The core survivor predicates, thresholds/defaults, ordering, original-count logging arguments, and `_observed_junctions` call-time seam are otherwise preserved. I found no static import cycle. Focused tests could not collect in this environment because `pysam` is unavailable.

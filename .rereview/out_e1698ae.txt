@@ -1,0 +1,1285 @@
+Reading prompt from stdin...
+OpenAI Codex v0.142.0
+--------
+workdir: /SSD/logan/dev/pyfin
+model: gpt-5.6-sol
+provider: OpenAI
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019f923b-f0a0-70a1-9dc0-e95bb5057238
+--------
+user
+Re-review a git commit in the pyfin repo with fresh, skeptical eyes. A PRIOR review by a weaker model (gpt-5.5) marked it CLEAN. Independently re-verify with the stronger model and catch anything it may have missed. Read the embedded diff (git show); use a PTY if the non-PTY shell returns blank stdout, but the diff below is self-contained.
+
+Commit: e1698ae — refactor(pipeline): unify GLOBAL finalize filters into selection.py (M3 Step 2)
+Nature: BEHAVIOR-PRESERVING REFACTOR (byte-identical bar)
+
+Acceptance bar: BYTE-IDENTICAL behaviour. Verify the move/extraction changed NO behaviour: no reordered statements that matter, no changed default/threshold, no altered condition or control flow, preserved test/mock seams (patch.object / module-level patch targets), no import cycle, no lost local variable or import, sequential-survivor / lazy-build / fold semantics preserved. Flag ANY line that could shift output.
+
+Give a clear verdict for THIS commit: CLEAN or ISSUES (list them with line cites). Be concrete and skeptical. Review only; do not modify code.
+
+===== git show e1698ae =====
+commit e1698ae9cd35e83286b4fb9515dee1e400a4f467
+Author: loganylchen <yuelong.chen.btr@gmail.com>
+Date:   Thu Jul 23 15:31:19 2026 +0800
+
+    refactor(pipeline): unify GLOBAL finalize filters into selection.py (M3 Step 2)
+    
+    Move the post-aggregate filter cascade out of _finalize_and_write into
+    fin/pipeline/selection.py::select_global — the A4 per-source abundance floor and the
+    isoform-fraction / soft-mass / mono-exon / full-length / polyA drops. The runner's
+    _finalize_and_write now: (unfiltered-TSV diagnostic) -> select_global(self.config,
+    aggregated, self._apply_polya5p_filter) -> (gene-id resolution + GTF/TSV/BEDPE writers).
+    
+    Byte-identical move: every filter's threshold/predicate, the enable_score_filter gate on
+    all six, and the sequential survivor threading (each filter sees the prior's survivors;
+    A4 rebinds aggregated first) are preserved (Codex-verified). _apply_polya5p_filter stays a
+    runner method passed at call time (test seam); the 4 now-unused *_drops imports were removed
+    from the runner. Each drop emits a SelectionOutcome(scope="global") — additive provenance.
+    
+    With M3 Step 1 (interval) this puts BOTH post-EM selection scopes in selection.py. 911 tests
+    pass (unchanged); Codex CLEAN.
+
+diff --git a/fin/pipeline/runner.py b/fin/pipeline/runner.py
+index 0ba8120..24b4d78 100644
+--- a/fin/pipeline/runner.py
++++ b/fin/pipeline/runner.py
+@@ -15,10 +15,6 @@ from fin.analysis.quantification import (
+     _exons_from_candidate,
+     aggregate_across_intervals,
+     compute_fulllen_frac,
+-    fulllen_fraction_drops,
+-    isoform_fraction_drops,
+-    mono_exon_drops,
+-    soft_mass_ratio_drops,
+     polya5p_drops,
+     quantify_transcripts,
+ )
+@@ -27,7 +23,7 @@ from fin.candidates.dataclasses import CandidateSet
+ from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+ from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+ from fin.pipeline.assignment import Assigner
+-from fin.pipeline.selection import select_m2_interval
++from fin.pipeline.selection import select_global, select_m2_interval
+ from fin.pipeline.config import PipelineConfig
+ from fin.scoring.em_inputs import build_em_matrices
+ from fin.scoring.krill_tiebreak import krill_tiebreak
+@@ -136,10 +132,6 @@ class PipelineRunner:
+         output_tsv: Optional[str],
+     ) -> Dict[str, QuantResult]:
+         """Apply post-EM filters, resolve gene_ids, optionally write GTF/TSV."""
+-        # R5 ablation: enable_score_filter=False disables all post-EM filters so
+-        # the ablation row sees unfiltered EM output (AC7).
+-        _score_filter_on = getattr(self.config, "enable_score_filter", True)
+-
+         # Diagnostic: write unfiltered scores TSV BEFORE the post-EM filter
+         # cascade so downstream FN-root-cause analysis can distinguish
+         # "candidate never reached EM" from "candidate dropped by a filter".
+@@ -167,173 +159,11 @@ class PipelineRunner:
+                 len(aggregated),
+             )
+ 
+-        # A4: post-EM abundance floor with per-source thresholds (on soft EM
+-        # abundance). NOVEL transcripts face min_abundance (the `fin` CLI defaults
+-        # it to 3). GTF transcripts face their own lighter floor min_gtf_abundance
+-        # (CLI default 1) so a GTF candidate whose EM soft-mass is below 1 read is
+-        # dropped — pyfin is not a copy-annotation tool — while genuine annotated
+-        # transcripts with real EM support are kept. When floor_gtf_abundance is
+-        # set (--floor-gtf-abundance) GTF is raised to the NOVEL floor — precisely
+-        # max(min_gtf_abundance, min_abundance) so the toggle never LOWERS an
+-        # explicit GTF floor — reproducing the SIRV gffcompare T>=3 with-GTF
+-        # operating point. Fusion is ALWAYS exempt so opt-in fusion calls are
+-        # never silently dropped. SIRV-tuned: these floors are overfit and gut
+-        # genuine low-abundance isoform recall on real data; disable via
+-        # --min-abundance 0 / --min-gtf-abundance 0.
+-        # NOTE: the separate ablation harness (fin/ablation/runner.py) keeps GTF
+-        # exempt regardless — that divergence is intentional (no-GTF de novo).
+-        floor_gtf = self.config.floor_gtf_abundance
+-        gtf_floor = (
+-            max(self.config.min_gtf_abundance, self.config.min_abundance)
+-            if floor_gtf
+-            else self.config.min_gtf_abundance
++        # GLOBAL post-aggregate selection cascade (abundance floor / isoform-fraction /
++        # soft-mass / mono / full-length / polyA). Lives in fin.pipeline.selection.
++        aggregated, _global_outcomes = select_global(
++            self.config, aggregated, self._apply_polya5p_filter,
+         )
+-        if _score_filter_on and (self.config.min_abundance > 0.0 or gtf_floor > 0.0):
+-            before = len(aggregated)
+-            aggregated = {
+-                cid: qr
+-                for cid, qr in aggregated.items()
+-                if qr.source == "fusion"
+-                or (
+-                    qr.abundance >= gtf_floor
+-                    if qr.source == "gtf"
+-                    else qr.abundance >= self.config.min_abundance
+-                )
+-            }
+-            dropped = before - len(aggregated)
+-            if dropped:
+-                logger.info(
+-                    "Dropped %d transcripts with abundance < floor "
+-                    "(novel < %.3f, gtf < %.3f)",
+-                    dropped,
+-                    self.config.min_abundance,
+-                    gtf_floor,
+-                )
+-
+-        # Minimum isoform fraction (locus-relative abundance) filter. Drops
+-        # NOVEL multi-exon transcripts whose abundance is below
+-        # `min_isoform_fraction` of the dominant overlapping novel isoform at
+-        # the same locus — the standard Cufflinks --min-isoform-fraction /
+-        # StringTie -f heuristic (the low-fraction tail is enriched for
+-        # incompletely-spliced precursors and assembly artifacts).
+-        # gtf/fusion/mono candidates are EXEMPT. SIRV WARNING: the conservative
+-        # literature default (0.01) is used; SIRV's F1-optimal ~0.4 is overfit.
+-        if _score_filter_on and self.config.min_isoform_fraction > 0.0:
+-            drop_ids = isoform_fraction_drops(
+-                aggregated, self.config.min_isoform_fraction
+-            )
+-            if drop_ids:
+-                aggregated = {
+-                    cid: qr
+-                    for cid, qr in aggregated.items()
+-                    if cid not in drop_ids
+-                }
+-                logger.info(
+-                    "Dropped %d novel transcripts with isoform fraction < %.3f",
+-                    len(drop_ids),
+-                    self.config.min_isoform_fraction,
+-                )
+-
+-        # Soft-mass / hard-read ratio filter. Drops a NOVEL multi-exon candidate
+-        # whose EM soft abundance is inflated far above its honest hard-read
+-        # (argmax) count — the signature of a wobble shadow that steals little
+-        # real read support but accumulates fractional soft crumbs from a
+-        # high-abundance structural near-copy (anchor). Catches the HIGH-relative
+-        # -abundance shadows that the isoform_fraction / cluster-recheck levers
+-        # cannot (a shadow at 32% of its anchor passes a fraction gate). Pure EM
+-        # evidence; gtf/fusion/mono exempt. max_soft_mass_ratio<=0 disables.
+-        if _score_filter_on and self.config.max_soft_mass_ratio > 0.0:
+-            drop_ids = soft_mass_ratio_drops(
+-                aggregated, self.config.max_soft_mass_ratio
+-            )
+-            if drop_ids:
+-                aggregated = {
+-                    cid: qr
+-                    for cid, qr in aggregated.items()
+-                    if cid not in drop_ids
+-                }
+-                logger.info(
+-                    "Dropped %d novel transcripts with soft/hard read ratio >= %.2f",
+-                    len(drop_ids),
+-                    self.config.max_soft_mass_ratio,
+-                )
+-
+-        # Lever 3 — mono-exon (single-exon) read-support gate. Drop a NOVEL
+-        # single-exon candidate whose hard read count < min_mono_exon_reads OR
+-        # genomic length < min_mono_exon_length. Suppresses single-exon de novo
+-        # noise (IsoQuant drops novel unspliced by default for ONT) WITHOUT a
+-        # blanket drop — a high-support/long real intronless gene survives.
+-        # gtf/fusion/multi-exon exempt. Needs the master switch AND >=1 threshold
+-        # > 0; otherwise no drops (byte-identical).
+-        if (
+-            _score_filter_on
+-            and getattr(self.config, "drop_mono_exon_novel", False)
+-            and (
+-                self.config.min_mono_exon_reads > 0
+-                or self.config.min_mono_exon_length > 0
+-            )
+-        ):
+-            drop_ids = mono_exon_drops(
+-                aggregated,
+-                min_reads=self.config.min_mono_exon_reads,
+-                min_len=self.config.min_mono_exon_length,
+-            )
+-            if drop_ids:
+-                aggregated = {
+-                    cid: qr
+-                    for cid, qr in aggregated.items()
+-                    if cid not in drop_ids
+-                }
+-                logger.info(
+-                    "Dropped %d novel single-exon transcripts (mono gate: "
+-                    "min_reads=%d min_len=%d)",
+-                    len(drop_ids),
+-                    self.config.min_mono_exon_reads,
+-                    self.config.min_mono_exon_length,
+-                )
+-
+-        # Full-length end-coherence filter (FLAIR/TALON-style full-length read
+-        # support). Drops NOVEL multi-exon (>=2 intron) transcripts whose
+-        # fraction of full-length assigned reads (read genomic 5' AND 3' both
+-        # within fulllen_window_bp of the candidate's ends) is below
+-        # min_fulllen_fraction. The fulllen_frac METRIC itself is signal-free
+-        # (BAM primary-alignment spans only), but it is computed per-interval
+-        # over the quant assignment population (the m2_em/m1_em EM hard
+-        # assignments or, under argmax, the M2-tiebreak picks); candidates with
+-        # fulllen_frac < 0 (unreachable or never scored) are EXEMPT and never
+-        # dropped. gtf/fusion/mono exempt. ORTHOGONAL to the isoform-fraction
+-        # filter above (the two stack on the competitor metric). SIRV WARNING:
+-        # the default 0.1 is SIRV-tuned; re-tune or disable on real data.
+-        if _score_filter_on and self.config.min_fulllen_fraction > 0.0:
+-            drop_ids = fulllen_fraction_drops(
+-                aggregated, self.config.min_fulllen_fraction
+-            )
+-            if drop_ids:
+-                aggregated = {
+-                    cid: qr
+-                    for cid, qr in aggregated.items()
+-                    if cid not in drop_ids
+-                }
+-                logger.info(
+-                    "Dropped %d novel transcripts with full-length fraction < %.3f",
+-                    len(drop_ids),
+-                    self.config.min_fulllen_fraction,
+-                )
+-
+-        # polyA + 5'-proximity candidate-retention filter. Drop a candidate
+-        # unless >= min_polya5p_reads of its assigned reads BOTH have a krill
+-        # whole-read polyA tail (qc PASS & length > min_polya_length) AND map
+-        # with their genomic 5' end within polya5p_window_bp of the candidate's
+-        # 5' end. GTF candidates are exempt by default (polya5p_exempt_gtf=True,
+-        # like fusion); only novel candidates are gated. Requires signal; no-ops
+-        # when absent.
+-        if (
+-            _score_filter_on
+-            and getattr(self.config, "min_polya5p_reads", 0) > 0
+-            and self.config.signal_path
+-            and Path(self.config.signal_path).exists()
+-        ):
+-            aggregated = self._apply_polya5p_filter(aggregated)
+ 
+         # Resolve gene_ids from GTF annotation
+         for cid, qr in aggregated.items():
+diff --git a/fin/pipeline/selection.py b/fin/pipeline/selection.py
+index db6b873..a22dbbc 100644
+--- a/fin/pipeline/selection.py
++++ b/fin/pipeline/selection.py
+@@ -23,10 +23,18 @@ from __future__ import annotations
+ 
+ import logging
+ from dataclasses import dataclass
+-from typing import Callable, List, Optional, Tuple
++from pathlib import Path
++from typing import Callable, Dict, List, Optional, Tuple
+ 
+ import numpy as np
+ 
++from fin.analysis.quantification import (
++    fulllen_fraction_drops,
++    isoform_fraction_drops,
++    mono_exon_drops,
++    soft_mass_ratio_drops,
++)
++
+ logger = logging.getLogger(__name__)
+ 
+ 
+@@ -311,3 +319,207 @@ def select_m2_interval(
+         )
+ 
+     return quant_results, outcomes
++
++
++def select_global(
++    config,
++    aggregated: Dict[str, "object"],
++    apply_polya5p_fn: Callable,
++) -> Tuple[Dict[str, "object"], List[SelectionOutcome]]:
++    """Run the GLOBAL post-aggregate selection cascade over the aggregated transcript dict.
++
++    Byte-identical move of the filter section of the runner's ``_finalize_and_write``: the A4
++    per-source abundance floor, then isoform-fraction / soft-mass / mono-exon / full-length /
++    polyA drops, each gated (as before) by ``enable_score_filter`` and its own threshold, over the
++    survivors of the earlier filters (sequential, locus-relative). ``apply_polya5p_fn`` is the
++    runner's ``_apply_polya5p_filter`` bound method (needs the signal reader), passed at call time.
++    Returns ``(filtered_aggregated, outcomes)``. Diagnostic dumps, gene-id resolution, and the
++    GTF/TSV/BEDPE writers stay in the runner (M4 splits the writers).
++    """
++    outcomes: List[SelectionOutcome] = []
++
++    def _record(cids, reason: str) -> None:
++        for cid in cids:
++            outcomes.append(SelectionOutcome(cid, "drop", reason, scope="global"))
++
++    # R5 ablation: enable_score_filter=False disables all post-EM filters so
++    # the ablation row sees unfiltered EM output (AC7).
++    _score_filter_on = getattr(config, "enable_score_filter", True)
++
++    # A4: post-EM abundance floor with per-source thresholds (on soft EM
++    # abundance). NOVEL transcripts face min_abundance (the `fin` CLI defaults
++    # it to 3). GTF transcripts face their own lighter floor min_gtf_abundance
++    # (CLI default 1) so a GTF candidate whose EM soft-mass is below 1 read is
++    # dropped — pyfin is not a copy-annotation tool — while genuine annotated
++    # transcripts with real EM support are kept. When floor_gtf_abundance is
++    # set (--floor-gtf-abundance) GTF is raised to the NOVEL floor — precisely
++    # max(min_gtf_abundance, min_abundance) so the toggle never LOWERS an
++    # explicit GTF floor — reproducing the SIRV gffcompare T>=3 with-GTF
++    # operating point. Fusion is ALWAYS exempt so opt-in fusion calls are
++    # never silently dropped. SIRV-tuned: these floors are overfit and gut
++    # genuine low-abundance isoform recall on real data; disable via
++    # --min-abundance 0 / --min-gtf-abundance 0.
++    # NOTE: the separate ablation harness (fin/ablation/runner.py) keeps GTF
++    # exempt regardless — that divergence is intentional (no-GTF de novo).
++    floor_gtf = config.floor_gtf_abundance
++    gtf_floor = (
++        max(config.min_gtf_abundance, config.min_abundance)
++        if floor_gtf
++        else config.min_gtf_abundance
++    )
++    if _score_filter_on and (config.min_abundance > 0.0 or gtf_floor > 0.0):
++        before = len(aggregated)
++        kept = {
++            cid: qr
++            for cid, qr in aggregated.items()
++            if qr.source == "fusion"
++            or (
++                qr.abundance >= gtf_floor
++                if qr.source == "gtf"
++                else qr.abundance >= config.min_abundance
++            )
++        }
++        dropped = before - len(kept)
++        if dropped:
++            _record(set(aggregated) - set(kept), "min_abundance")
++            logger.info(
++                "Dropped %d transcripts with abundance < floor "
++                "(novel < %.3f, gtf < %.3f)",
++                dropped,
++                config.min_abundance,
++                gtf_floor,
++            )
++        aggregated = kept
++
++    # Minimum isoform fraction (locus-relative abundance) filter. Drops
++    # NOVEL multi-exon transcripts whose abundance is below
++    # `min_isoform_fraction` of the dominant overlapping novel isoform at
++    # the same locus — the standard Cufflinks --min-isoform-fraction /
++    # StringTie -f heuristic (the low-fraction tail is enriched for
++    # incompletely-spliced precursors and assembly artifacts).
++    # gtf/fusion/mono candidates are EXEMPT. SIRV WARNING: the conservative
++    # literature default (0.01) is used; SIRV's F1-optimal ~0.4 is overfit.
++    if _score_filter_on and config.min_isoform_fraction > 0.0:
++        drop_ids = isoform_fraction_drops(
++            aggregated, config.min_isoform_fraction
++        )
++        if drop_ids:
++            aggregated = {
++                cid: qr
++                for cid, qr in aggregated.items()
++                if cid not in drop_ids
++            }
++            _record(drop_ids, "isoform_fraction")
++            logger.info(
++                "Dropped %d novel transcripts with isoform fraction < %.3f",
++                len(drop_ids),
++                config.min_isoform_fraction,
++            )
++
++    # Soft-mass / hard-read ratio filter. Drops a NOVEL multi-exon candidate
++    # whose EM soft abundance is inflated far above its honest hard-read
++    # (argmax) count — the signature of a wobble shadow that steals little
++    # real read support but accumulates fractional soft crumbs from a
++    # high-abundance structural near-copy (anchor). Catches the HIGH-relative
++    # -abundance shadows that the isoform_fraction / cluster-recheck levers
++    # cannot (a shadow at 32% of its anchor passes a fraction gate). Pure EM
++    # evidence; gtf/fusion/mono exempt. max_soft_mass_ratio<=0 disables.
++    if _score_filter_on and config.max_soft_mass_ratio > 0.0:
++        drop_ids = soft_mass_ratio_drops(
++            aggregated, config.max_soft_mass_ratio
++        )
++        if drop_ids:
++            aggregated = {
++                cid: qr
++                for cid, qr in aggregated.items()
++                if cid not in drop_ids
++            }
++            _record(drop_ids, "soft_mass_ratio")
++            logger.info(
++                "Dropped %d novel transcripts with soft/hard read ratio >= %.2f",
++                len(drop_ids),
++                config.max_soft_mass_ratio,
++            )
++
++    # Lever 3 — mono-exon (single-exon) read-support gate. Drop a NOVEL
++    # single-exon candidate whose hard read count < min_mono_exon_reads OR
++    # genomic length < min_mono_exon_length. Suppresses single-exon de novo
++    # noise (IsoQuant drops novel unspliced by default for ONT) WITHOUT a
++    # blanket drop — a high-support/long real intronless gene survives.
++    # gtf/fusion/multi-exon exempt. Needs the master switch AND >=1 threshold
++    # > 0; otherwise no drops (byte-identical).
++    if (
++        _score_filter_on
++        and getattr(config, "drop_mono_exon_novel", False)
++        and (
++            config.min_mono_exon_reads > 0
++            or config.min_mono_exon_length > 0
++        )
++    ):
++        drop_ids = mono_exon_drops(
++            aggregated,
++            min_reads=config.min_mono_exon_reads,
++            min_len=config.min_mono_exon_length,
++        )
++        if drop_ids:
++            aggregated = {
++                cid: qr
++                for cid, qr in aggregated.items()
++                if cid not in drop_ids
++            }
++            _record(drop_ids, "mono_exon")
++            logger.info(
++                "Dropped %d novel single-exon transcripts (mono gate: "
++                "min_reads=%d min_len=%d)",
++                len(drop_ids),
++                config.min_mono_exon_reads,
++                config.min_mono_exon_length,
++            )
++
++    # Full-length end-coherence filter (FLAIR/TALON-style full-length read
++    # support). Drops NOVEL multi-exon (>=2 intron) transcripts whose
++    # fraction of full-length assigned reads (read genomic 5' AND 3' both
++    # within fulllen_window_bp of the candidate's ends) is below
++    # min_fulllen_fraction. The fulllen_frac METRIC itself is signal-free
++    # (BAM primary-alignment spans only), but it is computed per-interval
++    # over the quant assignment population (the m2_em/m1_em EM hard
++    # assignments or, under argmax, the M2-tiebreak picks); candidates with
++    # fulllen_frac < 0 (unreachable or never scored) are EXEMPT and never
++    # dropped. gtf/fusion/mono exempt. ORTHOGONAL to the isoform-fraction
++    # filter above (the two stack on the competitor metric). SIRV WARNING:
++    # the default 0.1 is SIRV-tuned; re-tune or disable on real data.
++    if _score_filter_on and config.min_fulllen_fraction > 0.0:
++        drop_ids = fulllen_fraction_drops(
++            aggregated, config.min_fulllen_fraction
++        )
++        if drop_ids:
++            aggregated = {
++                cid: qr
++                for cid, qr in aggregated.items()
++                if cid not in drop_ids
++            }
++            _record(drop_ids, "fulllen_fraction")
++            logger.info(
++                "Dropped %d novel transcripts with full-length fraction < %.3f",
++                len(drop_ids),
++                config.min_fulllen_fraction,
++            )
++
++    # polyA + 5'-proximity candidate-retention filter. Drop a candidate
++    # unless >= min_polya5p_reads of its assigned reads BOTH have a krill
++    # whole-read polyA tail (qc PASS & length > min_polya_length) AND map
++    # with their genomic 5' end within polya5p_window_bp of the candidate's
++    # 5' end. GTF candidates are exempt by default (polya5p_exempt_gtf=True,
++    # like fusion); only novel candidates are gated. Requires signal; no-ops
++    # when absent.
++    if (
++        _score_filter_on
++        and getattr(config, "min_polya5p_reads", 0) > 0
++        and config.signal_path
++        and Path(config.signal_path).exists()
++    ):
++        before_keys = set(aggregated)
++        aggregated = apply_polya5p_fn(aggregated)
++        _record(before_keys - set(aggregated), "polya5p")
++
++    return aggregated, outcomes
+
+warning: Model metadata for `gpt-5.6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+codex
+I’ll independently inspect the commit, surrounding call sites, imports, and test seams, then compare exact pre/post behavior.
+  → Inspect commit and repository instructions
+  • Compare pre/post execution semantics
+  • Audit imports mocks and cycles
+  • Run focused verification checks
+  • Deliver skeptical commit verdict
+exec
+/bin/bash -lc "printf '%s\\n' '--- status ---'; git status --short; printf '%s\\n' '--- instructions ---'; find .. -name AGENTS.md -print; printf '%s\\n' '--- show stat/name ---'; git show --stat --oneline --decorate=short e1698ae; printf '%s\\n' '--- parent and commit files ---'; git diff-tree --no-commit-id --name-only -r e1698ae; printf '%s\\n' '--- full diff ---'; git show --format=fuller --find-renames e1698ae -- fin/pipeline/runner.py fin/pipeline/selection.py" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+codex
+The non-PTY shell returned blank as anticipated; I’m rerunning the repository inspection through a PTY.
+exec
+/bin/bash -lc "printf '%s\\n' '--- status ---'; git status --short; printf '%s\\n' '--- instructions ---'; find .. -name AGENTS.md -print; printf '%s\\n' '--- show stat/name ---'; git show --stat --oneline --decorate=short e1698ae; printf '%s\\n' '--- parent and commit files ---'; git diff-tree --no-commit-id --name-only -r e1698ae; printf '%s\\n' '--- full diff ---'; git show --format=fuller --find-renames e1698ae -- fin/pipeline/runner.py fin/pipeline/selection.py" in /SSD/logan/dev/pyfin
+codex
+The extraction is structurally close, but I’m now probing the risky edges: module patch targets, import graph, logging identity, and evaluation/exception differences introduced by provenance recording.
+Commit diff is confirmed; moving to semantic and seam-level comparison.
+  ✓ Inspect commit and repository instructions
+  → Compare pre/post execution semantics
+  • Audit imports mocks and cycles
+  • Run focused verification checks
+  • Deliver skeptical commit verdict
+codex
+Core filter order and thresholds appear preserved. I’m isolating whether the refactor changes observable seams or import-time/runtime behavior despite identical normal-path survivors.
+exec
+/bin/bash -c "GIT_PAGER=cat git show e1698ae:fin/pipeline/selection.py | nl -ba | sed -n '398,445p'; echo '---'; GIT_PAGER=cat git show e1698ae:fin/pipeline/runner.py | nl -ba | sed -n '15,32p;132,172p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+   398	    # StringTie -f heuristic (the low-fraction tail is enriched for
+   399	    # incompletely-spliced precursors and assembly artifacts).
+   400	    # gtf/fusion/mono candidates are EXEMPT. SIRV WARNING: the conservative
+   401	    # literature default (0.01) is used; SIRV's F1-optimal ~0.4 is overfit.
+   402	    if _score_filter_on and config.min_isoform_fraction > 0.0:
+   403	        drop_ids = isoform_fraction_drops(
+   404	            aggregated, config.min_isoform_fraction
+   405	        )
+   406	        if drop_ids:
+   407	            aggregated = {
+   408	                cid: qr
+   409	                for cid, qr in aggregated.items()
+   410	                if cid not in drop_ids
+   411	            }
+   412	            _record(drop_ids, "isoform_fraction")
+   413	            logger.info(
+   414	                "Dropped %d novel transcripts with isoform fraction < %.3f",
+   415	                len(drop_ids),
+   416	                config.min_isoform_fraction,
+   417	            )
+   418	
+   419	    # Soft-mass / hard-read ratio filter. Drops a NOVEL multi-exon candidate
+   420	    # whose EM soft abundance is inflated far above its honest hard-read
+   421	    # (argmax) count — the signature of a wobble shadow that steals little
+   422	    # real read support but accumulates fractional soft crumbs from a
+   423	    # high-abundance structural near-copy (anchor). Catches the HIGH-relative
+   424	    # -abundance shadows that the isoform_fraction / cluster-recheck levers
+   425	    # cannot (a shadow at 32% of its anchor passes a fraction gate). Pure EM
+   426	    # evidence; gtf/fusion/mono exempt. max_soft_mass_ratio<=0 disables.
+   427	    if _score_filter_on and config.max_soft_mass_ratio > 0.0:
+   428	        drop_ids = soft_mass_ratio_drops(
+   429	            aggregated, config.max_soft_mass_ratio
+   430	        )
+   431	        if drop_ids:
+   432	            aggregated = {
+   433	                cid: qr
+   434	                for cid, qr in aggregated.items()
+   435	                if cid not in drop_ids
+   436	            }
+   437	            _record(drop_ids, "soft_mass_ratio")
+   438	            logger.info(
+   439	                "Dropped %d novel transcripts with soft/hard read ratio >= %.2f",
+   440	                len(drop_ids),
+   441	                config.max_soft_mass_ratio,
+   442	            )
+   443	
+   444	    # Lever 3 — mono-exon (single-exon) read-support gate. Drop a NOVEL
+   445	    # single-exon candidate whose hard read count < min_mono_exon_reads OR
+---
+    15	    _exons_from_candidate,
+    16	    aggregate_across_intervals,
+    17	    compute_fulllen_frac,
+    18	    polya5p_drops,
+    19	    quantify_transcripts,
+    20	)
+    21	from fin.candidates.canonical import chain_all_canonical, parse_motifs
+    22	from fin.candidates.dataclasses import CandidateSet
+    23	from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+    24	from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+    25	from fin.pipeline.assignment import Assigner
+    26	from fin.pipeline.selection import select_global, select_m2_interval
+    27	from fin.pipeline.config import PipelineConfig
+    28	from fin.scoring.em_inputs import build_em_matrices
+    29	from fin.scoring.krill_tiebreak import krill_tiebreak
+    30	from fin.scoring.mappy_distance import compute_mappy_distance
+    31	
+    32	logger = logging.getLogger(__name__)
+   132	        output_tsv: Optional[str],
+   133	    ) -> Dict[str, QuantResult]:
+   134	        """Apply post-EM filters, resolve gene_ids, optionally write GTF/TSV."""
+   135	        # Diagnostic: write unfiltered scores TSV BEFORE the post-EM filter
+   136	        # cascade so downstream FN-root-cause analysis can distinguish
+   137	        # "candidate never reached EM" from "candidate dropped by a filter".
+   138	        if getattr(self.config, "write_unfiltered_scores", False) and output_tsv:
+   139	            from fin.io.io_tsv import write_scoring_tsv
+   140	
+   141	            unfiltered_path = str(Path(output_tsv).with_suffix(".unfiltered.tsv"))
+   142	            transcript_lengths_uf = {
+   143	                cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
+   144	                for cid, qr in aggregated.items()
+   145	            }
+   146	            # Resolve gene_ids on the unfiltered snapshot too so downstream
+   147	            # consumers don't see empty gene_id columns.
+   148	            for cid, qr in aggregated.items():
+   149	                if qr.source == "gtf" and self._gtf_reader:
+   150	                    tx = self._gtf_reader.get_transcript(cid)
+   151	                    if tx and not qr.gene_id:
+   152	                        qr.gene_id = tx.gene_id
+   153	                if not qr.gene_id:
+   154	                    qr.gene_id = qr.candidate_id
+   155	            write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
+   156	            logger.info(
+   157	                "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
+   158	                unfiltered_path,
+   159	                len(aggregated),
+   160	            )
+   161	
+   162	        # GLOBAL post-aggregate selection cascade (abundance floor / isoform-fraction /
+   163	        # soft-mass / mono / full-length / polyA). Lives in fin.pipeline.selection.
+   164	        aggregated, _global_outcomes = select_global(
+   165	            self.config, aggregated, self._apply_polya5p_filter,
+   166	        )
+   167	
+   168	        # Resolve gene_ids from GTF annotation
+   169	        for cid, qr in aggregated.items():
+   170	            if qr.source == "gtf" and self._gtf_reader:
+   171	                tx = self._gtf_reader.get_transcript(cid)
+   172	                if tx:
+
+exec
+/bin/bash -c "echo '--- finalize tests ---'; git grep -n -E '_finalize_and_write|write_unfiltered_scores|min_polya5p_reads|enable_score_filter' e1698ae -- tests | head -250; echo '--- import smoke via archives ---'; rm -rf /tmp/pyfin-review-parent /tmp/pyfin-review-commit; mkdir -p /tmp/pyfin-review-parent /tmp/pyfin-review-commit; git archive e1698ae"'^ | tar -x -C /tmp/pyfin-review-parent; git archive e1698ae | tar -x -C /tmp/pyfin-review-commit; PYTHONPATH=/tmp/pyfin-review-parent python - <<'"'PY'
+import fin.pipeline.runner as r
+import fin.pipeline.selection as s
+print('parent import ok', all(hasattr(r, n) for n in ('isoform_fraction_drops','soft_mass_ratio_drops','mono_exon_drops','fulllen_fraction_drops')), hasattr(s, 'select_global'))
+PY
+PYTHONPATH=/tmp/pyfin-review-commit python - <<'PY'
+import fin.pipeline.runner as r
+import fin.pipeline.selection as s
+print('commit import ok', all(hasattr(r, n) for n in ('isoform_fraction_drops','soft_mass_ratio_drops','mono_exon_drops','fulllen_fraction_drops')), hasattr(s, 'select_global'))
+print('runner attrs', [(n, hasattr(r,n)) for n in ('isoform_fraction_drops','soft_mass_ratio_drops','mono_exon_drops','fulllen_fraction_drops')])
+PY" in /SSD/logan/dev/pyfin
+ exited 1 in 480ms:
+2026-07-24 11:51:06 | INFO     | __init__.py:38 | Package initialized - version 0.1.0
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/SSD/logan/dev/pyfin/fin/pipeline/__init__.py", line 4, in <module>
+    from .runner import PipelineRunner
+  File "/SSD/logan/dev/pyfin/fin/pipeline/runner.py", line 24, in <module>
+    from fin.pipeline.assignment import Assigner
+  File "/SSD/logan/dev/pyfin/fin/pipeline/assignment.py", line 31, in <module>
+    from fin.scoring.krill_tiebreak import krill_tiebreak
+  File "/SSD/logan/dev/pyfin/fin/scoring/krill_tiebreak.py", line 15, in <module>
+    import mappy
+ModuleNotFoundError: No module named 'mappy'
+2026-07-24 11:51:06 | INFO     | __init__.py:38 | Package initialized - version 0.1.0
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/SSD/logan/dev/pyfin/fin/pipeline/__init__.py", line 4, in <module>
+    from .runner import PipelineRunner
+  File "/SSD/logan/dev/pyfin/fin/pipeline/runner.py", line 24, in <module>
+    from fin.pipeline.assignment import Assigner
+  File "/SSD/logan/dev/pyfin/fin/pipeline/assignment.py", line 31, in <module>
+    from fin.scoring.krill_tiebreak import krill_tiebreak
+  File "/SSD/logan/dev/pyfin/fin/scoring/krill_tiebreak.py", line 15, in <module>
+    import mappy
+ModuleNotFoundError: No module named 'mappy'
+
+codex
+A concrete compatibility risk is emerging: four callable names disappeared from `fin.pipeline.runner`. I’m confirming whether that is merely theoretical and checking focused tests against the exact commit snapshot.
+Normal-path predicates/order match; auditing compatibility seams and exact-snapshot validation now.
+  ✓ Inspect commit and repository instructions
+  ✓ Compare pre/post execution semantics
+  → Audit imports mocks and cycles
+  • Run focused verification checks
+  • Deliver skeptical commit verdict
+exec
+/bin/bash -c "echo '--- targeted tests source ---'; git show e1698ae:tests/unit/test_min_abundance_default.py | nl -ba | sed -n '1,190p'; echo '--- polya runner fixture/calls ---'; git show e1698ae:tests/unit/test_polya5p_filter.py | nl -ba | sed -n '180,350p'; echo '--- package init ---'; git show e1698ae:fin/pipeline/__init__.py | nl -ba; echo '--- exact snapshot pytest ---'; cd /tmp/pyfin-review-commit && pytest -q tests/unit/test_min_abundance_default.py tests/unit/test_polya5p_filter.py --disable-warnings --maxfail=1" in /SSD/logan/dev/pyfin
+ exited 1 in 277ms:
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-9.0.2, pluggy-1.6.0
+rootdir: /tmp/pyfin-review-commit
+configfile: pyproject.toml
+collecting ... collected 0 items / 1 error                                                    
+
+==================================== ERRORS ====================================
+__________ ERROR collecting tests/unit/test_min_abundance_default.py ___________
+ImportError while importing test module '/tmp/pyfin-review-commit/tests/unit/test_min_abundance_default.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+fin/io/io_bam.py:10: in <module>
+    import pysam
+E   ModuleNotFoundError: No module named 'pysam'
+
+During handling of the above exception, another exception occurred:
+/usr/lib/python3.10/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests/unit/test_min_abundance_default.py:20: in <module>
+    from fin.analysis.quantification import QuantResult
+fin/__init__.py:9: in <module>
+    from . import io
+fin/io/__init__.py:13: in <module>
+    from .interval_manager import (
+fin/io/interval_manager.py:21: in <module>
+    from .io_bam import BamReader
+fin/io/io_bam.py:12: in <module>
+    raise ImportError(
+E   ImportError: pysam is required for BAM/SAM support. Install it with: pip install pysam
+=========================== short test summary info ============================
+ERROR tests/unit/test_min_abundance_default.py
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+=============================== 1 error in 0.09s ===============================
+
+codex
+The survivor cascade itself matches. I’m doing one final randomized equivalence harness plus syntax/import-graph checks, then I’ll issue the verdict focused on real acceptance-bar violations.
+Import graph has no evident cycle; a module-level monkeypatch compatibility break and changed log-record origin remain under review.
+  ✓ Inspect commit and repository instructions
+  ✓ Compare pre/post execution semantics
+  ✓ Audit imports mocks and cycles
+  → Run focused verification checks
+  • Deliver skeptical commit verdict
+exec
+/bin/bash -c "set -e
+printf '%s\\n' '--- diff check ---'
+git diff-tree --check e1698ae"'^
+echo '"'--- compile exact snapshots ---'
+python -m compileall -q /tmp/pyfin-review-parent/fin /tmp/pyfin-review-commit/fin
+echo 'compileall ok'
+echo '--- randomized cascade equivalence ---'
+python - <<'PY'
+import ast, dataclasses, logging, random
+from pathlib import Path
+from types import SimpleNamespace
+
+src = open('/tmp/pyfin-review-commit/fin/pipeline/selection.py').read()
+tree = ast.parse(src)
+nodes = [n for n in tree.body if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name in {'SelectionOutcome','select_global'}]
+mod = ast.Module(body=nodes, type_ignores=[])
+ns = {'dataclass': dataclasses.dataclass, 'List': list, 'Dict': dict, 'Tuple': tuple,
+      'Callable': object, 'Path': Path, 'logger': logging.getLogger('new')}
+exec(compile(ast.fix_missing_locations(mod), '<selection>', 'exec'), ns)
+select_global = ns['select_global']
+
+@dataclasses.dataclass
+class QR:
+    source: str
+    abundance: float
+    tag: int
+
+class Config(SimpleNamespace):
+    pass
+
+def make_helpers(trace):
+    def drop(name, predicate):
+        def fn(agg, *args, **kwargs):
+            trace.append((name, tuple(agg), args, tuple(sorted(kwargs.items()))))
+            return {k for k,v in agg.items() if predicate(v)}
+        return fn
+    return {
+      'isoform_fraction_drops': drop('iso', lambda v: v.tag % 5 == 0),
+      'soft_mass_ratio_drops': drop('soft', lambda v: v.tag % 7 == 0),
+      'mono_exon_drops': drop('mono', lambda v: v.tag % 11 == 0),
+      'fulllen_fraction_drops': drop('full', lambda v: v.tag % 13 == 0),
+    }
+
+def old(config, aggregated, apply_fn, helpers, trace):
+    on = getattr(config, 'enable_score_filter', True)
+    floor_gtf = config.floor_gtf_abundance
+    gtf_floor = max(config.min_gtf_abundance, config.min_abundance) if floor_gtf else config.min_gtf_abundance
+    if on and (config.min_abundance > 0.0 or gtf_floor > 0.0):
+        aggregated = {cid:qr for cid,qr in aggregated.items() if qr.source == 'fusion' or (qr.abundance >= gtf_floor if qr.source == 'gtf' else qr.abundance >= config.min_abundance)}
+    if on and config.min_isoform_fraction > 0.0:
+        ids=helpers['isoform_fraction_drops'](aggregated, config.min_isoform_fraction)
+        if ids: aggregated={cid:qr for cid,qr in aggregated.items() if cid not in ids}
+    if on and config.max_soft_mass_ratio > 0.0:
+        ids=helpers['soft_mass_ratio_drops'](aggregated, config.max_soft_mass_ratio)
+        if ids: aggregated={cid:qr for cid,qr in aggregated.items() if cid not in ids}
+    if on and getattr(config,'drop_mono_exon_novel',False) and (config.min_mono_exon_reads > 0 or config.min_mono_exon_length > 0):
+        ids=helpers['mono_exon_drops'](aggregated,min_reads=config.min_mono_exon_reads,min_len=config.min_mono_exon_length)
+        if ids: aggregated={cid:qr for cid,qr in aggregated.items() if cid not in ids}
+    if on and config.min_fulllen_fraction > 0.0:
+        ids=helpers['fulllen_fraction_drops'](aggregated,config.min_fulllen_fraction)
+        if ids: aggregated={cid:qr for cid,qr in aggregated.items() if cid not in ids}
+    if on and getattr(config,'min_polya5p_reads',0)>0 and config.signal_path and Path(config.signal_path).exists():
+        aggregated=apply_fn(aggregated)
+    return aggregated
+
+random.seed(0)
+for case in range(2000):
+    agg={f'c{i}':QR(random.choice(['novel','gtf','fusion']),random.random()*5,i) for i in range(random.randrange(0,30))}
+    cfg=Config(enable_score_filter=random.choice([True,False]), floor_gtf_abundance=random.choice([True,False]),
+      min_abundance=random.choice([0.0,.5,3.0]), min_gtf_abundance=random.choice([0.0,.2,1.0]),
+      min_isoform_fraction=random.choice([0.0,.01]), max_soft_mass_ratio=random.choice([0.0,2.0]),
+      drop_mono_exon_novel=random.choice([True,False]), min_mono_exon_reads=random.choice([0,1]), min_mono_exon_length=random.choice([0,100]),
+      min_fulllen_fraction=random.choice([0.0,.1]), min_polya5p_reads=random.choice([0,1]), signal_path='/dev/null')
+    old_trace=[]; new_trace=[]
+    old_helpers=make_helpers(old_trace); new_helpers=make_helpers(new_trace)
+    def old_poly(d): old_trace.append(('poly',tuple(d),(),())); return {k:v for k,v in d.items() if v.tag%17}
+    def new_poly(d): new_trace.append(('poly',tuple(d),(),())); return {k:v for k,v in d.items() if v.tag%17}
+    got_old=old(cfg,agg,old_poly,old_helpers,old_trace)
+    ns.update(new_helpers)
+    got_new,_=select_global(cfg,agg,new_poly)
+    if tuple(got_old)"'!=tuple(got_new) or old_trace!=new_trace:
+        raise AssertionError((case, tuple(got_old),tuple(got_new),old_trace,new_trace))
+print('"'2000 randomized configurations matched survivor order and helper-call sequence')
+PY
+echo '--- static seam proof ---'
+python - <<'PY'
+import ast
+for label,path in [('parent','/tmp/pyfin-review-parent/fin/pipeline/runner.py'),('commit','/tmp/pyfin-review-commit/fin/pipeline/runner.py')]:
+    tree=ast.parse(open(path).read())
+    names=set()
+    for n in tree.body:
+        if isinstance(n,ast.ImportFrom):
+            names.update(a.asname or a.name for a in n.names)
+        elif isinstance(n,(ast.FunctionDef,ast.ClassDef)):
+            names.add(n.name)
+    targets={'isoform_fraction_drops','soft_mass_ratio_drops','mono_exon_drops','fulllen_fraction_drops'}
+    print(label, sorted(targets & names), 'missing=', sorted(targets-names))
+PY" in /SSD/logan/dev/pyfin
+ exited 1 in 265ms:
+compileall ok
+--- randomized cascade equivalence ---
+Traceback (most recent call last):
+  File "<stdin>", line 11, in <module>
+  File "<selection>", line 42, in <module>
+  File "<selection>", line 54, in SelectionOutcome
+NameError: name 'Optional' is not defined
+
+exec
+/bin/bash -c "set -e
+echo '--- diff check ---'; git diff --check e1698ae"'^ e1698ae; echo '"'diff check ok'
+echo '--- randomized cascade equivalence ---'
+python - <<'PY'
+import ast, dataclasses, logging, random
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Optional, List, Dict, Tuple, Callable
+src=open('/tmp/pyfin-review-commit/fin/pipeline/selection.py').read(); tree=ast.parse(src)
+nodes=[n for n in tree.body if isinstance(n,(ast.ClassDef,ast.FunctionDef)) and n.name in {'SelectionOutcome','select_global'}]
+ns={'dataclass':dataclasses.dataclass,'Optional':Optional,'List':List,'Dict':Dict,'Tuple':Tuple,'Callable':Callable,'Path':Path,'logger':logging.getLogger('new')}
+exec(compile(ast.fix_missing_locations(ast.Module(body=nodes,type_ignores=[])),'<selection>','exec'),ns)
+select_global=ns['select_global']
+@dataclasses.dataclass
+class QR: source:str; abundance:float; tag:int
+class Config(SimpleNamespace): pass
+def make_helpers(trace):
+ def drop(name, pred):
+  def fn(agg,*args,**kwargs): trace.append((name,tuple(agg),args,tuple(sorted(kwargs.items())))); return {k for k,v in agg.items() if pred(v)}
+  return fn
+ return {'isoform_fraction_drops':drop('iso',lambda v:v.tag%5==0),'soft_mass_ratio_drops':drop('soft',lambda v:v.tag%7==0),'mono_exon_drops':drop('mono',lambda v:v.tag%11==0),'fulllen_fraction_drops':drop('full',lambda v:v.tag%13==0)}
+def old(c,a,poly,h,t):
+ on=getattr(c,'enable_score_filter',True); gf=max(c.min_gtf_abundance,c.min_abundance) if c.floor_gtf_abundance else c.min_gtf_abundance
+ if on and (c.min_abundance>0 or gf>0): a={k:v for k,v in a.items() if v.source=='fusion' or (v.abundance>=gf if v.source=='gtf' else v.abundance>=c.min_abundance)}
+ if on and c.min_isoform_fraction>0:
+  d=h['isoform_fraction_drops'](a,c.min_isoform_fraction)
+  if d:a={k:v for k,v in a.items() if k not in d}
+ if on and c.max_soft_mass_ratio>0:
+  d=h['soft_mass_ratio_drops'](a,c.max_soft_mass_ratio)
+  if d:a={k:v for k,v in a.items() if k not in d}
+ if on and getattr(c,'drop_mono_exon_novel',False) and (c.min_mono_exon_reads>0 or c.min_mono_exon_length>0):
+  d=h['mono_exon_drops'](a,min_reads=c.min_mono_exon_reads,min_len=c.min_mono_exon_length)
+  if d:a={k:v for k,v in a.items() if k not in d}
+ if on and c.min_fulllen_fraction>0:
+  d=h['fulllen_fraction_drops'](a,c.min_fulllen_fraction)
+  if d:a={k:v for k,v in a.items() if k not in d}
+ if on and getattr(c,'min_polya5p_reads',0)>0 and c.signal_path and Path(c.signal_path).exists(): a=poly(a)
+ return a
+random.seed(0)
+for case in range(2000):
+ a={f'c{i}':QR(random.choice(['novel','gtf','fusion']),random.random()*5,i) for i in range(random.randrange(30))}
+ c=Config(enable_score_filter=random.choice([True,False]),floor_gtf_abundance=random.choice([True,False]),min_abundance=random.choice([0.,.5,3.]),min_gtf_abundance=random.choice([0.,.2,1.]),min_isoform_fraction=random.choice([0.,.01]),max_soft_mass_ratio=random.choice([0.,2.]),drop_mono_exon_novel=random.choice([True,False]),min_mono_exon_reads=random.choice([0,1]),min_mono_exon_length=random.choice([0,100]),min_fulllen_fraction=random.choice([0.,.1]),min_polya5p_reads=random.choice([0,1]),signal_path='/dev/null')
+ ot=[];nt=[];oh=make_helpers(ot);nh=make_helpers(nt)
+ def op(d):ot.append(('poly',tuple(d),(),()));return {k:v for k,v in d.items() if v.tag%17}
+ def np(d):nt.append(('poly',tuple(d),(),()));return {k:v for k,v in d.items() if v.tag%17}
+ go=old(c,a,op,oh,ot);ns.update(nh);gn,_=select_global(c,a,np)
+ assert tuple(go)==tuple(gn) and ot==nt,(case,tuple(go),tuple(gn),ot,nt)
+print('2000 randomized configurations matched survivor order and helper-call sequence')
+PY
+echo '--- static seam proof ---'
+python - <<'PY'
+import ast
+T={'isoform_fraction_drops','soft_mass_ratio_drops','mono_exon_drops','fulllen_fraction_drops'}
+for label,path in [('parent','/tmp/pyfin-review-parent/fin/pipeline/runner.py'),('commit','/tmp/pyfin-review-commit/fin/pipeline/runner.py')]:
+ tree=ast.parse(open(path).read()); names=set()
+ for n in tree.body:
+  if isinstance(n,ast.ImportFrom): names.update(a.asname or a.name for a in n.names)
+  elif isinstance(n,(ast.FunctionDef,ast.ClassDef)): names.add(n.name)
+ print(label,'present=',sorted(T&names),'missing=',sorted(T-names))
+PY" in /SSD/logan/dev/pyfin
+ succeeded in 175ms:
+2000 randomized configurations matched survivor order and helper-call sequence
+--- static seam proof ---
+parent present= ['fulllen_fraction_drops', 'isoform_fraction_drops', 'mono_exon_drops', 'soft_mass_ratio_drops'] missing= []
+commit present= [] missing= ['fulllen_fraction_drops', 'isoform_fraction_drops', 'mono_exon_drops', 'soft_mass_ratio_drops']
+
+exec
+/bin/bash -c "echo '--- logging configuration ---'; git grep -n -E 'basicConfig|filename|module|funcName|LogRecord|Formatter' e1698ae -- fin | head -120; echo '--- relevant logger lines ---'; git show e1698ae:fin/pipeline/selection.py | nl -ba | sed -n '36,40p;380,392p;408,418p;432,442p;465,477p;496,506p'; echo '--- parent logger lines ---'; git show e1698ae"'^:fin/pipeline/runner.py | nl -ba | sed -n '"'28,34p;198,212p;226,239p;253,266p;291,305p;322,335p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- logging configuration ---
+e1698ae:fin/__init__.py:8:# Import submodules
+e1698ae:fin/_dtw/CHANGELOG.md:9:  - `PyInit__cuda_dtw()` module initialization
+e1698ae:fin/_dtw/CHANGELOG.md:15:- **Python wrapper module** (`fin/_dtw/__init__.py`)
+e1698ae:fin/_dtw/PYTHON_BINDINGS.md:73:- fin/_dtw/__init__.py          - Python wrapper module
+e1698ae:fin/_dtw/PYTHON_BINDINGS.md:152:- `PyModule_Create` for module creation
+e1698ae:fin/_dtw/README.md:3:This module provides GPU-accelerated Dynamic Time Warping distance calculation using CUDA.
+e1698ae:fin/_dtw/README.md:194:The module uses the OpenDBA DTW kernel adapted for pairwise distance calculation:
+e1698ae:fin/_dtw/README.md:205:This module is part of the py-fin package and follows the same license.
+e1698ae:fin/_dtw/__init__.py:2:DTW (Dynamic Time Warping) module — krill backend.
+e1698ae:fin/_dtw/__init__.py:4:This module previously wrapped a self-shipped CUDA DTW extension
+e1698ae:fin/_dtw/dtw_api.cpp:875:static struct PyModuleDef dtwmodule = {
+e1698ae:fin/_dtw/dtw_api.cpp:879:    "This module provides GPU-accelerated DTW distance calculation using CUDA.\n"
+e1698ae:fin/_dtw/dtw_api.cpp:894:    PyObject *module = PyModule_Create(&dtwmodule);
+e1698ae:fin/_dtw/dtw_api.cpp:895:    if (module == NULL)
+e1698ae:fin/_dtw/dtw_api.cpp:900:    // Add module-level constants
+e1698ae:fin/_dtw/dtw_api.cpp:901:    PyModule_AddIntConstant(module, "__version_major__", 0);
+e1698ae:fin/_dtw/dtw_api.cpp:902:    PyModule_AddIntConstant(module, "__version_minor__", 1);
+e1698ae:fin/_dtw/dtw_api.cpp:903:    PyModule_AddStringConstant(module, "__version__", "0.1.0");
+e1698ae:fin/_dtw/dtw_api.cpp:905:    return module;
+e1698ae:fin/ablation/io.py:18:    filename: str = "ablation_summary.tsv",
+e1698ae:fin/ablation/io.py:29:        filename: Output filename (default: ablation_summary.tsv).
+e1698ae:fin/ablation/io.py:34:    out_path = Path(output_dir) / filename
+e1698ae:fin/analysis/__init__.py:2:Analysis pipeline modules for nanopore Direct RNA-seq data
+e1698ae:fin/analysis/assignments.py:21:def _get_array_module(use_gpu=True):
+e1698ae:fin/analysis/assignments.py:185:    xp, to_device, to_host = _get_array_module(use_gpu)
+e1698ae:fin/candidates/__init__.py:1:"""Transcript candidate discovery modules."""
+e1698ae:fin/candidates/canonical.py:114:    module docstring). A junction is canonical iff (donor, acceptor) is in
+e1698ae:fin/candidates/intron_chains.py:407:    """Motif-aware canonical chain expansion (Stage C; shared-module backed).
+e1698ae:fin/candidates/isoform_recovery.py:5:and its reads are pooled into the long member. This module brings it back AFTER the
+e1698ae:fin/candidates/junction_graph.py:10:This module pools all reads' junctions, clusters wobbled junctions to a
+e1698ae:fin/fusion/arm_assembly.py:3:Given the chimeric reads resolved by Stage F1, this module behaves like a
+e1698ae:fin/fusion/chimeric.py:8:This module also guards against the dominant nanopore dRNA false-fusion mode:
+e1698ae:fin/fusion/stitch.py:23:This module replaces the old ``build_fusion_candidates``.
+e1698ae:fin/io/__init__.py:2:I/O module for handling various data formats in nanopore Direct RNA-seq analysis
+e1698ae:fin/io/__init__.py:26:    def __init__(self, module_name, class_name, import_error_msg):
+e1698ae:fin/io/__init__.py:27:        self.module_name = module_name
+e1698ae:fin/io/__init__.py:30:        self._module = None
+e1698ae:fin/io/__init__.py:33:        if self._module is None:
+e1698ae:fin/io/__init__.py:35:                module = __import__(f"fin.io.{self.module_name}", fromlist=[self.class_name])
+e1698ae:fin/io/__init__.py:36:                self._module = getattr(module, self.class_name)
+e1698ae:fin/io/__init__.py:39:        return self._module(*args, **kwargs)
+e1698ae:fin/io/__init__.py:42:        if self._module is None:
+e1698ae:fin/io/__init__.py:44:                module = __import__(f"fin.io.{self.module_name}", fromlist=[self.class_name])
+e1698ae:fin/io/__init__.py:45:                self._module = getattr(module, self.class_name)
+e1698ae:fin/io/__init__.py:48:        return getattr(self._module, name)
+e1698ae:fin/io/interval_manager.py:4:This module provides functions to generate non-overlapping genomic intervals
+e1698ae:fin/io/io_bam.py:53:            self._alignment_file = pysam.AlignmentFile(str(self.file_path), mode, index_filename=str(self.file_path) + '.bai' if self._index else None)
+e1698ae:fin/io/io_bam.py:359:            'filename': str(self.file_path),
+e1698ae:fin/io/io_fastq.py:185:            'filename': str(self.file_path),
+e1698ae:fin/io/io_pod5.py:298:                "filename": str(self.file_path),
+e1698ae:fin/io/io_read_manager.py:4:This module provides classes for organizing nanopore Direct RNA-seq reads into logical subsets
+e1698ae:fin/io/io_slow5.py:262:                'filename': str(self.file_path),
+e1698ae:fin/pipeline/__init__.py:1:"""Pipeline orchestration modules."""
+e1698ae:fin/pipeline/assignment.py:4:its own module (intervals, clustering, EM, quantification are already standalone modules; this is
+e1698ae:fin/pipeline/assignment.py:19:``em_with_coherence`` / ``quantify_transcripts`` seams move to this module (tests re-point here).
+e1698ae:fin/pipeline/assignment.py:271:    """m2_em read-to-candidate assignment (no dropping). See module docstring.
+e1698ae:fin/pipeline/cluster_quant.py:12:injected by the caller (the runner), so this module has no krill/mappy import and is
+e1698ae:fin/pipeline/evidence.py:5:junction-dominance pre-gate, guided junction-support gate). This module centralizes that
+e1698ae:fin/pipeline/selection.py:5:set buried inside ``_quant_m2_em``, and finalize-time dict deletion. This module is the single home
+e1698ae:fin/scoring/__init__.py:1:"""Scoring modules: eventalign parsing, signal DTW (krill-only)."""
+e1698ae:fin/scoring/diff_region_dtw.py:3:This module computes a read-to-read distance matrix by restricting DTW to
+e1698ae:fin/scoring/em_inputs.py:3:This module assembles ``dist_read_to_tx`` and ``dist_read_to_read`` for
+e1698ae:fin/scoring/krill_aligner.py:75:        krill: imported krill module.
+e1698ae:fin/utils/__init__.py:2:Utility modules for the fin package
+e1698ae:fin/utils/log_config.py:4:This module provides centralized logging configuration with:
+e1698ae:fin/utils/log_config.py:30:        name: Logger name (use __name__ for module-level logging)
+e1698ae:fin/utils/log_config.py:53:        # Default format with datetime and filename
+e1698ae:fin/utils/log_config.py:57:            "%(filename)s:%(lineno)d | "
+e1698ae:fin/utils/log_config.py:61:    formatter = logging.Formatter(format_string, datefmt='%Y-%m-%d %H:%M:%S')
+e1698ae:fin/utils/log_config.py:66:        console_handler.setFormatter(formatter)
+e1698ae:fin/utils/log_config.py:74:        file_handler.setFormatter(formatter)
+e1698ae:fin/utils/sequences.py:4:This module provides basic sequence manipulation utilities.
+--- relevant logger lines ---
+    36	)
+    37	
+    38	logger = logging.getLogger(__name__)
+    39	
+    40	
+   380	            )
+   381	        }
+   382	        dropped = before - len(kept)
+   383	        if dropped:
+   384	            _record(set(aggregated) - set(kept), "min_abundance")
+   385	            logger.info(
+   386	                "Dropped %d transcripts with abundance < floor "
+   387	                "(novel < %.3f, gtf < %.3f)",
+   388	                dropped,
+   389	                config.min_abundance,
+   390	                gtf_floor,
+   391	            )
+   392	        aggregated = kept
+   408	                cid: qr
+   409	                for cid, qr in aggregated.items()
+   410	                if cid not in drop_ids
+   411	            }
+   412	            _record(drop_ids, "isoform_fraction")
+   413	            logger.info(
+   414	                "Dropped %d novel transcripts with isoform fraction < %.3f",
+   415	                len(drop_ids),
+   416	                config.min_isoform_fraction,
+   417	            )
+   418	
+   432	            aggregated = {
+   433	                cid: qr
+   434	                for cid, qr in aggregated.items()
+   435	                if cid not in drop_ids
+   436	            }
+   437	            _record(drop_ids, "soft_mass_ratio")
+   438	            logger.info(
+   439	                "Dropped %d novel transcripts with soft/hard read ratio >= %.2f",
+   440	                len(drop_ids),
+   441	                config.max_soft_mass_ratio,
+   442	            )
+   465	            aggregated = {
+   466	                cid: qr
+   467	                for cid, qr in aggregated.items()
+   468	                if cid not in drop_ids
+   469	            }
+   470	            _record(drop_ids, "mono_exon")
+   471	            logger.info(
+   472	                "Dropped %d novel single-exon transcripts (mono gate: "
+   473	                "min_reads=%d min_len=%d)",
+   474	                len(drop_ids),
+   475	                config.min_mono_exon_reads,
+   476	                config.min_mono_exon_length,
+   477	            )
+   496	            aggregated = {
+   497	                cid: qr
+   498	                for cid, qr in aggregated.items()
+   499	                if cid not in drop_ids
+   500	            }
+   501	            _record(drop_ids, "fulllen_fraction")
+   502	            logger.info(
+   503	                "Dropped %d novel transcripts with full-length fraction < %.3f",
+   504	                len(drop_ids),
+   505	                config.min_fulllen_fraction,
+   506	            )
+--- parent logger lines ---
+    28	from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+    29	from fin.pipeline.assignment import Assigner
+    30	from fin.pipeline.selection import select_m2_interval
+    31	from fin.pipeline.config import PipelineConfig
+    32	from fin.scoring.em_inputs import build_em_matrices
+    33	from fin.scoring.krill_tiebreak import krill_tiebreak
+    34	from fin.scoring.mappy_distance import compute_mappy_distance
+   198	                    qr.abundance >= gtf_floor
+   199	                    if qr.source == "gtf"
+   200	                    else qr.abundance >= self.config.min_abundance
+   201	                )
+   202	            }
+   203	            dropped = before - len(aggregated)
+   204	            if dropped:
+   205	                logger.info(
+   206	                    "Dropped %d transcripts with abundance < floor "
+   207	                    "(novel < %.3f, gtf < %.3f)",
+   208	                    dropped,
+   209	                    self.config.min_abundance,
+   210	                    gtf_floor,
+   211	                )
+   212	
+   226	                aggregated = {
+   227	                    cid: qr
+   228	                    for cid, qr in aggregated.items()
+   229	                    if cid not in drop_ids
+   230	                }
+   231	                logger.info(
+   232	                    "Dropped %d novel transcripts with isoform fraction < %.3f",
+   233	                    len(drop_ids),
+   234	                    self.config.min_isoform_fraction,
+   235	                )
+   236	
+   237	        # Soft-mass / hard-read ratio filter. Drops a NOVEL multi-exon candidate
+   238	        # whose EM soft abundance is inflated far above its honest hard-read
+   239	        # (argmax) count — the signature of a wobble shadow that steals little
+   253	                    if cid not in drop_ids
+   254	                }
+   255	                logger.info(
+   256	                    "Dropped %d novel transcripts with soft/hard read ratio >= %.2f",
+   257	                    len(drop_ids),
+   258	                    self.config.max_soft_mass_ratio,
+   259	                )
+   260	
+   261	        # Lever 3 — mono-exon (single-exon) read-support gate. Drop a NOVEL
+   262	        # single-exon candidate whose hard read count < min_mono_exon_reads OR
+   263	        # genomic length < min_mono_exon_length. Suppresses single-exon de novo
+   264	        # noise (IsoQuant drops novel unspliced by default for ONT) WITHOUT a
+   265	        # blanket drop — a high-support/long real intronless gene survives.
+   266	        # gtf/fusion/multi-exon exempt. Needs the master switch AND >=1 threshold
+   291	                    self.config.min_mono_exon_reads,
+   292	                    self.config.min_mono_exon_length,
+   293	                )
+   294	
+   295	        # Full-length end-coherence filter (FLAIR/TALON-style full-length read
+   296	        # support). Drops NOVEL multi-exon (>=2 intron) transcripts whose
+   297	        # fraction of full-length assigned reads (read genomic 5' AND 3' both
+   298	        # within fulllen_window_bp of the candidate's ends) is below
+   299	        # min_fulllen_fraction. The fulllen_frac METRIC itself is signal-free
+   300	        # (BAM primary-alignment spans only), but it is computed per-interval
+   301	        # over the quant assignment population (the m2_em/m1_em EM hard
+   302	        # assignments or, under argmax, the M2-tiebreak picks); candidates with
+   303	        # fulllen_frac < 0 (unreachable or never scored) are EXEMPT and never
+   304	        # dropped. gtf/fusion/mono exempt. ORTHOGONAL to the isoform-fraction
+   305	        # filter above (the two stack on the competitor metric). SIRV WARNING:
+   322	
+   323	        # polyA + 5'-proximity candidate-retention filter. Drop a candidate
+   324	        # unless >= min_polya5p_reads of its assigned reads BOTH have a krill
+   325	        # whole-read polyA tail (qc PASS & length > min_polya_length) AND map
+   326	        # with their genomic 5' end within polya5p_window_bp of the candidate's
+   327	        # 5' end. GTF candidates are exempt by default (polya5p_exempt_gtf=True,
+   328	        # like fusion); only novel candidates are gated. Requires signal; no-ops
+   329	        # when absent.
+   330	        if (
+   331	            _score_filter_on
+   332	            and getattr(self.config, "min_polya5p_reads", 0) > 0
+   333	            and self.config.signal_path
+   334	            and Path(self.config.signal_path).exists()
+   335	        ):
+
+exec
+/bin/bash -c "git grep -n -E 'logging\\.basicConfig|logging\\.Formatter|format=.*filename|format=.*name' e1698ae -- . ':"'!fin/_dtw/**'"' | head -100; echo '--- runner logger declaration parent/commit ---'; git show e1698ae"'^:fin/pipeline/runner.py | nl -ba | sed -n '"'34,42p'; git show e1698ae:fin/pipeline/runner.py | nl -ba | sed -n '30,36p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+e1698ae:benchmarks/ablation_5rows.py:30:logging.basicConfig(
+e1698ae:benchmarks/ablation_5rows.py:32:    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+e1698ae:benchmarks/candidates_only.py:18:logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+e1698ae:benchmarks/diff_region_mapping_poc.py:41:logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+e1698ae:benchmarks/em_subset_evaluate.py:32:logging.basicConfig(
+e1698ae:benchmarks/em_subset_evaluate.py:34:    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+e1698ae:benchmarks/evaluate_ablation.py:25:logging.basicConfig(
+e1698ae:benchmarks/evaluate_ablation.py:27:    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+e1698ae:benchmarks/replot_class_partitioned.py:37:logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+e1698ae:benchmarks/viz_class_partitioned.py:50:logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+e1698ae:benchmarks/viz_m1_m2_m3.py:44:logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+e1698ae:fin/utils/log_config.py:61:    formatter = logging.Formatter(format_string, datefmt='%Y-%m-%d %H:%M:%S')
+e1698ae:tests/eventalign_example.py:15:# logging.basicConfig(level=logging.DEBUG)
+e1698ae:tests/test.io.py:9:# logging.basicConfig(level=logging.DEBUG)
+e1698ae:tests/test_region_separator.py:23:    logging.basicConfig(
+e1698ae:tests/test_region_separator.py:24:        level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+--- runner logger declaration parent/commit ---
+    34	from fin.scoring.mappy_distance import compute_mappy_distance
+    35	
+    36	logger = logging.getLogger(__name__)
+    37	
+    38	# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+    39	# K (transcript-bp each side of the wobbling junction) comes from the configurable
+    40	# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+    41	# an unscorable tie cell (a tied candidate the eventalign window could not score).
+    42	_M2_EM_FLANK = 2
+    30	from fin.scoring.mappy_distance import compute_mappy_distance
+    31	
+    32	logger = logging.getLogger(__name__)
+    33	
+    34	# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+    35	# K (transcript-bp each side of the wobbling junction) comes from the configurable
+    36	# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+
+exec
+/bin/bash -c "git show e1698ae:fin/utils/log_config.py | nl -ba | sed -n '35,70p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+    35	        format_string: Custom format string (optional)
+    36	
+    37	    Returns:
+    38	        Configured logger instance
+    39	
+    40	    Example:
+    41	        >>> logger = setup_logger(__name__, level='DEBUG', log_file='fin.log')
+    42	        >>> logger.info("Process started")
+    43	    """
+    44	    # Create logger
+    45	    logger = logging.getLogger(name)
+    46	    logger.setLevel(getattr(logging, level.upper()))
+    47	
+    48	    # Clear existing handlers to avoid duplicates
+    49	    logger.handlers.clear()
+    50	
+    51	    # Define format
+    52	    if format_string is None:
+    53	        # Default format with datetime and filename
+    54	        format_string = (
+    55	            "%(asctime)s | "
+    56	            "%(levelname)-8s | "
+    57	            "%(filename)s:%(lineno)d | "
+    58	            "%(message)s"
+    59	        )
+    60	
+    61	    formatter = logging.Formatter(format_string, datefmt='%Y-%m-%d %H:%M:%S')
+    62	
+    63	    # Console handler
+    64	    if console:
+    65	        console_handler = logging.StreamHandler(sys.stdout)
+    66	        console_handler.setFormatter(formatter)
+    67	        logger.addHandler(console_handler)
+    68	
+    69	    # File handler
+    70	    if log_file:
+
+exec
+/bin/bash -c "git grep -n 'setup_logger' e1698ae -- fin | head -80; git show e1698ae:fin/__init__.py | nl -ba | sed -n '1,60p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+e1698ae:fin/__init__.py:10:from .utils.log_config import setup_logger, get_package_logger
+e1698ae:fin/__init__.py:50:    "setup_logger",
+e1698ae:fin/cli.py:270:    from fin.utils.log_config import setup_logger
+e1698ae:fin/cli.py:272:    setup_logger("fin", level="DEBUG" if verbose else "INFO")
+e1698ae:fin/pipeline/parallel.py:48:    from fin.utils.log_config import setup_logger
+e1698ae:fin/pipeline/parallel.py:51:    setup_logger("fin", level=log_level)
+e1698ae:fin/utils/__init__.py:5:from .log_config import setup_logger, get_package_logger, list_log_files
+e1698ae:fin/utils/__init__.py:7:__all__ = ["setup_logger", "get_package_logger", "list_log_files"]
+e1698ae:fin/utils/log_config.py:18:def setup_logger(
+e1698ae:fin/utils/log_config.py:41:        >>> logger = setup_logger(__name__, level='DEBUG', log_file='fin.log')
+e1698ae:fin/utils/log_config.py:84:    This is a convenient wrapper around setup_logger with sensible defaults
+e1698ae:fin/utils/log_config.py:89:        **kwargs: Additional arguments passed to setup_logger
+e1698ae:fin/utils/log_config.py:107:    logger = setup_logger(name, **kwargs)
+     1	"""
+     2	fin - A Python package for nanopore Direct RNA-seq data analysis
+     3	"""
+     4	
+     5	__version__ = "0.1.0"
+     6	__author__ = "loganylchen"
+     7	
+     8	# Import submodules
+     9	from . import io
+    10	from .utils.log_config import setup_logger, get_package_logger
+    11	
+    12	# Try to import _dtw extension (optional CUDA DTW)
+    13	try:
+    14	    from ._dtw import dtw_distance, dtw_pairwise, cleanup, is_available as dtw_is_available
+    15	
+    16	    _DTW_IMPORT_ERROR = None
+    17	    _DTW_AVAILABLE = True
+    18	except ImportError as e:
+    19	    _DTW_AVAILABLE = False
+    20	    dtw_distance = None
+    21	    dtw_pairwise = None
+    22	    cleanup = None
+    23	    def dtw_is_available() -> bool:
+    24	        return False
+    25	    _DTW_IMPORT_ERROR = str(e)
+    26	
+    27	# Try CuPy for GPU-accelerated EM
+    28	try:
+    29	    import cupy  # noqa: F401  # availability probe
+    30	    _CUPY_AVAILABLE = True
+    31	except ImportError:
+    32	    _CUPY_AVAILABLE = False
+    33	
+    34	# Initialize package logger
+    35	package_logger = get_package_logger(__name__, level="INFO")
+    36	
+    37	# Log package initialization
+    38	package_logger.info(f"Package initialized - version {__version__}")
+    39	
+    40	if not _DTW_AVAILABLE:
+    41	    package_logger.info(
+    42	        f"_dtw CUDA extension not available (optional). Error: {_DTW_IMPORT_ERROR}"
+    43	    )
+    44	
+    45	if _CUPY_AVAILABLE:
+    46	    package_logger.info("CuPy GPU acceleration available for EM algorithm")
+    47	
+    48	__all__ = [
+    49	    "io",
+    50	    "setup_logger",
+    51	    "get_package_logger",
+    52	]
+    53	
+    54	if _DTW_AVAILABLE:
+    55	    __all__.extend(["dtw_distance", "dtw_pairwise", "cleanup", "dtw_is_available"])
+
+Verification is complete: normal survivor semantics match, but the commit violates the explicit mock-seam and byte-identical logging requirements.
+  ✓ Inspect commit and repository instructions
+  ✓ Compare pre/post execution semantics
+  ✓ Audit imports mocks and cycles
+  ✓ Run focused verification checks
+  ✓ Deliver skeptical commit verdict
+codex
+**Verdict: ISSUES**
+
+- **Mock/patch seams were broken.** `runner.py` no longer exposes `isoform_fraction_drops`, `soft_mass_ratio_drops`, `mono_exon_drops`, or `fulllen_fraction_drops`; they are now bound in `selection.py`. Existing `patch("fin.pipeline.runner.isoform_fraction_drops")` or `patch.object(runner_module, ...)` calls now raise `AttributeError` instead of intercepting the filter. This directly violates the stated module-level patch-target requirement. `fin/pipeline/runner.py:15`, `fin/pipeline/runner.py:26`, `fin/pipeline/selection.py:31`
+- **Filter log output is not byte-identical.** The five moved `logger.info` calls now create records from `fin.pipeline.selection` and `selection.py`, rather than `fin.pipeline.runner` and `runner.py`. The production logger’s default format includes `%(filename)s:%(lineno)d`, so CLI/file log bytes change whenever these filters drop anything. `fin/pipeline/selection.py:38`, `fin/pipeline/selection.py:385`, `fin/pipeline/selection.py:413`, `fin/pipeline/selection.py:438`, `fin/pipeline/selection.py:471`, `fin/pipeline/selection.py:502`, `fin/utils/log_config.py:53`
+
+The actual survivor cascade—thresholds, gates, dictionary order, sequential filtering, lazy polyA invocation, and callback input—matched across 2,000 randomized configurations. No import cycle or syntax issue was found. Exact-snapshot pytest execution was unavailable because the environment lacks `pysam`/`mappy`, but both snapshots compiled successfully.
+tokens used
+63,902
+**Verdict: ISSUES**
+
+- **Mock/patch seams were broken.** `runner.py` no longer exposes `isoform_fraction_drops`, `soft_mass_ratio_drops`, `mono_exon_drops`, or `fulllen_fraction_drops`; they are now bound in `selection.py`. Existing `patch("fin.pipeline.runner.isoform_fraction_drops")` or `patch.object(runner_module, ...)` calls now raise `AttributeError` instead of intercepting the filter. This directly violates the stated module-level patch-target requirement. `fin/pipeline/runner.py:15`, `fin/pipeline/runner.py:26`, `fin/pipeline/selection.py:31`
+- **Filter log output is not byte-identical.** The five moved `logger.info` calls now create records from `fin.pipeline.selection` and `selection.py`, rather than `fin.pipeline.runner` and `runner.py`. The production logger’s default format includes `%(filename)s:%(lineno)d`, so CLI/file log bytes change whenever these filters drop anything. `fin/pipeline/selection.py:38`, `fin/pipeline/selection.py:385`, `fin/pipeline/selection.py:413`, `fin/pipeline/selection.py:438`, `fin/pipeline/selection.py:471`, `fin/pipeline/selection.py:502`, `fin/utils/log_config.py:53`
+
+The actual survivor cascade—thresholds, gates, dictionary order, sequential filtering, lazy polyA invocation, and callback input—matched across 2,000 randomized configurations. No import cycle or syntax issue was found. Exact-snapshot pytest execution was unavailable because the environment lacks `pysam`/`mappy`, but both snapshots compiled successfully.

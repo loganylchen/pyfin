@@ -186,6 +186,7 @@ class PipelineRunner:
                 and not getattr(self.config, "mono_resolve_post_em", False)),
             chain_cluster_fold_span_guard=getattr(
                 self.config, "chain_cluster_fold_span_guard", False),
+            clustering=getattr(self.config, "clustering", "read_chains"),
             canonical_search_bp=self.config.canonical_search_bp,
             max_chains_per_read=self.config.max_chains_per_read,
             canonical_motifs=self.config.canonical_motifs,

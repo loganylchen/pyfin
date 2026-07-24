@@ -1,0 +1,48 @@
+Design discussion (read-only; use a PTY if non-PTY shell returns blank stdout). pyfin de-novo
+candidate generation, redesigning the CLUSTERING step. New clean primitive already landed:
+fin/candidates/chain_cluster.py cluster_families(read_chains) -> ClusterResult (families of multi-exon
+variant chains + pooled reads + mono bucket); it currently takes READS ONLY. The old path
+fin/candidates/discovery.py _chain_cluster_candidates handles GTF SEPARATELY: builds gtf_candidates +
+gtf_by_chain keyed by EXACT intron chain, clusters reads-only, and only at emission merges a read
+cluster member's reads into a GTF candidate when the member chain EXACTLY equals a GTF chain
+(discovery.py ~219-306); an unmatched GTF stays a standalone candidate.
+
+QUESTION: when a GTF is present, should GTF transcripts ENTER the read clusters (as vertices in the
+same wobble/cassette/containment family grouping), or stay a separate exact-match-only track?
+
+The user's design philosophy: do NOT force-merge / snap to annotation; keep all structural variants;
+pool reads at the cluster; let the final WEIGHTED assignment decide read ownership. pyfin's KEY
+differentiator is that it does NOT snap to annotation (it wins corrupted-annotation conditions like
+c_jitter precisely because a jittered GTF does not capture reads). Also relevant: min_gtf_abundance
+floor (default 1) and the guided support gates; and the user already decided intron-retention siblings
+must be SEPARATE clusters.
+
+Give your independent, decisive take:
+
+1. Should a GTF transcript chain be added as a (zero-read) structural-hypothesis vertex into the
+   wobble/cassette/containment clustering, so it clusters with read-derived variants and competes for
+   the pooled reads by evidence? Or keep GTF as a separate exact-match track? Argue from: preserving
+   no-snap (corrupted-annotation robustness), GTF recall (annotated transcripts must not vanish),
+   and the "data decides" philosophy.
+
+2. If GTF enters the cluster as a 0-read variant: what are the risks? Specifically (a) a real annotated
+   transcript that is lowly/not expressed in THIS sample getting ~0 reads and then dropped by
+   min_gtf_abundance — is that desirable ("honest, only report expressed") or a recall regression vs
+   the current near-unconditional GTF emission? (b) does a 0-read GTF vertex distort family formation
+   or the read pool? (c) must the truncation/subset/intron-retention 3-way classification the user
+   wants for read-vs-read ALSO gate GTF-vs-read cluster joins (so a GTF that is an IR sibling of a read
+   structure is NOT pooled with it)?
+
+3. Interaction with pyfin's proven behavior: memory says pyfin's win on c_jitter comes from NOT
+   snapping. Does GTF-as-a-competing-variant preserve that (jittered GTF loses the pooled reads to the
+   true read structure), or could pooling reads with a wobble-matching GTF accidentally re-introduce a
+   soft snap (reads within wobble_bp of a jittered GTF get pooled and could be assigned to the GTF)?
+   How should assignment weighting avoid that?
+
+4. Recommend ONE approach for the new architecture, and note what it means for cluster_families'
+   signature (does it need to accept optional gtf_chains?) and for the downstream per-cluster
+   assignment (how GTF competes: by its stitched annotated sequence via mappy AS / junction NLL like
+   any other variant?). Keep GTF source-tagged so downstream gates (min_gtf_abundance, exemptions)
+   still distinguish it.
+
+Be decisive and concrete. Do not modify code.

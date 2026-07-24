@@ -1,0 +1,3236 @@
+Reading prompt from stdin...
+OpenAI Codex v0.142.0
+--------
+workdir: /SSD/logan/dev/pyfin
+model: gpt-5.6-sol
+provider: OpenAI
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019f923b-f0a2-7480-940d-77069da5a1c2
+--------
+user
+Re-review a git commit in the pyfin repo with fresh, skeptical eyes. A PRIOR review by a weaker model (gpt-5.5) marked it CLEAN. Independently re-verify with the stronger model and catch anything it may have missed. Read the embedded diff (git show); use a PTY if the non-PTY shell returns blank stdout, but the diff below is self-contained.
+
+Commit: b01bcf6 — refactor(pipeline): extract m2_em assignment into Assigner/QuantOutput (M2 Step B)
+Nature: BEHAVIOR-PRESERVING REFACTOR (byte-identical bar)
+
+Acceptance bar: BYTE-IDENTICAL behaviour. Verify the move/extraction changed NO behaviour: no reordered statements that matter, no changed default/threshold, no altered condition or control flow, preserved test/mock seams (patch.object / module-level patch targets), no import cycle, no lost local variable or import, sequential-survivor / lazy-build / fold semantics preserved. Flag ANY line that could shift output.
+
+Give a clear verdict for THIS commit: CLEAN or ISSUES (list them with line cites). Be concrete and skeptical. Review only; do not modify code.
+
+===== git show b01bcf6 =====
+commit b01bcf614618f9e8c9cd8dd141a11ceb67b952e6
+Author: loganylchen <yuelong.chen.btr@gmail.com>
+Date:   Thu Jul 23 15:09:05 2026 +0800
+
+    refactor(pipeline): extract m2_em assignment into Assigner/QuantOutput (M2 Step B)
+    
+    Move the assignment half of the ~460-line _quant_m2_em into a new Assigner class
+    (fin/pipeline/assignment.py) returning an immutable QuantOutput: mappy AS matrix +
+    kept-read set -> tie_nll -> d_tx skeleton (both gate branches) -> optional M3
+    coherence -> em_with_coherence -> optional krill_tiebreak -> quantify_transcripts +
+    max_R stamp. The runner's _quant_m2_em now calls self._assigner.assign(...) and keeps
+    only the post-EM SELECTION tail (drop_cols gates + containment FOLD + mono-resolve +
+    apply). Scope: default m2_em only; argmax/m1_em/cluster untouched.
+    
+    quantify_transcripts + max_R are stamped inside the Assigner (right after EM) rather
+    than after the drop cascade: byte-identical, because the intervening gates only
+    accumulate a drop_cols column-index set and never mutate R/hard_assignments/cand_list/
+    kept_read_ids (Codex-verified). _tie_nll/_eff_lengths stay runner methods passed into
+    assign() at call time so the patch.object test seams survive; the em_with_coherence/
+    quantify_transcripts seams move to the assignment module (2 tests re-pointed).
+    
+    Behavior-preserving. Codex review CLEAN (no byte-identity issue); 911 unit+integration
+    tests pass (only pre-existing test_cli fixture + environmental benchmark_smoke fails).
+    runner.py ~200 lines lighter.
+
+diff --git a/fin/pipeline/assignment.py b/fin/pipeline/assignment.py
+index b4702cd..8890cb2 100644
+--- a/fin/pipeline/assignment.py
++++ b/fin/pipeline/assignment.py
+@@ -4,20 +4,40 @@ Extracted from the runner's ``_quant_m2_em`` so the M1/M2/EM assignment orchestr
+ its own module (intervals, clustering, EM, quantification are already standalone modules; this is
+ the last piece that was glued into the runner).
+ 
+-Step A (this file): ``tie_nll`` — the per-read best-AS tie junction-NLL scoring (moved verbatim
+-from ``PipelineRunner._tie_nll``; ``self.config`` -> ``config``). Byte-identical.
++- Step A: ``tie_nll`` — the per-read best-AS tie junction-NLL scoring (moved verbatim from
++  ``PipelineRunner._tie_nll``; ``self.config`` -> ``config``).
++- Step B: ``Assigner.assign`` — the pure assignment pipeline (mappy AS matrix + kept-read set ->
++  ``tie_nll`` -> d_tx skeleton -> optional M3 coherence -> EM -> optional krill tie-break ->
++  ``quantify_transcripts`` + ``max_R`` stamp) returning an immutable ``QuantOutput``. NO candidate
++  dropping happens here — every structural gate/fold stays in the runner's selection tail (moved to
++  the SelectionEngine in M3). ``quantify_transcripts`` is stamped here (right after EM) rather than
++  after the drop cascade: byte-identical, because the intervening gates only accumulate a
++  ``drop_cols`` column-index set and never mutate ``R`` / ``hard_assignments`` / ``cand_list``.
++
++Byte-identical extraction. The runner keeps thin ``_tie_nll`` / ``_eff_lengths`` methods (passed into
++``assign`` at call time) so the existing ``patch.object(PipelineRunner, ...)`` test seams survive; the
++``em_with_coherence`` / ``quantify_transcripts`` seams move to this module (tests re-point here).
+ """
+ from __future__ import annotations
+ 
+ import logging
+-from typing import Dict, List, Tuple
++from dataclasses import dataclass
++from typing import Callable, Dict, List, Optional, Tuple
+ 
+ import numpy as np
+ 
++from fin.analysis.assignments import em_with_coherence
++from fin.analysis.quantification import quantify_transcripts
++from fin.scoring.krill_tiebreak import krill_tiebreak
++from fin.scoring.m2_junction_nll import MISSING
++
+ logger = logging.getLogger(__name__)
+ 
+ # Junction-window flank (bp) for the M2 tie discrimination window (matches runner).
+ _M2_EM_FLANK = 2
++# d_tx MISSING-cell pad added to (hi-lo) so an unscored tie cell sits just beyond the
++# worst scored margin (matches the runner's original constant).
++_M2_EM_PAD = 1.0
+ 
+ 
+ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
+@@ -218,3 +238,283 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
+     # coverage map is left empty here; the d_tx builder defaults missing reads
+     # to covered=True (recall-safe: never drops on the rare fallback path).
+     return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
++
++
++@dataclass
++class QuantOutput:
++    """Immutable result of the m2_em assignment pipeline (pre-selection).
++
++    Carries everything the runner's selection tail (and, in M3, the SelectionEngine) needs:
++    the read x candidate responsibility matrix ``R`` and ``hard_assignments``, the column-aligned
++    pre-selection ``quant_results`` (``max_R`` already stamped), the candidate axis ``cand_list``,
++    the kept-read axis, the M2 tie evidence (``ties_by_read`` / ``nlls_by_read`` / ``cover_by_read``),
++    and the log counters. Consumers treat it as READ-ONLY: selection materializes a NEW result rather
++    than mutating this object (M3). ``quant_results`` is column-aligned to ``R`` (enumerate index ==
++    R column) at construction; selection must not reorder it in place.
++    """
++
++    R: np.ndarray
++    hard_assignments: np.ndarray
++    quant_results: List  # List[QuantResult]
++    cand_list: List
++    kept_read_ids: List[str]
++    ties_by_read: Dict[int, List[int]]
++    nlls_by_read: Dict[int, Dict[int, float]]
++    cover_by_read: Dict[int, bool]
++    read_seqs: Dict[str, str]
++    n_ties: int
++    n_refined: int
++    beta_use: float
++
++
++class Assigner:
++    """m2_em read-to-candidate assignment (no dropping). See module docstring.
++
++    Holds the pipeline config. ``assign`` receives the runner's ``_tie_nll`` / ``_eff_lengths`` bound
++    methods at call time (``tie_nll_fn`` / ``eff_lengths_fn``) so the ``patch.object(PipelineRunner,
++    ...)`` test seams keep intercepting them.
++    """
++
++    def __init__(self, config):
++        self.config = config
++
++    def assign(
++        self,
++        candidate_set,
++        read_ids: List[str],
++        *,
++        tie_nll_fn: Callable,
++        eff_lengths_fn: Callable,
++    ) -> Optional[QuantOutput]:
++        """Run the m2_em assignment pipeline; return a QuantOutput or None (empty interval)."""
++        import mappy
++
++        from fin.scoring.mappy_preset import get_m1_preset
++        from fin.scoring.mappy_score import score_hit
++
++        cand_list = list(candidate_set.candidates)
++        read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
++        reads_iter = [(rid, read_sequences.get(rid, "")) for rid in read_ids]
++        reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
++        if not reads_iter:
++            return None
++
++        read_seqs = {rid: seq for rid, seq in reads_iter}
++        n_c = len(cand_list)
++        max_iter_em = (
++            self.config.em_max_iter_override
++            if self.config.em_max_iter_override is not None
++            else self.config.em_max_iter
++        )
++
++        # --- Per-candidate mappy aligners + raw AS matrix (tie detection). This
++        #     single AS pass also yields the kept-read set, so the previously
++        #     separate mappy_multimap_responsibilities pass (which recomputed the
++        #     identical AS only to derive kept reads, never feeding the EM) is
++        #     removed: ~40% of the per-interval cost on dense loci. ---
++        preset = get_m1_preset()
++        aligners = [
++            mappy.Aligner(seq=c.sequence, preset=preset) if c.sequence else None
++            for c in cand_list
++        ]
++        all_ids = [rid for rid, _ in reads_iter]
++        raw_all = np.full((len(all_ids), n_c), -np.inf, dtype=np.float64)
++        for i, rid in enumerate(all_ids):
++            seq = read_seqs[rid]
++            for j, aln in enumerate(aligners):
++                if aln is None:
++                    continue
++                best = None
++                for h in aln.map(seq):
++                    v = score_hit(h)
++                    if v is None:
++                        continue
++                    if best is None or v > best:
++                        best = v
++                if best is not None:
++                    raw_all[i, j] = best
++
++        # Keep reads with >=1 candidate at AS>0 (matches the removed
++        # mappy_multimap_responsibilities keep rule: row.sum()>0 over best>=0 AS).
++        # Mirror its MAPPY_R1_MIN_AS env knob so the kept set stays identical when
++        # that R1 tuning threshold is set.
++        import os as _os
++        _min_as = float(_os.environ.get("MAPPY_R1_MIN_AS", "0") or "0")
++        keep_rows = ((raw_all > 0.0) & (raw_all >= _min_as)).any(axis=1)
++        if not keep_rows.any():
++            return None
++        kept_read_ids = [rid for rid, k in zip(all_ids, keep_rows) if k]
++        raw = raw_all[keep_rows]
++        n_r = len(kept_read_ids)
++
++        # --- Junction NLL on the per-read AS-tie cells only. ---
++        nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read = tie_nll_fn(
++            kept_read_ids, read_seqs, cand_list, aligners, raw
++        )
++
++        # --- d_tx skeleton. Gate OFF: the pure soft NLL-graded skeleton (M1/AS
++        #     picks the tie set; junction-NLL is the only graded distance; cells
++        #     outside the tie stay MISSING). Gate ON: the diff-region coverage
++        #     decision matrix with proportional redistribution of ambiguous reads
++        #     (no read is ever dropped -> recall-safe). ---
++        gate = bool(getattr(self.config, "m2_diff_cover_gate", False))
++        d_tx = np.full((n_r, n_c), MISSING, dtype=np.float64)
++        if not gate:
++            for i in range(n_r):
++                tie = ties_by_read.get(i)
++                if not tie:
++                    continue
++                if len(tie) < 2:
++                    d_tx[i, tie[0]] = 0.0
++                    continue
++                nlls = nlls_by_read.get(i)
++                if not nlls:
++                    # nothing scorable -> flat tie (EM 1/K split among ties)
++                    for j in tie:
++                        d_tx[i, j] = 0.0
++                    continue
++                lo = min(nlls.values())
++                hi = max(nlls.values())
++                miss = (hi - lo) + _M2_EM_PAD
++                for j in tie:
++                    d_tx[i, j] = (nlls[j] - lo) if j in nlls else miss
++            small = (d_tx > 0) & (d_tx < 1e5)
++            diffs = d_tx[small]
++            sigma2 = max(float(np.median(diffs)) if diffs.size else 1.0, 1e-3)
++            d_tx[small] = d_tx[small] / sigma2
++        else:
++            # Diff-region coverage gate. margin = runner-up NLL - best NLL.
++            #
++            # Pass A: classify each tied read and accumulate a per-candidate prior
++            # (covered_vote) from ONLY the covered + distinguishing reads -- the
++            # gold-standard evidence of the locus isoform ratio. Ambiguous reads
++            # (no junction signal, or covered-but-indistinguishable that did not
++            # straddle every diff span) are deferred to Pass B.
++            margin_thr = float(getattr(self.config, "m2_diff_cover_margin", 0.0))
++            covered_vote = np.zeros(n_c, dtype=np.float64)
++            fuzzy: List[int] = []
++            for i in range(n_r):
++                tie = ties_by_read.get(i)
++                if not tie:
++                    continue
++                if len(tie) < 2:
++                    d_tx[i, tie[0]] = 0.0
++                    continue
++                nlls = nlls_by_read.get(i)
++                if not nlls:
++                    fuzzy.append(i)  # no junction signal -> defer (was: drop)
++                    continue
++                ordered = sorted(nlls.items(), key=lambda kv: kv[1])
++                best_j = ordered[0][0]
++                margin = (ordered[1][1] - ordered[0][1]) if len(ordered) > 1 else float("inf")
++                # The redistribution PRIOR (covered_vote) must be fed only by reads
++                # with EXPLICIT coverage: the per-read _tie_nll fallback leaves
++                # cover_by_read empty (coverage uncomputable), so a missing entry
++                # must NOT seed covered_vote (else the fallback path biases fuzzy
++                # reads off unverified coverage).
++                covered_for_vote = cover_by_read.get(i) is True
++                if margin >= margin_thr:
++                    # M2 distinguishes -> hard assign to the lowest-NLL candidate.
++                    d_tx[i, best_j] = 0.0  # every other tie cell stays MISSING
++                    if covered_for_vote:
++                        # Only covered+distinguishing reads define the locus ratio.
++                        covered_vote[best_j] += 1.0
++                else:
++                    # Indistinguishable (margin < thr), whether or not covered:
++                    # defer to Pass B and redistribute by the covered-read ratio
++                    # (flat 1/K only when the tie has no covered prior). The margin
++                    # is thus the SOLE decider of hard-assign vs ratio-follow.
++                    fuzzy.append(i)
++
++            # Pass B: redistribute each ambiguous read across its tie in proportion
++            # to the covered_vote ratio of those candidates (one-shot prior, not an
++            # EM feedback loop). d_tx = -log(p) so softmax(-d_tx) reproduces p at
++            # sigma=1; a zero-prior candidate stays MISSING. If NONE of the tie
++            # candidates earned covered votes, fall back to the flat 1/K split
++            # (== legacy behavior -> signal-dead loci are never starved).
++            for i in fuzzy:
++                tie = ties_by_read[i]
++                masses = np.array([covered_vote[j] for j in tie], dtype=np.float64)
++                s = masses.sum()
++                if s > 0:
++                    p = masses / s
++                    for idx, j in enumerate(tie):
++                        if p[idx] > 0:
++                            d_tx[i, j] = -float(np.log(p[idx]))
++                        # p==0 -> leave MISSING (no covered support for this cand)
++                else:
++                    for j in tie:
++                        d_tx[i, j] = 0.0  # flat 1/K (recall-safe fallback)
++            # ON-path d_tx values are already calibrated (0 / -log(p) / MISSING) for
++            # sigma=1; no sigma2 normalization (that is the OFF skeleton's step).
++        d_tx = d_tx.astype(np.float32)
++
++        # --- M3 read×read junction-window DTW coherence (opt-in; DTW is costly).
++        #     Each read anchored to its d_tx-argmin (best) candidate; σ3 (median
++        #     non-zero DTW) calibrates it to O(1) so β mixes cleanly. ---
++        if self.config.m3_coherence:
++            from fin.scoring.m3_junction_coherence import build_m3_coherence
++
++            winner_col = np.asarray(d_tx).argmin(axis=1).astype(np.int64)
++            no_data = np.asarray(d_tx).min(axis=1) >= 1e5  # all-MISSING rows
++            winner_col[no_data] = -1
++            dist_read_to_read = build_m3_coherence(
++                kept_read_ids, read_seqs, cand_list, winner_col,
++                self.config.signal_path, pore=self.config.krill_pore,
++                junction_k=self.config.m2_tiebreak_junction_k, flank=_M2_EM_FLANK,
++                use_gpu=self.config.use_gpu,
++            )
++            nz = dist_read_to_read[dist_read_to_read > 0]
++            sigma3 = max(float(np.median(nz)) if nz.size else 1.0, 1e-3)
++            dist_read_to_read = (dist_read_to_read / sigma3).astype(np.float32)
++            beta_use = self.config.em_beta
++        else:
++            dist_read_to_read = np.zeros((n_r, n_r), dtype=np.float32)
++            beta_use = 0.0
++
++        R, hard_assignments, _ = em_with_coherence(
++            dist_read_to_tx=d_tx,
++            dist_read_to_read=dist_read_to_read,
++            sigma=1.0,
++            beta=beta_use,
++            max_iter=max_iter_em,
++            tol=self.config.em_tol,
++            verbose=False,
++            use_gpu=self.config.use_gpu,
++            abundance_feedback=self.config.abundance_feedback,
++            abundance_length_norm=self.config.abundance_length_norm,
++            eff_lengths=eff_lengths_fn(cand_list),
++        )
++
++        if self.config.krill_tiebreak:
++            R = krill_tiebreak(
++                R=R, read_ids=kept_read_ids, read_seqs=read_seqs,
++                candidates=cand_list, signal_path=self.config.signal_path,
++                pore=self.config.krill_pore,
++                ambig_threshold=self.config.tiebreak_ambig_threshold,
++                use_gpu=self.config.use_gpu,
++            )
++            hard_assignments = R.argmax(axis=1)
++
++        quant_results = quantify_transcripts(
++            R, hard_assignments, cand_list, kept_read_ids
++        )
++        # Stamp max_R BEFORE any filtering: quant_results is column-aligned to R
++        # here (enumerate index == R column). Filtering would break that alignment.
++        for j, qr in enumerate(quant_results):
++            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
++
++        return QuantOutput(
++            R=R,
++            hard_assignments=hard_assignments,
++            quant_results=quant_results,
++            cand_list=cand_list,
++            kept_read_ids=kept_read_ids,
++            ties_by_read=ties_by_read,
++            nlls_by_read=nlls_by_read,
++            cover_by_read=cover_by_read,
++            read_seqs=read_seqs,
++            n_ties=n_ties,
++            n_refined=n_refined,
++            beta_use=beta_use,
++        )
+diff --git a/fin/pipeline/runner.py b/fin/pipeline/runner.py
+index a1625e7..95782a5 100644
+--- a/fin/pipeline/runner.py
++++ b/fin/pipeline/runner.py
+@@ -26,6 +26,7 @@ from fin.candidates.canonical import chain_all_canonical, parse_motifs
+ from fin.candidates.dataclasses import CandidateSet
+ from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+ from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
++from fin.pipeline.assignment import Assigner
+ from fin.pipeline.config import PipelineConfig
+ from fin.scoring.em_inputs import build_em_matrices
+ from fin.scoring.krill_tiebreak import krill_tiebreak
+@@ -53,6 +54,8 @@ class PipelineRunner:
+         # lazily on first fusion interval and cached (indexing is expensive).
+         self._fusion_genome_aligner = None
+         self._fusion_aligner_built = False
++        # m2_em assignment layer (mappy AS -> tie_nll -> d_tx -> EM -> quantify).
++        self._assigner = Assigner(config)
+ 
+     def setup(self):
+         """Open file handles and load references.
+@@ -1372,215 +1375,20 @@ class PipelineRunner:
+         signal scoring is in-memory krill — no f5c CLI. (``m4_source`` does not
+         affect this path.)
+         """
+-        import mappy
+-
+-        from fin.scoring.m2_junction_nll import MISSING
+-        from fin.scoring.mappy_preset import get_m1_preset
+-        from fin.scoring.mappy_score import score_hit
+-
+-        cand_list = list(candidate_set.candidates)
+-        read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
+-        reads_iter = [(rid, read_sequences.get(rid, "")) for rid in read_ids]
+-        reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
+-        if not reads_iter:
+-            return []
+-
+-        read_seqs = {rid: seq for rid, seq in reads_iter}
+-        n_c = len(cand_list)
+-        max_iter_em = (
+-            self.config.em_max_iter_override
+-            if self.config.em_max_iter_override is not None
+-            else self.config.em_max_iter
++        qo = self._assigner.assign(
++            candidate_set, read_ids,
++            tie_nll_fn=self._tie_nll, eff_lengths_fn=self._eff_lengths,
+         )
+-
+-        # --- Per-candidate mappy aligners + raw AS matrix (tie detection). This
+-        #     single AS pass also yields the kept-read set, so the previously
+-        #     separate mappy_multimap_responsibilities pass (which recomputed the
+-        #     identical AS only to derive kept reads, never feeding the EM) is
+-        #     removed: ~40% of the per-interval cost on dense loci. ---
+-        preset = get_m1_preset()
+-        aligners = [
+-            mappy.Aligner(seq=c.sequence, preset=preset) if c.sequence else None
+-            for c in cand_list
+-        ]
+-        all_ids = [rid for rid, _ in reads_iter]
+-        raw_all = np.full((len(all_ids), n_c), -np.inf, dtype=np.float64)
+-        for i, rid in enumerate(all_ids):
+-            seq = read_seqs[rid]
+-            for j, aln in enumerate(aligners):
+-                if aln is None:
+-                    continue
+-                best = None
+-                for h in aln.map(seq):
+-                    v = score_hit(h)
+-                    if v is None:
+-                        continue
+-                    if best is None or v > best:
+-                        best = v
+-                if best is not None:
+-                    raw_all[i, j] = best
+-
+-        # Keep reads with >=1 candidate at AS>0 (matches the removed
+-        # mappy_multimap_responsibilities keep rule: row.sum()>0 over best>=0 AS).
+-        # Mirror its MAPPY_R1_MIN_AS env knob so the kept set stays identical when
+-        # that R1 tuning threshold is set.
+-        import os as _os
+-        _min_as = float(_os.environ.get("MAPPY_R1_MIN_AS", "0") or "0")
+-        keep_rows = ((raw_all > 0.0) & (raw_all >= _min_as)).any(axis=1)
+-        if not keep_rows.any():
++        if qo is None:
+             return []
+-        kept_read_ids = [rid for rid, k in zip(all_ids, keep_rows) if k]
+-        raw = raw_all[keep_rows]
+-        n_r = len(kept_read_ids)
+-
+-        # --- Junction NLL on the per-read AS-tie cells only. ---
+-        nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read = self._tie_nll(
+-            kept_read_ids, read_seqs, cand_list, aligners, raw
+-        )
+-
+-        # --- d_tx skeleton. Gate OFF: the pure soft NLL-graded skeleton (M1/AS
+-        #     picks the tie set; junction-NLL is the only graded distance; cells
+-        #     outside the tie stay MISSING). Gate ON: the diff-region coverage
+-        #     decision matrix with proportional redistribution of ambiguous reads
+-        #     (no read is ever dropped -> recall-safe). ---
+-        gate = bool(getattr(self.config, "m2_diff_cover_gate", False))
+-        d_tx = np.full((n_r, n_c), MISSING, dtype=np.float64)
+-        if not gate:
+-            for i in range(n_r):
+-                tie = ties_by_read.get(i)
+-                if not tie:
+-                    continue
+-                if len(tie) < 2:
+-                    d_tx[i, tie[0]] = 0.0
+-                    continue
+-                nlls = nlls_by_read.get(i)
+-                if not nlls:
+-                    # nothing scorable -> flat tie (EM 1/K split among ties)
+-                    for j in tie:
+-                        d_tx[i, j] = 0.0
+-                    continue
+-                lo = min(nlls.values())
+-                hi = max(nlls.values())
+-                miss = (hi - lo) + _M2_EM_PAD
+-                for j in tie:
+-                    d_tx[i, j] = (nlls[j] - lo) if j in nlls else miss
+-            small = (d_tx > 0) & (d_tx < 1e5)
+-            diffs = d_tx[small]
+-            sigma2 = max(float(np.median(diffs)) if diffs.size else 1.0, 1e-3)
+-            d_tx[small] = d_tx[small] / sigma2
+-        else:
+-            # Diff-region coverage gate. margin = runner-up NLL - best NLL.
+-            #
+-            # Pass A: classify each tied read and accumulate a per-candidate prior
+-            # (covered_vote) from ONLY the covered + distinguishing reads -- the
+-            # gold-standard evidence of the locus isoform ratio. Ambiguous reads
+-            # (no junction signal, or covered-but-indistinguishable that did not
+-            # straddle every diff span) are deferred to Pass B.
+-            margin_thr = float(getattr(self.config, "m2_diff_cover_margin", 0.0))
+-            covered_vote = np.zeros(n_c, dtype=np.float64)
+-            fuzzy: List[int] = []
+-            for i in range(n_r):
+-                tie = ties_by_read.get(i)
+-                if not tie:
+-                    continue
+-                if len(tie) < 2:
+-                    d_tx[i, tie[0]] = 0.0
+-                    continue
+-                nlls = nlls_by_read.get(i)
+-                if not nlls:
+-                    fuzzy.append(i)  # no junction signal -> defer (was: drop)
+-                    continue
+-                ordered = sorted(nlls.items(), key=lambda kv: kv[1])
+-                best_j = ordered[0][0]
+-                margin = (ordered[1][1] - ordered[0][1]) if len(ordered) > 1 else float("inf")
+-                # The redistribution PRIOR (covered_vote) must be fed only by reads
+-                # with EXPLICIT coverage: the per-read _tie_nll fallback leaves
+-                # cover_by_read empty (coverage uncomputable), so a missing entry
+-                # must NOT seed covered_vote (else the fallback path biases fuzzy
+-                # reads off unverified coverage).
+-                covered_for_vote = cover_by_read.get(i) is True
+-                if margin >= margin_thr:
+-                    # M2 distinguishes -> hard assign to the lowest-NLL candidate.
+-                    d_tx[i, best_j] = 0.0  # every other tie cell stays MISSING
+-                    if covered_for_vote:
+-                        # Only covered+distinguishing reads define the locus ratio.
+-                        covered_vote[best_j] += 1.0
+-                else:
+-                    # Indistinguishable (margin < thr), whether or not covered:
+-                    # defer to Pass B and redistribute by the covered-read ratio
+-                    # (flat 1/K only when the tie has no covered prior). The margin
+-                    # is thus the SOLE decider of hard-assign vs ratio-follow.
+-                    fuzzy.append(i)
+-
+-            # Pass B: redistribute each ambiguous read across its tie in proportion
+-            # to the covered_vote ratio of those candidates (one-shot prior, not an
+-            # EM feedback loop). d_tx = -log(p) so softmax(-d_tx) reproduces p at
+-            # sigma=1; a zero-prior candidate stays MISSING. If NONE of the tie
+-            # candidates earned covered votes, fall back to the flat 1/K split
+-            # (== legacy behavior -> signal-dead loci are never starved).
+-            for i in fuzzy:
+-                tie = ties_by_read[i]
+-                masses = np.array([covered_vote[j] for j in tie], dtype=np.float64)
+-                s = masses.sum()
+-                if s > 0:
+-                    p = masses / s
+-                    for idx, j in enumerate(tie):
+-                        if p[idx] > 0:
+-                            d_tx[i, j] = -float(np.log(p[idx]))
+-                        # p==0 -> leave MISSING (no covered support for this cand)
+-                else:
+-                    for j in tie:
+-                        d_tx[i, j] = 0.0  # flat 1/K (recall-safe fallback)
+-            # ON-path d_tx values are already calibrated (0 / -log(p) / MISSING) for
+-            # sigma=1; no sigma2 normalization (that is the OFF skeleton's step).
+-        d_tx = d_tx.astype(np.float32)
+-
+-        # --- M3 read×read junction-window DTW coherence (opt-in; DTW is costly).
+-        #     Each read anchored to its d_tx-argmin (best) candidate; σ3 (median
+-        #     non-zero DTW) calibrates it to O(1) so β mixes cleanly. ---
+-        if self.config.m3_coherence:
+-            from fin.scoring.m3_junction_coherence import build_m3_coherence
+-
+-            winner_col = np.asarray(d_tx).argmin(axis=1).astype(np.int64)
+-            no_data = np.asarray(d_tx).min(axis=1) >= 1e5  # all-MISSING rows
+-            winner_col[no_data] = -1
+-            dist_read_to_read = build_m3_coherence(
+-                kept_read_ids, read_seqs, cand_list, winner_col,
+-                self.config.signal_path, pore=self.config.krill_pore,
+-                junction_k=self.config.m2_tiebreak_junction_k, flank=_M2_EM_FLANK,
+-                use_gpu=self.config.use_gpu,
+-            )
+-            nz = dist_read_to_read[dist_read_to_read > 0]
+-            sigma3 = max(float(np.median(nz)) if nz.size else 1.0, 1e-3)
+-            dist_read_to_read = (dist_read_to_read / sigma3).astype(np.float32)
+-            beta_use = self.config.em_beta
+-        else:
+-            dist_read_to_read = np.zeros((n_r, n_r), dtype=np.float32)
+-            beta_use = 0.0
+-
+-        R, hard_assignments, _ = em_with_coherence(
+-            dist_read_to_tx=d_tx,
+-            dist_read_to_read=dist_read_to_read,
+-            sigma=1.0,
+-            beta=beta_use,
+-            max_iter=max_iter_em,
+-            tol=self.config.em_tol,
+-            verbose=False,
+-            use_gpu=self.config.use_gpu,
+-            abundance_feedback=self.config.abundance_feedback,
+-            abundance_length_norm=self.config.abundance_length_norm,
+-            eff_lengths=self._eff_lengths(cand_list),
+-        )
+-
+-        if self.config.krill_tiebreak:
+-            R = krill_tiebreak(
+-                R=R, read_ids=kept_read_ids, read_seqs=read_seqs,
+-                candidates=cand_list, signal_path=self.config.signal_path,
+-                pore=self.config.krill_pore,
+-                ambig_threshold=self.config.tiebreak_ambig_threshold,
+-                use_gpu=self.config.use_gpu,
+-            )
+-            hard_assignments = R.argmax(axis=1)
++        R = qo.R
++        cand_list = qo.cand_list
++        ties_by_read = qo.ties_by_read
++        nlls_by_read = qo.nlls_by_read
++        quant_results = qo.quant_results
++        n_ties = qo.n_ties
++        n_refined = qo.n_refined
++        beta_use = qo.beta_use
+ 
+         # --- Cluster-internal wobble recheck (post-EM, data-layer shadow kill).
+         #     Cluster ALL multi-exon candidates by structure (same intron count +
+@@ -1714,13 +1522,6 @@ class PipelineRunner:
+                 exclude=set(drop_cols),
+             )
+ 
+-        quant_results = quantify_transcripts(
+-            R, hard_assignments, cand_list, kept_read_ids
+-        )
+-        # Stamp max_R BEFORE any filtering: quant_results is column-aligned to R
+-        # here (enumerate index == R column). Filtering would break that alignment.
+-        for j, qr in enumerate(quant_results):
+-            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
+         # --- Lever 1: containment / 5'-truncation collapse (post-EM mass-fold).
+         #     Fold a NOVEL candidate whose intron chain is a pure 3' suffix of a
+         #     longer candidate (a 5'-truncation shadow) INTO that parent: the
+diff --git a/tests/integration/test_pipeline_integration.py b/tests/integration/test_pipeline_integration.py
+index cc06822..32d9960 100644
+--- a/tests/integration/test_pipeline_integration.py
++++ b/tests/integration/test_pipeline_integration.py
+@@ -169,11 +169,11 @@ def _patch_m2_phases(num_reads: int = 10, num_cands: int = 2, candidates=None):
+             return_value=dist_rr,
+         ),
+         "em_with_coherence": patch(
+-            "fin.pipeline.runner.em_with_coherence",
++            "fin.pipeline.assignment.em_with_coherence",
+             return_value=(R, hard, []),
+         ),
+         "quantify_transcripts": patch(
+-            "fin.pipeline.runner.quantify_transcripts",
++            "fin.pipeline.assignment.quantify_transcripts",
+             return_value=quant_results,
+         ),
+     }
+diff --git a/tests/unit/test_m2_em_pure_seed.py b/tests/unit/test_m2_em_pure_seed.py
+index 10ed0a1..d271474 100644
+--- a/tests/unit/test_m2_em_pure_seed.py
++++ b/tests/unit/test_m2_em_pure_seed.py
+@@ -118,9 +118,9 @@ def _run(cfg, captured, m3_matrix=None, tie_nll_fn=_fake_tie_nll):
+     ), patch.object(PipelineRunner, "_tie_nll", tie_nll_fn), patch.object(
+         PipelineRunner, "_eff_lengths", return_value=None
+     ), patch(
+-        "fin.pipeline.runner.em_with_coherence", side_effect=_fake_em
++        "fin.pipeline.assignment.em_with_coherence", side_effect=_fake_em
+     ), patch(
+-        "fin.pipeline.runner.quantify_transcripts", return_value=[]
++        "fin.pipeline.assignment.quantify_transcripts", return_value=[]
+     ), patch(
+         "fin.scoring.m3_junction_coherence.build_m3_coherence",
+         return_value=(m3_matrix if m3_matrix is not None
+
+warning: Model metadata for `gpt-5.6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+codex
+I’ll independently compare the commit against its parent, then trace selection-state and patch seams.
+  → Inspect commit and repository guidance
+  • Compare moved logic against parent
+  • Trace downstream state and seams
+  • Run targeted verification checks
+  • Report concrete review verdict
+exec
+/bin/bash -lc "printf '%s\\n' '--- status ---'; git status --short; printf '%s\\n' '--- guidance ---'; find .. -name AGENTS.md -print; printf '%s\\n' '--- commit ---'; git show --stat --oneline --decorate --no-renames b01bcf6; printf '%s\\n' '--- current head ---'; git rev-parse --short HEAD" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+codex
+The shell returned blank output, so I’m retrying with a PTY as requested.
+exec
+/bin/bash -lc "printf '%s\\n' '--- status ---'; git status --short; printf '%s\\n' '--- guidance ---'; find .. -name AGENTS.md -print; printf '%s\\n' '--- commit ---'; git show --stat --oneline --decorate --no-renames b01bcf6; printf '%s\\n' '--- current head ---'; git rev-parse --short HEAD" in /SSD/logan/dev/pyfin
+ succeeded in 15870ms:
+%                                                                               (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/20[30m)[36m─┐
+[36m└[34m─([33m11:47:41[34m[00m[34m)[36m──> [?2004h(base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/20[30m)[36m─┐
+[36m└[34m─([33m11:47:41[34m[00m[36m ?✭[34m)[36m──> (base) [36m┌─[30m([32m/SSD/logan/dev/pyfin[30m)[36m────────────────────────────[30m([36mlogan[30m@[32mmnemosyne4:pts/20[30m)[36m─┐
+[36m└[34m─([33m11:47:41[34m[00m on [32mdev[00m[36m ?✭[34m)[36m──> exit[?2004l
+
+exec
+/bin/bash -c "printf '%s\\n' '--- status ---'; git status --short; printf '%s\\n' '--- guidance ---'; find .. -name AGENTS.md -print; printf '%s\\n' '--- commit ---'; git show --stat --oneline --decorate --no-renames b01bcf6; printf '%s\\n' '--- current head ---'; git rev-parse --short HEAD" in /SSD/logan/dev/pyfin
+ exited 1 in 13423ms:
+^C
+exec
+/bin/bash -c "git show --stat --oneline --no-renames b01bcf6 && printf '\\nAGENTS:\\n' && (rg --files -g 'AGENTS.md' -g '"'!experiments/**'"' -g '"'!scripts/**'"' .. || true) && printf '\\nHEAD:\\n' && git rev-parse --short HEAD" in /SSD/logan/dev/pyfin
+ succeeded in 7706ms:
+../krill/tools/AGENTS.md
+../krill/docs/AGENTS.md
+../krill/tools/polya_rna004/AGENTS.md
+../krill/scripts/AGENTS.md
+../krill/python/krill/AGENTS.md
+../krill/python/AGENTS.md
+../krill/benchmarks/AGENTS.md
+../krill/AGENTS.md
+../krill/src/AGENTS.md
+../krill/src/dtw/AGENTS.md
+../krill/test/AGENTS.md
+
+HEAD:
+d277b4e
+
+codex
+I’ve confirmed the commit scope. Next I’m tracing every state mutation between EM, filtering, and quantification.
+  ✓ Inspect commit and repository guidance
+  → Compare moved logic against parent
+  • Trace downstream state and seams
+  • Run targeted verification checks
+  • Report concrete review verdict
+exec
+/bin/bash -c 'set -e
+parent=b01bcf6''^
+mkdir -p /tmp/pyfin-review-b01
+# Capture relevant full files at parent and commit.
+git show "$parent":fin/pipeline/runner.py > /tmp/pyfin-review-b01/runner.old.py
+git show b01bcf6:fin/pipeline/runner.py > /tmp/pyfin-review-b01/runner.new.py
+git show "$parent":fin/pipeline/assignment.py > /tmp/pyfin-review-b01/assignment.old.py
+git show b01bcf6:fin/pipeline/assignment.py > /tmp/pyfin-review-b01/assignment.new.py
+printf '"'%s\\n' '--- old assignment region ---'
+nl -ba /tmp/pyfin-review-b01/runner.old.py | sed -n '1360,1760p'
+printf '%s\\n' '--- new runner region ---'
+nl -ba /tmp/pyfin-review-b01/runner.new.py | sed -n '1360,1570p'
+printf '%s\\n' '--- import differences ---'
+diff -u <(sed -n '1,90p' /tmp/pyfin-review-b01/runner.old.py) <(sed -n '1,90p' /tmp/pyfin-review-b01/runner.new.py) || true" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- old assignment region ---
+  1360	        candidate_set: CandidateSet,
+  1361	        read_ids: List[str],
+  1362	        interval: GenomicInterval,
+  1363	    ) -> Optional[List[QuantResult]]:
+  1364	        """quant_mode='m2_em' (production default): pure tie-break junction-NLL EM.
+  1365	
+  1366	        M1/AS is used ONLY as a hard selector — it picks each read's best-AS tie
+  1367	        set and masks mappability — and the per-event junction NLL is the SOLE
+  1368	        graded distance over that tie set (m2_resolve_tie semantics, NOT the dense
+  1369	        read×candidate matrix, which collapses). Optionally adds the M3 read×read
+  1370	        junction-window DTW coherence when ``config.m3_coherence`` is True
+  1371	        (β=em_beta); OFF by default because the pairwise DTW is expensive. All
+  1372	        signal scoring is in-memory krill — no f5c CLI. (``m4_source`` does not
+  1373	        affect this path.)
+  1374	        """
+  1375	        import mappy
+  1376	
+  1377	        from fin.scoring.m2_junction_nll import MISSING
+  1378	        from fin.scoring.mappy_preset import get_m1_preset
+  1379	        from fin.scoring.mappy_score import score_hit
+  1380	
+  1381	        cand_list = list(candidate_set.candidates)
+  1382	        read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
+  1383	        reads_iter = [(rid, read_sequences.get(rid, "")) for rid in read_ids]
+  1384	        reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
+  1385	        if not reads_iter:
+  1386	            return []
+  1387	
+  1388	        read_seqs = {rid: seq for rid, seq in reads_iter}
+  1389	        n_c = len(cand_list)
+  1390	        max_iter_em = (
+  1391	            self.config.em_max_iter_override
+  1392	            if self.config.em_max_iter_override is not None
+  1393	            else self.config.em_max_iter
+  1394	        )
+  1395	
+  1396	        # --- Per-candidate mappy aligners + raw AS matrix (tie detection). This
+  1397	        #     single AS pass also yields the kept-read set, so the previously
+  1398	        #     separate mappy_multimap_responsibilities pass (which recomputed the
+  1399	        #     identical AS only to derive kept reads, never feeding the EM) is
+  1400	        #     removed: ~40% of the per-interval cost on dense loci. ---
+  1401	        preset = get_m1_preset()
+  1402	        aligners = [
+  1403	            mappy.Aligner(seq=c.sequence, preset=preset) if c.sequence else None
+  1404	            for c in cand_list
+  1405	        ]
+  1406	        all_ids = [rid for rid, _ in reads_iter]
+  1407	        raw_all = np.full((len(all_ids), n_c), -np.inf, dtype=np.float64)
+  1408	        for i, rid in enumerate(all_ids):
+  1409	            seq = read_seqs[rid]
+  1410	            for j, aln in enumerate(aligners):
+  1411	                if aln is None:
+  1412	                    continue
+  1413	                best = None
+  1414	                for h in aln.map(seq):
+  1415	                    v = score_hit(h)
+  1416	                    if v is None:
+  1417	                        continue
+  1418	                    if best is None or v > best:
+  1419	                        best = v
+  1420	                if best is not None:
+  1421	                    raw_all[i, j] = best
+  1422	
+  1423	        # Keep reads with >=1 candidate at AS>0 (matches the removed
+  1424	        # mappy_multimap_responsibilities keep rule: row.sum()>0 over best>=0 AS).
+  1425	        # Mirror its MAPPY_R1_MIN_AS env knob so the kept set stays identical when
+  1426	        # that R1 tuning threshold is set.
+  1427	        import os as _os
+  1428	        _min_as = float(_os.environ.get("MAPPY_R1_MIN_AS", "0") or "0")
+  1429	        keep_rows = ((raw_all > 0.0) & (raw_all >= _min_as)).any(axis=1)
+  1430	        if not keep_rows.any():
+  1431	            return []
+  1432	        kept_read_ids = [rid for rid, k in zip(all_ids, keep_rows) if k]
+  1433	        raw = raw_all[keep_rows]
+  1434	        n_r = len(kept_read_ids)
+  1435	
+  1436	        # --- Junction NLL on the per-read AS-tie cells only. ---
+  1437	        nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read = self._tie_nll(
+  1438	            kept_read_ids, read_seqs, cand_list, aligners, raw
+  1439	        )
+  1440	
+  1441	        # --- d_tx skeleton. Gate OFF: the pure soft NLL-graded skeleton (M1/AS
+  1442	        #     picks the tie set; junction-NLL is the only graded distance; cells
+  1443	        #     outside the tie stay MISSING). Gate ON: the diff-region coverage
+  1444	        #     decision matrix with proportional redistribution of ambiguous reads
+  1445	        #     (no read is ever dropped -> recall-safe). ---
+  1446	        gate = bool(getattr(self.config, "m2_diff_cover_gate", False))
+  1447	        d_tx = np.full((n_r, n_c), MISSING, dtype=np.float64)
+  1448	        if not gate:
+  1449	            for i in range(n_r):
+  1450	                tie = ties_by_read.get(i)
+  1451	                if not tie:
+  1452	                    continue
+  1453	                if len(tie) < 2:
+  1454	                    d_tx[i, tie[0]] = 0.0
+  1455	                    continue
+  1456	                nlls = nlls_by_read.get(i)
+  1457	                if not nlls:
+  1458	                    # nothing scorable -> flat tie (EM 1/K split among ties)
+  1459	                    for j in tie:
+  1460	                        d_tx[i, j] = 0.0
+  1461	                    continue
+  1462	                lo = min(nlls.values())
+  1463	                hi = max(nlls.values())
+  1464	                miss = (hi - lo) + _M2_EM_PAD
+  1465	                for j in tie:
+  1466	                    d_tx[i, j] = (nlls[j] - lo) if j in nlls else miss
+  1467	            small = (d_tx > 0) & (d_tx < 1e5)
+  1468	            diffs = d_tx[small]
+  1469	            sigma2 = max(float(np.median(diffs)) if diffs.size else 1.0, 1e-3)
+  1470	            d_tx[small] = d_tx[small] / sigma2
+  1471	        else:
+  1472	            # Diff-region coverage gate. margin = runner-up NLL - best NLL.
+  1473	            #
+  1474	            # Pass A: classify each tied read and accumulate a per-candidate prior
+  1475	            # (covered_vote) from ONLY the covered + distinguishing reads -- the
+  1476	            # gold-standard evidence of the locus isoform ratio. Ambiguous reads
+  1477	            # (no junction signal, or covered-but-indistinguishable that did not
+  1478	            # straddle every diff span) are deferred to Pass B.
+  1479	            margin_thr = float(getattr(self.config, "m2_diff_cover_margin", 0.0))
+  1480	            covered_vote = np.zeros(n_c, dtype=np.float64)
+  1481	            fuzzy: List[int] = []
+  1482	            for i in range(n_r):
+  1483	                tie = ties_by_read.get(i)
+  1484	                if not tie:
+  1485	                    continue
+  1486	                if len(tie) < 2:
+  1487	                    d_tx[i, tie[0]] = 0.0
+  1488	                    continue
+  1489	                nlls = nlls_by_read.get(i)
+  1490	                if not nlls:
+  1491	                    fuzzy.append(i)  # no junction signal -> defer (was: drop)
+  1492	                    continue
+  1493	                ordered = sorted(nlls.items(), key=lambda kv: kv[1])
+  1494	                best_j = ordered[0][0]
+  1495	                margin = (ordered[1][1] - ordered[0][1]) if len(ordered) > 1 else float("inf")
+  1496	                # The redistribution PRIOR (covered_vote) must be fed only by reads
+  1497	                # with EXPLICIT coverage: the per-read _tie_nll fallback leaves
+  1498	                # cover_by_read empty (coverage uncomputable), so a missing entry
+  1499	                # must NOT seed covered_vote (else the fallback path biases fuzzy
+  1500	                # reads off unverified coverage).
+  1501	                covered_for_vote = cover_by_read.get(i) is True
+  1502	                if margin >= margin_thr:
+  1503	                    # M2 distinguishes -> hard assign to the lowest-NLL candidate.
+  1504	                    d_tx[i, best_j] = 0.0  # every other tie cell stays MISSING
+  1505	                    if covered_for_vote:
+  1506	                        # Only covered+distinguishing reads define the locus ratio.
+  1507	                        covered_vote[best_j] += 1.0
+  1508	                else:
+  1509	                    # Indistinguishable (margin < thr), whether or not covered:
+  1510	                    # defer to Pass B and redistribute by the covered-read ratio
+  1511	                    # (flat 1/K only when the tie has no covered prior). The margin
+  1512	                    # is thus the SOLE decider of hard-assign vs ratio-follow.
+  1513	                    fuzzy.append(i)
+  1514	
+  1515	            # Pass B: redistribute each ambiguous read across its tie in proportion
+  1516	            # to the covered_vote ratio of those candidates (one-shot prior, not an
+  1517	            # EM feedback loop). d_tx = -log(p) so softmax(-d_tx) reproduces p at
+  1518	            # sigma=1; a zero-prior candidate stays MISSING. If NONE of the tie
+  1519	            # candidates earned covered votes, fall back to the flat 1/K split
+  1520	            # (== legacy behavior -> signal-dead loci are never starved).
+  1521	            for i in fuzzy:
+  1522	                tie = ties_by_read[i]
+  1523	                masses = np.array([covered_vote[j] for j in tie], dtype=np.float64)
+  1524	                s = masses.sum()
+  1525	                if s > 0:
+  1526	                    p = masses / s
+  1527	                    for idx, j in enumerate(tie):
+  1528	                        if p[idx] > 0:
+  1529	                            d_tx[i, j] = -float(np.log(p[idx]))
+  1530	                        # p==0 -> leave MISSING (no covered support for this cand)
+  1531	                else:
+  1532	                    for j in tie:
+  1533	                        d_tx[i, j] = 0.0  # flat 1/K (recall-safe fallback)
+  1534	            # ON-path d_tx values are already calibrated (0 / -log(p) / MISSING) for
+  1535	            # sigma=1; no sigma2 normalization (that is the OFF skeleton's step).
+  1536	        d_tx = d_tx.astype(np.float32)
+  1537	
+  1538	        # --- M3 read×read junction-window DTW coherence (opt-in; DTW is costly).
+  1539	        #     Each read anchored to its d_tx-argmin (best) candidate; σ3 (median
+  1540	        #     non-zero DTW) calibrates it to O(1) so β mixes cleanly. ---
+  1541	        if self.config.m3_coherence:
+  1542	            from fin.scoring.m3_junction_coherence import build_m3_coherence
+  1543	
+  1544	            winner_col = np.asarray(d_tx).argmin(axis=1).astype(np.int64)
+  1545	            no_data = np.asarray(d_tx).min(axis=1) >= 1e5  # all-MISSING rows
+  1546	            winner_col[no_data] = -1
+  1547	            dist_read_to_read = build_m3_coherence(
+  1548	                kept_read_ids, read_seqs, cand_list, winner_col,
+  1549	                self.config.signal_path, pore=self.config.krill_pore,
+  1550	                junction_k=self.config.m2_tiebreak_junction_k, flank=_M2_EM_FLANK,
+  1551	                use_gpu=self.config.use_gpu,
+  1552	            )
+  1553	            nz = dist_read_to_read[dist_read_to_read > 0]
+  1554	            sigma3 = max(float(np.median(nz)) if nz.size else 1.0, 1e-3)
+  1555	            dist_read_to_read = (dist_read_to_read / sigma3).astype(np.float32)
+  1556	            beta_use = self.config.em_beta
+  1557	        else:
+  1558	            dist_read_to_read = np.zeros((n_r, n_r), dtype=np.float32)
+  1559	            beta_use = 0.0
+  1560	
+  1561	        R, hard_assignments, _ = em_with_coherence(
+  1562	            dist_read_to_tx=d_tx,
+  1563	            dist_read_to_read=dist_read_to_read,
+  1564	            sigma=1.0,
+  1565	            beta=beta_use,
+  1566	            max_iter=max_iter_em,
+  1567	            tol=self.config.em_tol,
+  1568	            verbose=False,
+  1569	            use_gpu=self.config.use_gpu,
+  1570	            abundance_feedback=self.config.abundance_feedback,
+  1571	            abundance_length_norm=self.config.abundance_length_norm,
+  1572	            eff_lengths=self._eff_lengths(cand_list),
+  1573	        )
+  1574	
+  1575	        if self.config.krill_tiebreak:
+  1576	            R = krill_tiebreak(
+  1577	                R=R, read_ids=kept_read_ids, read_seqs=read_seqs,
+  1578	                candidates=cand_list, signal_path=self.config.signal_path,
+  1579	                pore=self.config.krill_pore,
+  1580	                ambig_threshold=self.config.tiebreak_ambig_threshold,
+  1581	                use_gpu=self.config.use_gpu,
+  1582	            )
+  1583	            hard_assignments = R.argmax(axis=1)
+  1584	
+  1585	        # --- Cluster-internal wobble recheck (post-EM, data-layer shadow kill).
+  1586	        #     Cluster ALL multi-exon candidates by structure (same intron count +
+  1587	        #     every junction within +-bp); within a cluster the highest-EM-abundance
+  1588	        #     candidate anchors (often the true isoform, frequently a GTF
+  1589	        #     passthrough), and a NOVEL sibling whose abundance/anchor < fraction is
+  1590	        #     a wobble shadow -> drop. GTF/fusion never dropped (they only anchor).
+  1591	        #     Pure abundance evidence: GTF participates in the abundance race but is
+  1592	        #     NOT used as a correctness oracle, so this stays robust when the
+  1593	        #     annotation is wrong (and self-disables with no GTF: a real novel
+  1594	        #     anchors its own cluster). OFF -> no drops (byte-identical). ---
+  1595	        drop_cols: set = set()
+  1596	        # Strand-keyed {strand: Counter{(donor,acceptor): n_reads}} of directly-
+  1597	        # observed read junctions; built lazily (reopens BAM) and shared by the
+  1598	        # cluster-recheck GTF guard and the Lever-2 junction-support gate.
+  1599	        observed_jct = None
+  1600	        if getattr(self.config, "m2_cluster_recheck", False):
+  1601	            from fin.scoring.m2_junction_nll import structural_wobble_clusters
+  1602	
+  1603	            frac = self.config.m2_cluster_recheck_fraction
+  1604	            if frac <= 0.0:
+  1605	                frac = self.config.min_isoform_fraction
+  1606	            if frac > 0.0:
+  1607	                em_ab = np.asarray(R).sum(axis=0)
+  1608	                bp = self.config.m2_cluster_recheck_bp
+  1609	                cassette_bp = getattr(
+  1610	                    self.config, "m2_cluster_recheck_cassette_max_exon_bp", 0
+  1611	                )
+  1612	                clusters = structural_wobble_clusters(
+  1613	                    cand_list, bp, cassette_max_exon_bp=cassette_bp
+  1614	                )
+  1615	                from fin.scoring.m2_junction_nll import (
+  1616	                    gtf_guard_needed,
+  1617	                    wobble_shadow_drops,
+  1618	                )
+  1619	
+  1620	                gtf_drop = bool(getattr(
+  1621	                    self.config, "m2_cluster_recheck_novel_displaces_gtf", True
+  1622	                ))
+  1623	                # Build the directly-observed read junctions for the GTF read-support
+  1624	                # guard ONLY when a clustered low-abundance GTF sibling could actually
+  1625	                # be dropped — this reopens the BAM, so skip it for no-GTF intervals
+  1626	                # (and avoids touching the BAM for mocked/placeholder-path callers).
+  1627	                if gtf_drop and gtf_guard_needed(cand_list, em_ab, clusters, frac):
+  1628	                    observed_jct = self._observed_junctions(interval)
+  1629	                drop_cols |= wobble_shadow_drops(
+  1630	                    cand_list, em_ab, clusters, frac,
+  1631	                    gtf_drop_enabled=gtf_drop,
+  1632	                    observed_jct=observed_jct,
+  1633	                    jct_tol=int(getattr(self.config, "m2_cluster_recheck_jct_tol", 2)),
+  1634	                    gtf_min_jct_reads=int(getattr(
+  1635	                        self.config, "m2_cluster_recheck_gtf_min_jct_reads", 1
+  1636	                    )),
+  1637	                )
+  1638	
+  1639	        # --- Lever 2: per-junction read-support gate. Drop a NOVEL multi-exon
+  1640	        #     candidate if ANY of its junctions is spliced by fewer than
+  1641	        #     novel_junction_min_reads directly-observed reads (CIGAR introns,
+  1642	        #     strand-keyed, matched within novel_junction_reads_tol bp) — a novel
+  1643	        #     junction must be carried by >= N reads, not just 1. gtf/fusion/mono
+  1644	        #     exempt. <=1 disables (byte-identical). Reuses observed_jct if the
+  1645	        #     cluster-recheck already built it; otherwise builds it here. ---
+  1646	        _njmr = int(getattr(self.config, "novel_junction_min_reads", 0))
+  1647	        if _njmr > 1:
+  1648	            from fin.scoring.m2_junction_nll import junction_support_drops
+  1649	            if observed_jct is None:
+  1650	                observed_jct = self._observed_junctions(interval)
+  1651	            drop_cols |= junction_support_drops(
+  1652	                cand_list, observed_jct, min_reads=_njmr,
+  1653	                tol=int(getattr(self.config, "novel_junction_reads_tol", 2)),
+  1654	            )
+  1655	
+  1656	        # --- GUIDED junction-support gate (EXPERIMENT, default-off). Mirror of
+  1657	        #     Lever 2 for GTF-passthrough candidates: drop a guided multi-exon
+  1658	        #     candidate if ANY of its junctions lacks >= guided_junction_min_reads
+  1659	        #     directly-observed reads (CIGAR introns within guided_junction_reads
+  1660	        #     _tol bp). Extends the coordinate-EXACT read-support check — which
+  1661	        #     Lever 2 applies only to novel candidates — to GTF junctions, so a
+  1662	        #     jitter-corrupted annotation junction (coords > tol from the true
+  1663	        #     site, thus zero exact support) is dropped instead of surviving the
+  1664	        #     coordinate-inexact M2/M1 gate. Reuses observed_jct. 0 disables
+  1665	        #     (byte-identical). NOT recall-safe (also drops low-coverage annotated
+  1666	        #     junctions); default-off pending real-data validation. ---
+  1667	        _gjmr = int(getattr(self.config, "guided_junction_min_reads", 0))
+  1668	        if _gjmr > 0:
+  1669	            from fin.scoring.m2_junction_nll import guided_junction_support_drops
+  1670	            if observed_jct is None:
+  1671	                observed_jct = self._observed_junctions(interval)
+  1672	            drop_cols |= guided_junction_support_drops(
+  1673	                cand_list, observed_jct, min_reads=_gjmr,
+  1674	                tol=int(getattr(self.config, "guided_junction_reads_tol", 2)),
+  1675	            )
+  1676	
+  1677	        # --- M2/M1 read-support gate. A multi-exon candidate (GTF or novel;
+  1678	        #     fusion/mono exempt) must earn >=1 read's support: either it is some
+  1679	        #     read's M1 SOLE best-AS (tie set == just this candidate), or it is
+  1680	        #     some read's M2-best (lowest junction-NLL in that read's tie). A
+  1681	        #     jitter-corrupted GTF junction wins neither (loses the M2 contest to
+  1682	        #     the true-junction candidate and never holds a read's sole AS), so it
+  1683	        #     is dropped; a genuine isoform always earns one or the other. ---
+  1684	        if getattr(self.config, "m2_support_gate", False):
+  1685	            from fin.scoring.m2_junction_nll import support_gate_drops
+  1686	
+  1687	            drop_cols |= support_gate_drops(
+  1688	                cand_list, ties_by_read, nlls_by_read,
+  1689	                tie_ok=bool(getattr(self.config, "m2_support_gate_tie", True)),
+  1690	            )
+  1691	
+  1692	        # --- Containment-cluster drop: drop a NOVEL candidate whose intron chain is a
+  1693	        #     contiguous SUB-CHAIN of a longer candidate (a truncation / exon-skip shadow
+  1694	        #     the same-intron-count wobble cluster never groups) when it is a low-support
+  1695	        #     shadow by BOTH EM abundance AND supporting-read count. Runs AFTER all the
+  1696	        #     structural/support gates so ``exclude=drop_cols`` covers every already-doomed
+  1697	        #     parent — a shadow is never folded into a parent that is itself dropped. The
+  1698	        #     read-support guard keeps most genuine low-abundance short/alt-TSS isoforms;
+  1699	        #     gtf/fusion never dropped. DEFAULT-ON (--no-containment-cluster disables). ---
+  1700	        if getattr(self.config, "containment_cluster", False):
+  1701	            from fin.scoring.m2_junction_nll import containment_cluster_drops
+  1702	            em_ab_c = np.asarray(R).sum(axis=0)
+  1703	            read_counts = [len(getattr(c, "supporting_read_ids", ()) or ())
+  1704	                           for c in cand_list]
+  1705	            drop_cols |= containment_cluster_drops(
+  1706	                cand_list, em_ab_c, read_counts,
+  1707	                wobble_bp=int(getattr(self.config, "containment_cluster_wobble_bp", 6)),
+  1708	                min_ab_ratio=float(getattr(
+  1709	                    self.config, "containment_cluster_min_ab_ratio", 0.3)),
+  1710	                min_read_ratio=float(getattr(
+  1711	                    self.config, "containment_cluster_min_read_ratio", 0.3)),
+  1712	                max_shadow_reads=int(getattr(
+  1713	                    self.config, "containment_cluster_max_shadow_reads", 0)),
+  1714	                exclude=set(drop_cols),
+  1715	            )
+  1716	
+  1717	        quant_results = quantify_transcripts(
+  1718	            R, hard_assignments, cand_list, kept_read_ids
+  1719	        )
+  1720	        # Stamp max_R BEFORE any filtering: quant_results is column-aligned to R
+  1721	        # here (enumerate index == R column). Filtering would break that alignment.
+  1722	        for j, qr in enumerate(quant_results):
+  1723	            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
+  1724	        # --- Lever 1: containment / 5'-truncation collapse (post-EM mass-fold).
+  1725	        #     Fold a NOVEL candidate whose intron chain is a pure 3' suffix of a
+  1726	        #     longer candidate (a 5'-truncation shadow) INTO that parent: the
+  1727	        #     shadow's hard reads (read-id union) + soft EM mass move to the parent,
+  1728	        #     then the shadow joins drop_cols. Parents already in drop_cols
+  1729	        #     (wobble/support) are EXCLUDED, so a fold never targets an
+  1730	        #     ALREADY-dropped interval candidate; a folded parent CAN still be
+  1731	        #     removed by a later _finalize_and_write filter (isoform-fraction /
+  1732	        #     soft-mass / fulllen / polyA), which would lose the absorbed reads --
+  1733	        #     an accepted limitation given this lever is default-off. Chained
+  1734	        #     containment resolves to the terminal longest parent. OFF (default)
+  1735	        #     -> no folds (byte-identical). NOT recall-safe by
+  1736	        #     construction (a 3'-suffix also fits a real alt-TSS isoform); see
+  1737	        #     containment_shadow_drops -> kept default-off pending real-data tuning.
+  1738	        if getattr(self.config, "containment_collapse", False):
+  1739	            from fin.scoring.m2_junction_nll import containment_shadow_drops
+  1740	
+  1741	            em_ab_c = np.asarray(R).sum(axis=0)
+  1742	            fold = containment_shadow_drops(
+  1743	                cand_list, em_ab_c,
+  1744	                tol_bp=int(self.config.containment_3p_tol_bp),
+  1745	                min_ratio=float(self.config.containment_min_abundance_ratio),
+  1746	                exclude=drop_cols,
+  1747	            )
+  1748	            if fold:
+  1749	                qr_by_id = {q.candidate_id: q for q in quant_results}
+  1750	                n_folded = 0
+  1751	                for shadow_col, parent_col in fold.items():
+  1752	                    sq = qr_by_id.get(cand_list[shadow_col].candidate_id)
+  1753	                    pq = qr_by_id.get(cand_list[parent_col].candidate_id)
+  1754	                    if sq is None or pq is None:
+  1755	                        continue
+  1756	                    # Hard reads are disjoint by construction (EM argmax mask), so
+  1757	                    # the union count == sum, but union is robust either way. Soft
+  1758	                    # mass is added so aggregate_across_intervals (single interval:
+  1759	                    # unique/weight ratio == 1) reports parent + shadow abundance.
+  1760	                    union = set(pq.assigned_read_ids) | set(sq.assigned_read_ids)
+--- new runner region ---
+  1360	
+  1361	    def _quant_m2_em(
+  1362	        self,
+  1363	        candidate_set: CandidateSet,
+  1364	        read_ids: List[str],
+  1365	        interval: GenomicInterval,
+  1366	    ) -> Optional[List[QuantResult]]:
+  1367	        """quant_mode='m2_em' (production default): pure tie-break junction-NLL EM.
+  1368	
+  1369	        M1/AS is used ONLY as a hard selector — it picks each read's best-AS tie
+  1370	        set and masks mappability — and the per-event junction NLL is the SOLE
+  1371	        graded distance over that tie set (m2_resolve_tie semantics, NOT the dense
+  1372	        read×candidate matrix, which collapses). Optionally adds the M3 read×read
+  1373	        junction-window DTW coherence when ``config.m3_coherence`` is True
+  1374	        (β=em_beta); OFF by default because the pairwise DTW is expensive. All
+  1375	        signal scoring is in-memory krill — no f5c CLI. (``m4_source`` does not
+  1376	        affect this path.)
+  1377	        """
+  1378	        qo = self._assigner.assign(
+  1379	            candidate_set, read_ids,
+  1380	            tie_nll_fn=self._tie_nll, eff_lengths_fn=self._eff_lengths,
+  1381	        )
+  1382	        if qo is None:
+  1383	            return []
+  1384	        R = qo.R
+  1385	        cand_list = qo.cand_list
+  1386	        ties_by_read = qo.ties_by_read
+  1387	        nlls_by_read = qo.nlls_by_read
+  1388	        quant_results = qo.quant_results
+  1389	        n_ties = qo.n_ties
+  1390	        n_refined = qo.n_refined
+  1391	        beta_use = qo.beta_use
+  1392	
+  1393	        # --- Cluster-internal wobble recheck (post-EM, data-layer shadow kill).
+  1394	        #     Cluster ALL multi-exon candidates by structure (same intron count +
+  1395	        #     every junction within +-bp); within a cluster the highest-EM-abundance
+  1396	        #     candidate anchors (often the true isoform, frequently a GTF
+  1397	        #     passthrough), and a NOVEL sibling whose abundance/anchor < fraction is
+  1398	        #     a wobble shadow -> drop. GTF/fusion never dropped (they only anchor).
+  1399	        #     Pure abundance evidence: GTF participates in the abundance race but is
+  1400	        #     NOT used as a correctness oracle, so this stays robust when the
+  1401	        #     annotation is wrong (and self-disables with no GTF: a real novel
+  1402	        #     anchors its own cluster). OFF -> no drops (byte-identical). ---
+  1403	        drop_cols: set = set()
+  1404	        # Strand-keyed {strand: Counter{(donor,acceptor): n_reads}} of directly-
+  1405	        # observed read junctions; built lazily (reopens BAM) and shared by the
+  1406	        # cluster-recheck GTF guard and the Lever-2 junction-support gate.
+  1407	        observed_jct = None
+  1408	        if getattr(self.config, "m2_cluster_recheck", False):
+  1409	            from fin.scoring.m2_junction_nll import structural_wobble_clusters
+  1410	
+  1411	            frac = self.config.m2_cluster_recheck_fraction
+  1412	            if frac <= 0.0:
+  1413	                frac = self.config.min_isoform_fraction
+  1414	            if frac > 0.0:
+  1415	                em_ab = np.asarray(R).sum(axis=0)
+  1416	                bp = self.config.m2_cluster_recheck_bp
+  1417	                cassette_bp = getattr(
+  1418	                    self.config, "m2_cluster_recheck_cassette_max_exon_bp", 0
+  1419	                )
+  1420	                clusters = structural_wobble_clusters(
+  1421	                    cand_list, bp, cassette_max_exon_bp=cassette_bp
+  1422	                )
+  1423	                from fin.scoring.m2_junction_nll import (
+  1424	                    gtf_guard_needed,
+  1425	                    wobble_shadow_drops,
+  1426	                )
+  1427	
+  1428	                gtf_drop = bool(getattr(
+  1429	                    self.config, "m2_cluster_recheck_novel_displaces_gtf", True
+  1430	                ))
+  1431	                # Build the directly-observed read junctions for the GTF read-support
+  1432	                # guard ONLY when a clustered low-abundance GTF sibling could actually
+  1433	                # be dropped — this reopens the BAM, so skip it for no-GTF intervals
+  1434	                # (and avoids touching the BAM for mocked/placeholder-path callers).
+  1435	                if gtf_drop and gtf_guard_needed(cand_list, em_ab, clusters, frac):
+  1436	                    observed_jct = self._observed_junctions(interval)
+  1437	                drop_cols |= wobble_shadow_drops(
+  1438	                    cand_list, em_ab, clusters, frac,
+  1439	                    gtf_drop_enabled=gtf_drop,
+  1440	                    observed_jct=observed_jct,
+  1441	                    jct_tol=int(getattr(self.config, "m2_cluster_recheck_jct_tol", 2)),
+  1442	                    gtf_min_jct_reads=int(getattr(
+  1443	                        self.config, "m2_cluster_recheck_gtf_min_jct_reads", 1
+  1444	                    )),
+  1445	                )
+  1446	
+  1447	        # --- Lever 2: per-junction read-support gate. Drop a NOVEL multi-exon
+  1448	        #     candidate if ANY of its junctions is spliced by fewer than
+  1449	        #     novel_junction_min_reads directly-observed reads (CIGAR introns,
+  1450	        #     strand-keyed, matched within novel_junction_reads_tol bp) — a novel
+  1451	        #     junction must be carried by >= N reads, not just 1. gtf/fusion/mono
+  1452	        #     exempt. <=1 disables (byte-identical). Reuses observed_jct if the
+  1453	        #     cluster-recheck already built it; otherwise builds it here. ---
+  1454	        _njmr = int(getattr(self.config, "novel_junction_min_reads", 0))
+  1455	        if _njmr > 1:
+  1456	            from fin.scoring.m2_junction_nll import junction_support_drops
+  1457	            if observed_jct is None:
+  1458	                observed_jct = self._observed_junctions(interval)
+  1459	            drop_cols |= junction_support_drops(
+  1460	                cand_list, observed_jct, min_reads=_njmr,
+  1461	                tol=int(getattr(self.config, "novel_junction_reads_tol", 2)),
+  1462	            )
+  1463	
+  1464	        # --- GUIDED junction-support gate (EXPERIMENT, default-off). Mirror of
+  1465	        #     Lever 2 for GTF-passthrough candidates: drop a guided multi-exon
+  1466	        #     candidate if ANY of its junctions lacks >= guided_junction_min_reads
+  1467	        #     directly-observed reads (CIGAR introns within guided_junction_reads
+  1468	        #     _tol bp). Extends the coordinate-EXACT read-support check — which
+  1469	        #     Lever 2 applies only to novel candidates — to GTF junctions, so a
+  1470	        #     jitter-corrupted annotation junction (coords > tol from the true
+  1471	        #     site, thus zero exact support) is dropped instead of surviving the
+  1472	        #     coordinate-inexact M2/M1 gate. Reuses observed_jct. 0 disables
+  1473	        #     (byte-identical). NOT recall-safe (also drops low-coverage annotated
+  1474	        #     junctions); default-off pending real-data validation. ---
+  1475	        _gjmr = int(getattr(self.config, "guided_junction_min_reads", 0))
+  1476	        if _gjmr > 0:
+  1477	            from fin.scoring.m2_junction_nll import guided_junction_support_drops
+  1478	            if observed_jct is None:
+  1479	                observed_jct = self._observed_junctions(interval)
+  1480	            drop_cols |= guided_junction_support_drops(
+  1481	                cand_list, observed_jct, min_reads=_gjmr,
+  1482	                tol=int(getattr(self.config, "guided_junction_reads_tol", 2)),
+  1483	            )
+  1484	
+  1485	        # --- M2/M1 read-support gate. A multi-exon candidate (GTF or novel;
+  1486	        #     fusion/mono exempt) must earn >=1 read's support: either it is some
+  1487	        #     read's M1 SOLE best-AS (tie set == just this candidate), or it is
+  1488	        #     some read's M2-best (lowest junction-NLL in that read's tie). A
+  1489	        #     jitter-corrupted GTF junction wins neither (loses the M2 contest to
+  1490	        #     the true-junction candidate and never holds a read's sole AS), so it
+  1491	        #     is dropped; a genuine isoform always earns one or the other. ---
+  1492	        if getattr(self.config, "m2_support_gate", False):
+  1493	            from fin.scoring.m2_junction_nll import support_gate_drops
+  1494	
+  1495	            drop_cols |= support_gate_drops(
+  1496	                cand_list, ties_by_read, nlls_by_read,
+  1497	                tie_ok=bool(getattr(self.config, "m2_support_gate_tie", True)),
+  1498	            )
+  1499	
+  1500	        # --- Containment-cluster drop: drop a NOVEL candidate whose intron chain is a
+  1501	        #     contiguous SUB-CHAIN of a longer candidate (a truncation / exon-skip shadow
+  1502	        #     the same-intron-count wobble cluster never groups) when it is a low-support
+  1503	        #     shadow by BOTH EM abundance AND supporting-read count. Runs AFTER all the
+  1504	        #     structural/support gates so ``exclude=drop_cols`` covers every already-doomed
+  1505	        #     parent — a shadow is never folded into a parent that is itself dropped. The
+  1506	        #     read-support guard keeps most genuine low-abundance short/alt-TSS isoforms;
+  1507	        #     gtf/fusion never dropped. DEFAULT-ON (--no-containment-cluster disables). ---
+  1508	        if getattr(self.config, "containment_cluster", False):
+  1509	            from fin.scoring.m2_junction_nll import containment_cluster_drops
+  1510	            em_ab_c = np.asarray(R).sum(axis=0)
+  1511	            read_counts = [len(getattr(c, "supporting_read_ids", ()) or ())
+  1512	                           for c in cand_list]
+  1513	            drop_cols |= containment_cluster_drops(
+  1514	                cand_list, em_ab_c, read_counts,
+  1515	                wobble_bp=int(getattr(self.config, "containment_cluster_wobble_bp", 6)),
+  1516	                min_ab_ratio=float(getattr(
+  1517	                    self.config, "containment_cluster_min_ab_ratio", 0.3)),
+  1518	                min_read_ratio=float(getattr(
+  1519	                    self.config, "containment_cluster_min_read_ratio", 0.3)),
+  1520	                max_shadow_reads=int(getattr(
+  1521	                    self.config, "containment_cluster_max_shadow_reads", 0)),
+  1522	                exclude=set(drop_cols),
+  1523	            )
+  1524	
+  1525	        # --- Lever 1: containment / 5'-truncation collapse (post-EM mass-fold).
+  1526	        #     Fold a NOVEL candidate whose intron chain is a pure 3' suffix of a
+  1527	        #     longer candidate (a 5'-truncation shadow) INTO that parent: the
+  1528	        #     shadow's hard reads (read-id union) + soft EM mass move to the parent,
+  1529	        #     then the shadow joins drop_cols. Parents already in drop_cols
+  1530	        #     (wobble/support) are EXCLUDED, so a fold never targets an
+  1531	        #     ALREADY-dropped interval candidate; a folded parent CAN still be
+  1532	        #     removed by a later _finalize_and_write filter (isoform-fraction /
+  1533	        #     soft-mass / fulllen / polyA), which would lose the absorbed reads --
+  1534	        #     an accepted limitation given this lever is default-off. Chained
+  1535	        #     containment resolves to the terminal longest parent. OFF (default)
+  1536	        #     -> no folds (byte-identical). NOT recall-safe by
+  1537	        #     construction (a 3'-suffix also fits a real alt-TSS isoform); see
+  1538	        #     containment_shadow_drops -> kept default-off pending real-data tuning.
+  1539	        if getattr(self.config, "containment_collapse", False):
+  1540	            from fin.scoring.m2_junction_nll import containment_shadow_drops
+  1541	
+  1542	            em_ab_c = np.asarray(R).sum(axis=0)
+  1543	            fold = containment_shadow_drops(
+  1544	                cand_list, em_ab_c,
+  1545	                tol_bp=int(self.config.containment_3p_tol_bp),
+  1546	                min_ratio=float(self.config.containment_min_abundance_ratio),
+  1547	                exclude=drop_cols,
+  1548	            )
+  1549	            if fold:
+  1550	                qr_by_id = {q.candidate_id: q for q in quant_results}
+  1551	                n_folded = 0
+  1552	                for shadow_col, parent_col in fold.items():
+  1553	                    sq = qr_by_id.get(cand_list[shadow_col].candidate_id)
+  1554	                    pq = qr_by_id.get(cand_list[parent_col].candidate_id)
+  1555	                    if sq is None or pq is None:
+  1556	                        continue
+  1557	                    # Hard reads are disjoint by construction (EM argmax mask), so
+  1558	                    # the union count == sum, but union is robust either way. Soft
+  1559	                    # mass is added so aggregate_across_intervals (single interval:
+  1560	                    # unique/weight ratio == 1) reports parent + shadow abundance.
+  1561	                    union = set(pq.assigned_read_ids) | set(sq.assigned_read_ids)
+  1562	                    pq.assigned_read_ids = tuple(sorted(union))
+  1563	                    pq.num_assigned_reads = len(union)
+  1564	                    pq.abundance += sq.abundance
+  1565	                    # Keep the parent's max EM responsibility consistent with the
+  1566	                    # absorbed reads (max_R is a reporting/FP-analysis metric, not a
+  1567	                    # filter input; confidence is left as the parent's own mean).
+  1568	                    pq.max_R = max(pq.max_R, sq.max_R)
+  1569	                    drop_cols.add(shadow_col)
+  1570	                    n_folded += 1
+--- import differences ---
+--- /dev/fd/63	2026-07-24 11:48:42.781696366 +0800
++++ /dev/fd/62	2026-07-24 11:48:42.779696376 +0800
+@@ -26,6 +26,7 @@
+ from fin.candidates.dataclasses import CandidateSet
+ from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+ from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
++from fin.pipeline.assignment import Assigner
+ from fin.pipeline.config import PipelineConfig
+ from fin.scoring.em_inputs import build_em_matrices
+ from fin.scoring.krill_tiebreak import krill_tiebreak
+@@ -53,6 +54,8 @@
+         # lazily on first fusion interval and cached (indexing is expensive).
+         self._fusion_genome_aligner = None
+         self._fusion_aligner_built = False
++        # m2_em assignment layer (mappy AS -> tie_nll -> d_tx -> EM -> quantify).
++        self._assigner = Assigner(config)
+ 
+     def setup(self):
+         """Open file handles and load references.
+@@ -85,6 +88,3 @@
+         """Run the full pipeline across all intervals.
+ 
+         Returns:
+-            Aggregated quantification results.
+-        """
+-        # Generate intervals
+
+exec
+/bin/bash -c "printf '%s\\n' '--- old EM through quantify ---'; nl -ba /tmp/pyfin-review-b01/runner.old.py | sed -n '1570,1735p'; printf '%s\\n' '--- new assign ending ---'; nl -ba /tmp/pyfin-review-b01/assignment.new.py | sed -n '390,525p'; printf '%s\\n' '--- new runner call through folds ---'; nl -ba /tmp/pyfin-review-b01/runner.new.py | sed -n '1360,1565p'; printf '%s\\n' '--- old relevant globals/import usages ---'; rg -n '_M2_EM_(FLANK|PAD)|em_with_coherence|quantify_transcripts|krill_tiebreak|MISSING' /tmp/pyfin-review-b01/runner.old.py /tmp/pyfin-review-b01/runner.new.py /tmp/pyfin-review-b01/assignment.new.py" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- old EM through quantify ---
+  1570	            abundance_feedback=self.config.abundance_feedback,
+  1571	            abundance_length_norm=self.config.abundance_length_norm,
+  1572	            eff_lengths=self._eff_lengths(cand_list),
+  1573	        )
+  1574	
+  1575	        if self.config.krill_tiebreak:
+  1576	            R = krill_tiebreak(
+  1577	                R=R, read_ids=kept_read_ids, read_seqs=read_seqs,
+  1578	                candidates=cand_list, signal_path=self.config.signal_path,
+  1579	                pore=self.config.krill_pore,
+  1580	                ambig_threshold=self.config.tiebreak_ambig_threshold,
+  1581	                use_gpu=self.config.use_gpu,
+  1582	            )
+  1583	            hard_assignments = R.argmax(axis=1)
+  1584	
+  1585	        # --- Cluster-internal wobble recheck (post-EM, data-layer shadow kill).
+  1586	        #     Cluster ALL multi-exon candidates by structure (same intron count +
+  1587	        #     every junction within +-bp); within a cluster the highest-EM-abundance
+  1588	        #     candidate anchors (often the true isoform, frequently a GTF
+  1589	        #     passthrough), and a NOVEL sibling whose abundance/anchor < fraction is
+  1590	        #     a wobble shadow -> drop. GTF/fusion never dropped (they only anchor).
+  1591	        #     Pure abundance evidence: GTF participates in the abundance race but is
+  1592	        #     NOT used as a correctness oracle, so this stays robust when the
+  1593	        #     annotation is wrong (and self-disables with no GTF: a real novel
+  1594	        #     anchors its own cluster). OFF -> no drops (byte-identical). ---
+  1595	        drop_cols: set = set()
+  1596	        # Strand-keyed {strand: Counter{(donor,acceptor): n_reads}} of directly-
+  1597	        # observed read junctions; built lazily (reopens BAM) and shared by the
+  1598	        # cluster-recheck GTF guard and the Lever-2 junction-support gate.
+  1599	        observed_jct = None
+  1600	        if getattr(self.config, "m2_cluster_recheck", False):
+  1601	            from fin.scoring.m2_junction_nll import structural_wobble_clusters
+  1602	
+  1603	            frac = self.config.m2_cluster_recheck_fraction
+  1604	            if frac <= 0.0:
+  1605	                frac = self.config.min_isoform_fraction
+  1606	            if frac > 0.0:
+  1607	                em_ab = np.asarray(R).sum(axis=0)
+  1608	                bp = self.config.m2_cluster_recheck_bp
+  1609	                cassette_bp = getattr(
+  1610	                    self.config, "m2_cluster_recheck_cassette_max_exon_bp", 0
+  1611	                )
+  1612	                clusters = structural_wobble_clusters(
+  1613	                    cand_list, bp, cassette_max_exon_bp=cassette_bp
+  1614	                )
+  1615	                from fin.scoring.m2_junction_nll import (
+  1616	                    gtf_guard_needed,
+  1617	                    wobble_shadow_drops,
+  1618	                )
+  1619	
+  1620	                gtf_drop = bool(getattr(
+  1621	                    self.config, "m2_cluster_recheck_novel_displaces_gtf", True
+  1622	                ))
+  1623	                # Build the directly-observed read junctions for the GTF read-support
+  1624	                # guard ONLY when a clustered low-abundance GTF sibling could actually
+  1625	                # be dropped — this reopens the BAM, so skip it for no-GTF intervals
+  1626	                # (and avoids touching the BAM for mocked/placeholder-path callers).
+  1627	                if gtf_drop and gtf_guard_needed(cand_list, em_ab, clusters, frac):
+  1628	                    observed_jct = self._observed_junctions(interval)
+  1629	                drop_cols |= wobble_shadow_drops(
+  1630	                    cand_list, em_ab, clusters, frac,
+  1631	                    gtf_drop_enabled=gtf_drop,
+  1632	                    observed_jct=observed_jct,
+  1633	                    jct_tol=int(getattr(self.config, "m2_cluster_recheck_jct_tol", 2)),
+  1634	                    gtf_min_jct_reads=int(getattr(
+  1635	                        self.config, "m2_cluster_recheck_gtf_min_jct_reads", 1
+  1636	                    )),
+  1637	                )
+  1638	
+  1639	        # --- Lever 2: per-junction read-support gate. Drop a NOVEL multi-exon
+  1640	        #     candidate if ANY of its junctions is spliced by fewer than
+  1641	        #     novel_junction_min_reads directly-observed reads (CIGAR introns,
+  1642	        #     strand-keyed, matched within novel_junction_reads_tol bp) — a novel
+  1643	        #     junction must be carried by >= N reads, not just 1. gtf/fusion/mono
+  1644	        #     exempt. <=1 disables (byte-identical). Reuses observed_jct if the
+  1645	        #     cluster-recheck already built it; otherwise builds it here. ---
+  1646	        _njmr = int(getattr(self.config, "novel_junction_min_reads", 0))
+  1647	        if _njmr > 1:
+  1648	            from fin.scoring.m2_junction_nll import junction_support_drops
+  1649	            if observed_jct is None:
+  1650	                observed_jct = self._observed_junctions(interval)
+  1651	            drop_cols |= junction_support_drops(
+  1652	                cand_list, observed_jct, min_reads=_njmr,
+  1653	                tol=int(getattr(self.config, "novel_junction_reads_tol", 2)),
+  1654	            )
+  1655	
+  1656	        # --- GUIDED junction-support gate (EXPERIMENT, default-off). Mirror of
+  1657	        #     Lever 2 for GTF-passthrough candidates: drop a guided multi-exon
+  1658	        #     candidate if ANY of its junctions lacks >= guided_junction_min_reads
+  1659	        #     directly-observed reads (CIGAR introns within guided_junction_reads
+  1660	        #     _tol bp). Extends the coordinate-EXACT read-support check — which
+  1661	        #     Lever 2 applies only to novel candidates — to GTF junctions, so a
+  1662	        #     jitter-corrupted annotation junction (coords > tol from the true
+  1663	        #     site, thus zero exact support) is dropped instead of surviving the
+  1664	        #     coordinate-inexact M2/M1 gate. Reuses observed_jct. 0 disables
+  1665	        #     (byte-identical). NOT recall-safe (also drops low-coverage annotated
+  1666	        #     junctions); default-off pending real-data validation. ---
+  1667	        _gjmr = int(getattr(self.config, "guided_junction_min_reads", 0))
+  1668	        if _gjmr > 0:
+  1669	            from fin.scoring.m2_junction_nll import guided_junction_support_drops
+  1670	            if observed_jct is None:
+  1671	                observed_jct = self._observed_junctions(interval)
+  1672	            drop_cols |= guided_junction_support_drops(
+  1673	                cand_list, observed_jct, min_reads=_gjmr,
+  1674	                tol=int(getattr(self.config, "guided_junction_reads_tol", 2)),
+  1675	            )
+  1676	
+  1677	        # --- M2/M1 read-support gate. A multi-exon candidate (GTF or novel;
+  1678	        #     fusion/mono exempt) must earn >=1 read's support: either it is some
+  1679	        #     read's M1 SOLE best-AS (tie set == just this candidate), or it is
+  1680	        #     some read's M2-best (lowest junction-NLL in that read's tie). A
+  1681	        #     jitter-corrupted GTF junction wins neither (loses the M2 contest to
+  1682	        #     the true-junction candidate and never holds a read's sole AS), so it
+  1683	        #     is dropped; a genuine isoform always earns one or the other. ---
+  1684	        if getattr(self.config, "m2_support_gate", False):
+  1685	            from fin.scoring.m2_junction_nll import support_gate_drops
+  1686	
+  1687	            drop_cols |= support_gate_drops(
+  1688	                cand_list, ties_by_read, nlls_by_read,
+  1689	                tie_ok=bool(getattr(self.config, "m2_support_gate_tie", True)),
+  1690	            )
+  1691	
+  1692	        # --- Containment-cluster drop: drop a NOVEL candidate whose intron chain is a
+  1693	        #     contiguous SUB-CHAIN of a longer candidate (a truncation / exon-skip shadow
+  1694	        #     the same-intron-count wobble cluster never groups) when it is a low-support
+  1695	        #     shadow by BOTH EM abundance AND supporting-read count. Runs AFTER all the
+  1696	        #     structural/support gates so ``exclude=drop_cols`` covers every already-doomed
+  1697	        #     parent — a shadow is never folded into a parent that is itself dropped. The
+  1698	        #     read-support guard keeps most genuine low-abundance short/alt-TSS isoforms;
+  1699	        #     gtf/fusion never dropped. DEFAULT-ON (--no-containment-cluster disables). ---
+  1700	        if getattr(self.config, "containment_cluster", False):
+  1701	            from fin.scoring.m2_junction_nll import containment_cluster_drops
+  1702	            em_ab_c = np.asarray(R).sum(axis=0)
+  1703	            read_counts = [len(getattr(c, "supporting_read_ids", ()) or ())
+  1704	                           for c in cand_list]
+  1705	            drop_cols |= containment_cluster_drops(
+  1706	                cand_list, em_ab_c, read_counts,
+  1707	                wobble_bp=int(getattr(self.config, "containment_cluster_wobble_bp", 6)),
+  1708	                min_ab_ratio=float(getattr(
+  1709	                    self.config, "containment_cluster_min_ab_ratio", 0.3)),
+  1710	                min_read_ratio=float(getattr(
+  1711	                    self.config, "containment_cluster_min_read_ratio", 0.3)),
+  1712	                max_shadow_reads=int(getattr(
+  1713	                    self.config, "containment_cluster_max_shadow_reads", 0)),
+  1714	                exclude=set(drop_cols),
+  1715	            )
+  1716	
+  1717	        quant_results = quantify_transcripts(
+  1718	            R, hard_assignments, cand_list, kept_read_ids
+  1719	        )
+  1720	        # Stamp max_R BEFORE any filtering: quant_results is column-aligned to R
+  1721	        # here (enumerate index == R column). Filtering would break that alignment.
+  1722	        for j, qr in enumerate(quant_results):
+  1723	            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
+  1724	        # --- Lever 1: containment / 5'-truncation collapse (post-EM mass-fold).
+  1725	        #     Fold a NOVEL candidate whose intron chain is a pure 3' suffix of a
+  1726	        #     longer candidate (a 5'-truncation shadow) INTO that parent: the
+  1727	        #     shadow's hard reads (read-id union) + soft EM mass move to the parent,
+  1728	        #     then the shadow joins drop_cols. Parents already in drop_cols
+  1729	        #     (wobble/support) are EXCLUDED, so a fold never targets an
+  1730	        #     ALREADY-dropped interval candidate; a folded parent CAN still be
+  1731	        #     removed by a later _finalize_and_write filter (isoform-fraction /
+  1732	        #     soft-mass / fulllen / polyA), which would lose the absorbed reads --
+  1733	        #     an accepted limitation given this lever is default-off. Chained
+  1734	        #     containment resolves to the terminal longest parent. OFF (default)
+  1735	        #     -> no folds (byte-identical). NOT recall-safe by
+--- new assign ending ---
+   390	            # gold-standard evidence of the locus isoform ratio. Ambiguous reads
+   391	            # (no junction signal, or covered-but-indistinguishable that did not
+   392	            # straddle every diff span) are deferred to Pass B.
+   393	            margin_thr = float(getattr(self.config, "m2_diff_cover_margin", 0.0))
+   394	            covered_vote = np.zeros(n_c, dtype=np.float64)
+   395	            fuzzy: List[int] = []
+   396	            for i in range(n_r):
+   397	                tie = ties_by_read.get(i)
+   398	                if not tie:
+   399	                    continue
+   400	                if len(tie) < 2:
+   401	                    d_tx[i, tie[0]] = 0.0
+   402	                    continue
+   403	                nlls = nlls_by_read.get(i)
+   404	                if not nlls:
+   405	                    fuzzy.append(i)  # no junction signal -> defer (was: drop)
+   406	                    continue
+   407	                ordered = sorted(nlls.items(), key=lambda kv: kv[1])
+   408	                best_j = ordered[0][0]
+   409	                margin = (ordered[1][1] - ordered[0][1]) if len(ordered) > 1 else float("inf")
+   410	                # The redistribution PRIOR (covered_vote) must be fed only by reads
+   411	                # with EXPLICIT coverage: the per-read _tie_nll fallback leaves
+   412	                # cover_by_read empty (coverage uncomputable), so a missing entry
+   413	                # must NOT seed covered_vote (else the fallback path biases fuzzy
+   414	                # reads off unverified coverage).
+   415	                covered_for_vote = cover_by_read.get(i) is True
+   416	                if margin >= margin_thr:
+   417	                    # M2 distinguishes -> hard assign to the lowest-NLL candidate.
+   418	                    d_tx[i, best_j] = 0.0  # every other tie cell stays MISSING
+   419	                    if covered_for_vote:
+   420	                        # Only covered+distinguishing reads define the locus ratio.
+   421	                        covered_vote[best_j] += 1.0
+   422	                else:
+   423	                    # Indistinguishable (margin < thr), whether or not covered:
+   424	                    # defer to Pass B and redistribute by the covered-read ratio
+   425	                    # (flat 1/K only when the tie has no covered prior). The margin
+   426	                    # is thus the SOLE decider of hard-assign vs ratio-follow.
+   427	                    fuzzy.append(i)
+   428	
+   429	            # Pass B: redistribute each ambiguous read across its tie in proportion
+   430	            # to the covered_vote ratio of those candidates (one-shot prior, not an
+   431	            # EM feedback loop). d_tx = -log(p) so softmax(-d_tx) reproduces p at
+   432	            # sigma=1; a zero-prior candidate stays MISSING. If NONE of the tie
+   433	            # candidates earned covered votes, fall back to the flat 1/K split
+   434	            # (== legacy behavior -> signal-dead loci are never starved).
+   435	            for i in fuzzy:
+   436	                tie = ties_by_read[i]
+   437	                masses = np.array([covered_vote[j] for j in tie], dtype=np.float64)
+   438	                s = masses.sum()
+   439	                if s > 0:
+   440	                    p = masses / s
+   441	                    for idx, j in enumerate(tie):
+   442	                        if p[idx] > 0:
+   443	                            d_tx[i, j] = -float(np.log(p[idx]))
+   444	                        # p==0 -> leave MISSING (no covered support for this cand)
+   445	                else:
+   446	                    for j in tie:
+   447	                        d_tx[i, j] = 0.0  # flat 1/K (recall-safe fallback)
+   448	            # ON-path d_tx values are already calibrated (0 / -log(p) / MISSING) for
+   449	            # sigma=1; no sigma2 normalization (that is the OFF skeleton's step).
+   450	        d_tx = d_tx.astype(np.float32)
+   451	
+   452	        # --- M3 read×read junction-window DTW coherence (opt-in; DTW is costly).
+   453	        #     Each read anchored to its d_tx-argmin (best) candidate; σ3 (median
+   454	        #     non-zero DTW) calibrates it to O(1) so β mixes cleanly. ---
+   455	        if self.config.m3_coherence:
+   456	            from fin.scoring.m3_junction_coherence import build_m3_coherence
+   457	
+   458	            winner_col = np.asarray(d_tx).argmin(axis=1).astype(np.int64)
+   459	            no_data = np.asarray(d_tx).min(axis=1) >= 1e5  # all-MISSING rows
+   460	            winner_col[no_data] = -1
+   461	            dist_read_to_read = build_m3_coherence(
+   462	                kept_read_ids, read_seqs, cand_list, winner_col,
+   463	                self.config.signal_path, pore=self.config.krill_pore,
+   464	                junction_k=self.config.m2_tiebreak_junction_k, flank=_M2_EM_FLANK,
+   465	                use_gpu=self.config.use_gpu,
+   466	            )
+   467	            nz = dist_read_to_read[dist_read_to_read > 0]
+   468	            sigma3 = max(float(np.median(nz)) if nz.size else 1.0, 1e-3)
+   469	            dist_read_to_read = (dist_read_to_read / sigma3).astype(np.float32)
+   470	            beta_use = self.config.em_beta
+   471	        else:
+   472	            dist_read_to_read = np.zeros((n_r, n_r), dtype=np.float32)
+   473	            beta_use = 0.0
+   474	
+   475	        R, hard_assignments, _ = em_with_coherence(
+   476	            dist_read_to_tx=d_tx,
+   477	            dist_read_to_read=dist_read_to_read,
+   478	            sigma=1.0,
+   479	            beta=beta_use,
+   480	            max_iter=max_iter_em,
+   481	            tol=self.config.em_tol,
+   482	            verbose=False,
+   483	            use_gpu=self.config.use_gpu,
+   484	            abundance_feedback=self.config.abundance_feedback,
+   485	            abundance_length_norm=self.config.abundance_length_norm,
+   486	            eff_lengths=eff_lengths_fn(cand_list),
+   487	        )
+   488	
+   489	        if self.config.krill_tiebreak:
+   490	            R = krill_tiebreak(
+   491	                R=R, read_ids=kept_read_ids, read_seqs=read_seqs,
+   492	                candidates=cand_list, signal_path=self.config.signal_path,
+   493	                pore=self.config.krill_pore,
+   494	                ambig_threshold=self.config.tiebreak_ambig_threshold,
+   495	                use_gpu=self.config.use_gpu,
+   496	            )
+   497	            hard_assignments = R.argmax(axis=1)
+   498	
+   499	        quant_results = quantify_transcripts(
+   500	            R, hard_assignments, cand_list, kept_read_ids
+   501	        )
+   502	        # Stamp max_R BEFORE any filtering: quant_results is column-aligned to R
+   503	        # here (enumerate index == R column). Filtering would break that alignment.
+   504	        for j, qr in enumerate(quant_results):
+   505	            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
+   506	
+   507	        return QuantOutput(
+   508	            R=R,
+   509	            hard_assignments=hard_assignments,
+   510	            quant_results=quant_results,
+   511	            cand_list=cand_list,
+   512	            kept_read_ids=kept_read_ids,
+   513	            ties_by_read=ties_by_read,
+   514	            nlls_by_read=nlls_by_read,
+   515	            cover_by_read=cover_by_read,
+   516	            read_seqs=read_seqs,
+   517	            n_ties=n_ties,
+   518	            n_refined=n_refined,
+   519	            beta_use=beta_use,
+   520	        )
+--- new runner call through folds ---
+  1360	
+  1361	    def _quant_m2_em(
+  1362	        self,
+  1363	        candidate_set: CandidateSet,
+  1364	        read_ids: List[str],
+  1365	        interval: GenomicInterval,
+  1366	    ) -> Optional[List[QuantResult]]:
+  1367	        """quant_mode='m2_em' (production default): pure tie-break junction-NLL EM.
+  1368	
+  1369	        M1/AS is used ONLY as a hard selector — it picks each read's best-AS tie
+  1370	        set and masks mappability — and the per-event junction NLL is the SOLE
+  1371	        graded distance over that tie set (m2_resolve_tie semantics, NOT the dense
+  1372	        read×candidate matrix, which collapses). Optionally adds the M3 read×read
+  1373	        junction-window DTW coherence when ``config.m3_coherence`` is True
+  1374	        (β=em_beta); OFF by default because the pairwise DTW is expensive. All
+  1375	        signal scoring is in-memory krill — no f5c CLI. (``m4_source`` does not
+  1376	        affect this path.)
+  1377	        """
+  1378	        qo = self._assigner.assign(
+  1379	            candidate_set, read_ids,
+  1380	            tie_nll_fn=self._tie_nll, eff_lengths_fn=self._eff_lengths,
+  1381	        )
+  1382	        if qo is None:
+  1383	            return []
+  1384	        R = qo.R
+  1385	        cand_list = qo.cand_list
+  1386	        ties_by_read = qo.ties_by_read
+  1387	        nlls_by_read = qo.nlls_by_read
+  1388	        quant_results = qo.quant_results
+  1389	        n_ties = qo.n_ties
+  1390	        n_refined = qo.n_refined
+  1391	        beta_use = qo.beta_use
+  1392	
+  1393	        # --- Cluster-internal wobble recheck (post-EM, data-layer shadow kill).
+  1394	        #     Cluster ALL multi-exon candidates by structure (same intron count +
+  1395	        #     every junction within +-bp); within a cluster the highest-EM-abundance
+  1396	        #     candidate anchors (often the true isoform, frequently a GTF
+  1397	        #     passthrough), and a NOVEL sibling whose abundance/anchor < fraction is
+  1398	        #     a wobble shadow -> drop. GTF/fusion never dropped (they only anchor).
+  1399	        #     Pure abundance evidence: GTF participates in the abundance race but is
+  1400	        #     NOT used as a correctness oracle, so this stays robust when the
+  1401	        #     annotation is wrong (and self-disables with no GTF: a real novel
+  1402	        #     anchors its own cluster). OFF -> no drops (byte-identical). ---
+  1403	        drop_cols: set = set()
+  1404	        # Strand-keyed {strand: Counter{(donor,acceptor): n_reads}} of directly-
+  1405	        # observed read junctions; built lazily (reopens BAM) and shared by the
+  1406	        # cluster-recheck GTF guard and the Lever-2 junction-support gate.
+  1407	        observed_jct = None
+  1408	        if getattr(self.config, "m2_cluster_recheck", False):
+  1409	            from fin.scoring.m2_junction_nll import structural_wobble_clusters
+  1410	
+  1411	            frac = self.config.m2_cluster_recheck_fraction
+  1412	            if frac <= 0.0:
+  1413	                frac = self.config.min_isoform_fraction
+  1414	            if frac > 0.0:
+  1415	                em_ab = np.asarray(R).sum(axis=0)
+  1416	                bp = self.config.m2_cluster_recheck_bp
+  1417	                cassette_bp = getattr(
+  1418	                    self.config, "m2_cluster_recheck_cassette_max_exon_bp", 0
+  1419	                )
+  1420	                clusters = structural_wobble_clusters(
+  1421	                    cand_list, bp, cassette_max_exon_bp=cassette_bp
+  1422	                )
+  1423	                from fin.scoring.m2_junction_nll import (
+  1424	                    gtf_guard_needed,
+  1425	                    wobble_shadow_drops,
+  1426	                )
+  1427	
+  1428	                gtf_drop = bool(getattr(
+  1429	                    self.config, "m2_cluster_recheck_novel_displaces_gtf", True
+  1430	                ))
+  1431	                # Build the directly-observed read junctions for the GTF read-support
+  1432	                # guard ONLY when a clustered low-abundance GTF sibling could actually
+  1433	                # be dropped — this reopens the BAM, so skip it for no-GTF intervals
+  1434	                # (and avoids touching the BAM for mocked/placeholder-path callers).
+  1435	                if gtf_drop and gtf_guard_needed(cand_list, em_ab, clusters, frac):
+  1436	                    observed_jct = self._observed_junctions(interval)
+  1437	                drop_cols |= wobble_shadow_drops(
+  1438	                    cand_list, em_ab, clusters, frac,
+  1439	                    gtf_drop_enabled=gtf_drop,
+  1440	                    observed_jct=observed_jct,
+  1441	                    jct_tol=int(getattr(self.config, "m2_cluster_recheck_jct_tol", 2)),
+  1442	                    gtf_min_jct_reads=int(getattr(
+  1443	                        self.config, "m2_cluster_recheck_gtf_min_jct_reads", 1
+  1444	                    )),
+  1445	                )
+  1446	
+  1447	        # --- Lever 2: per-junction read-support gate. Drop a NOVEL multi-exon
+  1448	        #     candidate if ANY of its junctions is spliced by fewer than
+  1449	        #     novel_junction_min_reads directly-observed reads (CIGAR introns,
+  1450	        #     strand-keyed, matched within novel_junction_reads_tol bp) — a novel
+  1451	        #     junction must be carried by >= N reads, not just 1. gtf/fusion/mono
+  1452	        #     exempt. <=1 disables (byte-identical). Reuses observed_jct if the
+  1453	        #     cluster-recheck already built it; otherwise builds it here. ---
+  1454	        _njmr = int(getattr(self.config, "novel_junction_min_reads", 0))
+  1455	        if _njmr > 1:
+  1456	            from fin.scoring.m2_junction_nll import junction_support_drops
+  1457	            if observed_jct is None:
+  1458	                observed_jct = self._observed_junctions(interval)
+  1459	            drop_cols |= junction_support_drops(
+  1460	                cand_list, observed_jct, min_reads=_njmr,
+  1461	                tol=int(getattr(self.config, "novel_junction_reads_tol", 2)),
+  1462	            )
+  1463	
+  1464	        # --- GUIDED junction-support gate (EXPERIMENT, default-off). Mirror of
+  1465	        #     Lever 2 for GTF-passthrough candidates: drop a guided multi-exon
+  1466	        #     candidate if ANY of its junctions lacks >= guided_junction_min_reads
+  1467	        #     directly-observed reads (CIGAR introns within guided_junction_reads
+  1468	        #     _tol bp). Extends the coordinate-EXACT read-support check — which
+  1469	        #     Lever 2 applies only to novel candidates — to GTF junctions, so a
+  1470	        #     jitter-corrupted annotation junction (coords > tol from the true
+  1471	        #     site, thus zero exact support) is dropped instead of surviving the
+  1472	        #     coordinate-inexact M2/M1 gate. Reuses observed_jct. 0 disables
+  1473	        #     (byte-identical). NOT recall-safe (also drops low-coverage annotated
+  1474	        #     junctions); default-off pending real-data validation. ---
+  1475	        _gjmr = int(getattr(self.config, "guided_junction_min_reads", 0))
+  1476	        if _gjmr > 0:
+  1477	            from fin.scoring.m2_junction_nll import guided_junction_support_drops
+  1478	            if observed_jct is None:
+  1479	                observed_jct = self._observed_junctions(interval)
+  1480	            drop_cols |= guided_junction_support_drops(
+  1481	                cand_list, observed_jct, min_reads=_gjmr,
+  1482	                tol=int(getattr(self.config, "guided_junction_reads_tol", 2)),
+  1483	            )
+  1484	
+  1485	        # --- M2/M1 read-support gate. A multi-exon candidate (GTF or novel;
+  1486	        #     fusion/mono exempt) must earn >=1 read's support: either it is some
+  1487	        #     read's M1 SOLE best-AS (tie set == just this candidate), or it is
+  1488	        #     some read's M2-best (lowest junction-NLL in that read's tie). A
+  1489	        #     jitter-corrupted GTF junction wins neither (loses the M2 contest to
+  1490	        #     the true-junction candidate and never holds a read's sole AS), so it
+  1491	        #     is dropped; a genuine isoform always earns one or the other. ---
+  1492	        if getattr(self.config, "m2_support_gate", False):
+  1493	            from fin.scoring.m2_junction_nll import support_gate_drops
+  1494	
+  1495	            drop_cols |= support_gate_drops(
+  1496	                cand_list, ties_by_read, nlls_by_read,
+  1497	                tie_ok=bool(getattr(self.config, "m2_support_gate_tie", True)),
+  1498	            )
+  1499	
+  1500	        # --- Containment-cluster drop: drop a NOVEL candidate whose intron chain is a
+  1501	        #     contiguous SUB-CHAIN of a longer candidate (a truncation / exon-skip shadow
+  1502	        #     the same-intron-count wobble cluster never groups) when it is a low-support
+  1503	        #     shadow by BOTH EM abundance AND supporting-read count. Runs AFTER all the
+  1504	        #     structural/support gates so ``exclude=drop_cols`` covers every already-doomed
+  1505	        #     parent — a shadow is never folded into a parent that is itself dropped. The
+  1506	        #     read-support guard keeps most genuine low-abundance short/alt-TSS isoforms;
+  1507	        #     gtf/fusion never dropped. DEFAULT-ON (--no-containment-cluster disables). ---
+  1508	        if getattr(self.config, "containment_cluster", False):
+  1509	            from fin.scoring.m2_junction_nll import containment_cluster_drops
+  1510	            em_ab_c = np.asarray(R).sum(axis=0)
+  1511	            read_counts = [len(getattr(c, "supporting_read_ids", ()) or ())
+  1512	                           for c in cand_list]
+  1513	            drop_cols |= containment_cluster_drops(
+  1514	                cand_list, em_ab_c, read_counts,
+  1515	                wobble_bp=int(getattr(self.config, "containment_cluster_wobble_bp", 6)),
+  1516	                min_ab_ratio=float(getattr(
+  1517	                    self.config, "containment_cluster_min_ab_ratio", 0.3)),
+  1518	                min_read_ratio=float(getattr(
+  1519	                    self.config, "containment_cluster_min_read_ratio", 0.3)),
+  1520	                max_shadow_reads=int(getattr(
+  1521	                    self.config, "containment_cluster_max_shadow_reads", 0)),
+  1522	                exclude=set(drop_cols),
+  1523	            )
+  1524	
+  1525	        # --- Lever 1: containment / 5'-truncation collapse (post-EM mass-fold).
+  1526	        #     Fold a NOVEL candidate whose intron chain is a pure 3' suffix of a
+  1527	        #     longer candidate (a 5'-truncation shadow) INTO that parent: the
+  1528	        #     shadow's hard reads (read-id union) + soft EM mass move to the parent,
+  1529	        #     then the shadow joins drop_cols. Parents already in drop_cols
+  1530	        #     (wobble/support) are EXCLUDED, so a fold never targets an
+  1531	        #     ALREADY-dropped interval candidate; a folded parent CAN still be
+  1532	        #     removed by a later _finalize_and_write filter (isoform-fraction /
+  1533	        #     soft-mass / fulllen / polyA), which would lose the absorbed reads --
+  1534	        #     an accepted limitation given this lever is default-off. Chained
+  1535	        #     containment resolves to the terminal longest parent. OFF (default)
+  1536	        #     -> no folds (byte-identical). NOT recall-safe by
+  1537	        #     construction (a 3'-suffix also fits a real alt-TSS isoform); see
+  1538	        #     containment_shadow_drops -> kept default-off pending real-data tuning.
+  1539	        if getattr(self.config, "containment_collapse", False):
+  1540	            from fin.scoring.m2_junction_nll import containment_shadow_drops
+  1541	
+  1542	            em_ab_c = np.asarray(R).sum(axis=0)
+  1543	            fold = containment_shadow_drops(
+  1544	                cand_list, em_ab_c,
+  1545	                tol_bp=int(self.config.containment_3p_tol_bp),
+  1546	                min_ratio=float(self.config.containment_min_abundance_ratio),
+  1547	                exclude=drop_cols,
+  1548	            )
+  1549	            if fold:
+  1550	                qr_by_id = {q.candidate_id: q for q in quant_results}
+  1551	                n_folded = 0
+  1552	                for shadow_col, parent_col in fold.items():
+  1553	                    sq = qr_by_id.get(cand_list[shadow_col].candidate_id)
+  1554	                    pq = qr_by_id.get(cand_list[parent_col].candidate_id)
+  1555	                    if sq is None or pq is None:
+  1556	                        continue
+  1557	                    # Hard reads are disjoint by construction (EM argmax mask), so
+  1558	                    # the union count == sum, but union is robust either way. Soft
+  1559	                    # mass is added so aggregate_across_intervals (single interval:
+  1560	                    # unique/weight ratio == 1) reports parent + shadow abundance.
+  1561	                    union = set(pq.assigned_read_ids) | set(sq.assigned_read_ids)
+  1562	                    pq.assigned_read_ids = tuple(sorted(union))
+  1563	                    pq.num_assigned_reads = len(union)
+  1564	                    pq.abundance += sq.abundance
+  1565	                    # Keep the parent's max EM responsibility consistent with the
+--- old relevant globals/import usages ---
+/tmp/pyfin-review-b01/assignment.new.py:11:  ``quantify_transcripts`` + ``max_R`` stamp) returning an immutable ``QuantOutput``. NO candidate
+/tmp/pyfin-review-b01/assignment.new.py:13:  the SelectionEngine in M3). ``quantify_transcripts`` is stamped here (right after EM) rather than
+/tmp/pyfin-review-b01/assignment.new.py:19:``em_with_coherence`` / ``quantify_transcripts`` seams move to this module (tests re-point here).
+/tmp/pyfin-review-b01/assignment.new.py:29:from fin.analysis.assignments import em_with_coherence
+/tmp/pyfin-review-b01/assignment.new.py:30:from fin.analysis.quantification import quantify_transcripts
+/tmp/pyfin-review-b01/assignment.new.py:31:from fin.scoring.krill_tiebreak import krill_tiebreak
+/tmp/pyfin-review-b01/assignment.new.py:32:from fin.scoring.m2_junction_nll import MISSING
+/tmp/pyfin-review-b01/assignment.new.py:37:_M2_EM_FLANK = 2
+/tmp/pyfin-review-b01/assignment.new.py:38:# d_tx MISSING-cell pad added to (hi-lo) so an unscored tie cell sits just beyond the
+/tmp/pyfin-review-b01/assignment.new.py:40:_M2_EM_PAD = 1.0
+/tmp/pyfin-review-b01/assignment.new.py:83:        # (empty ties -> _quant_m2_em leaves rows MISSING, byte-identical).
+/tmp/pyfin-review-b01/assignment.new.py:86:        # well-defined; without them every row would be all-MISSING and the
+/tmp/pyfin-review-b01/assignment.new.py:127:            [cand_list[j] for j in tie], flank=_M2_EM_FLANK, k=k
+/tmp/pyfin-review-b01/assignment.new.py:133:                [cand_list[j] for j in tie], flank=_M2_EM_FLANK
+/tmp/pyfin-review-b01/assignment.new.py:357:        #     outside the tie stay MISSING). Gate ON: the diff-region coverage
+/tmp/pyfin-review-b01/assignment.new.py:361:        d_tx = np.full((n_r, n_c), MISSING, dtype=np.float64)
+/tmp/pyfin-review-b01/assignment.new.py:378:                miss = (hi - lo) + _M2_EM_PAD
+/tmp/pyfin-review-b01/assignment.new.py:418:                    d_tx[i, best_j] = 0.0  # every other tie cell stays MISSING
+/tmp/pyfin-review-b01/assignment.new.py:432:            # sigma=1; a zero-prior candidate stays MISSING. If NONE of the tie
+/tmp/pyfin-review-b01/assignment.new.py:444:                        # p==0 -> leave MISSING (no covered support for this cand)
+/tmp/pyfin-review-b01/assignment.new.py:448:            # ON-path d_tx values are already calibrated (0 / -log(p) / MISSING) for
+/tmp/pyfin-review-b01/assignment.new.py:459:            no_data = np.asarray(d_tx).min(axis=1) >= 1e5  # all-MISSING rows
+/tmp/pyfin-review-b01/assignment.new.py:464:                junction_k=self.config.m2_tiebreak_junction_k, flank=_M2_EM_FLANK,
+/tmp/pyfin-review-b01/assignment.new.py:475:        R, hard_assignments, _ = em_with_coherence(
+/tmp/pyfin-review-b01/assignment.new.py:489:        if self.config.krill_tiebreak:
+/tmp/pyfin-review-b01/assignment.new.py:490:            R = krill_tiebreak(
+/tmp/pyfin-review-b01/assignment.new.py:499:        quant_results = quantify_transcripts(
+/tmp/pyfin-review-b01/runner.new.py:12:from fin.analysis.assignments import em_with_coherence
+/tmp/pyfin-review-b01/runner.new.py:23:    quantify_transcripts,
+/tmp/pyfin-review-b01/runner.new.py:32:from fin.scoring.krill_tiebreak import krill_tiebreak
+/tmp/pyfin-review-b01/runner.new.py:41:_M2_EM_FLANK = 2
+/tmp/pyfin-review-b01/runner.new.py:42:_M2_EM_PAD = 1.0
+/tmp/pyfin-review-b01/runner.new.py:1293:        R, hard_assignments, _ = em_with_coherence(
+/tmp/pyfin-review-b01/runner.new.py:1307:        if self.config.krill_tiebreak:
+/tmp/pyfin-review-b01/runner.new.py:1308:            R = krill_tiebreak(
+/tmp/pyfin-review-b01/runner.new.py:1317:        quant_results = quantify_transcripts(
+/tmp/pyfin-review-b01/runner.old.py:12:from fin.analysis.assignments import em_with_coherence
+/tmp/pyfin-review-b01/runner.old.py:23:    quantify_transcripts,
+/tmp/pyfin-review-b01/runner.old.py:31:from fin.scoring.krill_tiebreak import krill_tiebreak
+/tmp/pyfin-review-b01/runner.old.py:40:_M2_EM_FLANK = 2
+/tmp/pyfin-review-b01/runner.old.py:41:_M2_EM_PAD = 1.0
+/tmp/pyfin-review-b01/runner.old.py:1290:        R, hard_assignments, _ = em_with_coherence(
+/tmp/pyfin-review-b01/runner.old.py:1304:        if self.config.krill_tiebreak:
+/tmp/pyfin-review-b01/runner.old.py:1305:            R = krill_tiebreak(
+/tmp/pyfin-review-b01/runner.old.py:1314:        quant_results = quantify_transcripts(
+/tmp/pyfin-review-b01/runner.old.py:1377:        from fin.scoring.m2_junction_nll import MISSING
+/tmp/pyfin-review-b01/runner.old.py:1443:        #     outside the tie stay MISSING). Gate ON: the diff-region coverage
+/tmp/pyfin-review-b01/runner.old.py:1447:        d_tx = np.full((n_r, n_c), MISSING, dtype=np.float64)
+/tmp/pyfin-review-b01/runner.old.py:1464:                miss = (hi - lo) + _M2_EM_PAD
+/tmp/pyfin-review-b01/runner.old.py:1504:                    d_tx[i, best_j] = 0.0  # every other tie cell stays MISSING
+/tmp/pyfin-review-b01/runner.old.py:1518:            # sigma=1; a zero-prior candidate stays MISSING. If NONE of the tie
+/tmp/pyfin-review-b01/runner.old.py:1530:                        # p==0 -> leave MISSING (no covered support for this cand)
+/tmp/pyfin-review-b01/runner.old.py:1534:            # ON-path d_tx values are already calibrated (0 / -log(p) / MISSING) for
+/tmp/pyfin-review-b01/runner.old.py:1545:            no_data = np.asarray(d_tx).min(axis=1) >= 1e5  # all-MISSING rows
+/tmp/pyfin-review-b01/runner.old.py:1550:                junction_k=self.config.m2_tiebreak_junction_k, flank=_M2_EM_FLANK,
+/tmp/pyfin-review-b01/runner.old.py:1561:        R, hard_assignments, _ = em_with_coherence(
+/tmp/pyfin-review-b01/runner.old.py:1575:        if self.config.krill_tiebreak:
+/tmp/pyfin-review-b01/runner.old.py:1576:            R = krill_tiebreak(
+/tmp/pyfin-review-b01/runner.old.py:1717:        quant_results = quantify_transcripts(
+
+codex
+The core arithmetic appears copied closely. I’m now checking hidden monkeypatch targets and whether early quantification can observe changed state.
+  ✓ Inspect commit and repository guidance
+  ✓ Compare moved logic against parent
+  → Trace downstream state and seams
+  • Run targeted verification checks
+  • Report concrete review verdict
+exec
+/bin/bash -c "set -e
+printf '%s\\n' '--- quantify implementation ---'
+rg -n '"'^def quantify_transcripts|class QuantResult'"' fin/analysis/quantification.py fin -g '*.py' | head -20
+nl -ba fin/analysis/quantification.py | sed -n '1,180p'
+printf '%s\\n' '--- patch targets across parent tree ---'
+git grep -nE 'patch(\\.object)?\\(["'^'"\\n]*(runner\\.(em_with_coherence|quantify_transcripts|krill_tiebreak)|PipelineRunner.*(_tie_nll|_eff_lengths))' b01bcf6"'^ -- tests || true
+printf '"'%s\\n' '--- all symbol references in parent tests ---'
+git grep -nE 'runner\\.(em_with_coherence|quantify_transcripts|krill_tiebreak)|assignment\\.(em_with_coherence|quantify_transcripts|krill_tiebreak)|_tie_nll|_eff_lengths' b01bcf6"'^ -- tests || true
+printf '"'%s\\n' '--- gate region old ---'
+nl -ba /tmp/pyfin-review-b01/runner.old.py | sed -n '1585,1730p'
+printf '%s\\n' '--- commit line numbers ---'
+git show b01bcf6:fin/pipeline/assignment.py | nl -ba | sed -n '15,35p;470,510p'
+git show b01bcf6:fin/pipeline/runner.py | nl -ba | sed -n '1368,1410p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- quantify implementation ---
+fin/analysis/quantification.py:18:class QuantResult:
+fin/analysis/quantification.py:72:def quantify_transcripts(
+fin/analysis/quantification.py:18:class QuantResult:
+fin/analysis/quantification.py:72:def quantify_transcripts(
+     1	"""Probability-weighted transcript quantification from EM assignments."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import logging
+     6	from collections import defaultdict
+     7	from dataclasses import dataclass
+     8	from typing import Dict, List, Optional, Tuple
+     9	
+    10	import numpy as np
+    11	
+    12	from fin.candidates.dataclasses import TranscriptCandidate
+    13	
+    14	logger = logging.getLogger(__name__)
+    15	
+    16	
+    17	@dataclass
+    18	class QuantResult:
+    19	    """Quantification result for a single transcript candidate."""
+    20	
+    21	    candidate_id: str
+    22	    abundance: float  # probability-weighted read count
+    23	    confidence: float  # mean assignment probability for assigned reads
+    24	    num_assigned_reads: int  # number of hard-assigned reads
+    25	    source: str  # "gtf" or "novel"
+    26	    chrom: str = ""
+    27	    strand: str = "."
+    28	    start: int = 0
+    29	    end: int = 0
+    30	    exons: Tuple[Tuple[int, int], ...] = ()  # 0-based
+    31	    gene_id: str = ""
+    32	    # Composite signal scores. Vestigial: no code path populates these anymore
+    33	    # (the composite scorer was removed with the quantify subcommand), so in
+    34	    # every assembly quant_mode (argmax/m1_em/m2_em) they stay at their 0.0
+    35	    # defaults. Retained as scores.tsv columns for output-schema stability -- do
+    36	    # not gate assembly-mode filters on them (see runner._finalize_and_write's
+    37	    # combined_score guard).
+    38	    coherence_score: float = 0.0
+    39	    discrimination_score: float = 0.0
+    40	    combined_score: float = 0.0
+    41	    breakpoint_left: Optional[Tuple[str, int, str]] = None
+    42	    breakpoint_right: Optional[Tuple[str, int, str]] = None
+    43	    fusion_junction: Optional[Tuple[int, int]] = None
+    44	    # P0-6: read IDs hard-assigned to this candidate. Used by
+    45	    # aggregate_across_intervals to dedup reads that span multiple intervals.
+    46	    assigned_read_ids: Tuple[str, ...] = ()
+    47	    # T8: maximum EM responsibility any single read assigned to this transcript.
+    48	    # max_R = R[:, j].max() after EM. Used for FP-by-EM analysis.
+    49	    max_R: float = 0.0
+    50	    # Full-length end-coherence fraction: fraction of this candidate's assigned
+    51	    # reads that are full-length wrt its genomic 5'/3' ends (read 5' AND 3'
+    52	    # within fulllen_window_bp). -1.0 = exempt / unreachable / never scored
+    53	    # (NEVER dropped by the fulllen filter). The METRIC itself is signal-free
+    54	    # (BAM primary-alignment spans only), but it is computed over the production
+    55	    # argmax assignment population (which may use the M2-tiebreak signal); see
+    56	    # fulllen_fraction_drops.
+    57	    fulllen_frac: float = -1.0
+    58	
+    59	
+    60	def _exons_from_candidate(c: TranscriptCandidate) -> Tuple[Tuple[int, int], ...]:
+    61	    """Derive exon coordinates from a candidate's intron chain and boundaries."""
+    62	    introns = c.intron_chain.introns
+    63	    if not introns:
+    64	        return ((c.start, c.end),)
+    65	    exons = [(c.start, introns[0][0])]
+    66	    for i in range(len(introns) - 1):
+    67	        exons.append((introns[i][1], introns[i + 1][0]))
+    68	    exons.append((introns[-1][1], c.end))
+    69	    return tuple(exons)
+    70	
+    71	
+    72	def quantify_transcripts(
+    73	    R: np.ndarray,
+    74	    hard_assignments: np.ndarray,
+    75	    candidates: List[TranscriptCandidate],
+    76	    read_ids: List[str],
+    77	) -> List[QuantResult]:
+    78	    """Compute probability-weighted transcript abundance (vectorized).
+    79	
+    80	    Args:
+    81	        R: Soft assignment matrix of shape (n_reads, n_candidates).
+    82	            R[i, j] = P(read_i belongs to candidate_j).
+    83	        hard_assignments: Array of shape (n_reads,) with hard cluster indices.
+    84	        candidates: List of TranscriptCandidate objects (column order matches R).
+    85	        read_ids: List of read IDs (row order matches R).
+    86	
+    87	    Returns:
+    88	        List of QuantResult, one per candidate.
+    89	    """
+    90	    n_reads, n_cands = R.shape
+    91	
+    92	    # Vectorized abundance: sum of soft assignments per candidate
+    93	    abundance = R.sum(axis=0)  # shape (n_cands,)
+    94	
+    95	    # Vectorized hard assignment counts and confidence
+    96	    read_ids_arr = np.asarray(read_ids)
+    97	    results = []
+    98	    for j, cand in enumerate(candidates):
+    99	        assigned_mask = hard_assignments == j
+   100	        num_assigned = int(assigned_mask.sum())
+   101	        confidence = float(R[assigned_mask, j].mean()) if num_assigned > 0 else 0.0
+   102	        assigned_ids = (
+   103	            tuple(read_ids_arr[assigned_mask].tolist())
+   104	            if num_assigned > 0
+   105	            else ()
+   106	        )
+   107	
+   108	        results.append(
+   109	            QuantResult(
+   110	                candidate_id=cand.candidate_id,
+   111	                abundance=float(abundance[j]),
+   112	                confidence=confidence,
+   113	                num_assigned_reads=num_assigned,
+   114	                source=cand.source,
+   115	                chrom=cand.chrom,
+   116	                strand=cand.strand,
+   117	                start=cand.start,
+   118	                end=cand.end,
+   119	                exons=_exons_from_candidate(cand),
+   120	                assigned_read_ids=assigned_ids,
+   121	                breakpoint_left=cand.breakpoint_left,
+   122	                breakpoint_right=cand.breakpoint_right,
+   123	                fusion_junction=cand.fusion_junction,
+   124	            )
+   125	        )
+   126	
+   127	    return results
+   128	
+   129	
+   130	def _qr_overlap(a: QuantResult, b: QuantResult) -> bool:
+   131	    """1-D genomic interval overlap on (chrom, strand, [start, end))."""
+   132	    if a.chrom != b.chrom or a.strand != b.strand:
+   133	        return False
+   134	    return a.start < b.end and b.start < a.end
+   135	
+   136	
+   137	def isoform_fraction_drops(
+   138	    results: Dict[str, QuantResult],
+   139	    min_fraction: float,
+   140	) -> set:
+   141	    """Return candidate_ids to drop by the minimum-isoform-fraction heuristic.
+   142	
+   143	    For every NOVEL multi-exon transcript C, compute its locus-relative
+   144	    abundance::
+   145	
+   146	        relabund(C) = C.abundance / max(abundance over ALL transcripts
+   147	                       (novel, GTF and fusion) that OVERLAP C, C included)
+   148	
+   149	    and drop C when ``relabund(C) < min_fraction``. This is the standard
+   150	    Cufflinks ``--min-isoform-fraction`` / StringTie ``-f`` minor-isoform
+   151	    suppression rule: the low-fraction tail of a locus is enriched for
+   152	    incompletely-spliced precursors (pre-mRNA), RT/template-switching
+   153	    artifacts, and assembly noise rather than genuine isoforms.
+   154	
+   155	    The locus maximum spans ALL sources (not just novel): on dense annotated
+   156	    loci the dominant isoform is usually a GTF-passthrough transcript, so
+   157	    comparing a novel only against other novels lets wobble-shadow isoforms
+   158	    (junction-shifted near-copies of a true transcript) escape — they only
+   159	    compete with each other and keep a deceptively high novel-only fraction.
+   160	    Measuring each novel against the strongest transcript of ANY source at its
+   161	    locus collapses those shadows below the threshold.
+   162	
+   163	    GTF-passthrough (``source="gtf"``), fusion (``source="fusion"``), and
+   164	    single-exon (mono) candidates are EXEMPT and never dropped — they only ever
+   165	    contribute to the locus maximum, never to the drop set. ``min_fraction
+   166	    <= 0`` disables the filter (returns an empty set).
+   167	
+   168	    SIRV WARNING: synthetic SIRV has no genuine low-abundance isoform tail, so
+   169	    its F1-optimal threshold (~0.4) is 4-40x more aggressive than real tools
+   170	    and would gut recall on a real transcriptome. Keep this conservative
+   171	    (literature default 0.01) and re-tune on real data.
+   172	    """
+   173	    if min_fraction <= 0.0:
+   174	        return set()
+   175	    # Bucket by (chrom, strand): only candidates on the same chromosome and
+   176	    # strand can share a locus, so the pairwise overlap scan stays within a
+   177	    # bucket instead of running all-vs-all across the whole genome. (Within a
+   178	    # locus-dense single chrom/strand it is still O(n^2); a sweep-line could be
+   179	    # added if a real run ever makes that the bottleneck.)
+   180	    #
+--- patch targets across parent tree ---
+b01bcf6^:tests/integration/test_pipeline_integration.py:163:        "tie_nll": patch.object(PipelineRunner, "_tie_nll", _fake_tie_nll),
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:118:    ), patch.object(PipelineRunner, "_tie_nll", tie_nll_fn), patch.object(
+--- all symbol references in parent tests ---
+b01bcf6^:tests/integration/test_pipeline_integration.py:4:real BAM/krill/CUDA. The pure tie-break junction-NLL seed (``_tie_nll``), the
+b01bcf6^:tests/integration/test_pipeline_integration.py:38:    every read as kept. The tie sets still come from the mocked ``_tie_nll``, so
+b01bcf6^:tests/integration/test_pipeline_integration.py:48:def _fake_tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+b01bcf6^:tests/integration/test_pipeline_integration.py:163:        "tie_nll": patch.object(PipelineRunner, "_tie_nll", _fake_tie_nll),
+b01bcf6^:tests/integration/test_pipeline_integration.py:165:            PipelineRunner, "_eff_lengths", return_value=None
+b01bcf6^:tests/integration/test_pipeline_integration.py:172:            "fin.pipeline.runner.em_with_coherence",
+b01bcf6^:tests/integration/test_pipeline_integration.py:176:            "fin.pipeline.runner.quantify_transcripts",
+b01bcf6^:tests/unit/test_cluster_quant.py:109:def test_straddling_tie_nll_tie_stays_ambiguous():
+b01bcf6^:tests/unit/test_em_abundance_feedback.py:117:def test_eff_length_norm_requires_eff_lengths():
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:19:These tests mock the I/O boundaries (mappy multimap, the krill ``_tie_nll`` pass,
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:41:# Per-read tie sets + scored junction-NLLs injected via the mocked _tie_nll.
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:84:    actual AS values are irrelevant because _tie_nll is mocked to drive ties."""
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:93:def _fake_tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:100:def _run(cfg, captured, m3_matrix=None, tie_nll_fn=_fake_tie_nll):
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:118:    ), patch.object(PipelineRunner, "_tie_nll", tie_nll_fn), patch.object(
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:119:        PipelineRunner, "_eff_lengths", return_value=None
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:121:        "fin.pipeline.runner.em_with_coherence", side_effect=_fake_em
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:123:        "fin.pipeline.runner.quantify_transcripts", return_value=[]
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:195:def _fake_tie_nll_on(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:209:def _fake_tie_nll_on2(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:222:        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on)
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:260:        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on2)
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:299:def _fake_tie_nll_on4(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:313:        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on4)
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:332:ON3_COVER: dict = {}  # empty -> mimics the per-read _tie_nll fallback path
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:335:def _fake_tie_nll_on3(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:350:        _run(cfg, self.captured, tie_nll_fn=_fake_tie_nll_on3)
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:366:    """When krill has no aligner, _tie_nll still exposes AS tie sets on the gate-ON
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:387:            return runner._tie_nll(kept, read_seqs, cands, [None] * N_C, raw)
+--- gate region old ---
+  1585	        # --- Cluster-internal wobble recheck (post-EM, data-layer shadow kill).
+  1586	        #     Cluster ALL multi-exon candidates by structure (same intron count +
+  1587	        #     every junction within +-bp); within a cluster the highest-EM-abundance
+  1588	        #     candidate anchors (often the true isoform, frequently a GTF
+  1589	        #     passthrough), and a NOVEL sibling whose abundance/anchor < fraction is
+  1590	        #     a wobble shadow -> drop. GTF/fusion never dropped (they only anchor).
+  1591	        #     Pure abundance evidence: GTF participates in the abundance race but is
+  1592	        #     NOT used as a correctness oracle, so this stays robust when the
+  1593	        #     annotation is wrong (and self-disables with no GTF: a real novel
+  1594	        #     anchors its own cluster). OFF -> no drops (byte-identical). ---
+  1595	        drop_cols: set = set()
+  1596	        # Strand-keyed {strand: Counter{(donor,acceptor): n_reads}} of directly-
+  1597	        # observed read junctions; built lazily (reopens BAM) and shared by the
+  1598	        # cluster-recheck GTF guard and the Lever-2 junction-support gate.
+  1599	        observed_jct = None
+  1600	        if getattr(self.config, "m2_cluster_recheck", False):
+  1601	            from fin.scoring.m2_junction_nll import structural_wobble_clusters
+  1602	
+  1603	            frac = self.config.m2_cluster_recheck_fraction
+  1604	            if frac <= 0.0:
+  1605	                frac = self.config.min_isoform_fraction
+  1606	            if frac > 0.0:
+  1607	                em_ab = np.asarray(R).sum(axis=0)
+  1608	                bp = self.config.m2_cluster_recheck_bp
+  1609	                cassette_bp = getattr(
+  1610	                    self.config, "m2_cluster_recheck_cassette_max_exon_bp", 0
+  1611	                )
+  1612	                clusters = structural_wobble_clusters(
+  1613	                    cand_list, bp, cassette_max_exon_bp=cassette_bp
+  1614	                )
+  1615	                from fin.scoring.m2_junction_nll import (
+  1616	                    gtf_guard_needed,
+  1617	                    wobble_shadow_drops,
+  1618	                )
+  1619	
+  1620	                gtf_drop = bool(getattr(
+  1621	                    self.config, "m2_cluster_recheck_novel_displaces_gtf", True
+  1622	                ))
+  1623	                # Build the directly-observed read junctions for the GTF read-support
+  1624	                # guard ONLY when a clustered low-abundance GTF sibling could actually
+  1625	                # be dropped — this reopens the BAM, so skip it for no-GTF intervals
+  1626	                # (and avoids touching the BAM for mocked/placeholder-path callers).
+  1627	                if gtf_drop and gtf_guard_needed(cand_list, em_ab, clusters, frac):
+  1628	                    observed_jct = self._observed_junctions(interval)
+  1629	                drop_cols |= wobble_shadow_drops(
+  1630	                    cand_list, em_ab, clusters, frac,
+  1631	                    gtf_drop_enabled=gtf_drop,
+  1632	                    observed_jct=observed_jct,
+  1633	                    jct_tol=int(getattr(self.config, "m2_cluster_recheck_jct_tol", 2)),
+  1634	                    gtf_min_jct_reads=int(getattr(
+  1635	                        self.config, "m2_cluster_recheck_gtf_min_jct_reads", 1
+  1636	                    )),
+  1637	                )
+  1638	
+  1639	        # --- Lever 2: per-junction read-support gate. Drop a NOVEL multi-exon
+  1640	        #     candidate if ANY of its junctions is spliced by fewer than
+  1641	        #     novel_junction_min_reads directly-observed reads (CIGAR introns,
+  1642	        #     strand-keyed, matched within novel_junction_reads_tol bp) — a novel
+  1643	        #     junction must be carried by >= N reads, not just 1. gtf/fusion/mono
+  1644	        #     exempt. <=1 disables (byte-identical). Reuses observed_jct if the
+  1645	        #     cluster-recheck already built it; otherwise builds it here. ---
+  1646	        _njmr = int(getattr(self.config, "novel_junction_min_reads", 0))
+  1647	        if _njmr > 1:
+  1648	            from fin.scoring.m2_junction_nll import junction_support_drops
+  1649	            if observed_jct is None:
+  1650	                observed_jct = self._observed_junctions(interval)
+  1651	            drop_cols |= junction_support_drops(
+  1652	                cand_list, observed_jct, min_reads=_njmr,
+  1653	                tol=int(getattr(self.config, "novel_junction_reads_tol", 2)),
+  1654	            )
+  1655	
+  1656	        # --- GUIDED junction-support gate (EXPERIMENT, default-off). Mirror of
+  1657	        #     Lever 2 for GTF-passthrough candidates: drop a guided multi-exon
+  1658	        #     candidate if ANY of its junctions lacks >= guided_junction_min_reads
+  1659	        #     directly-observed reads (CIGAR introns within guided_junction_reads
+  1660	        #     _tol bp). Extends the coordinate-EXACT read-support check — which
+  1661	        #     Lever 2 applies only to novel candidates — to GTF junctions, so a
+  1662	        #     jitter-corrupted annotation junction (coords > tol from the true
+  1663	        #     site, thus zero exact support) is dropped instead of surviving the
+  1664	        #     coordinate-inexact M2/M1 gate. Reuses observed_jct. 0 disables
+  1665	        #     (byte-identical). NOT recall-safe (also drops low-coverage annotated
+  1666	        #     junctions); default-off pending real-data validation. ---
+  1667	        _gjmr = int(getattr(self.config, "guided_junction_min_reads", 0))
+  1668	        if _gjmr > 0:
+  1669	            from fin.scoring.m2_junction_nll import guided_junction_support_drops
+  1670	            if observed_jct is None:
+  1671	                observed_jct = self._observed_junctions(interval)
+  1672	            drop_cols |= guided_junction_support_drops(
+  1673	                cand_list, observed_jct, min_reads=_gjmr,
+  1674	                tol=int(getattr(self.config, "guided_junction_reads_tol", 2)),
+  1675	            )
+  1676	
+  1677	        # --- M2/M1 read-support gate. A multi-exon candidate (GTF or novel;
+  1678	        #     fusion/mono exempt) must earn >=1 read's support: either it is some
+  1679	        #     read's M1 SOLE best-AS (tie set == just this candidate), or it is
+  1680	        #     some read's M2-best (lowest junction-NLL in that read's tie). A
+  1681	        #     jitter-corrupted GTF junction wins neither (loses the M2 contest to
+  1682	        #     the true-junction candidate and never holds a read's sole AS), so it
+  1683	        #     is dropped; a genuine isoform always earns one or the other. ---
+  1684	        if getattr(self.config, "m2_support_gate", False):
+  1685	            from fin.scoring.m2_junction_nll import support_gate_drops
+  1686	
+  1687	            drop_cols |= support_gate_drops(
+  1688	                cand_list, ties_by_read, nlls_by_read,
+  1689	                tie_ok=bool(getattr(self.config, "m2_support_gate_tie", True)),
+  1690	            )
+  1691	
+  1692	        # --- Containment-cluster drop: drop a NOVEL candidate whose intron chain is a
+  1693	        #     contiguous SUB-CHAIN of a longer candidate (a truncation / exon-skip shadow
+  1694	        #     the same-intron-count wobble cluster never groups) when it is a low-support
+  1695	        #     shadow by BOTH EM abundance AND supporting-read count. Runs AFTER all the
+  1696	        #     structural/support gates so ``exclude=drop_cols`` covers every already-doomed
+  1697	        #     parent — a shadow is never folded into a parent that is itself dropped. The
+  1698	        #     read-support guard keeps most genuine low-abundance short/alt-TSS isoforms;
+  1699	        #     gtf/fusion never dropped. DEFAULT-ON (--no-containment-cluster disables). ---
+  1700	        if getattr(self.config, "containment_cluster", False):
+  1701	            from fin.scoring.m2_junction_nll import containment_cluster_drops
+  1702	            em_ab_c = np.asarray(R).sum(axis=0)
+  1703	            read_counts = [len(getattr(c, "supporting_read_ids", ()) or ())
+  1704	                           for c in cand_list]
+  1705	            drop_cols |= containment_cluster_drops(
+  1706	                cand_list, em_ab_c, read_counts,
+  1707	                wobble_bp=int(getattr(self.config, "containment_cluster_wobble_bp", 6)),
+  1708	                min_ab_ratio=float(getattr(
+  1709	                    self.config, "containment_cluster_min_ab_ratio", 0.3)),
+  1710	                min_read_ratio=float(getattr(
+  1711	                    self.config, "containment_cluster_min_read_ratio", 0.3)),
+  1712	                max_shadow_reads=int(getattr(
+  1713	                    self.config, "containment_cluster_max_shadow_reads", 0)),
+  1714	                exclude=set(drop_cols),
+  1715	            )
+  1716	
+  1717	        quant_results = quantify_transcripts(
+  1718	            R, hard_assignments, cand_list, kept_read_ids
+  1719	        )
+  1720	        # Stamp max_R BEFORE any filtering: quant_results is column-aligned to R
+  1721	        # here (enumerate index == R column). Filtering would break that alignment.
+  1722	        for j, qr in enumerate(quant_results):
+  1723	            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
+  1724	        # --- Lever 1: containment / 5'-truncation collapse (post-EM mass-fold).
+  1725	        #     Fold a NOVEL candidate whose intron chain is a pure 3' suffix of a
+  1726	        #     longer candidate (a 5'-truncation shadow) INTO that parent: the
+  1727	        #     shadow's hard reads (read-id union) + soft EM mass move to the parent,
+  1728	        #     then the shadow joins drop_cols. Parents already in drop_cols
+  1729	        #     (wobble/support) are EXCLUDED, so a fold never targets an
+  1730	        #     ALREADY-dropped interval candidate; a folded parent CAN still be
+--- commit line numbers ---
+    15	  ``drop_cols`` column-index set and never mutate ``R`` / ``hard_assignments`` / ``cand_list``.
+    16	
+    17	Byte-identical extraction. The runner keeps thin ``_tie_nll`` / ``_eff_lengths`` methods (passed into
+    18	``assign`` at call time) so the existing ``patch.object(PipelineRunner, ...)`` test seams survive; the
+    19	``em_with_coherence`` / ``quantify_transcripts`` seams move to this module (tests re-point here).
+    20	"""
+    21	from __future__ import annotations
+    22	
+    23	import logging
+    24	from dataclasses import dataclass
+    25	from typing import Callable, Dict, List, Optional, Tuple
+    26	
+    27	import numpy as np
+    28	
+    29	from fin.analysis.assignments import em_with_coherence
+    30	from fin.analysis.quantification import quantify_transcripts
+    31	from fin.scoring.krill_tiebreak import krill_tiebreak
+    32	from fin.scoring.m2_junction_nll import MISSING
+    33	
+    34	logger = logging.getLogger(__name__)
+    35	
+   470	            beta_use = self.config.em_beta
+   471	        else:
+   472	            dist_read_to_read = np.zeros((n_r, n_r), dtype=np.float32)
+   473	            beta_use = 0.0
+   474	
+   475	        R, hard_assignments, _ = em_with_coherence(
+   476	            dist_read_to_tx=d_tx,
+   477	            dist_read_to_read=dist_read_to_read,
+   478	            sigma=1.0,
+   479	            beta=beta_use,
+   480	            max_iter=max_iter_em,
+   481	            tol=self.config.em_tol,
+   482	            verbose=False,
+   483	            use_gpu=self.config.use_gpu,
+   484	            abundance_feedback=self.config.abundance_feedback,
+   485	            abundance_length_norm=self.config.abundance_length_norm,
+   486	            eff_lengths=eff_lengths_fn(cand_list),
+   487	        )
+   488	
+   489	        if self.config.krill_tiebreak:
+   490	            R = krill_tiebreak(
+   491	                R=R, read_ids=kept_read_ids, read_seqs=read_seqs,
+   492	                candidates=cand_list, signal_path=self.config.signal_path,
+   493	                pore=self.config.krill_pore,
+   494	                ambig_threshold=self.config.tiebreak_ambig_threshold,
+   495	                use_gpu=self.config.use_gpu,
+   496	            )
+   497	            hard_assignments = R.argmax(axis=1)
+   498	
+   499	        quant_results = quantify_transcripts(
+   500	            R, hard_assignments, cand_list, kept_read_ids
+   501	        )
+   502	        # Stamp max_R BEFORE any filtering: quant_results is column-aligned to R
+   503	        # here (enumerate index == R column). Filtering would break that alignment.
+   504	        for j, qr in enumerate(quant_results):
+   505	            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
+   506	
+   507	        return QuantOutput(
+   508	            R=R,
+   509	            hard_assignments=hard_assignments,
+   510	            quant_results=quant_results,
+  1368	
+  1369	        M1/AS is used ONLY as a hard selector — it picks each read's best-AS tie
+  1370	        set and masks mappability — and the per-event junction NLL is the SOLE
+  1371	        graded distance over that tie set (m2_resolve_tie semantics, NOT the dense
+  1372	        read×candidate matrix, which collapses). Optionally adds the M3 read×read
+  1373	        junction-window DTW coherence when ``config.m3_coherence`` is True
+  1374	        (β=em_beta); OFF by default because the pairwise DTW is expensive. All
+  1375	        signal scoring is in-memory krill — no f5c CLI. (``m4_source`` does not
+  1376	        affect this path.)
+  1377	        """
+  1378	        qo = self._assigner.assign(
+  1379	            candidate_set, read_ids,
+  1380	            tie_nll_fn=self._tie_nll, eff_lengths_fn=self._eff_lengths,
+  1381	        )
+  1382	        if qo is None:
+  1383	            return []
+  1384	        R = qo.R
+  1385	        cand_list = qo.cand_list
+  1386	        ties_by_read = qo.ties_by_read
+  1387	        nlls_by_read = qo.nlls_by_read
+  1388	        quant_results = qo.quant_results
+  1389	        n_ties = qo.n_ties
+  1390	        n_refined = qo.n_refined
+  1391	        beta_use = qo.beta_use
+  1392	
+  1393	        # --- Cluster-internal wobble recheck (post-EM, data-layer shadow kill).
+  1394	        #     Cluster ALL multi-exon candidates by structure (same intron count +
+  1395	        #     every junction within +-bp); within a cluster the highest-EM-abundance
+  1396	        #     candidate anchors (often the true isoform, frequently a GTF
+  1397	        #     passthrough), and a NOVEL sibling whose abundance/anchor < fraction is
+  1398	        #     a wobble shadow -> drop. GTF/fusion never dropped (they only anchor).
+  1399	        #     Pure abundance evidence: GTF participates in the abundance race but is
+  1400	        #     NOT used as a correctness oracle, so this stays robust when the
+  1401	        #     annotation is wrong (and self-disables with no GTF: a real novel
+  1402	        #     anchors its own cluster). OFF -> no drops (byte-identical). ---
+  1403	        drop_cols: set = set()
+  1404	        # Strand-keyed {strand: Counter{(donor,acceptor): n_reads}} of directly-
+  1405	        # observed read junctions; built lazily (reopens BAM) and shared by the
+  1406	        # cluster-recheck GTF guard and the Lever-2 junction-support gate.
+  1407	        observed_jct = None
+  1408	        if getattr(self.config, "m2_cluster_recheck", False):
+  1409	            from fin.scoring.m2_junction_nll import structural_wobble_clusters
+  1410	
+
+exec
+/bin/bash -c "printf '%s\\n' '--- parent test references ---'; git grep -nE 'fin\\.pipeline\\.runner\\.(em_with_coherence|quantify_transcripts|krill_tiebreak)|PipelineRunner.*(_tie_nll|_eff_lengths)' b01bcf6"'^ -- tests || true; printf '"'%s\\n' '--- commit test references ---'; git grep -nE 'fin\\.pipeline\\.(runner|assignment)\\.(em_with_coherence|quantify_transcripts|krill_tiebreak)|PipelineRunner.*(_tie_nll|_eff_lengths)' b01bcf6 -- tests || true; printf '%s\\n' '--- entire repository runner patch targets at parent ---'; git grep -nE 'fin\\.pipeline\\.runner\\.(em_with_coherence|quantify_transcripts|krill_tiebreak)' b01bcf6"'^ -- '"':"'!*.pyc'"' || true" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- parent test references ---
+b01bcf6^:tests/integration/test_pipeline_integration.py:163:        "tie_nll": patch.object(PipelineRunner, "_tie_nll", _fake_tie_nll),
+b01bcf6^:tests/integration/test_pipeline_integration.py:165:            PipelineRunner, "_eff_lengths", return_value=None
+b01bcf6^:tests/integration/test_pipeline_integration.py:172:            "fin.pipeline.runner.em_with_coherence",
+b01bcf6^:tests/integration/test_pipeline_integration.py:176:            "fin.pipeline.runner.quantify_transcripts",
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:118:    ), patch.object(PipelineRunner, "_tie_nll", tie_nll_fn), patch.object(
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:119:        PipelineRunner, "_eff_lengths", return_value=None
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:121:        "fin.pipeline.runner.em_with_coherence", side_effect=_fake_em
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:123:        "fin.pipeline.runner.quantify_transcripts", return_value=[]
+--- commit test references ---
+b01bcf6:tests/integration/test_pipeline_integration.py:163:        "tie_nll": patch.object(PipelineRunner, "_tie_nll", _fake_tie_nll),
+b01bcf6:tests/integration/test_pipeline_integration.py:165:            PipelineRunner, "_eff_lengths", return_value=None
+b01bcf6:tests/integration/test_pipeline_integration.py:172:            "fin.pipeline.assignment.em_with_coherence",
+b01bcf6:tests/integration/test_pipeline_integration.py:176:            "fin.pipeline.assignment.quantify_transcripts",
+b01bcf6:tests/unit/test_m2_em_pure_seed.py:118:    ), patch.object(PipelineRunner, "_tie_nll", tie_nll_fn), patch.object(
+b01bcf6:tests/unit/test_m2_em_pure_seed.py:119:        PipelineRunner, "_eff_lengths", return_value=None
+b01bcf6:tests/unit/test_m2_em_pure_seed.py:121:        "fin.pipeline.assignment.em_with_coherence", side_effect=_fake_em
+b01bcf6:tests/unit/test_m2_em_pure_seed.py:123:        "fin.pipeline.assignment.quantify_transcripts", return_value=[]
+--- entire repository runner patch targets at parent ---
+b01bcf6^:tests/integration/test_pipeline_integration.py:172:            "fin.pipeline.runner.em_with_coherence",
+b01bcf6^:tests/integration/test_pipeline_integration.py:176:            "fin.pipeline.runner.quantify_transcripts",
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:121:        "fin.pipeline.runner.em_with_coherence", side_effect=_fake_em
+b01bcf6^:tests/unit/test_m2_em_pure_seed.py:123:        "fin.pipeline.runner.quantify_transcripts", return_value=[]
+
+exec
+/bin/bash -c "printf '%s\\n' '--- runner config assignments ---'; git grep -n 'self\\.config\\s*=' b01bcf6 -- fin tests || true; printf '%s\\n' '--- tests mutating runner.config ---'; git grep -nE '(runner|self\\.runner|pr)\\.config\\s*=|patch\\.object\\(["'^,]+, ["'"'\"']config[\"'\"']' b01bcf6 -- tests || true; printf '%s\\n' '--- PipelineRunner construction patterns ---'; git grep -n 'PipelineRunner(' b01bcf6 -- tests | head -80; printf '%s\\n' '--- class init lines at commit ---'; git show b01bcf6:fin/pipeline/runner.py | nl -ba | sed -n '38,62p'" in /SSD/logan/dev/pyfin
+ exited 2 in 0ms:
+/bin/bash: -c: line 1: syntax error near unexpected token `('
+/bin/bash: -c: line 1: `printf '%s\n' '--- runner config assignments ---'; git grep -n 'self\.config\s*=' b01bcf6 -- fin tests || true; printf '%s\n' '--- tests mutating runner.config ---'; git grep -nE '(runner|self\.runner|pr)\.config\s*=|patch\.object\([^,]+, ["'"']config["'"']' b01bcf6 -- tests || true; printf '%s\n' '--- PipelineRunner construction patterns ---'; git grep -n 'PipelineRunner(' b01bcf6 -- tests | head -80; printf '%s\n' '--- class init lines at commit ---'; git show b01bcf6:fin/pipeline/runner.py | nl -ba | sed -n '38,62p''
+
+exec
+/bin/bash -c "printf '%s\\n' '--- runner config assignments ---'; git grep -nE 'self\\.config[[:space:]]*=' b01bcf6 -- fin tests || true; printf '%s\\n' '--- tests mutating config ---'; git grep -nE '\\.config[[:space:]]*=' b01bcf6 -- tests || true; printf '%s\\n' '--- PipelineRunner construction patterns ---'; git grep -n 'PipelineRunner(' b01bcf6 -- tests | head -80; printf '%s\\n' '--- class init lines at commit ---'; git show b01bcf6:fin/pipeline/runner.py | nl -ba | sed -n '38,62p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- runner config assignments ---
+b01bcf6:fin/pipeline/assignment.py:279:        self.config = config
+b01bcf6:fin/pipeline/runner.py:49:        self.config = config
+--- tests mutating config ---
+b01bcf6:tests/unit/test_min_abundance_default.py:80:        runner.config = cfg
+b01bcf6:tests/unit/test_runner_outputs.py:295:    r.config = PipelineConfig(bam_path="/nonexistent/does_not_exist.bam")
+b01bcf6:tests/unit/test_runner_outputs.py:302:    r.config = PipelineConfig(bam_path="/dev/null")
+--- PipelineRunner construction patterns ---
+b01bcf6:tests/integration/test_pipeline_integration.py:99:    runner = PipelineRunner(config)
+b01bcf6:tests/unit/test_canonical_gate.py:57:    return PipelineRunner(cfg)
+b01bcf6:tests/unit/test_em_iter_toggle.py:92:        runner = PipelineRunner(cfg)
+b01bcf6:tests/unit/test_em_iter_toggle.py:102:        runner = PipelineRunner(cfg)
+b01bcf6:tests/unit/test_m2_em_pure_seed.py:114:    runner = PipelineRunner(cfg)
+b01bcf6:tests/unit/test_m2_em_pure_seed.py:382:        runner = PipelineRunner(cfg)
+b01bcf6:tests/unit/test_polya5p_filter.py:205:    runner = PipelineRunner(cfg)
+b01bcf6:tests/unit/test_quant_argmax_keep.py:49:    return PipelineRunner(cfg)
+b01bcf6:tests/unit/test_quant_cluster_dispatch.py:97:    return PipelineRunner(cfg)
+b01bcf6:tests/unit/test_recovery_wiring.py:94:    r = PipelineRunner(cfg)
+b01bcf6:tests/unit/test_runner_outputs.py:54:    runner = PipelineRunner(config)
+--- class init lines at commit ---
+    38	# K (transcript-bp each side of the wobbling junction) comes from the configurable
+    39	# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+    40	# an unscorable tie cell (a tied candidate the eventalign window could not score).
+    41	_M2_EM_FLANK = 2
+    42	_M2_EM_PAD = 1.0
+    43	
+    44	
+    45	class PipelineRunner:
+    46	    """Orchestrates the full pyfin pipeline."""
+    47	
+    48	    def __init__(self, config: PipelineConfig):
+    49	        self.config = config
+    50	        self._gtf_reader = None
+    51	        self._genome_fasta = None
+    52	        self._signal_reader = None
+    53	        # Genome-wide mappy aligner for fusion soft-clip arm re-alignment; built
+    54	        # lazily on first fusion interval and cached (indexing is expensive).
+    55	        self._fusion_genome_aligner = None
+    56	        self._fusion_aligner_built = False
+    57	        # m2_em assignment layer (mappy AS -> tie_nll -> d_tx -> EM -> quantify).
+    58	        self._assigner = Assigner(config)
+    59	
+    60	    def setup(self):
+    61	        """Open file handles and load references.
+    62	
+
+exec
+/bin/bash -c "printf '%s\\n' '--- bypassed construction ---'; git grep -nE 'PipelineRunner\\.__new__|object\\.__new__\\(PipelineRunner|Mock\\(spec=PipelineRunner|create_autospec\\(PipelineRunner' b01bcf6 -- tests fin || true; printf '%s\\n' '--- config reassignment contexts ---'; git show b01bcf6:tests/unit/test_min_abundance_default.py | nl -ba | sed -n '65,90p'; git show b01bcf6:tests/unit/test_runner_outputs.py | nl -ba | sed -n '280,312p'; printf '%s\\n' '--- assignment init line ---'; git show b01bcf6:fin/pipeline/assignment.py | nl -ba | sed -n '270,286p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- bypassed construction ---
+b01bcf6:tests/unit/test_min_abundance_default.py:79:        runner = PipelineRunner.__new__(PipelineRunner)
+b01bcf6:tests/unit/test_runner_outputs.py:294:    r = PipelineRunner.__new__(PipelineRunner)
+b01bcf6:tests/unit/test_runner_outputs.py:301:    r = PipelineRunner.__new__(PipelineRunner)
+--- config reassignment contexts ---
+    65	class TestRunnerAbundanceFloor:
+    66	    def _runner(
+    67	        self, min_ab: float, floor_gtf: bool = False, min_gtf_ab: float = 0.0
+    68	    ) -> PipelineRunner:
+    69	        cfg = PipelineConfig(
+    70	            bam_path="/tmp/x.bam",
+    71	            min_abundance=min_ab,
+    72	            min_gtf_abundance=min_gtf_ab,
+    73	            floor_gtf_abundance=floor_gtf,
+    74	            # Disable every other post-EM filter so we isolate A4 abundance.
+    75	            min_isoform_fraction=0.0,
+    76	            min_fulllen_fraction=0.0,
+    77	            min_polya5p_reads=0,
+    78	        )
+    79	        runner = PipelineRunner.__new__(PipelineRunner)
+    80	        runner.config = cfg
+    81	        runner._gtf_reader = None
+    82	        return runner
+    83	
+    84	    def test_default_floors_novel_only_keeps_gtf_and_fusion(self):
+    85	        """Default (floor_gtf_abundance=False): novel dropped, GTF+fusion kept."""
+    86	        runner = self._runner(min_ab=0.5)
+    87	        agg = {
+    88	            "g_low": _qr("g_low", "gtf", 0.2),
+    89	            "n_low": _qr("n_low", "novel", 0.2),
+    90	            "n_high": _qr("n_high", "novel", 5.0),
+   280	# _observed_junctions: recall-safe self-disable on missing/unreadable BAM
+   281	# (Lever 2 is default-on, so this runs on every m2_em interval).
+   282	# ---------------------------------------------------------------------------
+   283	
+   284	import types  # noqa: E402
+   285	
+   286	
+   287	def _stub_interval():
+   288	    return types.SimpleNamespace(
+   289	        chrom="chr1", start=0, end=100, region_string="chr1:1-100"
+   290	    )
+   291	
+   292	
+   293	def test_observed_junctions_none_on_missing_bam():
+   294	    r = PipelineRunner.__new__(PipelineRunner)
+   295	    r.config = PipelineConfig(bam_path="/nonexistent/does_not_exist.bam")
+   296	    assert r._observed_junctions(_stub_interval()) is None
+   297	
+   298	
+   299	def test_observed_junctions_none_on_unreadable_bam():
+   300	    # An existing-but-invalid BAM (e.g. /dev/null) must self-disable, not raise.
+   301	    r = PipelineRunner.__new__(PipelineRunner)
+   302	    r.config = PipelineConfig(bam_path="/dev/null")
+   303	    assert r._observed_junctions(_stub_interval()) is None
+--- assignment init line ---
+   270	class Assigner:
+   271	    """m2_em read-to-candidate assignment (no dropping). See module docstring.
+   272	
+   273	    Holds the pipeline config. ``assign`` receives the runner's ``_tie_nll`` / ``_eff_lengths`` bound
+   274	    methods at call time (``tie_nll_fn`` / ``eff_lengths_fn``) so the ``patch.object(PipelineRunner,
+   275	    ...)`` test seams keep intercepting them.
+   276	    """
+   277	
+   278	    def __init__(self, config):
+   279	        self.config = config
+   280	
+   281	    def assign(
+   282	        self,
+   283	        candidate_set,
+   284	        read_ids: List[str],
+   285	        *,
+   286	        tie_nll_fn: Callable,
+
+exec
+/bin/bash -c "nl -ba /tmp/pyfin-review-b01/runner.old.py | sed -n '1638,1728p'; printf '%s\\n' '--- exact moved block diff normalized visually ---'; diff -u <(sed -n '1381,1583p' /tmp/pyfin-review-b01/runner.old.py) <(sed -n '306,497p' /tmp/pyfin-review-b01/assignment.new.py) || true" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+  1638	
+  1639	        # --- Lever 2: per-junction read-support gate. Drop a NOVEL multi-exon
+  1640	        #     candidate if ANY of its junctions is spliced by fewer than
+  1641	        #     novel_junction_min_reads directly-observed reads (CIGAR introns,
+  1642	        #     strand-keyed, matched within novel_junction_reads_tol bp) — a novel
+  1643	        #     junction must be carried by >= N reads, not just 1. gtf/fusion/mono
+  1644	        #     exempt. <=1 disables (byte-identical). Reuses observed_jct if the
+  1645	        #     cluster-recheck already built it; otherwise builds it here. ---
+  1646	        _njmr = int(getattr(self.config, "novel_junction_min_reads", 0))
+  1647	        if _njmr > 1:
+  1648	            from fin.scoring.m2_junction_nll import junction_support_drops
+  1649	            if observed_jct is None:
+  1650	                observed_jct = self._observed_junctions(interval)
+  1651	            drop_cols |= junction_support_drops(
+  1652	                cand_list, observed_jct, min_reads=_njmr,
+  1653	                tol=int(getattr(self.config, "novel_junction_reads_tol", 2)),
+  1654	            )
+  1655	
+  1656	        # --- GUIDED junction-support gate (EXPERIMENT, default-off). Mirror of
+  1657	        #     Lever 2 for GTF-passthrough candidates: drop a guided multi-exon
+  1658	        #     candidate if ANY of its junctions lacks >= guided_junction_min_reads
+  1659	        #     directly-observed reads (CIGAR introns within guided_junction_reads
+  1660	        #     _tol bp). Extends the coordinate-EXACT read-support check — which
+  1661	        #     Lever 2 applies only to novel candidates — to GTF junctions, so a
+  1662	        #     jitter-corrupted annotation junction (coords > tol from the true
+  1663	        #     site, thus zero exact support) is dropped instead of surviving the
+  1664	        #     coordinate-inexact M2/M1 gate. Reuses observed_jct. 0 disables
+  1665	        #     (byte-identical). NOT recall-safe (also drops low-coverage annotated
+  1666	        #     junctions); default-off pending real-data validation. ---
+  1667	        _gjmr = int(getattr(self.config, "guided_junction_min_reads", 0))
+  1668	        if _gjmr > 0:
+  1669	            from fin.scoring.m2_junction_nll import guided_junction_support_drops
+  1670	            if observed_jct is None:
+  1671	                observed_jct = self._observed_junctions(interval)
+  1672	            drop_cols |= guided_junction_support_drops(
+  1673	                cand_list, observed_jct, min_reads=_gjmr,
+  1674	                tol=int(getattr(self.config, "guided_junction_reads_tol", 2)),
+  1675	            )
+  1676	
+  1677	        # --- M2/M1 read-support gate. A multi-exon candidate (GTF or novel;
+  1678	        #     fusion/mono exempt) must earn >=1 read's support: either it is some
+  1679	        #     read's M1 SOLE best-AS (tie set == just this candidate), or it is
+  1680	        #     some read's M2-best (lowest junction-NLL in that read's tie). A
+  1681	        #     jitter-corrupted GTF junction wins neither (loses the M2 contest to
+  1682	        #     the true-junction candidate and never holds a read's sole AS), so it
+  1683	        #     is dropped; a genuine isoform always earns one or the other. ---
+  1684	        if getattr(self.config, "m2_support_gate", False):
+  1685	            from fin.scoring.m2_junction_nll import support_gate_drops
+  1686	
+  1687	            drop_cols |= support_gate_drops(
+  1688	                cand_list, ties_by_read, nlls_by_read,
+  1689	                tie_ok=bool(getattr(self.config, "m2_support_gate_tie", True)),
+  1690	            )
+  1691	
+  1692	        # --- Containment-cluster drop: drop a NOVEL candidate whose intron chain is a
+  1693	        #     contiguous SUB-CHAIN of a longer candidate (a truncation / exon-skip shadow
+  1694	        #     the same-intron-count wobble cluster never groups) when it is a low-support
+  1695	        #     shadow by BOTH EM abundance AND supporting-read count. Runs AFTER all the
+  1696	        #     structural/support gates so ``exclude=drop_cols`` covers every already-doomed
+  1697	        #     parent — a shadow is never folded into a parent that is itself dropped. The
+  1698	        #     read-support guard keeps most genuine low-abundance short/alt-TSS isoforms;
+  1699	        #     gtf/fusion never dropped. DEFAULT-ON (--no-containment-cluster disables). ---
+  1700	        if getattr(self.config, "containment_cluster", False):
+  1701	            from fin.scoring.m2_junction_nll import containment_cluster_drops
+  1702	            em_ab_c = np.asarray(R).sum(axis=0)
+  1703	            read_counts = [len(getattr(c, "supporting_read_ids", ()) or ())
+  1704	                           for c in cand_list]
+  1705	            drop_cols |= containment_cluster_drops(
+  1706	                cand_list, em_ab_c, read_counts,
+  1707	                wobble_bp=int(getattr(self.config, "containment_cluster_wobble_bp", 6)),
+  1708	                min_ab_ratio=float(getattr(
+  1709	                    self.config, "containment_cluster_min_ab_ratio", 0.3)),
+  1710	                min_read_ratio=float(getattr(
+  1711	                    self.config, "containment_cluster_min_read_ratio", 0.3)),
+  1712	                max_shadow_reads=int(getattr(
+  1713	                    self.config, "containment_cluster_max_shadow_reads", 0)),
+  1714	                exclude=set(drop_cols),
+  1715	            )
+  1716	
+  1717	        quant_results = quantify_transcripts(
+  1718	            R, hard_assignments, cand_list, kept_read_ids
+  1719	        )
+  1720	        # Stamp max_R BEFORE any filtering: quant_results is column-aligned to R
+  1721	        # here (enumerate index == R column). Filtering would break that alignment.
+  1722	        for j, qr in enumerate(quant_results):
+  1723	            qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
+  1724	        # --- Lever 1: containment / 5'-truncation collapse (post-EM mass-fold).
+  1725	        #     Fold a NOVEL candidate whose intron chain is a pure 3' suffix of a
+  1726	        #     longer candidate (a 5'-truncation shadow) INTO that parent: the
+  1727	        #     shadow's hard reads (read-id union) + soft EM mass move to the parent,
+  1728	        #     then the shadow joins drop_cols. Parents already in drop_cols
+--- exact moved block diff normalized visually ---
+--- /dev/fd/63	2026-07-24 11:50:02.501296691 +0800
++++ /dev/fd/62	2026-07-24 11:50:02.502296686 +0800
+@@ -1,14 +1,3 @@
+-        cand_list = list(candidate_set.candidates)
+-        read_sequences = getattr(candidate_set, "read_sequences", {}) or {}
+-        reads_iter = [(rid, read_sequences.get(rid, "")) for rid in read_ids]
+-        reads_iter = [(rid, seq) for rid, seq in reads_iter if seq]
+-        if not reads_iter:
+-            return []
+-
+-        read_seqs = {rid: seq for rid, seq in reads_iter}
+-        n_c = len(cand_list)
+-        max_iter_em = (
+-            self.config.em_max_iter_override
+             if self.config.em_max_iter_override is not None
+             else self.config.em_max_iter
+         )
+@@ -48,13 +37,13 @@
+         _min_as = float(_os.environ.get("MAPPY_R1_MIN_AS", "0") or "0")
+         keep_rows = ((raw_all > 0.0) & (raw_all >= _min_as)).any(axis=1)
+         if not keep_rows.any():
+-            return []
++            return None
+         kept_read_ids = [rid for rid, k in zip(all_ids, keep_rows) if k]
+         raw = raw_all[keep_rows]
+         n_r = len(kept_read_ids)
+ 
+         # --- Junction NLL on the per-read AS-tie cells only. ---
+-        nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read = self._tie_nll(
++        nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read = tie_nll_fn(
+             kept_read_ids, read_seqs, cand_list, aligners, raw
+         )
+ 
+@@ -189,7 +178,7 @@
+             use_gpu=self.config.use_gpu,
+             abundance_feedback=self.config.abundance_feedback,
+             abundance_length_norm=self.config.abundance_length_norm,
+-            eff_lengths=self._eff_lengths(cand_list),
++            eff_lengths=eff_lengths_fn(cand_list),
+         )
+ 
+         if self.config.krill_tiebreak:
+
+exec
+/bin/bash -c "printf '%s\\n' '--- parent runner imports ---'; git show b01bcf6"'^:fin/pipeline/runner.py | nl -ba | sed -n '"'1,48p'; printf '%s\\n' '--- commit runner imports ---'; git show b01bcf6:fin/pipeline/runner.py | nl -ba | sed -n '1,48p'; printf '%s\\n' '--- assignment old/new imports ---'; git show b01bcf6"'^:fin/pipeline/assignment.py | nl -ba | sed -n '"'1,35p'; git show b01bcf6:fin/pipeline/assignment.py | nl -ba | sed -n '1,38p'; printf '%s\\n' '--- m2 junction imports ---'; git show b01bcf6:fin/scoring/m2_junction_nll.py | sed -n '1,70p'" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+--- parent runner imports ---
+     1	"""Pipeline orchestrator: interval -> candidates -> scoring -> EM -> quantification."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import logging
+     6	from pathlib import Path
+     7	from typing import Dict, List, Optional, Tuple
+     8	
+     9	import numpy as np
+    10	import pysam
+    11	
+    12	from fin.analysis.assignments import em_with_coherence
+    13	from fin.analysis.quantification import (
+    14	    QuantResult,
+    15	    _exons_from_candidate,
+    16	    aggregate_across_intervals,
+    17	    compute_fulllen_frac,
+    18	    fulllen_fraction_drops,
+    19	    isoform_fraction_drops,
+    20	    mono_exon_drops,
+    21	    soft_mass_ratio_drops,
+    22	    polya5p_drops,
+    23	    quantify_transcripts,
+    24	)
+    25	from fin.candidates.canonical import chain_all_canonical, parse_motifs
+    26	from fin.candidates.dataclasses import CandidateSet
+    27	from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+    28	from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+    29	from fin.pipeline.config import PipelineConfig
+    30	from fin.scoring.em_inputs import build_em_matrices
+    31	from fin.scoring.krill_tiebreak import krill_tiebreak
+    32	from fin.scoring.mappy_distance import compute_mappy_distance
+    33	
+    34	logger = logging.getLogger(__name__)
+    35	
+    36	# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+    37	# K (transcript-bp each side of the wobbling junction) comes from the configurable
+    38	# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+    39	# an unscorable tie cell (a tied candidate the eventalign window could not score).
+    40	_M2_EM_FLANK = 2
+    41	_M2_EM_PAD = 1.0
+    42	
+    43	
+    44	class PipelineRunner:
+    45	    """Orchestrates the full pyfin pipeline."""
+    46	
+    47	    def __init__(self, config: PipelineConfig):
+    48	        self.config = config
+--- commit runner imports ---
+     1	"""Pipeline orchestrator: interval -> candidates -> scoring -> EM -> quantification."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import logging
+     6	from pathlib import Path
+     7	from typing import Dict, List, Optional, Tuple
+     8	
+     9	import numpy as np
+    10	import pysam
+    11	
+    12	from fin.analysis.assignments import em_with_coherence
+    13	from fin.analysis.quantification import (
+    14	    QuantResult,
+    15	    _exons_from_candidate,
+    16	    aggregate_across_intervals,
+    17	    compute_fulllen_frac,
+    18	    fulllen_fraction_drops,
+    19	    isoform_fraction_drops,
+    20	    mono_exon_drops,
+    21	    soft_mass_ratio_drops,
+    22	    polya5p_drops,
+    23	    quantify_transcripts,
+    24	)
+    25	from fin.candidates.canonical import chain_all_canonical, parse_motifs
+    26	from fin.candidates.dataclasses import CandidateSet
+    27	from fin.candidates.discovery import discover_candidates, merge_fusion_candidates
+    28	from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
+    29	from fin.pipeline.assignment import Assigner
+    30	from fin.pipeline.config import PipelineConfig
+    31	from fin.scoring.em_inputs import build_em_matrices
+    32	from fin.scoring.krill_tiebreak import krill_tiebreak
+    33	from fin.scoring.mappy_distance import compute_mappy_distance
+    34	
+    35	logger = logging.getLogger(__name__)
+    36	
+    37	# Pure tie-break junction-NLL M2-EM constants (SIRV-validated experiment values).
+    38	# K (transcript-bp each side of the wobbling junction) comes from the configurable
+    39	# m2_tiebreak_junction_k; FLANK is the diff-window padding and PAD the penalty for
+    40	# an unscorable tie cell (a tied candidate the eventalign window could not score).
+    41	_M2_EM_FLANK = 2
+    42	_M2_EM_PAD = 1.0
+    43	
+    44	
+    45	class PipelineRunner:
+    46	    """Orchestrates the full pyfin pipeline."""
+    47	
+    48	    def __init__(self, config: PipelineConfig):
+--- assignment old/new imports ---
+     1	"""Assignment layer: read-to-candidate assignment for quant_mode="m2_em".
+     2	
+     3	Extracted from the runner's ``_quant_m2_em`` so the M1/M2/EM assignment orchestration lives in
+     4	its own module (intervals, clustering, EM, quantification are already standalone modules; this is
+     5	the last piece that was glued into the runner).
+     6	
+     7	Step A (this file): ``tie_nll`` — the per-read best-AS tie junction-NLL scoring (moved verbatim
+     8	from ``PipelineRunner._tie_nll``; ``self.config`` -> ``config``). Byte-identical.
+     9	"""
+    10	from __future__ import annotations
+    11	
+    12	import logging
+    13	from typing import Dict, List, Tuple
+    14	
+    15	import numpy as np
+    16	
+    17	logger = logging.getLogger(__name__)
+    18	
+    19	# Junction-window flank (bp) for the M2 tie discrimination window (matches runner).
+    20	_M2_EM_FLANK = 2
+    21	
+    22	
+    23	def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
+    24	    """Per-read best-AS tie junction-NLL (the m2_resolve_tie niche).
+    25	
+    26	    For each read whose raw mappy AS is simultaneously best across >=2 candidates, build the
+    27	    class junction-discrimination window over that tie set and score each tied candidate with the
+    28	    per-event junction mean-NLL (non-HMM krill eventalign over the window). Only tied,
+    29	    window-scorable cells are touched -- never the dense read×candidate matrix.
+    30	
+    31	    Returns (nlls_by_read {i: {j: nll}}, ties_by_read {i: [j,...]}, n_ties, n_refined,
+    32	    cover_by_read {i: bool}). ``cover_by_read`` is populated only when the diff-region coverage
+    33	    gate (config.m2_diff_cover_gate) is ON; otherwise it is empty.
+    34	    """
+    35	    import krill
+     1	"""Assignment layer: read-to-candidate assignment for quant_mode="m2_em".
+     2	
+     3	Extracted from the runner's ``_quant_m2_em`` so the M1/M2/EM assignment orchestration lives in
+     4	its own module (intervals, clustering, EM, quantification are already standalone modules; this is
+     5	the last piece that was glued into the runner).
+     6	
+     7	- Step A: ``tie_nll`` — the per-read best-AS tie junction-NLL scoring (moved verbatim from
+     8	  ``PipelineRunner._tie_nll``; ``self.config`` -> ``config``).
+     9	- Step B: ``Assigner.assign`` — the pure assignment pipeline (mappy AS matrix + kept-read set ->
+    10	  ``tie_nll`` -> d_tx skeleton -> optional M3 coherence -> EM -> optional krill tie-break ->
+    11	  ``quantify_transcripts`` + ``max_R`` stamp) returning an immutable ``QuantOutput``. NO candidate
+    12	  dropping happens here — every structural gate/fold stays in the runner's selection tail (moved to
+    13	  the SelectionEngine in M3). ``quantify_transcripts`` is stamped here (right after EM) rather than
+    14	  after the drop cascade: byte-identical, because the intervening gates only accumulate a
+    15	  ``drop_cols`` column-index set and never mutate ``R`` / ``hard_assignments`` / ``cand_list``.
+    16	
+    17	Byte-identical extraction. The runner keeps thin ``_tie_nll`` / ``_eff_lengths`` methods (passed into
+    18	``assign`` at call time) so the existing ``patch.object(PipelineRunner, ...)`` test seams survive; the
+    19	``em_with_coherence`` / ``quantify_transcripts`` seams move to this module (tests re-point here).
+    20	"""
+    21	from __future__ import annotations
+    22	
+    23	import logging
+    24	from dataclasses import dataclass
+    25	from typing import Callable, Dict, List, Optional, Tuple
+    26	
+    27	import numpy as np
+    28	
+    29	from fin.analysis.assignments import em_with_coherence
+    30	from fin.analysis.quantification import quantify_transcripts
+    31	from fin.scoring.krill_tiebreak import krill_tiebreak
+    32	from fin.scoring.m2_junction_nll import MISSING
+    33	
+    34	logger = logging.getLogger(__name__)
+    35	
+    36	# Junction-window flank (bp) for the M2 tie discrimination window (matches runner).
+    37	_M2_EM_FLANK = 2
+    38	# d_tx MISSING-cell pad added to (hi-lo) so an unscored tie cell sits just beyond the
+--- m2 junction imports ---
+"""M2 junction NLL: per-event signal distance over internal-junction diff windows.
+
+This is the production-shaped form of the validated "version B" wobble
+discriminator (see ``experiments/_gt_zval_multi.py``; SIRV interval 10582-11643,
+6 wobble pairs, pooled 86.2%). The signal engine is krill ``align_read_variants``
+(in-memory eventalign, ``hmm_confidence=False``).
+
+The three essential ingredients of the metric:
+  1. NON-HMM eventalign (clean per-kmer ``standardized_level`` z for every event;
+     ``model_kmer == reference_kmer`` is forced, so the only signal quantity is |z|).
+  2. A SHARED genomic discrimination window restricted to *internal* intron
+     boundaries (excludes 5'/3'/UTR structural differences), built from the
+     exon symmetric difference between candidates of the same wobble class.
+  3. per-event NLL = ``0.5·z² + log(model_stdv)``, **mean over the window**
+     (÷n; the sum is read-length confounded).
+
+M2 is an M1-structural-mask refinement: only (read, candidate) cells that M1
+accepts (mappy aligns with no single indel > ``M1_MAX_INDEL_BP``) are scored;
+M1-rejected cells get the sentinel ``MISSING`` distance. Cells whose candidate
+class has no discrimination window (singletons / no internal diff) fall back to
+the M1 distance, so M2 degrades to M1 where there is no wobble competition.
+"""
+from __future__ import annotations
+
+import logging
+import math
+from functools import lru_cache
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+
+from fin.candidates.dataclasses import TranscriptCandidate
+from fin.scoring.mappy_preset import get_m1_preset
+from fin.scoring.mappy_score import score_hit
+
+logger = logging.getLogger(__name__)
+
+MISSING = 1e6  # sentinel distance for M1-rejected / no-coverage cells
+
+
+# ---------------------------------------------------------------------------
+# Exon / coordinate helpers (ported from experiments/_gt_zval_multi.py)
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=16384)
+def _build_exons_key(
+    introns: Tuple[Tuple[int, int], ...], start: int, end: int
+) -> Tuple[Tuple[int, int], ...]:
+    """Cached exon geometry keyed on the hashable candidate signature.
+
+    The exon layout is a pure function of (intron_chain, start, end), but the
+    per-event NLL loop calls ``_tx2genome`` (hence ``_exon_tx_map`` ->
+    ``_build_exons``) ~15M times against the SAME handful of candidates. Caching
+    on the geometry tuple collapses those rebuilds to one per unique candidate.
+    """
+    exons: List[Tuple[int, int]] = []
+    pos = start
+    for s, e in sorted(introns):
+        if s > pos:
+            exons.append((pos, s))
+        pos = max(pos, e)
+    if end > pos:
+        exons.append((pos, end))
+    return tuple(exons)
+
+
+@lru_cache(maxsize=16384)
+def _exon_tx_map_key(
+    introns: Tuple[Tuple[int, int], ...], start: int, end: int, strand: str
+
+exec
+/bin/bash -c 'git show b01bcf6''^:fin/pipeline/runner.py | nl -ba | sed -n '"'1030,1075p'; git show b01bcf6:fin/pipeline/runner.py | nl -ba | sed -n '1030,1075p'; git grep -n 'assignment_tie_nll\\|from fin.pipeline.assignment' b01bcf6"'^ -- fin/pipeline/runner.py; git grep -n '"'assignment_tie_nll\\|from fin.pipeline.assignment' b01bcf6 -- fin/pipeline/runner.py" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+  1030	                        if not seq:
+  1031	                            continue
+  1032	
+  1033	                        new_id = _generate_novel_id()
+  1034	                        new_cand = TranscriptCandidate(
+  1035	                            candidate_id=new_id,
+  1036	                            intron_chain=IntronChain(introns=schain),
+  1037	                            three_prime_pos=(end if strand == "+" else start),
+  1038	                            sequence=seq,
+  1039	                            source="novel",
+  1040	                            supporting_read_ids=set(sreads),
+  1041	                            chrom=cand.chrom,
+  1042	                            strand=strand,
+  1043	                            start=start,
+  1044	                            end=end,
+  1045	                        )
+  1046	                        # Append in lockstep with the parallel accumulators so the
+  1047	                        # emission loop (which enumerates cand_list) picks it up.
+  1048	                        cand_list.append(new_cand)
+  1049	                        counts.append(peak.excess)
+  1050	                        assigned.append(list(sreads))
+  1051	                        max_weight.append(1.0)
+  1052	                        survivor.append(True)
+  1053	                        # Conserve mass: remove the recovered excess from the parent.
+  1054	                        counts[gj] = max(0.0, counts[gj] - peak.excess)
+  1055	                        recovered_total += 1
+  1056	
+  1057	        if recovered_total:
+  1058	            logger.info(
+  1059	                "R1 cluster interval %s: recovered %d 5'-TSS short isoforms",
+  1060	                interval.region_string, recovered_total,
+  1061	            )
+  1062	
+  1063	        quant_results: List[QuantResult] = []
+  1064	        for j, cand in enumerate(cand_list):
+  1065	            # Honor the per-cluster survival gate: a member whose total assigned
+  1066	            # weight is below cluster_min_support is NOT a survivor -> zero it so the
+  1067	            # threshold is a real gate (not overridden here to confidence 1.0).
+  1068	            kept = survivor[j]
+  1069	            qr = QuantResult(
+  1070	                candidate_id=cand.candidate_id,
+  1071	                abundance=float(counts[j]) if kept else 0.0,
+  1072	                confidence=1.0 if kept else 0.0,
+  1073	                num_assigned_reads=len(assigned[j]) if kept else 0,
+  1074	                source=cand.source,
+  1075	                chrom=cand.chrom,
+  1030	                            genome_seq, start, end,
+  1031	                            IntronChain(introns=schain), strand,
+  1032	                        )
+  1033	                        if not seq:
+  1034	                            continue
+  1035	
+  1036	                        new_id = _generate_novel_id()
+  1037	                        new_cand = TranscriptCandidate(
+  1038	                            candidate_id=new_id,
+  1039	                            intron_chain=IntronChain(introns=schain),
+  1040	                            three_prime_pos=(end if strand == "+" else start),
+  1041	                            sequence=seq,
+  1042	                            source="novel",
+  1043	                            supporting_read_ids=set(sreads),
+  1044	                            chrom=cand.chrom,
+  1045	                            strand=strand,
+  1046	                            start=start,
+  1047	                            end=end,
+  1048	                        )
+  1049	                        # Append in lockstep with the parallel accumulators so the
+  1050	                        # emission loop (which enumerates cand_list) picks it up.
+  1051	                        cand_list.append(new_cand)
+  1052	                        counts.append(peak.excess)
+  1053	                        assigned.append(list(sreads))
+  1054	                        max_weight.append(1.0)
+  1055	                        survivor.append(True)
+  1056	                        # Conserve mass: remove the recovered excess from the parent.
+  1057	                        counts[gj] = max(0.0, counts[gj] - peak.excess)
+  1058	                        recovered_total += 1
+  1059	
+  1060	        if recovered_total:
+  1061	            logger.info(
+  1062	                "R1 cluster interval %s: recovered %d 5'-TSS short isoforms",
+  1063	                interval.region_string, recovered_total,
+  1064	            )
+  1065	
+  1066	        quant_results: List[QuantResult] = []
+  1067	        for j, cand in enumerate(cand_list):
+  1068	            # Honor the per-cluster survival gate: a member whose total assigned
+  1069	            # weight is below cluster_min_support is NOT a survivor -> zero it so the
+  1070	            # threshold is a real gate (not overridden here to confidence 1.0).
+  1071	            kept = survivor[j]
+  1072	            qr = QuantResult(
+  1073	                candidate_id=cand.candidate_id,
+  1074	                abundance=float(counts[j]) if kept else 0.0,
+  1075	                confidence=1.0 if kept else 0.0,
+b01bcf6^:fin/pipeline/runner.py:1330:        from fin.pipeline.assignment import tie_nll
+b01bcf6:fin/pipeline/runner.py:29:from fin.pipeline.assignment import Assigner
+b01bcf6:fin/pipeline/runner.py:1333:        from fin.pipeline.assignment import tie_nll
+
+codex
+Two compatibility risks are now concrete: relocated module patch targets and a stale cached config after reassignment. I’ll validate them on the exact commit and run focused tests.
+  ✓ Inspect commit and repository guidance
+  ✓ Compare moved logic against parent
+  ✓ Trace downstream state and seams
+  → Run targeted verification checks
+  • Report concrete review verdict
+exec
+/bin/bash -c 'set -e
+review_dir=/tmp/pyfin-b01bcf6-review
+if [ -e "$review_dir" ]; then git worktree remove --force "$review_dir" >/dev/null 2>&1 || rm -rf "$review_dir"; fi
+git worktree add --detach "$review_dir" b01bcf6 >/dev/null
+printf '"'%s\\n' '--- identity/seam probe ---'
+PYTHONPATH=\""'$review_dir" python - <<'"'PY'
+from unittest.mock import patch
+from fin.pipeline.config import PipelineConfig
+from fin.pipeline.runner import PipelineRunner
+import fin.pipeline.runner as runner_mod
+import fin.pipeline.assignment as assignment_mod
+
+cfg1 = PipelineConfig(bam_path='/tmp/one.bam')
+cfg2 = PipelineConfig(bam_path='/tmp/two.bam')
+r = PipelineRunner(cfg1)
+r.config = cfg2
+print('runner/assigner config same after replacement:', r.config is r._assigner.config)
+print('assigner still original config:', r._assigner.config is cfg1)
+orig = assignment_mod.em_with_coherence
+with patch.object(runner_mod, 'em_with_coherence', object()):
+    print('runner EM patch reaches assigner:', assignment_mod.em_with_coherence is not orig)
+origq = assignment_mod.quantify_transcripts
+with patch.object(runner_mod, 'quantify_transcripts', object()):
+    print('runner quantify patch reaches assigner:', assignment_mod.quantify_transcripts is not origq)
+origk = assignment_mod.krill_tiebreak
+with patch.object(runner_mod, 'krill_tiebreak', object()):
+    print('runner krill patch reaches assigner:', assignment_mod.krill_tiebreak is not origk)
+PY
+printf '%s\\n' '--- focused tests ---'
+cd \""'$review_dir"
+pytest -q tests/unit/test_m2_em_pure_seed.py tests/integration/test_pipeline_integration.py --disable-warnings --maxfail=1' in /SSD/logan/dev/pyfin
+ exited 1 in 285ms:
+2026-07-24 11:50:39 | INFO     | __init__.py:38 | Package initialized - version 0.1.0
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "/SSD/logan/dev/pyfin/fin/pipeline/__init__.py", line 4, in <module>
+    from .runner import PipelineRunner
+  File "/SSD/logan/dev/pyfin/fin/pipeline/runner.py", line 24, in <module>
+    from fin.pipeline.assignment import Assigner
+  File "/SSD/logan/dev/pyfin/fin/pipeline/assignment.py", line 31, in <module>
+    from fin.scoring.krill_tiebreak import krill_tiebreak
+  File "/SSD/logan/dev/pyfin/fin/scoring/krill_tiebreak.py", line 15, in <module>
+    import mappy
+ModuleNotFoundError: No module named 'mappy'
+
+codex
+The focused test environment lacks `mappy`, so collection cannot run. I’m using a minimal import stub to verify the two wiring regressions directly.
+exec
+/bin/bash -c 'set -e
+review_dir=/tmp/pyfin-b01bcf6-review
+cd "$review_dir"
+python - <<'"'PY'
+import sys, types
+sys.modules['mappy'] = types.ModuleType('mappy')
+from unittest.mock import patch
+from fin.pipeline.config import PipelineConfig
+from fin.pipeline.runner import PipelineRunner
+import fin.pipeline.runner as runner_mod
+import fin.pipeline.assignment as assignment_mod
+
+cfg1 = PipelineConfig(bam_path='/tmp/one.bam')
+cfg2 = PipelineConfig(bam_path='/tmp/two.bam')
+r = PipelineRunner(cfg1)
+r.config = cfg2
+print('runner/assigner config same after replacement:', r.config is r._assigner.config)
+print('assigner still original config:', r._assigner.config is cfg1)
+orig = assignment_mod.em_with_coherence
+with patch.object(runner_mod, 'em_with_coherence', object()):
+    print('runner EM patch reaches assigner:', assignment_mod.em_with_coherence is not orig)
+origq = assignment_mod.quantify_transcripts
+with patch.object(runner_mod, 'quantify_transcripts', object()):
+    print('runner quantify patch reaches assigner:', assignment_mod.quantify_transcripts is not origq)
+origk = assignment_mod.krill_tiebreak
+with patch.object(runner_mod, 'krill_tiebreak', object()):
+    print('runner krill patch reaches assigner:', assignment_mod.krill_tiebreak is not origk)
+PY
+printf '%s\\n' '--- syntax compile ---'
+python -m py_compile fin/pipeline/assignment.py fin/pipeline/runner.py
+printf '%s\\n' '--- focused pytest collection attempt ---'
+pytest -q tests/unit/test_m2_em_pure_seed.py --disable-warnings --maxfail=1 || true" in /SSD/logan/dev/pyfin
+ succeeded in 981ms:
+2026-07-24 11:50:53 | INFO     | __init__.py:38 | Package initialized - version 0.1.0
+runner/assigner config same after replacement: False
+assigner still original config: True
+runner EM patch reaches assigner: False
+runner quantify patch reaches assigner: False
+runner krill patch reaches assigner: False
+--- syntax compile ---
+--- focused pytest collection attempt ---
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-9.0.2, pluggy-1.6.0
+rootdir: /tmp/pyfin-b01bcf6-review
+configfile: pyproject.toml
+collected 0 items / 1 error
+
+==================================== ERRORS ====================================
+_____________ ERROR collecting tests/unit/test_m2_em_pure_seed.py ______________
+ImportError while importing test module '/tmp/pyfin-b01bcf6-review/tests/unit/test_m2_em_pure_seed.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.10/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests/unit/test_m2_em_pure_seed.py:27: in <module>
+    import numpy as np
+E   ModuleNotFoundError: No module named 'numpy'
+=========================== short test summary info ============================
+ERROR tests/unit/test_m2_em_pure_seed.py
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+=============================== 1 error in 0.23s ===============================
+
+codex
+Verification is complete: arithmetic/control flow is otherwise faithful, but the refactor breaks two strict compatibility guarantees.
+  ✓ Inspect commit and repository guidance
+  ✓ Compare moved logic against parent
+  ✓ Trace downstream state and seams
+  ✓ Run targeted verification checks
+  ✓ Report concrete review verdict
+codex
+**Verdict: ISSUES**
+
+- **Config replacement now produces split-brain behavior.** `PipelineRunner` stores the original config in `Assigner` at construction (`fin/pipeline/runner.py:58`, `fin/pipeline/assignment.py:279`). If `runner.config` is subsequently replaced, the assignment phase continues using the old config while the selection tail uses the new one. Before this commit, all of `_quant_m2_em` read `self.config` dynamically. This can change EM iterations, M2/M3 gates, krill behavior, thresholds, and ultimately output. Direct `runner.config = ...` usage already exists in the test suite, so config replacement is an established seam.
+
+- **Module-level mock/patch targets are not preserved.** M2 now resolves `em_with_coherence`, `krill_tiebreak`, and `quantify_transcripts` from `fin.pipeline.assignment` (`fin/pipeline/assignment.py:29`, `fin/pipeline/assignment.py:31`, `fin/pipeline/assignment.py:475`, `fin/pipeline/assignment.py:490`, `fin/pipeline/assignment.py:499`). Patching the previous targets in `fin.pipeline.runner` no longer intercepts M2 execution. The commit updates two in-repo targets, but silently also moves the `krill_tiebreak` seam. Because runner still exports these names for other modes, old patches do not fail loudly—they simply stop controlling M2 and may execute real EM/quantification/signal code.
+
+The moved arithmetic, thresholds, kept-read logic, drop ordering, containment fold, and lazy observed-junction construction otherwise match the parent. Syntax compilation passed; focused pytest collection was unavailable in the provided environment because its pytest interpreter lacks NumPy.
+tokens used
+66,358
+**Verdict: ISSUES**
+
+- **Config replacement now produces split-brain behavior.** `PipelineRunner` stores the original config in `Assigner` at construction (`fin/pipeline/runner.py:58`, `fin/pipeline/assignment.py:279`). If `runner.config` is subsequently replaced, the assignment phase continues using the old config while the selection tail uses the new one. Before this commit, all of `_quant_m2_em` read `self.config` dynamically. This can change EM iterations, M2/M3 gates, krill behavior, thresholds, and ultimately output. Direct `runner.config = ...` usage already exists in the test suite, so config replacement is an established seam.
+
+- **Module-level mock/patch targets are not preserved.** M2 now resolves `em_with_coherence`, `krill_tiebreak`, and `quantify_transcripts` from `fin.pipeline.assignment` (`fin/pipeline/assignment.py:29`, `fin/pipeline/assignment.py:31`, `fin/pipeline/assignment.py:475`, `fin/pipeline/assignment.py:490`, `fin/pipeline/assignment.py:499`). Patching the previous targets in `fin.pipeline.runner` no longer intercepts M2 execution. The commit updates two in-repo targets, but silently also moves the `krill_tiebreak` seam. Because runner still exports these names for other modes, old patches do not fail loudly—they simply stop controlling M2 and may execute real EM/quantification/signal code.
+
+The moved arithmetic, thresholds, kept-read logic, drop ordering, containment fold, and lazy observed-junction construction otherwise match the parent. Syntax compilation passed; focused pytest collection was unavailable in the provided environment because its pytest interpreter lacks NumPy.

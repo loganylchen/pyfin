@@ -1,0 +1,364 @@
+Re-review a git commit in the pyfin repo with fresh, skeptical eyes. A PRIOR review by a weaker model (gpt-5.5) marked it CLEAN. Independently re-verify with the stronger model and catch anything it may have missed. Read the embedded diff (git show); use a PTY if the non-PTY shell returns blank stdout, but the diff below is self-contained.
+
+Commit: 84241b1 — feat(candidates): clustering-only primitive cluster_families (no fold/mono)
+Nature: ADDITIVE FEATURE (not wired into production)
+
+Verify: correctness, DETERMINISM, no shared-state mutation, and that it CANNOT change existing production behaviour (cluster_read_chains + discovery path untouched; new symbols only). For the GTF-attach commit specifically: non-bridging (a GTF never merges two read families), zero-read pool integrity (read_pool/variant_reads never get GTF), GTF-only families for unmatched GTF.
+
+Give a clear verdict for THIS commit: CLEAN or ISSUES (list them with line cites). Be concrete and skeptical. Review only; do not modify code.
+
+===== git show 84241b1 =====
+commit 84241b10751a661bd22bbbf102730ef5ed1cf6cb
+Author: loganylchen <yuelong.chen.btr@gmail.com>
+Date:   Thu Jul 23 23:15:30 2026 +0800
+
+    feat(candidates): clustering-only primitive cluster_families (no fold/mono)
+    
+    Add a clean, single-responsibility clustering step for de-novo candidate generation
+    (clustering redesign): cluster_families() + ChainFamily / ClusterResult in
+    chain_cluster.py. Unlike cluster_read_chains it does ONLY family grouping and makes no
+    structural-collapse or read-ownership decision:
+      1. group reads by EXACT intron chain (3' ignored, no snap),
+      2. bucket every single-exon (chain-less) read into mono_reads UNTOUCHED,
+      3. union-find the distinct multi-exon chains into families by wobble/cassette/
+         containment (reusing _related; single-linkage, intentional),
+      4. each family = its variant chains (KEPT, not merged) + a POOLED read set + per-variant
+         discovery provenance.
+    
+    No fold, no mono processing (fold/path-completion/mono-resolution are separate later
+    per-cluster steps), no coordinate rewrite. Deterministic (chains/families coord-sorted;
+    reads are sets) — avoids the old mono-fold order-sensitivity.
+    
+    ADDITIVE and NOT wired into production: cluster_read_chains and the discovery path are
+    untouched, so production behavior is unchanged (full suite 922 passed = 911 + 14 new,
+    only the pre-existing test_cli + environmental benchmark_smoke fails). Codex review CLEAN.
+    Next step wires it via the per-cluster consumer.
+
+diff --git a/fin/candidates/chain_cluster.py b/fin/candidates/chain_cluster.py
+index 72deabf..c019c78 100644
+--- a/fin/candidates/chain_cluster.py
++++ b/fin/candidates/chain_cluster.py
+@@ -66,6 +66,46 @@ class ChainCluster:
+                    key=lambda m: (m.num_introns, len(m.read_ids), m.chain.introns))
+ 
+ 
++@dataclass
++class ChainFamily:
++    """A clustering-only family of related MULTI-EXON structural variants.
++
++    ``variants`` are the distinct exact intron chains (structures) grouped together by
++    wobble / cassette / containment -- NO coordinates are merged or snapped, and every
++    variant is KEPT (no fold). ``read_pool`` is the union of all reads whose exact chain is
++    in this family: once a family forms, reads belong to the FAMILY, not to an individual
++    variant -- which variant a read truly supports is re-decided later, by evidence, in the
++    per-cluster assignment. ``variant_reads`` is the per-variant discovery provenance (which
++    exact chain each read produced), kept only for choosing a representative and for the
++    later path-completion step; it is NOT the final read ownership.
++    """
++    variants: List[Chain]
++    read_pool: Set[str] = field(default_factory=set)
++    variant_reads: Dict[Chain, Set[str]] = field(default_factory=dict)
++
++    @property
++    def representative(self) -> Chain:
++        """Longest variant, tie-broken by discovery read support then coords.
++
++        A convenience pick, NOT a snapped consensus -- coordinates are never rewritten.
++        """
++        return max(self.variants,
++                   key=lambda c: (len(c), len(self.variant_reads.get(c, ())), c))
++
++
++@dataclass
++class ClusterResult:
++    """Output of the clustering-only step: multi-exon families + the interval mono bucket.
++
++    ``mono_reads`` is the holding bucket of every single-exon (chain-less) read in the
++    interval -- deliberately UNPROCESSED here (not folded, not locus-split). Whether each is
++    a genuine intronless transcript or a fragment of a surviving multi-exon candidate is a
++    later decision, made after multi-exon resolution (see the clustering redesign).
++    """
++    families: List[ChainFamily]
++    mono_reads: Set[str] = field(default_factory=set)
++
++
+ # ---------------------------------------------------------------------------
+ # chain-relation predicates (single interval/strand: no chrom/strand bucketing)
+ # ---------------------------------------------------------------------------
+@@ -328,3 +368,88 @@ def cluster_read_chains(
+         clusters.append(ChainCluster(members=[_mk(c)], read_ids=set(reads[c])))
+ 
+     return clusters
++
++
++def cluster_families(
++    read_chains: List[Tuple[Dict, IntronChain]],
++    *,
++    wobble_bp: int = 6,
++    cassette_max_exon_bp: int = 70,
++) -> ClusterResult:
++    """Clustering ONLY: group an interval's reads into multi-exon structural families.
++
++    The clean, single-responsibility clustering step (see the clustering redesign). Unlike
++    :func:`cluster_read_chains`, it does NOT fold exact sub-chains, does NOT fold or spatially
++    split mono reads, and never rewrites coordinates. It ONLY:
++
++      1. groups reads by their EXACT intron chain (3' ignored, no snap),
++      2. buckets every single-exon (chain-less) read into ``mono_reads`` UNTOUCHED,
++      3. union-finds the distinct multi-exon chains into families by wobble / cassette /
++         containment (single-linkage; see :func:`_related`),
++      4. returns each family's variant chains + a POOLED read set (reads belong to the
++         family, not a member) + the per-variant discovery provenance.
++
++    Deterministic: families and their variants are coordinate-sorted; ``mono_reads`` is a
++    plain set. Fold, path-completion, and mono resolution are SEPARATE later per-cluster
++    steps -- this function makes no structural-collapse or read-ownership decision.
++
++    Args:
++        read_chains: per-read ``(read_dict, IntronChain)`` (read_dict needs "query_name";
++            CIGAR-derived chains, used as-is).
++        wobble_bp: per-junction tolerance for wobble / cassette / containment joins.
++        cassette_max_exon_bp: max skipped-exon length for a cassette join (0 disables).
++
++    Returns:
++        A :class:`ClusterResult` (multi-exon families + the interval mono bucket).
++    """
++    # 1. group reads by EXACT chain; single-exon (chain-less) reads -> the mono bucket.
++    by_chain: Dict[Chain, Set[str]] = {}
++    mono_reads: Set[str] = set()
++    for rd, chain in read_chains:
++        rid = rd.get("query_name")
++        if rid is None:
++            continue
++        introns = tuple(chain.introns)
++        if not introns:
++            mono_reads.add(rid)
++        else:
++            by_chain.setdefault(introns, set()).add(rid)
++
++    # 2. union-find the distinct multi-exon chains by wobble / cassette / containment.
++    #    Sorted vertex order -> deterministic; the resulting partition (connected
++    #    components of the symmetric _related graph) is order-independent regardless.
++    multi = sorted(by_chain)
++    parent: Dict[Chain, Chain] = {c: c for c in multi}
++
++    def find(x: Chain) -> Chain:
++        while parent[x] != x:
++            parent[x] = parent[parent[x]]
++            x = parent[x]
++        return x
++
++    for i in range(len(multi)):
++        for j in range(i + 1, len(multi)):
++            a, b = multi[i], multi[j]
++            if find(a) != find(b) and _related(a, b, wobble_bp, cassette_max_exon_bp):
++                parent[find(a)] = find(b)
++
++    comps: Dict[Chain, List[Chain]] = {}
++    for c in multi:
++        comps.setdefault(find(c), []).append(c)
++
++    # 3. build families: variants coord-sorted, read pool = union of members' reads,
++    #    per-variant discovery reads kept as provenance (not final ownership).
++    families: List[ChainFamily] = []
++    for comp in comps.values():
++        variants = sorted(comp)
++        pool: Set[str] = set()
++        for c in comp:
++            pool |= by_chain[c]
++        families.append(ChainFamily(
++            variants=variants,
++            read_pool=pool,
++            variant_reads={c: set(by_chain[c]) for c in comp},
++        ))
++    families.sort(key=lambda f: f.variants[0])   # stable family order
++
++    return ClusterResult(families=families, mono_reads=mono_reads)
+diff --git a/tests/unit/test_cluster_families.py b/tests/unit/test_cluster_families.py
+new file mode 100644
+index 0000000..22d457f
+--- /dev/null
++++ b/tests/unit/test_cluster_families.py
+@@ -0,0 +1,182 @@
++"""Unit tests for the clustering-only primitive ``cluster_families``.
++
++This is the clean, single-responsibility clustering step (clustering redesign): group reads
++into multi-exon structural families by wobble/cassette/containment, pool their reads, and
++bucket every chain-less read into ``mono_reads`` UNTOUCHED. It must NOT fold exact sub-chains,
++NOT process mono, and NOT rewrite coordinates.
++"""
++from fin.candidates.chain_cluster import ChainFamily, ClusterResult, cluster_families
++from fin.candidates.dataclasses import IntronChain
++
++
++def _rc(qname, introns):
++    """(read_dict, IntronChain) with a minimal read_dict (only query_name is read)."""
++    return ({"query_name": qname}, IntronChain(introns=tuple(introns)))
++
++
++def _families_by_variant_count(res):
++    return sorted(len(f.variants) for f in res.families)
++
++
++class TestGroupingAndPool:
++    def test_identical_chains_pool_into_one_variant(self):
++        res = cluster_families([
++            _rc("r1", [(1000, 2000), (3000, 4000)]),
++            _rc("r2", [(1000, 2000), (3000, 4000)]),
++            _rc("r3", [(1000, 2000), (3000, 4000)]),
++        ])
++        assert len(res.families) == 1
++        fam = res.families[0]
++        assert fam.variants == [((1000, 2000), (3000, 4000))]     # one distinct structure
++        assert fam.read_pool == {"r1", "r2", "r3"}               # reads pooled at family
++        assert res.mono_reads == set()
++
++    def test_unrelated_chains_are_separate_families(self):
++        res = cluster_families([
++            _rc("a", [(1000, 2000)]),
++            _rc("b", [(90000, 91000)]),   # far away -> not related
++        ])
++        assert len(res.families) == 2
++        assert all(len(f.variants) == 1 for f in res.families)
++
++
++class TestWobbleKeptNotMerged:
++    def test_wobble_siblings_one_family_two_variants(self):
++        # 2bp-wobbled junctions: same family (wobble), but BOTH variants kept (no merge,
++        # no coordinate snapping) and reads pooled.
++        res = cluster_families([
++            _rc("r1", [(1000, 2000), (3000, 4000)]),
++            _rc("r2", [(1002, 1998), (3000, 4000)]),
++        ], wobble_bp=6)
++        assert len(res.families) == 1
++        fam = res.families[0]
++        assert set(fam.variants) == {
++            ((1000, 2000), (3000, 4000)),
++            ((1002, 1998), (3000, 4000)),
++        }
++        assert fam.read_pool == {"r1", "r2"}
++        # coordinates untouched: both original chains still present verbatim
++        assert ((1000, 2000), (3000, 4000)) in fam.variant_reads
++        assert fam.variant_reads[((1002, 1998), (3000, 4000))] == {"r2"}
++
++    def test_beyond_wobble_tolerance_splits(self):
++        # 12bp apart with tol=6 and NO bridge -> two separate families.
++        res = cluster_families([
++            _rc("r1", [(1000, 2000)]),
++            _rc("r2", [(1012, 1988)]),
++        ], wobble_bp=6)
++        assert len(res.families) == 2
++
++
++class TestNoFold:
++    def test_exact_subchain_is_not_folded_but_clusters_via_containment(self):
++        # (3000,4000) is an EXACT sub-chain of the 2-intron chain. cluster_read_chains
++        # would FOLD it away; cluster_families must NOT fold -> it stays a distinct variant,
++        # joined into the SAME family by tolerant containment.
++        res = cluster_families([
++            _rc("long", [(1000, 2000), (3000, 4000)]),
++            _rc("short", [(3000, 4000)]),
++        ])
++        assert len(res.families) == 1
++        fam = res.families[0]
++        assert set(fam.variants) == {
++            ((1000, 2000), (3000, 4000)),
++            ((3000, 4000),),
++        }
++        assert fam.read_pool == {"long", "short"}
++
++
++class TestCassette:
++    def test_cassette_sibling_same_family(self):
++        # Inclusion isoform (K=3 introns) splits the base's second intron (3000,4000) into
++        # (3000,3500) + (3550,4000) with a 50bp (< 70) cassette exon [3500,3550]; outer
++        # donor/acceptor match the base intron -> cassette -> same family.
++        base = [(1000, 2000), (3000, 4000)]
++        cassette = [(1000, 2000), (3000, 3500), (3550, 4000)]
++        res = cluster_families([
++            _rc("b", base),
++            _rc("c", cassette),
++        ], wobble_bp=6, cassette_max_exon_bp=70)
++        assert len(res.families) == 1
++        assert _families_by_variant_count(res) == [2]
++
++
++class TestMonoBucket:
++    def test_monoexon_reads_go_to_bucket_untouched(self):
++        res = cluster_families([
++            _rc("m1", []),
++            _rc("m2", []),
++            _rc("multi", [(1000, 2000), (3000, 4000)]),
++        ])
++        assert res.mono_reads == {"m1", "m2"}     # bucketed, not folded, not split
++        assert len(res.families) == 1              # only the multi-exon read forms a family
++        assert res.families[0].variants == [((1000, 2000), (3000, 4000))]
++
++    def test_all_mono_no_families(self):
++        res = cluster_families([_rc("m1", []), _rc("m2", [])])
++        assert res.families == []
++        assert res.mono_reads == {"m1", "m2"}
++
++
++class TestSingleLinkageAndDeterminism:
++    def test_single_linkage_bridges_three(self):
++        # A~B (2bp) and B~C (2bp) but A vs C is 4bp on the first donor -> still all one
++        # family via single-linkage transitivity (accepted by design).
++        res = cluster_families([
++            _rc("a", [(1000, 2000)]),
++            _rc("b", [(1002, 2000)]),
++            _rc("c", [(1004, 2000)]),
++        ], wobble_bp=2)
++        assert len(res.families) == 1
++        assert len(res.families[0].variants) == 3
++        assert res.families[0].read_pool == {"a", "b", "c"}
++
++    def test_deterministic_across_input_order(self):
++        reads_a = [
++            _rc("r1", [(1000, 2000), (3000, 4000)]),
++            _rc("r2", [(1002, 1998), (3000, 4000)]),
++            _rc("r3", [(5000, 6000)]),
++        ]
++        reads_b = list(reversed(reads_a))
++        ra = cluster_families(reads_a)
++        rb = cluster_families(reads_b)
++        # same families (variant lists coordinate-sorted) and same mono bucket
++        assert [f.variants for f in ra.families] == [f.variants for f in rb.families]
++        assert ra.mono_reads == rb.mono_reads
++
++
++class TestSkipsUnnamedReads:
++    def test_missing_query_name_skipped(self):
++        res = cluster_families([
++            ({"query_name": None}, IntronChain(introns=((1000, 2000),))),
++            _rc("ok", [(1000, 2000)]),
++        ])
++        assert len(res.families) == 1
++        assert res.families[0].read_pool == {"ok"}
++
++
++class TestEmptyAndRepresentative:
++    def test_empty_input(self):
++        res = cluster_families([])
++        assert res.families == []
++        assert res.mono_reads == set()
++
++    def test_representative_is_longest_no_snap(self):
++        # containment family: short (3000,4000) + long 2-intron chain -> representative is
++        # the longest variant, with ORIGINAL coordinates (no consensus/snap).
++        res = cluster_families([
++            _rc("s", [(3000, 4000)]),
++            _rc("l", [(1000, 2000), (3000, 4000)]),
++        ])
++        assert len(res.families) == 1
++        assert res.families[0].representative == ((1000, 2000), (3000, 4000))
++
++    def test_representative_tiebreak_by_support(self):
++        # two wobble variants of equal length -> representative is the higher-support one.
++        res = cluster_families([
++            _rc("a1", [(1000, 2000)]),
++            _rc("a2", [(1000, 2000)]),   # (1000,2000) has 2 reads
++            _rc("b1", [(1003, 2000)]),   # (1003,2000) has 1 read
++        ], wobble_bp=6)
++        assert len(res.families) == 1
++        assert res.families[0].representative == ((1000, 2000),)

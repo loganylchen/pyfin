@@ -1,0 +1,53 @@
+HOLISTIC ARCHITECTURE REVIEW (read-only) of a just-completed pipeline refactor in the pyfin repo.
+This is NOT a byte-identity check (each of the 6 milestones was already reviewed for that). Assess the
+FINAL LAYERED STRUCTURE AS A WHOLE — is it sound to build step-by-step performance work on top?
+
+Read these files directly (they are in the repo; use a PTY if the non-PTY shell returns blank stdout):
+- fin/pipeline/runner.py       (orchestrator, ~1273 lines)
+- fin/pipeline/evidence.py     (Evidence layer)
+- fin/pipeline/assignment.py   (Assignment layer: Assigner + QuantOutput + tie_nll)
+- fin/pipeline/selection.py    (Selection layer: canonical_gate_select + junction_dominance_select
+                                [PRE_ASSIGN], select_m2_interval [INTERVAL], select_global [GLOBAL],
+                                SelectionOutcome)
+- fin/pipeline/finalize.py     (Finalize layer: write_unfiltered_diagnostic + finalize_outputs)
+
+Context: the goal of the refactor was that "which candidates are real" (selection) has ONE home, and
+each layer is isolated so changing one place affects one step. Selection was previously smeared across
+three incompatible mechanisms (pre-EM in-place mutation, a post-EM drop_cols column set inside
+_quant_m2_em, and finalize-time dict deletion); it is now unified in selection.py across three scopes,
+each emitting a uniform SelectionOutcome. Assignment (m2_em) was extracted into an Assigner returning
+an immutable-by-convention QuantOutput. Scope was the DEFAULT m2_em path; argmax/m1_em/cluster keep
+their own quant handling.
+
+Assess and report on:
+
+1. LAYER BOUNDARIES: are the layers cleanly separated (Evidence -> Generation -> Assignment ->
+   Selection[pre/interval/global] -> Aggregate -> Finalize)? Does the runner act as a thin orchestrator
+   that wires them, or does it still hold logic that belongs in a layer? Point to any remaining
+   cross-layer leakage.
+
+2. THE "CHANGE ONE PLACE" PROPERTY: for a few concrete example edits a performance-tuning phase would
+   make — (a) change the min_abundance floor rule, (b) add a new interval-scope drop gate, (c) change
+   the canonical-junction rule, (d) change how reads are assigned in EM — does each land in exactly ONE
+   module now? Where would each edit go? Flag any edit that would still require touching multiple layers.
+
+3. SELECTION AS THE TUNING SURFACE: selection.py is where the next phase (candidate-set model selection,
+   wobble dedup, replacing the min_abundance floor) will happen. Is its current shape a good surface for
+   that? The SelectionOutcome records are currently produced but the returned outcomes lists are
+   IGNORED by the runner (only the surviving results/dict are used). Is that acceptable as-is, and is
+   there an obvious low-risk next step to make the outcomes useful (provenance/FN-FP attribution)
+   without changing behavior?
+
+4. SEAMS & COUPLING: the runner passes bound methods into the layers at call time (_tie_nll,
+   _eff_lengths, _observed_junctions, _apply_polya5p_filter) to preserve test mock seams. Is this a
+   reasonable pattern or a smell that will get in the way of tuning? Any import-cycle risk or hidden
+   coupling between assignment.py / selection.py / finalize.py?
+
+5. RISKS / TECH DEBT for the tuning phase: what should we be careful about? Specifically: QuantOutput is
+   "immutable by convention" but the interval selection tail still mutates QuantResult objects during
+   FOLD; the three selection scopes share the SelectionOutcome type but run at different granularities
+   (candidate list vs aggregated dict); cluster/argmax/m1_em are OUTSIDE the unified selection. Call out
+   anything that could bite a performance-tuning change.
+
+Give a concise structural verdict: is the prototype structure SOUND to start step-by-step performance
+tuning on, or are there structural fixes to make FIRST? Be concrete. Review only; do not modify code.

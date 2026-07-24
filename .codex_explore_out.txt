@@ -1,0 +1,277 @@
+Reading prompt from stdin...
+OpenAI Codex v0.142.0
+--------
+workdir: /SSD/logan/dev/pyfin
+model: gpt-5.6-sol
+provider: OpenAI
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019f92a9-c623-7041-bf89-4d205e7a46c4
+--------
+user
+Review a NEW, ADDITIVE primitive in the pyfin repo (read-only; use a PTY if non-PTY shell returns
+blank stdout). Read `.codex_explore_diff.txt` at repo root: the full new file
+fin/candidates/explore.py and its test file. It is NOT wired into production (nothing in fin/ imports
+it; verified). This implements the "explore" step we designed with you: family-local intron-graph path
+enumeration that ADDS assembled full-length candidates (cross-read truncation recovery), keeping all
+exact variants (caller keeps those). Downstream re-mapping does TP/FP discrimination, so generating
+many candidates here is intentional (pure recall step).
+
+The agreed design: NODES = distinct observed introns; EDGES = consecutive intron pairs within a
+variant chain (read-phased), only when genomically valid (positive exon); enumerate maximal
+source->sink paths with a deterministic BOTTLENECK-FIRST beam; N=1 edges (precision is downstream);
+emit only NON-variant chains; cap per family. You previously noted read-phased edges do NOT prevent
+GLOBAL recombination (A-B-X-D + A-C-X-E also yield A-B-X-E / A-C-X-D) -- that is ACCEPTED here and a
+test pins it; min_edge_support is exposed for downstream weighting.
+
+Verify, concretely, with line cites:
+
+1. CORRECTNESS of the cross-read assembly: does _build_graph correctly build the read-phased DAG
+   (node/edge support = read counts; disjoint reads across variants so summing == union; the
+   `b[0] <= a[1]` guard drops non-genomic edges)? Does explore_family_paths enumerate maximal
+   source->sink paths and emit exactly the NON-variant chains? Confirm the truncation case
+   [I1,I2]+[I2,I3] -> [I1,I2,I3] and that full-read chains / single variants add nothing.
+
+2. DETERMINISM: is the output order-independent of variant/read input order? Check `sources` sorted,
+   the beam prune (stable `nxt.sort()` then `nxt.sort(key=_edge_scores, reverse=True)`), and the final
+   ranking sort. Any residual nondeterminism (sets iterated in a way that affects output; ties)?
+
+3. TERMINATION / NO CYCLES: the graph is claimed a DAG (genomic order). Confirm no infinite loop:
+   the `while frontier` extends only to strictly-later introns, `if b in path` guards revisits, and
+   the `len(completed) <= max_new*4` bound. Is there any family shape that loops or explodes past the
+   beam/cap? Is the beam applied per-layer correctly (paths of different lengths coexist in frontier)?
+
+4. MAXIMALITY vs SHORT ISOFORMS: paths complete only at sinks (no successor). Confirm this does NOT
+   drop exact variants (caller keeps them) but DOES mean a short assembled isoform whose 3' end has a
+   successor is not emitted. Is that an acceptable v1 limitation (note it), and does it ever DROP a
+   real exact variant? (It must not -- variants are the caller's, not explore's.)
+
+5. min_edge_support / reads provenance: is min_edge_support the true bottleneck (min over path edges)?
+   Is `reads` the union of variant_reads for variants that are contiguous sub-chains of the path
+   (_is_subchain correct)? Any off-by-one / wrong-tiling?
+
+6. ADDITIVITY / SAFETY: pure function, no mutation of the family, no shared-state, no import cycle,
+   deterministic, and cannot affect production (not imported). Any dataclass mutable-default or
+   aliasing bug?
+
+7. TEST QUALITY: do the tests pin the contract (assembly, recombination emitted, single-variant no-op,
+   full-read no-op, determinism, cap, geometry guard)? Missing edges worth adding (empty family; a node
+   that is both a variant-terminal and has a successor; beam width forcing a true path out)?
+
+Verdict: CLEAN (safe to commit) / ISSUES (list them). Review only; do not modify code.
+
+warning: Model metadata for `gpt-5.6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+codex
+I’ll inspect the provided diff and repository context, then trace each contract point against the tests.
+  → Read explore diff and instructions
+  • Trace graph and enumeration logic
+  • Audit determinism termination safety
+  • Evaluate tests and missing cases
+  • Deliver cited verdict
+exec
+/bin/bash -lc "printf '%s\\n' '--- AGENTS ---'; find .. -name AGENTS.md -print; printf '%s\\n' '--- DIFF ---'; cat .codex_explore_diff.txt" in /SSD/logan/dev/pyfin
+ succeeded in 0ms:
+codex
+The non-PTY read returned blank, so I’m retrying with a PTY as requested.
+exec
+/bin/bash -lc "printf '%s\\n' '--- AGENTS ---'; find .. -name AGENTS.md -print; printf '%s\\n' '--- DIFF ---'; cat .codex_explore_diff.txt" in /SSD/logan/dev/pyfin
+codex
+I have the bundle structure; next I’m reading both files in full and checking import isolation.
+  ✓ Read explore diff and instructions
+  → Trace graph and enumeration logic
+  • Audit determinism termination safety
+  • Evaluate tests and missing cases
+  • Deliver cited verdict
+codex
+The core traversal is clear. I’m checking family invariants and exercising edge cases that the current tests do not cover.
+codex
+Core logic appears sound under `ChainFamily` invariants. I’m now running the focused suite and targeted adversarial checks without writing caches.
+  ✓ Read explore diff and instructions
+  ✓ Trace graph and enumeration logic
+  → Audit determinism termination safety
+  • Evaluate tests and missing cases
+  • Deliver cited verdict
+codex
+I found two bounded-search edge cases worth distinguishing from correctness. I’m confirming import isolation and constructing minimal reproductions for the cutoff behavior.
+codex
+Review is complete: logic is deterministic and cycle-safe, but the search bound has a real recall/cap edge case.
+  ✓ Read explore diff and instructions
+  ✓ Trace graph and enumeration logic
+  ✓ Audit determinism termination safety
+  ✓ Evaluate tests and missing cases
+  ✓ Deliver cited verdict
+codex
+**Verdict: ISSUES**
+
+The core graph construction, determinism, provenance, and cycle safety are correct. However, the completion-work bound can suppress valid assembled candidates, and `max_new=0` violates the output cap. The module is currently production-inert because nothing imports it, but I would address these before treating the primitive as contract-clean.
+
+**1. Cross-Read Assembly**
+- `_build_graph` correctly creates one node per distinct observed intron and increments node support by the number of reads assigned to each exact variant: `fin/candidates/explore.py:63`, `fin/candidates/explore.py:67`.
+- Each consecutive pair receives the variant’s read count, with adjacency stored in `succ`/`pred`: `fin/candidates/explore.py:71`.
+- Summing is a true union count under the documented `ChainFamily` invariant that each read has one exact discovery chain: `fin/candidates/chain_cluster.py:73`, `fin/candidates/chain_cluster.py:78`.
+- `b[0] <= a[1]` correctly rejects overlapping or zero-length intervening exons: `fin/candidates/explore.py:72`.
+- Sources are nodes with no valid predecessor, and paths are completed only when the terminal node has no successor: `fin/candidates/explore.py:98`, `fin/candidates/explore.py:114`.
+- Completed chains already present in `family.variants` are filtered, as are single-node paths and duplicates: `fin/candidates/explore.py:129`, `fin/candidates/explore.py:134`.
+- The `[I1,I2] + [I2,I3] → [I1,I2,I3]` case is correctly pinned, including bottleneck support and read union: `tests/unit/test_explore.py:31`.
+- Single-variant and already-full-chain no-ops are pinned: `tests/unit/test_explore.py:46`, `tests/unit/test_explore.py:50`.
+
+**2. Determinism**
+- Source order is coordinate-sorted: `fin/candidates/explore.py:98`.
+- Successors are sorted before expansion, eliminating set-order dependence: `fin/candidates/explore.py:114`.
+- Beam ties are deterministic: the initial lexicographic sort establishes coordinate order, and Python’s stable support sort preserves that order among equal scores: `fin/candidates/explore.py:124`.
+- Final ranking is total and deterministic: descending bottleneck, descending cumulative support, then chain coordinates: `fin/candidates/explore.py:132`.
+- Variant and read input order cannot affect counts or set-union contents. Iteration of `family.variants` while collecting reads changes neither the resulting set nor output ordering: `fin/candidates/explore.py:139`.
+- No residual nondeterministic output behavior is apparent.
+- Test weakness: the determinism test applies `_chains`, which sorts the output itself, so it does **not** pin the function’s native result order or metadata ordering: `tests/unit/test_explore.py:26`, `tests/unit/test_explore.py:79`.
+
+**3. Termination and Bounds**
+- With valid introns, every accepted edge moves strictly rightward because the next donor must exceed the previous acceptor. Therefore the graph is acyclic: `fin/candidates/explore.py:72`.
+- The revisit guard provides additional protection: `fin/candidates/explore.py:119`.
+- Active frontier paths advance exactly one edge per iteration, so all paths within `frontier` have the same depth. Shorter paths move into `completed`; paths of different lengths do not coexist in the active frontier: `fin/candidates/explore.py:108`, `fin/candidates/explore.py:121`.
+- There is no infinite-loop family shape under normal intron-coordinate invariants. Even malformed cycles would be stopped by the revisit guard and finite path length.
+- The beam is correctly applied globally after each expansion layer: `fin/candidates/explore.py:127`.
+- However, it is not a strict memory/work cap. The initial frontier contains every source, and all children are materialized in `nxt` before pruning. A high-source or high-fan-out family can therefore temporarily exceed `beam_width` substantially: `fin/candidates/explore.py:109`, `fin/candidates/explore.py:112`.
+
+**Material issue:** the completion bound counts exact variants and single-node paths that are later discarded:
+
+```python
+while frontier and len(completed) <= max_new * 4:
+```
+
+`fin/candidates/explore.py:111`
+
+This can stop traversal while longer assembled paths remain in `frontier`. I reproduced a family containing five short exact source-to-sink variants plus the valid tiled chain `[I1,I2]+[I2,I3]`. With `max_new=1`, the function returned `[]`: the five exact paths filled `completed`, and the assembled path was never allowed to reach its sink. With `max_new=2`, it was emitted. Thus unrelated exact paths can consume the recall-search budget even though they can never enter `out`.
+
+**4. Maximality and Short Isoforms**
+- Only source-to-sink paths are emitted. A path ending at a node with any successor is extended rather than completed: `fin/candidates/explore.py:114`.
+- Therefore, a biologically valid shorter assembled isoform ending at an internal node is not generated. This is a reasonable, clearly documentable v1 limitation for maximal full-length recovery.
+- It does **not** drop an exact short variant. Exact variants remain in `family.variants`; this function neither mutates nor replaces them, and simply avoids returning them again: `fin/candidates/explore.py:96`, `fin/candidates/explore.py:134`.
+- Because the primitive is not wired yet, retaining exact variants remains an integration requirement for the eventual caller rather than something this module can enforce.
+
+**5. Support and Provenance**
+- `_edge_scores` computes the true minimum support over every path edge and uses cumulative support only as a secondary score: `fin/candidates/explore.py:102`.
+- `min_edge_support` is populated from that minimum, and `n_edges` is correctly `len(chain)-1`: `fin/candidates/explore.py:137`, `fin/candidates/explore.py:142`.
+- `_is_subchain` checks every legal starting offset through `range(n-m+1)`, so there is no off-by-one at the final possible alignment: `fin/candidates/explore.py:149`.
+- It correctly requires an exact contiguous subsequence, not merely overlapping introns.
+- `reads` is a fresh set containing the union of reads from every variant that is a contiguous subchain: `fin/candidates/explore.py:138`.
+- No aliasing occurs because set union copies members into the new set.
+- The truncation test pins both bottleneck support and the union of both tiling variants’ reads: `tests/unit/test_explore.py:37`.
+
+**6. Additivity and Safety**
+- The function constructs only local counters, adjacency sets, path lists, and output objects. It does not modify `family`, `family.variants`, or `family.variant_reads`.
+- `ExploredPath.reads` uses `default_factory=set`, so there is no shared mutable dataclass default: `fin/candidates/explore.py:41`, `fin/candidates/explore.py:52`.
+- Chains are tuples and therefore immutable.
+- The new module imports only standard-library modules, so it introduces no import cycle: `fin/candidates/explore.py:32`.
+- `fin/candidates/__init__.py` does not expose/import it, and repository search found no production reference. It therefore cannot currently affect production.
+- **Cap bug:** `max_new=0` still returns one candidate because an item is appended before `len(out) >= max_new` is checked: `fin/candidates/explore.py:142`, `fin/candidates/explore.py:144`. Negative `beam_width` also has undefined-looking slice semantics rather than validation. Positive parameter preconditions should either be enforced or documented.
+
+**7. Test Quality**
+Currently pinned well:
+- Two- and three-way cross-read assembly: `tests/unit/test_explore.py:31`, `tests/unit/test_explore.py:41`
+- Single/full variant no-ops: `tests/unit/test_explore.py:46`, `tests/unit/test_explore.py:50`
+- Accepted global recombination: `tests/unit/test_explore.py:56`
+- Basic variant-order independence: `tests/unit/test_explore.py:78`
+- Output cap length: `tests/unit/test_explore.py:84`
+- Return type: `tests/unit/test_explore.py:93`
+- Geometry guard: `tests/unit/test_explore.py:99`
+
+Worth adding:
+- Empty/GTF-only family and a one-intron-only family.
+- `max_new=0` and invalid/non-positive parameter behavior.
+- Native output-order equality across variant order, without `_chains`.
+- Equal-score coordinate tie ordering.
+- An exact short variant ending at a node that also has a successor, confirming only the assembled maximal path is returned.
+- A beam-width test that deliberately prunes a lower-bottleneck path, documenting approximate recall.
+- A regression for exact completed paths exhausting the `completed` bound before a longer assembled path reaches its sink.
+- Provenance exclusion for reads belonging to alternate variants that are not contiguous subchains.
+
+The focused pytest file could not collect in this environment because `pysam` is missing from the package import path; direct targeted execution confirmed the `max_new=0` and premature-completion-cutoff behaviors. No files were modified.
+tokens used
+51,971
+**Verdict: ISSUES**
+
+The core graph construction, determinism, provenance, and cycle safety are correct. However, the completion-work bound can suppress valid assembled candidates, and `max_new=0` violates the output cap. The module is currently production-inert because nothing imports it, but I would address these before treating the primitive as contract-clean.
+
+**1. Cross-Read Assembly**
+- `_build_graph` correctly creates one node per distinct observed intron and increments node support by the number of reads assigned to each exact variant: `fin/candidates/explore.py:63`, `fin/candidates/explore.py:67`.
+- Each consecutive pair receives the variant’s read count, with adjacency stored in `succ`/`pred`: `fin/candidates/explore.py:71`.
+- Summing is a true union count under the documented `ChainFamily` invariant that each read has one exact discovery chain: `fin/candidates/chain_cluster.py:73`, `fin/candidates/chain_cluster.py:78`.
+- `b[0] <= a[1]` correctly rejects overlapping or zero-length intervening exons: `fin/candidates/explore.py:72`.
+- Sources are nodes with no valid predecessor, and paths are completed only when the terminal node has no successor: `fin/candidates/explore.py:98`, `fin/candidates/explore.py:114`.
+- Completed chains already present in `family.variants` are filtered, as are single-node paths and duplicates: `fin/candidates/explore.py:129`, `fin/candidates/explore.py:134`.
+- The `[I1,I2] + [I2,I3] → [I1,I2,I3]` case is correctly pinned, including bottleneck support and read union: `tests/unit/test_explore.py:31`.
+- Single-variant and already-full-chain no-ops are pinned: `tests/unit/test_explore.py:46`, `tests/unit/test_explore.py:50`.
+
+**2. Determinism**
+- Source order is coordinate-sorted: `fin/candidates/explore.py:98`.
+- Successors are sorted before expansion, eliminating set-order dependence: `fin/candidates/explore.py:114`.
+- Beam ties are deterministic: the initial lexicographic sort establishes coordinate order, and Python’s stable support sort preserves that order among equal scores: `fin/candidates/explore.py:124`.
+- Final ranking is total and deterministic: descending bottleneck, descending cumulative support, then chain coordinates: `fin/candidates/explore.py:132`.
+- Variant and read input order cannot affect counts or set-union contents. Iteration of `family.variants` while collecting reads changes neither the resulting set nor output ordering: `fin/candidates/explore.py:139`.
+- No residual nondeterministic output behavior is apparent.
+- Test weakness: the determinism test applies `_chains`, which sorts the output itself, so it does **not** pin the function’s native result order or metadata ordering: `tests/unit/test_explore.py:26`, `tests/unit/test_explore.py:79`.
+
+**3. Termination and Bounds**
+- With valid introns, every accepted edge moves strictly rightward because the next donor must exceed the previous acceptor. Therefore the graph is acyclic: `fin/candidates/explore.py:72`.
+- The revisit guard provides additional protection: `fin/candidates/explore.py:119`.
+- Active frontier paths advance exactly one edge per iteration, so all paths within `frontier` have the same depth. Shorter paths move into `completed`; paths of different lengths do not coexist in the active frontier: `fin/candidates/explore.py:108`, `fin/candidates/explore.py:121`.
+- There is no infinite-loop family shape under normal intron-coordinate invariants. Even malformed cycles would be stopped by the revisit guard and finite path length.
+- The beam is correctly applied globally after each expansion layer: `fin/candidates/explore.py:127`.
+- However, it is not a strict memory/work cap. The initial frontier contains every source, and all children are materialized in `nxt` before pruning. A high-source or high-fan-out family can therefore temporarily exceed `beam_width` substantially: `fin/candidates/explore.py:109`, `fin/candidates/explore.py:112`.
+
+**Material issue:** the completion bound counts exact variants and single-node paths that are later discarded:
+
+```python
+while frontier and len(completed) <= max_new * 4:
+```
+
+`fin/candidates/explore.py:111`
+
+This can stop traversal while longer assembled paths remain in `frontier`. I reproduced a family containing five short exact source-to-sink variants plus the valid tiled chain `[I1,I2]+[I2,I3]`. With `max_new=1`, the function returned `[]`: the five exact paths filled `completed`, and the assembled path was never allowed to reach its sink. With `max_new=2`, it was emitted. Thus unrelated exact paths can consume the recall-search budget even though they can never enter `out`.
+
+**4. Maximality and Short Isoforms**
+- Only source-to-sink paths are emitted. A path ending at a node with any successor is extended rather than completed: `fin/candidates/explore.py:114`.
+- Therefore, a biologically valid shorter assembled isoform ending at an internal node is not generated. This is a reasonable, clearly documentable v1 limitation for maximal full-length recovery.
+- It does **not** drop an exact short variant. Exact variants remain in `family.variants`; this function neither mutates nor replaces them, and simply avoids returning them again: `fin/candidates/explore.py:96`, `fin/candidates/explore.py:134`.
+- Because the primitive is not wired yet, retaining exact variants remains an integration requirement for the eventual caller rather than something this module can enforce.
+
+**5. Support and Provenance**
+- `_edge_scores` computes the true minimum support over every path edge and uses cumulative support only as a secondary score: `fin/candidates/explore.py:102`.
+- `min_edge_support` is populated from that minimum, and `n_edges` is correctly `len(chain)-1`: `fin/candidates/explore.py:137`, `fin/candidates/explore.py:142`.
+- `_is_subchain` checks every legal starting offset through `range(n-m+1)`, so there is no off-by-one at the final possible alignment: `fin/candidates/explore.py:149`.
+- It correctly requires an exact contiguous subsequence, not merely overlapping introns.
+- `reads` is a fresh set containing the union of reads from every variant that is a contiguous subchain: `fin/candidates/explore.py:138`.
+- No aliasing occurs because set union copies members into the new set.
+- The truncation test pins both bottleneck support and the union of both tiling variants’ reads: `tests/unit/test_explore.py:37`.
+
+**6. Additivity and Safety**
+- The function constructs only local counters, adjacency sets, path lists, and output objects. It does not modify `family`, `family.variants`, or `family.variant_reads`.
+- `ExploredPath.reads` uses `default_factory=set`, so there is no shared mutable dataclass default: `fin/candidates/explore.py:41`, `fin/candidates/explore.py:52`.
+- Chains are tuples and therefore immutable.
+- The new module imports only standard-library modules, so it introduces no import cycle: `fin/candidates/explore.py:32`.
+- `fin/candidates/__init__.py` does not expose/import it, and repository search found no production reference. It therefore cannot currently affect production.
+- **Cap bug:** `max_new=0` still returns one candidate because an item is appended before `len(out) >= max_new` is checked: `fin/candidates/explore.py:142`, `fin/candidates/explore.py:144`. Negative `beam_width` also has undefined-looking slice semantics rather than validation. Positive parameter preconditions should either be enforced or documented.
+
+**7. Test Quality**
+Currently pinned well:
+- Two- and three-way cross-read assembly: `tests/unit/test_explore.py:31`, `tests/unit/test_explore.py:41`
+- Single/full variant no-ops: `tests/unit/test_explore.py:46`, `tests/unit/test_explore.py:50`
+- Accepted global recombination: `tests/unit/test_explore.py:56`
+- Basic variant-order independence: `tests/unit/test_explore.py:78`
+- Output cap length: `tests/unit/test_explore.py:84`
+- Return type: `tests/unit/test_explore.py:93`
+- Geometry guard: `tests/unit/test_explore.py:99`
+
+Worth adding:
+- Empty/GTF-only family and a one-intron-only family.
+- `max_new=0` and invalid/non-positive parameter behavior.
+- Native output-order equality across variant order, without `_chains`.
+- Equal-score coordinate tie ordering.
+- An exact short variant ending at a node that also has a successor, confirming only the assembled maximal path is returned.
+- A beam-width test that deliberately prunes a lower-bottleneck path, documenting approximate recall.
+- A regression for exact completed paths exhausting the `completed` bound before a longer assembled path reaches its sink.
+- Provenance exclusion for reads belonging to alternate variants that are not contiguous subchains.
+
+The focused pytest file could not collect in this environment because `pysam` is missing from the package import path; direct targeted execution confirmed the `max_new=0` and premature-completion-cutoff behaviors. No files were modified.
