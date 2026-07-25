@@ -530,7 +530,8 @@ def cluster_families(
     return ClusterResult(families=families, mono_reads=mono_reads)
 
 
-def collapse(family: ChainFamily) -> ChainCluster:
+def collapse(family: ChainFamily, *, span_guard: bool = False,
+             read_spans: Optional[Dict[str, Tuple[int, int]]] = None) -> ChainCluster:
     """Collapse a single (post-explore) family into a :class:`ChainCluster`, folding EXACT
     contiguous sub-chains into their longest exact container.
 
@@ -539,10 +540,20 @@ def collapse(family: ChainFamily) -> ChainCluster:
     gpt-5.6-sol xhigh):
 
     - **fold-all** (philosophy A): every variant that is an EXACT contiguous sub-chain of a
-      longer variant folds into its LONGEST exact container, UNCONDITIONALLY (no read-support
-      guard). dRNA 5' degradation ladders (same 3' end, successively shorter 5') are exactly
-      these exact sub-chains; whether a folded sub-chain is a genuine short isoform is decided
-      LATER by the post-EM 5'-TSS read-end recovery -- never guessed here.
+      longer variant folds into its LONGEST exact container. dRNA 5' degradation ladders (same 3'
+      end, successively shorter 5') are exactly these exact sub-chains; whether a folded sub-chain
+      is a genuine short isoform is decided LATER by the post-EM 5'-TSS read-end recovery -- never
+      guessed here from read counts.
+    - **span_guard** (optional, mirrors ``cluster_read_chains``'s ``fold_span_guard``): when set,
+      a sub-chain read folds into its container ONLY if its aligned span does NOT run exonically
+      across one of the container's EXTRA introns (introns the container splices but the sub-chain
+      lacks). A read that spans such an intron read THROUGH it -- positive evidence for a
+      retained-intron / alternative isoform, NOT 5' degradation -- so it is KEPT as its own
+      candidate (the sub-chain survives with only its span-contradicting reads). 5' degradation
+      reads start DOWNSTREAM of the missing introns, so they never span an extra intron and still
+      fold. Needs ``read_spans`` (query_name -> [start, end)); without it, span_guard is a no-op
+      (folds unconditionally). This is the recall-preserving guard that stops collapse from
+      absorbing real retention isoforms.
     - **exact only**: wobble / cassette / non-exact-containment siblings are NOT folded (they
       are not exact sub-chains); they stay as separate members and compete in EM, where the
       abundance-based selection decides (Codex's pre-EM=canonicalisation / post-EM=biological
@@ -571,6 +582,7 @@ def collapse(family: ChainFamily) -> ChainCluster:
     Deterministic (coordinate-sorted); never mutates ``family``.
     """
     vr = family.variant_reads
+    spans = read_spans or {}
     # longest-first: `next(exact-subchain of a kept chain)` then picks the LONGEST container.
     chains_sorted = sorted(family.variants, key=lambda c: (-len(c), -len(vr.get(c, ())), c))
     kept: List[Chain] = []
@@ -581,10 +593,30 @@ def collapse(family: ChainFamily) -> ChainCluster:
         if container is None:
             kept.append(c)
             reads[c] = set(vr.get(c, ()))
-        else:
-            cr = vr.get(c, set())
+            continue
+        cr = vr.get(c, set())
+        if not span_guard:
             reads[container] |= cr
             folded_of.setdefault(container, []).append((c, set(cr)))
+            continue
+        # span guard: split c's reads into those that fold (5' degradation) and those that span
+        # exonically across one of the container's EXTRA introns (retained-intron / alt isoform).
+        off = _subchain_offset(c, container)
+        extra = container[:off] + container[off + len(c):]
+        fold_r: Set[str] = set()
+        keep_r: Set[str] = set()
+        for rid in cr:
+            sp = spans.get(rid)
+            if sp is not None and any(sp[0] <= d and sp[1] >= a for d, a in extra):
+                keep_r.add(rid)          # read through an extra intron -> distinct isoform
+            else:
+                fold_r.add(rid)
+        if fold_r:
+            reads[container] |= fold_r
+            folded_of.setdefault(container, []).append((c, set(fold_r)))
+        if keep_r:
+            kept.append(c)               # sub-chain survives with only its contradicting reads
+            reads[c] = keep_r
 
     def _mk(c: Chain) -> GenCandidate:
         return GenCandidate(

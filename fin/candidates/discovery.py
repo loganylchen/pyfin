@@ -223,7 +223,8 @@ def _chain_cluster_candidates(
         from fin.candidates.dataclasses import IntronChain
         result = cluster_families(
             read_chains, wobble_bp=wobble_bp, cassette_max_exon_bp=cassette_max_exon_bp)
-        clusters = [collapse(fam) for fam in result.families]
+        clusters = [collapse(fam, span_guard=fold_span_guard, read_spans=spans)
+                    for fam in result.families]
         if result.mono_reads:            # mono holding bucket -> one empty-chain cluster
             clusters.append(ChainCluster(
                 members=[GenCandidate(IntronChain(introns=()), set(result.mono_reads))],

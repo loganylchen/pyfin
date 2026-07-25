@@ -165,3 +165,40 @@ class TestBridgeAndRobustness:
             for r in m.read_ids:
                 counts[r] = counts.get(r, 0) + 1
         assert all(v == 1 for v in counts.values())
+
+
+class TestSpanGuard:
+    # container (I1,I2,I3); sub-chain (I3,) is a 5' suffix. A read supporting (I3,) that reads
+    # exonically across the container's extra intron I2 is a retained-intron / alt isoform and
+    # must be KEPT; a 5'-degradation read (starts downstream of I2) folds.
+    C = (I1, I2, I3)
+    SUB = (I3,)                       # extra introns vs container = I1, I2
+
+    def _fam_sub(self):
+        return ChainFamily(
+            variants=[self.C, self.SUB],
+            read_pool={"full", "deg", "ret"},
+            variant_reads={self.C: {"full"}, self.SUB: {"deg", "ret"}})
+
+    def test_span_guard_keeps_retention_read_folds_degradation(self):
+        spans = {"full": (900, 6100), "deg": (4500, 6500), "ret": (2500, 6500)}
+        cl = collapse(self._fam_sub(), span_guard=True, read_spans=spans)
+        by = {tuple(m.chain.introns): m for m in cl.members}
+        assert set(by) == {self.C, self.SUB}          # sub-chain survives (retention kept)
+        assert by[self.C].read_ids == {"full", "deg"}  # degradation folded into container
+        assert by[self.SUB].read_ids == {"ret"}        # retention read kept on the sub-chain
+        # only the degradation read is recorded as a folded shadow
+        folded = {tuple(f.chain.introns): f.read_ids for f in by[self.C].folded}
+        assert folded == {self.SUB: {"deg"}}
+
+    def test_span_guard_off_folds_everything(self):
+        spans = {"full": (900, 6100), "deg": (4500, 6500), "ret": (2500, 6500)}
+        cl = collapse(self._fam_sub(), span_guard=False, read_spans=spans)
+        assert [tuple(m.chain.introns) for m in cl.members] == [self.C]
+        assert cl.members[0].read_ids == {"full", "deg", "ret"}
+
+    def test_span_guard_without_spans_is_noop(self):
+        # span_guard=True but no read_spans -> cannot judge -> folds unconditionally.
+        cl = collapse(self._fam_sub(), span_guard=True, read_spans=None)
+        assert [tuple(m.chain.introns) for m in cl.members] == [self.C]
+        assert cl.members[0].read_ids == {"full", "deg", "ret"}
