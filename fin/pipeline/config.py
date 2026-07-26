@@ -34,10 +34,10 @@ class PipelineConfig:
     # 10.1%->26.4% (2.6x), at a ~20% distinct-truth recall cost that is 92% attributable
     # to the exact sub-chain collapse (recoverable later by guarding the collapse).
     chain_cluster_discovery: bool = True
-    clustering: str = "read_chains"  # generation clustering primitive (--chain-cluster-discovery only). "read_chains" = legacy cluster_read_chains (fold+cluster inline, PRODUCTION DEFAULT). "families" = clustering redesign: cluster_families (grouping only, single-linkage) + collapse (explicit exact-subchain fold); mono reads deferred to a holding bucket (pair with --mono-resolve-post-em). Behavior change (NOT byte-identical); metric-validated before any default flip.
+    clustering: str = "families"  # generation clustering primitive (--chain-cluster-discovery only). "families" = clustering redesign (PRODUCTION DEFAULT): cluster_families (grouping only, single-linkage) + collapse (explicit exact-subchain fold, span-guarded); mono reads deferred to a holding bucket resolved post-EM (mono_resolve_post_em). Emits the SAME multi-exon candidate SET as the legacy path (SIRV 250=250, gencode p00 51069=51069/82.4% FL; the EM cluster scoping may differ in rare exact-subchain-bridge cases, and mono handling differs by design -- deferred vs generation-folded) and the full pipeline BEATS the old default on real human p00 (recall +0.4, Pr +1.9). "read_chains" = legacy cluster_read_chains (fold+cluster inline); pair with --no-mono-resolve-post-em for the exact old behavior.
     chain_cluster_wobble_bp: int = 6
     chain_cluster_cassette_max_exon_bp: int = 70
-    chain_cluster_fold_monoexon: bool = True  # fold single-exon reads wholly inside a multi-exon candidate's exon into that candidate (5'/3' degradation fragments) instead of emitting standalone mono candidates; intronic/uncontained mono reads stay separate. PRODUCTION DEFAULT (p00 m2_em: out 9581->9181, `=` 6323->6414, Pr 66.0->69.9 -- de-fragmentation both-axes win). --no- reverts to legacy standalone mono candidates.
+    chain_cluster_fold_monoexon: bool = True  # generation-time mono fold: a single-exon read wholly inside a multi-exon candidate's exon folds into it (5'/3' degradation fragment) instead of a standalone mono candidate; intronic/uncontained mono stay separate. ONLY effective when post-EM mono resolution is NOT running (mono_resolve_post_em False, or non-m2_em quant mode); under the production default (mono_resolve_post_em=True) the post-EM resolution supersedes it and this flag is inert. --no- reverts to standalone mono candidates.
     chain_cluster_fold_span_guard: bool = True  # only fold a read into an exact-sub-chain container if its aligned span does NOT run exonically across one of the container's EXTRA introns; a read spanning such an intron (retained-intron / alternative isoform) is kept as its own candidate instead of being absorbed. PRODUCTION DEFAULT. --no- reverts to unconditional exact-sub-chain fold.
     # Post-EM mono-exon resolution (quant_mode="m2_em" only). When True, single-exon
     # reads are NOT folded into multi-exon candidates at generation (chain_cluster_fold_
@@ -48,8 +48,14 @@ class PipelineConfig:
     # highest-EM-abundance one; uncovered reads stay on the mono candidate, which is kept
     # only if it retains >= mono_resolve_min_reads (else dropped). Fragment reads follow
     # inferred multi-isoform abundance instead of a static generation-time container.
-    # Default OFF (byte-identical). Codex-vetted; validate on p00 before any default flip.
-    mono_resolve_post_em: bool = False
+    # PRODUCTION DEFAULT (ON): pairs with clustering="families" (which defers mono to a bucket).
+    # On real human gencode p00 this survivor-conditioned, cross-cluster resolution BEATS the old
+    # generation-time fold_monoexon (recall 33.0->33.4, Pr 70.9->72.8) -- a mono read can be shared
+    # across clusters, so deferring the host decision until after multi-exon EM/selection (against
+    # SURVIVING candidates) is both more principled and better. When False, mono handling falls back
+    # to the generation-time fold (chain_cluster_fold_monoexon, on by default) -- or standalone mono
+    # candidates if that is also off. Only active for quant_mode="m2_em".
+    mono_resolve_post_em: bool = True
     mono_resolve_min_reads: int = 2   # uncovered reads a mono candidate must retain to survive
     mono_resolve_slop_bp: int = 10    # terminal boundary slop for the exonic-containment test
     min_abundance: float = 0.0        # A4: drop quantified NOVEL transcripts with abundance < this. Field default stays 0 (programmatic/quantify/ablation callers unchanged); the `fin` CLI defaults it to 3 (NOVEL only).

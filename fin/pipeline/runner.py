@@ -182,8 +182,11 @@ class PipelineRunner:
                 self.config, "chain_cluster_cassette_max_exon_bp", 70),
             chain_cluster_fold_monoexon=(
                 getattr(self.config, "chain_cluster_fold_monoexon", False)
-                # defer the mono fold to post-EM when mono_resolve_post_em is on
-                and not getattr(self.config, "mono_resolve_post_em", False)),
+                # Defer the generation-time mono fold ONLY when post-EM resolution will
+                # actually run (mono_resolve_post_em is m2_em-only). For argmax/m1_em/cluster
+                # there is no post-EM mono step, so keep the generation fold to suppress FPs.
+                and not (getattr(self.config, "mono_resolve_post_em", False)
+                         and getattr(self.config, "quant_mode", "m2_em") == "m2_em")),
             chain_cluster_fold_span_guard=getattr(
                 self.config, "chain_cluster_fold_span_guard", False),
             clustering=getattr(self.config, "clustering", "read_chains"),

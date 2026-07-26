@@ -58,3 +58,21 @@ def test_families_folds_ladder_and_emits_mono():
     assert ((3000, 4000),) not in by_chain
     # the mono read emitted a single-exon candidate (empty chain).
     assert any(not c.intron_chain.introns and "m1" in c.supporting_read_ids for c in novel)
+
+
+def test_families_fold_monoexon_folds_contained_mono():
+    # with fold_monoexon on (the non-m2_em path), a mono read wholly inside a multi member's exon
+    # folds into it instead of emitting a standalone mono candidate.
+    full = [(100, 900), (1000, 1000), (100, 0)]        # chain ((1100,2000),(3000,4000)), span 1000-4100
+    r1 = _read("f1", 1000, full)
+    mono = {"query_name": "m1", "reference_start": 2100, "reference_end": 2400,  # inside exon [2000,3000]
+            "cigartuples": [(0, 300)], "is_forward": True}
+    reads = [r1, mono]
+    ivl = GenomicInterval(chrom="chr1", start=900, end=4200, strand="+")
+    cs = _chain_cluster_candidates(
+        ivl, reads, {"f1", "m1"}, {}, None, GENOME, "+", 1,
+        wobble_bp=6, cassette_max_exon_bp=70, fold_monoexon_contained=True, clustering="families")
+    novel = [c for c in cs.candidates if c.source == "novel"]
+    assert not any(not c.intron_chain.introns for c in novel)      # NO standalone mono candidate
+    multi = [c for c in novel if c.intron_chain.introns]
+    assert len(multi) == 1 and multi[0].supporting_read_ids == {"f1", "m1"}   # mono folded in

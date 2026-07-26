@@ -55,6 +55,46 @@ def _spatial_read_clusters(read_ids, spans):
     return clusters
 
 
+def _fold_mono_into_members(clusters, mono_ids, spans):
+    """Fold each mono (single-exon) read wholly inside a multi-exon member's exon INTO that
+    member, for the families path when no post-EM mono resolution runs (fold_monoexon semantics).
+
+    Mirrors ``cluster_read_chains``'s generation-time mono fold: a mono read whose span lies
+    wholly within one exon of a multi member (overlaps no intron) folds into the deterministically
+    chosen best container (max by live read count, then #introns, then coords); reads in an intron
+    or not exon-contained stay as mono. Multi footprints are computed ONCE from each member's own
+    reads (pre-fold). Mutates member ``read_ids``; returns the remaining uncontained mono ids.
+    """
+    from fin.candidates.chain_cluster import _monoexon_in_exon
+    containers = []                       # (member, lo, hi, chain_introns)
+    for cl in clusters:
+        for m in cl.members:
+            ch = tuple(m.chain.introns)
+            if not ch:
+                continue
+            pts = [spans[r] for r in m.read_ids if r in spans]
+            if not pts:
+                continue
+            containers.append((m, min(p[0] for p in pts), max(p[1] for p in pts), ch))
+    if not containers:
+        return set(mono_ids)
+    remaining = set()
+    for rid in sorted(mono_ids):          # sorted -> deterministic under live-count tie-breaks
+        sp = spans.get(rid)
+        if sp is None:
+            remaining.add(rid)
+            continue
+        s, e = sp
+        hits = [(m, ch) for (m, lo, hi, ch) in containers
+                if _monoexon_in_exon(s, e, ch, lo, hi)]
+        if not hits:
+            remaining.add(rid)
+            continue
+        best = max(hits, key=lambda t: (len(t[0].read_ids), len(t[1]), t[1]))
+        best[0].read_ids.add(rid)
+    return remaining
+
+
 def _best_overlap_gtf(mono_gtf, lo: int, hi: int):
     """Pick the single-exon GTF candidate whose span most overlaps ``[lo, hi)``.
 
@@ -198,12 +238,14 @@ def _chain_cluster_candidates(
 
     ``clustering`` selects the clustering primitive (both yield the same downstream
     ``ChainCluster`` contract, so the emission below is shared):
-      - ``"read_chains"`` (default): the legacy :func:`cluster_read_chains` (fold + cluster inline).
-      - ``"families"``: the clustering redesign -- :func:`cluster_families` (grouping only) then
-        :func:`collapse` per family (explicit exact-subchain fold). Mono reads go to a holding
-        bucket emitted as one empty-chain cluster (spatially split by the shared emission loop,
-        and optionally re-resolved post-EM by ``mono_resolve_post_em``). ``fold_monoexon_contained``
-        / ``fold_span_guard`` do not apply here (mono is deferred, not generation-folded).
+      - ``"families"`` (production default): the clustering redesign -- :func:`cluster_families`
+        (grouping only) then :func:`collapse` per family (exact-subchain fold, ``fold_span_guard``
+        honoured). Mono reads go to a holding bucket: when the effective ``fold_monoexon_contained``
+        flag is on they are generation-folded into containing multi members
+        (:func:`_fold_mono_into_members`); otherwise the bucket is emitted standalone -- for post-EM
+        ``mono_resolve_post_em`` resolution when that is enabled (the m2_em default), or as final
+        standalone mono candidates when it is not. Both fold flags apply here.
+      - ``"read_chains"``: the legacy :func:`cluster_read_chains` (fold + cluster inline).
     """
     read_chains = []
     spans: dict = {}
@@ -225,10 +267,17 @@ def _chain_cluster_candidates(
             read_chains, wobble_bp=wobble_bp, cassette_max_exon_bp=cassette_max_exon_bp)
         clusters = [collapse(fam, span_guard=fold_span_guard, read_spans=spans)
                     for fam in result.families]
-        if result.mono_reads:            # mono holding bucket -> one empty-chain cluster
+        mono_ids = set(result.mono_reads)
+        # When the effective fold_monoexon_contained flag is on (the runner keeps it on unless a
+        # post-EM mono_resolve will run), fold contained mono reads into a multi member at
+        # generation to suppress single-exon truncation FPs; otherwise the bucket is emitted
+        # standalone -- deferred to post-EM mono_resolve when enabled, else final mono candidates.
+        if mono_ids and fold_monoexon_contained:
+            mono_ids = _fold_mono_into_members(clusters, mono_ids, spans)
+        if mono_ids:                     # remaining mono holding bucket -> one empty-chain cluster
             clusters.append(ChainCluster(
-                members=[GenCandidate(IntronChain(introns=()), set(result.mono_reads))],
-                read_ids=set(result.mono_reads)))
+                members=[GenCandidate(IntronChain(introns=()), set(mono_ids))],
+                read_ids=set(mono_ids)))
     else:
         from fin.candidates.chain_cluster import cluster_read_chains
         clusters = cluster_read_chains(
