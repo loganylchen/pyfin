@@ -16,7 +16,7 @@ from fin.analysis.quantification import (
 from fin.candidates.dataclasses import IntronChain, TranscriptCandidate
 
 
-def _make_candidate(cid, source="gtf"):
+def _make_candidate(cid, source="gtf", family_id=None):
     return TranscriptCandidate(
         candidate_id=cid,
         intron_chain=IntronChain(introns=()),
@@ -28,6 +28,7 @@ def _make_candidate(cid, source="gtf"):
         strand="+",
         start=0,
         end=1000,
+        family_id=family_id,
     )
 
 
@@ -76,6 +77,14 @@ class TestQuantifyTranscripts:
         assert results[0].confidence == 0.8  # only r1 assigned to tx1
         assert results[1].confidence == 0.7  # only r2 assigned to tx2
 
+    def test_family_id_propagates_from_candidate(self):
+        R = np.array([[1.0]])
+        hard = np.array([0])
+        results = quantify_transcripts(
+            R, hard, [_make_candidate("tx1", family_id="fam_a")], ["r1"]
+        )
+        assert results[0].family_id == "fam_a"
+
     def test_no_assigned_reads(self):
         """Candidate with no hard-assigned reads should have 0 confidence."""
         R = np.array([[0.1, 0.9]])
@@ -108,6 +117,20 @@ class TestAggregateAcrossIntervals:
         assert agg["tx1"].num_assigned_reads == 5
         # Weighted average confidence: (0.9*3 + 0.8*2) / 5 = 4.3/5 = 0.86
         np.testing.assert_almost_equal(agg["tx1"].confidence, 0.86)
+
+    def test_family_id_aggregation_is_deterministic(self):
+        interval1 = [
+            QuantResult(
+                "tx1", 3.0, 0.9, 3, "gtf", family_id="fam_b"
+            )
+        ]
+        interval2 = [
+            QuantResult(
+                "tx1", 2.0, 0.8, 2, "gtf", family_id="fam_a"
+            )
+        ]
+        agg = aggregate_across_intervals([interval1, interval2])
+        assert agg["tx1"].family_id == "fam_a"
 
     def test_different_candidates(self):
         """Different candidates should stay separate."""

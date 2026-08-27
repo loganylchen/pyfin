@@ -28,16 +28,6 @@ class TestEmIterToggleConfig:
         c = PipelineConfig(bam_path="/tmp/x.bam")
         assert c.quant_mode == "m2_em"
 
-    def test_m3_coherence_default_false(self):
-        # M3 read×read DTW coherence is opt-in (DTW is costly).
-        c = PipelineConfig(bam_path="/tmp/x.bam")
-        assert c.m3_coherence is False
-
-    def test_em_beta_default_one(self):
-        # SIRV beta-sweep sweet spot (used as the M3 weight when m3_coherence).
-        c = PipelineConfig(bam_path="/tmp/x.bam")
-        assert c.em_beta == 1.0
-
     def test_em_max_iter_override_default_none(self):
         c = PipelineConfig(bam_path="/tmp/x.bam")
         assert c.em_max_iter_override is None
@@ -45,11 +35,6 @@ class TestEmIterToggleConfig:
     def test_enable_score_filter_default_true(self):
         c = PipelineConfig(bam_path="/tmp/x.bam")
         assert c.enable_score_filter is True
-
-    def test_m4_source_default_whole_read(self):
-        """AC1: m4_source default must be 'whole_read'."""
-        c = PipelineConfig(bam_path="/tmp/x.bam")
-        assert c.m4_source == "whole_read"
 
     def test_override_em_max_iter_override(self):
         c = PipelineConfig(bam_path="/tmp/x.bam", em_max_iter_override=1)
@@ -62,15 +47,6 @@ class TestEmIterToggleConfig:
     def test_override_enable_score_filter_false(self):
         c = PipelineConfig(bam_path="/tmp/x.bam", enable_score_filter=False)
         assert c.enable_score_filter is False
-
-    def test_override_m4_source_none(self):
-        """AC5 gate: m4_source='none' is accepted."""
-        c = PipelineConfig(bam_path="/tmp/x.bam", m4_source="none")
-        assert c.m4_source == "none"
-
-    def test_override_m4_source_diff_region(self):
-        c = PipelineConfig(bam_path="/tmp/x.bam", m4_source="diff_region")
-        assert c.m4_source == "diff_region"
 
 
 class TestEmIterToggleRunnerLogic:

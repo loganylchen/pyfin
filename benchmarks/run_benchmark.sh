@@ -7,6 +7,15 @@ DATASET=""
 TOOLS="pyfin"
 OUTPUT_DIR="./benchmark_output"
 
+PYTHON_BIN="${PYTHON:-}"
+if [[ -z "$PYTHON_BIN" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python3)"
+    elif command -v python >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python)"
+    fi
+fi
+
 usage() {
     cat <<EOF
 Usage: run_benchmark.sh [OPTIONS]
@@ -62,7 +71,7 @@ check_and_run() {
 IFS=',' read -ra TOOL_ARR <<< "$TOOLS"
 for tool in "${TOOL_ARR[@]}"; do
     case "$tool" in
-        pyfin)    check_and_run pyfin python ;;
+        pyfin)    check_and_run pyfin "${PYTHON_BIN:-python}" ;;
         bambu)    check_and_run bambu Rscript ;;
         isoquant) check_and_run isoquant isoquant.py ;;
         jaffal)   check_and_run jaffal bpipe ;;
@@ -74,7 +83,11 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPARE_SCRIPT="$SCRIPT_DIR/compare_results.py"
 if [[ -f "$COMPARE_SCRIPT" ]]; then
-    python "$COMPARE_SCRIPT" --input-dir "$OUTPUT_DIR" --output "$OUTPUT_DIR/comparison.tsv"
+    if [[ -n "$PYTHON_BIN" ]]; then
+        "$PYTHON_BIN" "$COMPARE_SCRIPT" --input-dir "$OUTPUT_DIR" --output "$OUTPUT_DIR/comparison.tsv"
+    else
+        echo "[WARN] no Python interpreter found - skipping comparison"
+    fi
 else
     echo "[WARN] compare_results.py not found at $COMPARE_SCRIPT — skipping comparison"
 fi

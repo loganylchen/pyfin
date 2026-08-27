@@ -1,4 +1,4 @@
-"""Unit tests for fin/scoring/m3_junction_coherence.py pure-logic helpers.
+"""Prototype tests for the retired production M3 coherence implementation.
 
 The signal path (winner-anchored eventalign -> read x read DTW) is validated
 end-to-end against real krill + blow5 data in the Docker ablation run; these
@@ -10,7 +10,10 @@ from __future__ import annotations
 import numpy as np
 
 from fin.candidates.dataclasses import IntronChain, TranscriptCandidate
-from fin.scoring.m3_junction_coherence import _window_signal, build_m3_coherence
+from experiments.m3_coherence.m3_junction_coherence import (
+    _window_signal,
+    build_m3_coherence,
+)
 
 
 def _cand(cid, introns, start, end, strand="+", seq="A"):

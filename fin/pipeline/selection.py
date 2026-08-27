@@ -3,7 +3,7 @@
 Historically "which candidates are real" had no single home — it was smeared across three
 incompatible mechanisms: pre-EM gates mutating the candidate list, a post-EM ``drop_cols`` column
 set buried inside ``_quant_m2_em``, and finalize-time dict deletion. This module is the single home
-for the post-EM INTERVAL scope (M3 Step 1): the cascade that runs after assignment, within one
+for the post-assignment INTERVAL scope: the cascade that runs within one
 interval, over the ``QuantOutput`` of the m2_em Assigner.
 
 Design (behavior-preserving; see the pipeline reorganization plan + Codex review 2):
@@ -16,8 +16,8 @@ Design (behavior-preserving; see the pipeline reorganization plan + Codex review
   snapshot + declared precedence" model is a separate, behavior-CHANGING follow-up, not this step.
 
 Scope: the DEFAULT ``m2_em`` path only. ``argmax`` / ``m1_em`` / ``cluster`` keep their own survival
-handling. The PRE_ASSIGN (canonical / junction-dominance) and GLOBAL (finalize filters) scopes move
-here in later M3 steps.
+handling. PRE_ASSIGN (canonical/junction-dominance) and GLOBAL filters are also
+owned here.
 """
 from __future__ import annotations
 
@@ -369,6 +369,9 @@ def select_global(
     )
     if _score_filter_on and (config.min_abundance > 0.0 or gtf_floor > 0.0):
         before = len(aggregated)
+        strict_novel = bool(
+            getattr(config, "strict_novel_abundance_floor", False)
+        )
         kept = {
             cid: qr
             for cid, qr in aggregated.items()
@@ -376,16 +379,21 @@ def select_global(
             or (
                 qr.abundance >= gtf_floor
                 if qr.source == "gtf"
-                else qr.abundance >= config.min_abundance
+                else (
+                    qr.abundance > config.min_abundance
+                    if strict_novel
+                    else qr.abundance >= config.min_abundance
+                )
             )
         }
         dropped = before - len(kept)
         if dropped:
             _record(set(aggregated) - set(kept), "min_abundance")
             logger.info(
-                "Dropped %d transcripts with abundance < floor "
-                "(novel < %.3f, gtf < %.3f)",
+                "Dropped %d transcripts failing abundance floor "
+                "(keep novel %s %.3f, gtf >= %.3f)",
                 dropped,
+                ">" if strict_novel else ">=",
                 config.min_abundance,
                 gtf_floor,
             )
@@ -393,15 +401,17 @@ def select_global(
 
     # Minimum isoform fraction (locus-relative abundance) filter. Drops
     # NOVEL multi-exon transcripts whose abundance is below
-    # `min_isoform_fraction` of the dominant overlapping novel isoform at
-    # the same locus — the standard Cufflinks --min-isoform-fraction /
+    # `min_isoform_fraction` of the dominant transcript in its persisted
+    # splice family (or overlap fallback) — the standard Cufflinks heuristic /
     # StringTie -f heuristic (the low-fraction tail is enriched for
     # incompletely-spliced precursors and assembly artifacts).
     # gtf/fusion/mono candidates are EXEMPT. SIRV WARNING: the conservative
     # literature default (0.01) is used; SIRV's F1-optimal ~0.4 is overfit.
     if _score_filter_on and config.min_isoform_fraction > 0.0:
         drop_ids = isoform_fraction_drops(
-            aggregated, config.min_isoform_fraction
+            aggregated,
+            config.min_isoform_fraction,
+            locus=getattr(config, "isoform_fraction_locus", "family"),
         )
         if drop_ids:
             aggregated = {
@@ -411,9 +421,11 @@ def select_global(
             }
             _record(drop_ids, "isoform_fraction")
             logger.info(
-                "Dropped %d novel transcripts with isoform fraction < %.3f",
+                "Dropped %d novel transcripts with isoform fraction < %.3f "
+                "(%s locus)",
                 len(drop_ids),
                 config.min_isoform_fraction,
+                getattr(config, "isoform_fraction_locus", "family"),
             )
 
     # Soft-mass / hard-read ratio filter. Drops a NOVEL multi-exon candidate

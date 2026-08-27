@@ -4,7 +4,108 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Iterable, Literal, Mapping, Optional
+
+
+# CLI operating points. Programmatic PipelineConfig construction keeps the
+# dataclass defaults below; profiles are resolved by fin.cli before construction.
+PIPELINE_PROFILES: dict[str, dict[str, object]] = {
+    "sirv": {
+        "min_abundance": 3.0,
+        "strict_novel_abundance_floor": False,
+        "min_gtf_abundance": 1.0,
+        "floor_gtf_abundance": True,
+        "min_isoform_fraction": 0.01,
+        "max_soft_mass_ratio": 2.0,
+        "min_fulllen_fraction": 0.1,
+        "min_polya5p_reads": 0,
+        "canonical_gate": True,
+        "novel_junction_min_reads": 2,
+        "containment_cluster": True,
+        "m2_cluster_recheck": True,
+        "m2_metric": "auto",
+        "m2_diff_cover_margin": 0.5,
+        # Inactive under the mean default; these are the best SIRV summed
+        # fallback values when a user explicitly switches only m2_metric.
+        "m2_summed_llr_margin": 1.0,
+        "m2_summed_llr_flank": 4,
+    },
+    "real-drna": {
+        "min_abundance": 1.0,
+        "strict_novel_abundance_floor": True,
+        "min_gtf_abundance": 1.0,
+        "floor_gtf_abundance": False,
+        "min_isoform_fraction": 0.01,
+        "max_soft_mass_ratio": 0.0,
+        "min_fulllen_fraction": 0.0,
+        "min_polya5p_reads": 0,
+        "drop_mono_exon_novel": True,
+        "min_mono_exon_reads": 5,
+        "junction_snap": True,
+        "junction_snap_tolerance": 6,
+        "junction_snap_min_support": 2,
+        "junction_snap_min_ratio": 2.0,
+        "canonical_gate": True,
+        "novel_junction_min_reads": 2,
+        "containment_cluster": True,
+        "m2_cluster_recheck": True,
+        "m2_metric": "summed_llr",
+        "m2_diff_cover_margin": 0.5,
+        "m2_summed_llr_margin": 1.0,
+        "m2_summed_llr_flank": 8,
+    },
+    "custom": {},
+}
+PIPELINE_PROFILES["real-drna-precision"] = {
+    **PIPELINE_PROFILES["real-drna"],
+    "min_novel_reads": 2,
+}
+PROFILE_FIELDS = frozenset(
+    key for values in PIPELINE_PROFILES.values() for key in values
+)
+
+
+def gtf_has_usable_guide(gtf_path: Optional[str], min_transcripts: int = 2) -> bool:
+    """Use the benchmark convention: fewer than two GTF transcripts is unguided."""
+    if not gtf_path:
+        return False
+    path = Path(gtf_path)
+    if not path.exists():
+        return False
+    found = 0
+    with path.open(errors="ignore") as handle:
+        for line in handle:
+            if "\ttranscript\t" in line:
+                found += 1
+                if found >= min_transcripts:
+                    return True
+    return False
+
+
+def resolve_m2_metric(metric: str, gtf_path: Optional[str]) -> tuple[str, str]:
+    """Resolve the profile-only auto sentinel to a concrete assignment metric."""
+    if metric != "auto":
+        return metric, "fixed"
+    if gtf_has_usable_guide(gtf_path):
+        return "mean", "auto-guided"
+    return "summed_llr", "auto-unguided"
+
+
+def resolve_profile_values(
+    profile: str,
+    values: Mapping[str, object],
+    explicit_fields: Iterable[str] = (),
+) -> dict[str, object]:
+    """Overlay a named profile while preserving explicit caller values."""
+    if profile not in PIPELINE_PROFILES:
+        choices = ", ".join(sorted(PIPELINE_PROFILES))
+        raise ValueError(f"unknown profile {profile!r}; expected one of: {choices}")
+    explicit = set(explicit_fields)
+    resolved = dict(values)
+    for key, value in PIPELINE_PROFILES[profile].items():
+        if key in resolved and key not in explicit:
+            resolved[key] = value
+    return resolved
 
 
 @dataclass
@@ -13,6 +114,12 @@ class PipelineConfig:
 
     # Input files
     bam_path: str
+
+    # Resolved CLI operating point. "custom" is the programmatic/back-compat
+    # default; fin.cli records command-line fields that overrode a named profile.
+    profile: str = "custom"
+    profile_overrides: tuple[str, ...] = ()
+
     gtf_path: Optional[str] = None
     genome_fasta_path: str = ""
     fastq_path: str = ""
@@ -58,12 +165,13 @@ class PipelineConfig:
     mono_resolve_post_em: bool = True
     mono_resolve_min_reads: int = 2   # uncovered reads a mono candidate must retain to survive
     mono_resolve_slop_bp: int = 10    # terminal boundary slop for the exonic-containment test
-    min_abundance: float = 0.0        # A4: drop quantified NOVEL transcripts with abundance < this. Field default stays 0 (programmatic/quantify/ablation callers unchanged); the `fin` CLI defaults it to 3 (NOVEL only).
-    floor_gtf_abundance: bool = False  # A4: when True the GTF floor is raised to max(min_gtf_abundance, min_abundance) (i.e. up to the NOVEL floor, never below the explicit GTF floor); default False = GTF uses its own lighter min_gtf_abundance. The `fin` CLI exposes this as --floor-gtf-abundance (OFF). Fusion is always exempt. Ablation path is separate and keeps GTF exempt regardless.
-    min_gtf_abundance: float = 0.0    # A4: own (lighter) abundance floor for GTF transcripts, on soft EM abundance. Field default stays 0 (programmatic/quantify/ablation callers unchanged); the `fin` CLI defaults it to 1, so a GTF candidate whose EM soft-mass is below 1 read is dropped (avoids echoing annotation as a copy-tool). When floor_gtf_abundance is set the effective GTF floor becomes max(min_gtf_abundance, min_abundance). Fusion always exempt.
+    min_abundance: float = 0.0        # A4: NOVEL soft-abundance floor. Programmatic default stays 0; CLI profiles resolve SIRV=3 and real-dRNA=1.
+    strict_novel_abundance_floor: bool = False  # False keeps abundance == floor (SIRV >=3); True requires abundance > floor (real-dRNA >1 read-equivalent). This encodes boundary semantics explicitly instead of an epsilon/magic threshold.
+    floor_gtf_abundance: bool = False  # A4: when True the GTF floor is raised to max(min_gtf_abundance, min_abundance). Programmatic/real-dRNA default False; the optimized SIRV profile enables it. Fusion is always exempt.
+    min_gtf_abundance: float = 0.0    # A4: own lighter GTF soft-abundance floor. Programmatic default stays 0; both named CLI profiles resolve it to 1. With floor_gtf_abundance, the effective floor is max(min_gtf_abundance, min_abundance). Fusion always exempt.
     # Minimum isoform fraction (locus-relative abundance) FILTER. Drop a NOVEL
     # multi-exon transcript whose abundance is below this fraction of the
-    # dominant OVERLAPPING novel isoform at its locus. This is the standard
+    # dominant transcript in its persisted splice family. This is the standard
     # Cufflinks --min-isoform-fraction (-F, default 0.10) / StringTie -f
     # (default 0.01) minor-isoform suppression heuristic: the low-fraction tail
     # of a locus is enriched for incompletely-spliced pre-mRNA, RT/template-
@@ -76,6 +184,10 @@ class PipelineConfig:
     # isoform tail — NEVER use it on real data. Configurable; re-tune on real
     # transcriptomes.
     min_isoform_fraction: float = 0.01
+    # "family" uses the discovery splice family; candidates without a family
+    # ID fall back to historical same-strand genomic overlap. "overlap" forces
+    # the historical denominator for every candidate.
+    isoform_fraction_locus: Literal["family", "overlap"] = "family"
 
     # Soft-mass / hard-read ratio ceiling. Drop a NOVEL multi-exon candidate
     # whose EM soft abundance (R.sum) divided by its hard argmax read count
@@ -88,8 +200,8 @@ class PipelineConfig:
     # exempt. 0 disables. Default 2.0 tuned on the SGNex heya8+sirv4 12-condition
     # nanocount matrix: ALL 24 cells F1@3 up-or-equal (mean +1.04), recall held
     # on every cell (true isoforms cluster at ratio ~1, a few reach ~1.4-1.6, so
-    # 2.0 clears them); SIRV-tuned — re-tune on real dRNA if genuine isoforms
-    # there show inflated soft/hard ratios.
+    # 2.0 clears them). The SIRV profile keeps 2.0; the real-dRNA profile
+    # disables this gate because its recall gain outweighed the tiny F1 change.
     max_soft_mass_ratio: float = 2.0
 
     # Full-length end-coherence FILTER (FLAIR/TALON-style full-length read
@@ -106,7 +218,8 @@ class PipelineConfig:
     # with fewer than `fulllen_min_reads` assigned reads carrying a genomic span
     # (unreachable), and candidates on the legacy EM path (fulllen never
     # computed), keep the -1.0 sentinel and are NEVER dropped. Set 0.0 to
-    # disable. SIRV WARNING: the default 0.1 is SIRV-tuned (it drops ~74% of
+    # disable. SIRV WARNING: the SIRV-profile 0.1 is tuned to that synthetic
+    # domain; the real-dRNA profile resolves this field to 0. It drops ~74% of
     # reachable novel-multi candidates "for free" because synthetic SIRV lacks a
     # real 5'-truncated minor-isoform tail). On a real dRNA transcriptome
     # (sequenced 3'->5', genuine 5'-truncated isoforms) this same value would
@@ -124,9 +237,9 @@ class PipelineConfig:
     # Requires `signal_path`; it adds a krill whole-read eventalign (polya=True)
     # pass over all reads to every run, and no-ops gracefully when signal is
     # absent or krill produces nothing. Set `min_polya5p_reads = 0` to disable.
-    # SIRV WARNING: SIRV-tuned and ON by default (=1). On SIRV no-GTF this lifts
-    # gffcompare Tx-F1 (48.8 -> 49.5) by removing FP novels. Re-tune or disable
-    # on real dRNA.
+    # Historical SIRV runs enabled this at 1, but the current two-replicate
+    # p00/full honest-F1 sweep selected 0; both named profiles now disable it.
+    # It remains available as an explicit A/B lever.
     #
     # `polya5p_exempt_gtf` (default True): GTF-sourced candidates are EXEMPT from
     # this filter, like fusion candidates — only `novel` candidates face the
@@ -166,11 +279,6 @@ class PipelineConfig:
 
     # EM parameters
     em_sigma: float = 1.0
-    # M3 read×read coherence weight in em_with_coherence (only applied when
-    # m3_coherence=True). Default 1.0 = the SIRV beta-sweep sweet spot for the
-    # pure tie-break junction-NLL EM (with-GTF Tx-F1 59.7 at β=1 vs 59.2 M3-off);
-    # β≥2 over-smooths. SIRV-tuned; revisit on real dRNA.
-    em_beta: float = 1.0
     em_max_iter: int = 1000
     em_tol: float = 1e-4
 
@@ -197,11 +305,8 @@ class PipelineConfig:
     #              M2 distance: M1/AS picks each read's best-AS tie set + mappability
     #              mask, and the per-event junction-NLL is the sole graded distance
     #              over that tie set (m2_resolve_tie semantics, NOT the dense
-    #              read×candidate matrix). Optionally adds the M3 read×read DTW
-    #              coherence when m3_coherence=True (beta=em_beta). Chosen as the
-    #              default for real-dRNA robustness (principled soft assignment);
-    #              on SIRV it clears the competitor floor (Tx-F1 ~48.9 no-GTF /
-    #              59.2 with-GTF, M3 off) just under argmax.
+    #              read×candidate matrix). Production uses no read×read coherence.
+    #              Chosen for real-dRNA robustness (principled soft assignment).
     # All signal scoring is krill (in-memory eventalign); the legacy f5c CLI
     # path is gone. SIRV WARNING: tuned on synthetic SIRV; revisit for real data.
     quant_mode: Literal["argmax", "m1_em", "m2_em", "cluster"] = "m2_em"
@@ -229,21 +334,6 @@ class PipelineConfig:
     # R5 only: when False, the post-EM abundance/fraction filters are treated as 0
     # (single-switch filter, AC7).
     enable_score_filter: bool = True
-    # m4 (read-to-read distance) source. "whole_read" preserves legacy
-    # production behavior. "diff_region" uses the new intron-chain-derived
-    # diff-region DTW (R4/R5 of the ablation). "none" forces a zero matrix
-    # (no coherence contribution) regardless of em_beta.
-    m4_source: Literal["whole_read", "diff_region", "none"] = "whole_read"
-
-    # Read×read junction-window DTW coherence (M3) in the EM quant modes. OFF by
-    # default because the pairwise DTW is expensive; the production m2_em default
-    # runs the pure tie-break junction-NLL EM with NO M3 (no DTW). When True the
-    # runner builds the M3 read×read matrix and mixes it into em_with_coherence at
-    # beta=em_beta. SIRV: with-GTF Tx-F1 59.7 (M3 on, β=1) vs 59.2 (off) — small,
-    # high-precision, recall-neutral; the payoff is expected on real dRNA. Gates
-    # M3 in the assembly runner (m2_em).
-    m3_coherence: bool = False
-
     tiebreak_ambig_threshold: float = 0.90
     # krill in-memory tiebreak
     krill_tiebreak: bool = False
@@ -261,6 +351,14 @@ class PipelineConfig:
     m2_tiebreak: bool = True
     m2_tiebreak_junction_k: int = 10
     m2_tiebreak_margin: float = 1e-9
+    # Metric used by the default m2_em tie scorer. "mean" is the legacy wide
+    # class-window mean NLL. "summed_llr" uses tight differing-junction windows
+    # and undivided per-event NLL, restricted to same-intron-count contrasts.
+    # "off" retains the M1 exact tie and assigns it without signal refinement.
+    m2_metric: Literal["off", "mean", "summed_llr", "auto"] = "mean"
+    m2_metric_route: str = "fixed"
+    m2_summed_llr_margin: float = 2.0
+    m2_summed_llr_flank: int = 6
     # M2-EM diff-region coverage gate (quant_mode="m2_em" only). Default ON. For a
     # read in a >=2 best-AS tie, only let it discriminate wobble siblings when its
     # eventalign signal STRADDLES the wobbling junction(s) (donor->acceptor span;
@@ -372,6 +470,15 @@ class PipelineConfig:
     drop_mono_exon_novel: bool = False
     min_mono_exon_reads: int = 0
     min_mono_exon_length: int = 0
+    # Finalized-model junction consensus correction. Novel multi-exon models
+    # may snap each intron to a more strongly supported exact CIGAR junction
+    # within tolerance, then structurally identical corrected models merge with
+    # their abundance/read mass preserved. GTF/fusion are exempt. Default off
+    # until the live multi-sample validation promotes a profile setting.
+    junction_snap: bool = False
+    junction_snap_tolerance: int = 6
+    junction_snap_min_support: int = 2
+    junction_snap_min_ratio: float = 2.0
     # Lever 2 — per-junction read-support gate (quant_mode="m2_em" only). Drop a
     # NOVEL multi-exon candidate if ANY of its junctions is spliced by fewer than
     # novel_junction_min_reads directly-observed reads (intron junctions extracted
@@ -548,12 +655,60 @@ class PipelineConfig:
     # many bp. See DeepChopper (Nat. Commun. 2026). 0 disables the guard.
     fusion_max_internal_gap_bp: int = 30
 
+    @classmethod
+    def from_profile(cls, profile: str, **kwargs) -> "PipelineConfig":
+        """Construct a programmatic config from a named operating point.
+
+        Explicit keyword arguments override profile values, matching the CLI.
+        """
+        if "profile" in kwargs:
+            raise TypeError("profile must be passed as the first argument")
+        config = cls(profile=profile, **kwargs)
+        values = {key: getattr(config, key) for key in PROFILE_FIELDS}
+        explicit = PROFILE_FIELDS.intersection(kwargs)
+        resolved = resolve_profile_values(profile, values, explicit)
+        for key, value in resolved.items():
+            setattr(config, key, value)
+        config.m2_metric, config.m2_metric_route = resolve_m2_metric(
+            config.m2_metric, config.gtf_path
+        )
+        config.profile_overrides = tuple(sorted(explicit))
+        return config
+
     def validate(self):
-        """Validate that required paths exist and parallelism knobs are coherent."""
-        for attr in ("bam_path", "genome_fasta_path", "fastq_path", "signal_path"):
+        """Validate required paths, profiles, metrics, and parallelism knobs."""
+        for attr in (
+            "bam_path",
+            "gtf_path",
+            "genome_fasta_path",
+            "fastq_path",
+            "signal_path",
+        ):
             val = getattr(self, attr)
             if val and not Path(val).exists():
                 raise FileNotFoundError(f"{attr}: {val}")
+        if self.profile not in PIPELINE_PROFILES:
+            raise ValueError(f"unknown profile: {self.profile!r}")
+        if self.m2_metric == "auto":
+            self.m2_metric, self.m2_metric_route = resolve_m2_metric(
+                self.m2_metric, self.gtf_path
+            )
+        if self.isoform_fraction_locus not in ("family", "overlap"):
+            raise ValueError(
+                "isoform_fraction_locus must be 'family' or 'overlap'"
+            )
+        if self.m2_metric not in ("off", "mean", "summed_llr"):
+            raise ValueError(f"unknown m2_metric: {self.m2_metric!r}")
+        if self.m2_diff_cover_margin < 0 or self.m2_summed_llr_margin < 0:
+            raise ValueError("M2 margins must be >= 0")
+        if self.m2_summed_llr_flank < 1:
+            raise ValueError("m2_summed_llr_flank must be >= 1")
+        if self.junction_snap_tolerance < 1:
+            raise ValueError("junction_snap_tolerance must be >= 1")
+        if self.junction_snap_min_support < 1:
+            raise ValueError("junction_snap_min_support must be >= 1")
+        if self.junction_snap_min_ratio < 1.0:
+            raise ValueError("junction_snap_min_ratio must be >= 1")
         if self.threads < 1:
             raise ValueError(f"threads must be >= 1, got {self.threads}")
         if not 0 <= self.gpu_workers <= self.threads:

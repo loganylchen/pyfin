@@ -11,8 +11,9 @@ Covers:
    gffcompare T>=3 with-GTF operating point; fusion stays exempt regardless.
 
 The dataclass field defaults stay min_abundance=0.0 / min_gtf_abundance=0.0 /
-floor_gtf_abundance=False, so programmatic/quantify/ablation callers see NO floor
-unless they opt in; the GTF floor of 1 is a `fin`-CLI default only. Asserted too.
+floor_gtf_abundance=False / strict_novel_abundance_floor=False, so programmatic
+callers see no floor unless they opt in. Named profiles may change both value and
+boundary semantics.
 """
 
 from __future__ import annotations
@@ -47,6 +48,14 @@ class TestCliDefault:
         opt = next(p for p in main.params if p.name == "floor_gtf_abundance")
         assert opt.default is False
 
+    def test_cli_strict_novel_floor_default_off(self):
+        from fin.cli import main
+
+        opt = next(
+            p for p in main.params if p.name == "strict_novel_abundance_floor"
+        )
+        assert opt.default is False
+
     def test_cli_min_gtf_abundance_default_is_1(self):
         """The `fin` assembly command must default --min-gtf-abundance to 1.0."""
         from fin.cli import main
@@ -59,17 +68,23 @@ class TestCliDefault:
         c = PipelineConfig(bam_path="/tmp/x.bam")
         assert c.min_abundance == 0.0
         assert c.min_gtf_abundance == 0.0
+        assert c.strict_novel_abundance_floor is False
         assert c.floor_gtf_abundance is False
 
 
 class TestRunnerAbundanceFloor:
     def _runner(
-        self, min_ab: float, floor_gtf: bool = False, min_gtf_ab: float = 0.0
+        self,
+        min_ab: float,
+        floor_gtf: bool = False,
+        min_gtf_ab: float = 0.0,
+        strict_novel: bool = False,
     ) -> PipelineRunner:
         cfg = PipelineConfig(
             bam_path="/tmp/x.bam",
             min_abundance=min_ab,
             min_gtf_abundance=min_gtf_ab,
+            strict_novel_abundance_floor=strict_novel,
             floor_gtf_abundance=floor_gtf,
             # Disable every other post-EM filter so we isolate A4 abundance.
             min_isoform_fraction=0.0,
@@ -110,6 +125,26 @@ class TestRunnerAbundanceFloor:
         assert "n_low" not in out
         assert "g_high" in out
         assert "f_low" in out              # fusion still exempt
+
+    def test_strict_novel_floor_excludes_exact_boundary_only(self):
+        runner = self._runner(min_ab=1.0, strict_novel=True)
+        agg = {
+            "n_below": _qr("n_below", "novel", 0.999),
+            "n_exact": _qr("n_exact", "novel", 1.0),
+            "n_above": _qr("n_above", "novel", 1.000001),
+            "g_exact": _qr("g_exact", "gtf", 1.0),
+        }
+        out = runner._finalize_and_write(agg, None, None)
+        assert set(out) == {"n_above", "g_exact"}
+
+    def test_inclusive_novel_floor_keeps_exact_boundary(self):
+        runner = self._runner(min_ab=1.0, strict_novel=False)
+        agg = {
+            "n_below": _qr("n_below", "novel", 0.999),
+            "n_exact": _qr("n_exact", "novel", 1.0),
+        }
+        out = runner._finalize_and_write(agg, None, None)
+        assert set(out) == {"n_exact"}
 
     def test_floor_disabled_keeps_everything(self):
         runner = self._runner(min_ab=0.0)

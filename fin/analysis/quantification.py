@@ -29,6 +29,7 @@ class QuantResult:
     end: int = 0
     exons: Tuple[Tuple[int, int], ...] = ()  # 0-based
     gene_id: str = ""
+    family_id: Optional[str] = None
     # Composite signal scores. Vestigial: no code path populates these anymore
     # (the composite scorer was removed with the quantify subcommand), so in
     # every assembly quant_mode (argmax/m1_em/m2_em) they stay at their 0.0
@@ -117,6 +118,7 @@ def quantify_transcripts(
                 start=cand.start,
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
+                family_id=cand.family_id,
                 assigned_read_ids=assigned_ids,
                 breakpoint_left=cand.breakpoint_left,
                 breakpoint_right=cand.breakpoint_right,
@@ -137,6 +139,7 @@ def _qr_overlap(a: QuantResult, b: QuantResult) -> bool:
 def isoform_fraction_drops(
     results: Dict[str, QuantResult],
     min_fraction: float,
+    locus: str = "family",
 ) -> set:
     """Return candidate_ids to drop by the minimum-isoform-fraction heuristic.
 
@@ -144,7 +147,7 @@ def isoform_fraction_drops(
     abundance::
 
         relabund(C) = C.abundance / max(abundance over ALL transcripts
-                       (novel, GTF and fusion) that OVERLAP C, C included)
+                       in C's splice family, C included)
 
     and drop C when ``relabund(C) < min_fraction``. This is the standard
     Cufflinks ``--min-isoform-fraction`` / StringTie ``-f`` minor-isoform
@@ -152,13 +155,11 @@ def isoform_fraction_drops(
     incompletely-spliced precursors (pre-mRNA), RT/template-switching
     artifacts, and assembly noise rather than genuine isoforms.
 
-    The locus maximum spans ALL sources (not just novel): on dense annotated
-    loci the dominant isoform is usually a GTF-passthrough transcript, so
-    comparing a novel only against other novels lets wobble-shadow isoforms
-    (junction-shifted near-copies of a true transcript) escape — they only
-    compete with each other and keep a deceptively high novel-only fraction.
-    Measuring each novel against the strongest transcript of ANY source at its
-    locus collapses those shadows below the threshold.
+    The family maximum spans ALL sources (not just novel), so an attached GTF
+    hypothesis can still anchor a read-derived family. ``locus="overlap"``
+    restores the historical same-strand genomic-overlap denominator. In family
+    mode, a candidate without a persisted family ID also uses that overlap
+    fallback, preserving legacy/read-chain behavior.
 
     GTF-passthrough (``source="gtf"``), fusion (``source="fusion"``), and
     single-exon (mono) candidates are EXEMPT and never dropped — they only ever
@@ -172,6 +173,8 @@ def isoform_fraction_drops(
     """
     if min_fraction <= 0.0:
         return set()
+    if locus not in ("family", "overlap"):
+        raise ValueError("locus must be 'family' or 'overlap'")
     # Bucket by (chrom, strand): only candidates on the same chromosome and
     # strand can share a locus, so the pairwise overlap scan stays within a
     # bucket instead of running all-vs-all across the whole genome. (Within a
@@ -182,8 +185,11 @@ def isoform_fraction_drops(
     # or fusion transcript); only NOVEL multi-exon candidates are eligible to be
     # dropped.
     buckets: Dict[Tuple[str, str], List[QuantResult]] = defaultdict(list)
+    family_buckets: Dict[str, List[QuantResult]] = defaultdict(list)
     for qr in results.values():
         buckets[(qr.chrom, qr.strand)].append(qr)
+        if qr.family_id is not None:
+            family_buckets[qr.family_id].append(qr)
     drops: set = set()
     for bucket in buckets.values():
         for qr in bucket:
@@ -192,10 +198,15 @@ def isoform_fraction_drops(
             if qr.source != "novel" or len(qr.exons) < 2:
                 continue
             locus_max = qr.abundance
-            for other in bucket:
-                if other.candidate_id != qr.candidate_id and _qr_overlap(qr, other):
-                    if other.abundance > locus_max:
-                        locus_max = other.abundance
+            use_family = locus == "family" and qr.family_id is not None
+            cohort = family_buckets[qr.family_id] if use_family else bucket
+            for other in cohort:
+                if other.candidate_id == qr.candidate_id:
+                    continue
+                if not use_family and not _qr_overlap(qr, other):
+                    continue
+                if other.abundance > locus_max:
+                    locus_max = other.abundance
             # The locus-dominant isoform (relabund == 1.0) is NEVER dropped,
             # even if a caller mis-configures min_fraction > 1.0.
             if qr.abundance >= locus_max:
@@ -528,6 +539,7 @@ def aggregate_across_intervals(
                     "end": qr.end,
                     "exons": qr.exons,
                     "gene_id": qr.gene_id,
+                    "family_ids": set(),
                     "coherence_sum": 0.0,
                     "discrimination_sum": 0.0,
                     "combined_sum": 0.0,
@@ -539,6 +551,8 @@ def aggregate_across_intervals(
                     "fulllen_frac": -1.0,
                 }
             a = agg[qr.candidate_id]
+            if qr.family_id is not None:
+                a["family_ids"].add(qr.family_id)
             # Preserve max EM responsibility across intervals (a candidate's
             # max_R is the highest single-read responsibility it ever sees).
             if qr.max_R > a["max_R"]:
@@ -623,6 +637,7 @@ def aggregate_across_intervals(
             end=a["end"],
             exons=a["exons"],
             gene_id=a["gene_id"],
+            family_id=min(a["family_ids"]) if a["family_ids"] else None,
             coherence_score=coherence,
             discrimination_score=discrimination,
             combined_score=combined,

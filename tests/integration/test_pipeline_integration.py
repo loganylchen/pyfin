@@ -2,9 +2,9 @@
 
 Exercises the krill-only quant_mode='m2_em' EM path with heavy mocking — no
 real BAM/krill/CUDA. The pure tie-break junction-NLL seed (``_tie_nll``), the
-per-candidate mappy aligners, the M3 read×read coherence and EM are all stubbed;
-the test asserts the orchestration contract (dispatch, fusion augmentation,
-use_gpu threading, the m3_coherence gate).
+per-candidate mappy aligners and EM are stubbed; the test asserts the
+orchestration contract, including dispatch, fusion augmentation, GPU threading,
+and the production zero-coherence EM call.
 """
 
 from __future__ import annotations
@@ -84,7 +84,6 @@ def _make_config(**overrides) -> PipelineConfig:
         use_prior=False,
         fusion_enabled=False,
         quant_mode="m2_em",
-        m4_source="diff_region",
         em_max_iter=2,
         em_tol=1e-2,
         # Avoid the post-quant fulllen BAM fetch (no real BAM here).
@@ -128,7 +127,6 @@ def _patch_m2_phases(num_reads: int = 10, num_cands: int = 2, candidates=None):
     )
 
     R_mm = np.full((num_reads, num_cands), 1.0 / num_cands)
-    dist_rr = np.zeros((num_reads, num_reads), dtype=np.float32)
     R = np.full((num_reads, num_cands), 1.0 / num_cands)
     hard = np.zeros(num_reads, dtype=int)
 
@@ -164,10 +162,6 @@ def _patch_m2_phases(num_reads: int = 10, num_cands: int = 2, candidates=None):
         "eff_lengths": patch.object(
             PipelineRunner, "_eff_lengths", return_value=None
         ),
-        "build_m3_coherence": patch(
-            "fin.scoring.m3_junction_coherence.build_m3_coherence",
-            return_value=dist_rr,
-        ),
         "em_with_coherence": patch(
             "fin.pipeline.assignment.em_with_coherence",
             return_value=(R, hard, []),
@@ -196,7 +190,6 @@ def test_process_interval_m2_em_smoke(tmp_path):
 
     with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
          patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
-         patches["build_m3_coherence"], \
          patches["em_with_coherence"], patches["quantify_transcripts"]:
         results = runner.process_interval(_make_interval())
 
@@ -216,7 +209,6 @@ def test_process_interval_use_gpu_threaded(tmp_path):
 
     with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
          patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
-         patches["build_m3_coherence"], \
          patches["em_with_coherence"] as em_m, patches["quantify_transcripts"]:
         runner.process_interval(_make_interval())
 
@@ -224,41 +216,21 @@ def test_process_interval_use_gpu_threaded(tmp_path):
     assert em_kwargs.get("use_gpu") is False
 
 
-def test_process_interval_m3_off_by_default_disables_coherence(tmp_path):
-    """m3_coherence default OFF -> EM beta=0 and build_m3_coherence not called."""
+def test_process_interval_disables_read_coherence(tmp_path):
+    """Production M2 calls the generic EM engine with zero coherence."""
     cfg = _make_config(work_dir=str(tmp_path))
-    assert cfg.m3_coherence is False
     runner = _make_runner(cfg)
 
     patches, _, _ = _patch_m2_phases(num_reads=6, num_cands=2)
 
     with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
          patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
-         patches["build_m3_coherence"] as m3_m, \
          patches["em_with_coherence"] as em_m, patches["quantify_transcripts"]:
         runner.process_interval(_make_interval())
 
-    m3_m.assert_not_called()
     _, em_kwargs = em_m.call_args
     assert em_kwargs.get("beta") == 0.0
-
-
-def test_process_interval_m3_on_enables_coherence(tmp_path):
-    """m3_coherence=True -> build_m3_coherence is called and EM beta=em_beta."""
-    cfg = _make_config(work_dir=str(tmp_path), m3_coherence=True, em_beta=1.0)
-    runner = _make_runner(cfg)
-
-    patches, _, _ = _patch_m2_phases(num_reads=6, num_cands=2)
-
-    with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
-         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
-         patches["build_m3_coherence"] as m3_m, \
-         patches["em_with_coherence"] as em_m, patches["quantify_transcripts"]:
-        runner.process_interval(_make_interval())
-
-    m3_m.assert_called_once()
-    _, em_kwargs = em_m.call_args
-    assert em_kwargs.get("beta") == 1.0
+    assert not np.asarray(em_kwargs["dist_read_to_read"]).any()
 
 
 def _fake_bam_reader_with_reads(read_dicts):
@@ -304,7 +276,6 @@ def test_process_interval_fusion_enabled(tmp_path):
 
     with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
          patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
-         patches["build_m3_coherence"], \
          patches["em_with_coherence"], patches["quantify_transcripts"], \
          patch.object(runner, "_get_fusion_genome_aligner", return_value=object()), \
          patch("fin.io.io_bam.BamReader", fake_bam), \
@@ -326,7 +297,6 @@ def test_process_interval_fusion_disabled_by_default(tmp_path):
 
     with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
          patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
-         patches["build_m3_coherence"], \
          patches["em_with_coherence"], patches["quantify_transcripts"], \
          patch("fin.fusion.detect_fusion_candidates") as det:
         runner.process_interval(_make_interval())

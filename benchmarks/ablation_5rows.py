@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Ablation benchmark: run all 5 rows (R1..R5) over a small interval set.
+"""Ablation benchmark: run the active quantification rows on an interval set.
 
 Requires a real dataset (BAM + signal + optional GTF). Writes per-row TSVs
 and a combined summary to --out-dir. Intended to be run on a 5-row SIRV or
@@ -49,7 +49,6 @@ def _build_base_config(args) -> "PipelineConfig":
         use_gpu=not args.no_gpu,
         max_reads=args.max_reads,
         em_sigma=1.0,
-        em_beta=1.0,  # SIRV-swept M3 weight; rows R2/R4/R5 use this when m3_coherence=True
         em_max_iter=200,
         use_prior=True,
         score_alpha=0.5,
@@ -60,7 +59,6 @@ def _build_base_config(args) -> "PipelineConfig":
         # Ablation-specific overrides set per row below
         quant_mode="m2_em",
         enable_score_filter=True,
-        m4_source="diff_region",
     )
 
 
@@ -71,8 +69,6 @@ def _row_config(base, row_cfg) -> "PipelineConfig":
     overrides = {
         "quant_mode": row_cfg.quant_mode,
         "em_max_iter_override": row_cfg.em_max_iter_override,
-        "m4_source": row_cfg.m4_source,
-        "m3_coherence": row_cfg.m3_coherence,
         "enable_score_filter": row_cfg.enable_score_filter,
     }
     return dataclasses.replace(base, **overrides)

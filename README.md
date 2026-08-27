@@ -2,9 +2,9 @@
 
 A Python package for nanopore Direct RNA-seq **transcriptome assembly with fusion
 detection and per-transcript signal-based scoring**. Reference-based discovery of
-known and novel isoforms; SA-tag fusion calling; layered signal scoring (krill
-eventalign + read-to-read DTW coherence) that refines the read-to-transcript EM
-assignment, yielding signal-aware abundance / TPM per candidate.
+known and novel isoforms; SA-tag fusion calling; and bounded krill eventalign
+that refines exact M1 ties before read-to-transcript assignment, yielding
+signal-aware abundance / TPM per candidate.
 
 ## Pipeline Overview
 
@@ -19,17 +19,14 @@ Candidate Discovery         Fusion Detection (--fusion)
    |                         -> fusion candidates)
    +------------+------------+
                 v
-        Phase 2: Signal scoring (krill eventalign; M1-M4 stages)
+        Phase 2: M1 alignment + M2 junction eventalign
                 |
                 v
-        Phase 3: Read-to-read DTW coherence (CUDA / CPU)
+        Phase 3: Read-to-transcript assignment (CuPy / numpy)
+                  - signal-refined soft responsibilities
                 |
                 v
-        Phase 4: EM read-to-transcript assignment (CuPy / numpy)
-                  - signal-refined soft assignments
-                |
-                v
-        Phase 5: Quantification + outputs
+        Phase 4: Quantification + outputs
                   - assembly.gtf  (with abundance attributes)
                   - scores.tsv    (per-candidate metrics + TPM)
                   - fusions.bedpe (when --fusion)
@@ -39,10 +36,9 @@ Candidate Discovery         Fusion Detection (--fusion)
 
 1. **Candidate Discovery** - Reference-based: GTF transcripts + novel isoforms via intron-chain extraction + 3' end clustering
 1.5. **Fusion Detection** *(optional, `--fusion`)* - Parses SA tags, clusters breakpoints, builds spliced fusion candidates merged into the same `CandidateSet`
-2. **Signal Scoring** - krill eventalign produces per-read signal-to-reference distances (M1 mappy mask, M2 junction NLL)
-3. **Signal DTW** - Pairwise read-to-read signal coherence (M3; CUDA C++ extension, CPU fallback)
-4. **EM Assignment** - Probabilistic read-to-transcript assignment with read×read coherence regularization (CuPy GPU)
-5. **Quantification** - Probability-weighted abundance + TPM, written to GTF / TSV / BEDPE
+2. **Signal Scoring** - M1 supplies a mappy structural mask; krill M2 junction NLL refines exact ties inside shared genomic disagreement windows
+3. **Assignment** - Probabilistic read-to-transcript responsibilities with production read-by-read coherence disabled (`beta=0`)
+4. **Quantification** - Probability-weighted abundance + TPM, written to GTF / TSV / BEDPE
 
 ## Installation
 
@@ -98,6 +94,39 @@ which minimap2 f5c samtools
 
 ## Quick Start
 
+### Operating profiles
+
+The CLI resolves a named scientific operating point before constructing
+`PipelineConfig`. The product default is balanced `--profile real-drna`; use
+`--profile real-drna-precision` for a higher-F1 support floor,
+`--profile sirv` for synthetic SIRV benchmarking, and `--profile custom` for raw
+option defaults. Any explicitly supplied CLI option overrides its profile value.
+
+| Profile | Intended data | Key resolved behavior |
+| --- | --- | --- |
+| `real-drna` | Biological nanopore dRNA, balanced | Tight summed LLR; strict >1 abundance; novel mono >=5 hard reads; read-supported junction consensus; soft-mass/full-length/polyA gates off |
+| `real-drna-precision` | Biological nanopore dRNA, precision-prioritized | Balanced real settings plus generation support >=2; higher T3 F1 with about 1 pp lower T1/T3 recall |
+| `sirv` | SIRV synthetic benchmark | M2 auto-routes to summed LLR (1,4) without a usable GTF and mean with a guide; inclusive >=3 abundance and expressed-GTF/full-length gates |
+| `custom` | Manual/legacy experiments | No profile overlay; pass `--isoform-fraction-locus overlap` to reproduce pre-family selection |
+
+Every run writes `run_manifest.json` beside the GTF. It records the selected
+profile, explicit overrides, resolved configuration, source SHA-256, Git commit
+when available, and result-changing environment variables.
+
+```bash
+# Biological sample (default profile shown explicitly for reproducibility)
+pyfin --profile real-drna ...
+
+# Precision-prioritized biological sample
+pyfin --profile real-drna-precision ...
+
+# SIRV: auto selects SUM when unguided and mean when a usable GTF is supplied
+pyfin --profile sirv ...
+
+# Explicit A/B override remains available
+pyfin --profile sirv --m2-metric mean ...
+```
+
 ### CLI — assembly only
 
 ```bash
@@ -114,6 +143,7 @@ pyfin \
 Outputs:
 - `pyfin_out/assembly.gtf` — assembled transcripts (gtf + novel) with `coherence_score`, `discrimination_score`, `combined_score`, `tpm` attributes
 - `pyfin_out/scores.tsv` — per-candidate metrics table
+- `pyfin_out/run_manifest.json` — resolved profile, overrides, configuration, source hash/commit, and result-changing environment
 
 ### CLI — assembly + fusion detection
 
@@ -132,7 +162,8 @@ Adds `pyfin_out/fusions.bedpe` listing called fusion breakpoints with read suppo
 ```python
 from fin.pipeline import PipelineConfig, PipelineRunner
 
-config = PipelineConfig(
+config = PipelineConfig.from_profile(
+    "real-drna",
     bam_path="reads.bam",
     gtf_path="annotations.gtf",
     genome_fasta_path="genome.fa",
@@ -146,7 +177,6 @@ config = PipelineConfig(
     fusion_enabled=True,        # SA-tag fusion calling
     use_gpu=True,
     em_sigma=1.0,
-    em_beta=0.5,
 )
 
 runner = PipelineRunner(config)
@@ -160,10 +190,10 @@ for cid, qr in sorted(results.items(), key=lambda x: -x[1].abundance):
 
 ## Per-Transcript Scoring
 
-Signal scoring is layered into the read-to-transcript assignment itself (the
-`M1`–`M4` stages: a mappy structural mask, per-event junction-NLL refinement, and
-optional read×read junction coherence). These feed the EM, whose soft assignments
-yield each candidate's `abundance`, `num_reads`, and `tpm` in `scores.tsv`.
+Signal scoring is layered into read-to-transcript assignment: M1 supplies the
+mappy structural mask and M2 refines exact ties with per-event junction NLL.
+These feed the assignment engine, whose soft responsibilities yield each
+candidate's `abundance`, `num_reads`, and `tpm` in `scores.tsv`.
 
 The `coherence_score`, `discrimination_score`, and `combined_score` columns in
 `scores.tsv` are retained for output-schema stability but are always `0.0`: they
@@ -290,8 +320,8 @@ fin/
 | `output_tsv` | str | None | Output per-candidate scoring TSV path |
 | `output_bedpe` | str | None | Output fusion BEDPE path (with `fusion_enabled`) |
 | `three_prime_threshold` | int | 24 | 3' end clustering distance (bp) |
+| `isoform_fraction_locus` | str | "family" | Use persistent splice families for minor-isoform denominators; "overlap" restores legacy behavior |
 | `em_sigma` | float | 1.0 | EM temperature (lower = harder assignments) |
-| `em_beta` | float | 0.5 | Coherence weight (0 = ignore read similarity) |
 | `em_max_iter` | int | 1000 | Maximum EM iterations |
 | `em_tol` | float | 1e-4 | EM convergence tolerance |
 | `use_gpu` | bool | True | Enable GPU acceleration (DTW + EM) |

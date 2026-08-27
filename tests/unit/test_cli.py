@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 
@@ -31,10 +30,21 @@ def test_default_help_shows_assembly_flags():
         "--fastq",
         "--signal",
         "--output-dir",
+        "--profile",
         "--no-gpu",
         "--fusion",
+        "--m2-metric",
+        "--m2-summed-llr-margin",
+        "--strict-novel-abundance-floor",
+        "--isoform-fraction-locus",
     ]:
         assert flag in r.stdout, f"Missing flag in fin --help: {flag}"
+
+
+def test_isoform_fraction_locus_rejects_unknown_mode():
+    r = run_cli("--isoform-fraction-locus", "gene")
+    assert r.returncode != 0
+    assert "Invalid value" in r.stderr
 
 
 def test_default_help_shows_fusion_flags():
@@ -64,6 +74,18 @@ def test_default_help_shows_mono_exon_flags():
         "--min-mono-exon-length",
     ]:
         assert flag in r.stdout, f"Missing mono-exon flag in fin --help: {flag}"
+
+
+def test_default_help_shows_junction_snap_flags():
+    r = run_cli("--help")
+    assert r.returncode == 0
+    for flag in [
+        "--junction-snap",
+        "--junction-snap-tolerance",
+        "--junction-snap-min-support",
+        "--junction-snap-min-ratio",
+    ]:
+        assert flag in r.stdout, f"Missing junction-snap flag in fin --help: {flag}"
 
 
 def test_default_help_shows_junction_support_flags():
@@ -139,14 +161,19 @@ def test_unknown_subcommand_errors():
 # Interval-level parallelism flags (--threads / --gpu-workers)
 # ---------------------------------------------------------------------------
 
-_TD = os.path.join(os.path.dirname(__file__), "..", "..", "testdata")
-_REQUIRED = [
-    "--bam", os.path.join(_TD, "mapped.bam"),
-    "--genome", os.path.join(_TD, "SIRV.genome.fa"),
-    "--fastq", os.path.join(_TD, "mapped.fq.gz"),
-    "--signal", os.path.join(_TD, "mapped.blow5"),
-    "--output-dir", "/tmp/_fin_cli_validate",
-]
+def _required_args(tmp_path):
+    paths = []
+    for flag, name in (
+        ("--bam", "mapped.bam"),
+        ("--genome", "SIRV.genome.fa"),
+        ("--fastq", "mapped.fq.gz"),
+        ("--signal", "mapped.blow5"),
+    ):
+        path = tmp_path / name
+        path.touch()
+        paths.extend((flag, str(path)))
+    paths.extend(("--output-dir", str(tmp_path / "out")))
+    return paths
 
 
 def test_help_shows_parallel_flags():
@@ -156,20 +183,23 @@ def test_help_shows_parallel_flags():
         assert flag in r.stdout, f"Missing parallel flag in fin --help: {flag}"
 
 
-def test_threads_zero_rejected():
+def test_threads_zero_rejected(tmp_path):
     # Validation fires before the pipeline runs -> fast, non-zero exit.
-    r = run_cli(*_REQUIRED, "--threads", "0")
+    r = run_cli(*_required_args(tmp_path), "--threads", "0")
     assert r.returncode != 0
     assert "threads" in (r.stdout + r.stderr).lower()
 
 
-def test_gpu_workers_negative_rejected():
-    r = run_cli(*_REQUIRED, "--threads", "2", "--gpu-workers=-1")
+def test_gpu_workers_negative_rejected(tmp_path):
+    r = run_cli(*_required_args(tmp_path), "--threads", "2", "--gpu-workers=-1")
     assert r.returncode != 0
     assert "gpu-workers" in (r.stdout + r.stderr).lower()
 
 
-def test_gpu_workers_exceeds_threads_rejected():
-    r = run_cli(*_REQUIRED, "--gpu", "--threads", "2", "--gpu-workers", "3")
+def test_gpu_workers_exceeds_threads_rejected(tmp_path):
+    r = run_cli(
+        *_required_args(tmp_path),
+        "--gpu", "--threads", "2", "--gpu-workers", "3",
+    )
     assert r.returncode != 0
     assert "gpu-workers" in (r.stdout + r.stderr).lower()

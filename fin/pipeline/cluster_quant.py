@@ -12,7 +12,7 @@ The policy here is pure/deterministic and signal-agnostic; the two mechanisms it
 injected by the caller (the runner), so this module has no krill/mappy import and is
 unit-testable on synthetic inputs.
 
-Assignment builds an M3 read x member compatibility matrix, then EM quantifies it:
+Assignment builds a read x member compatibility matrix, then EM quantifies it:
   * M1 within-cluster: each read is scored ONLY against this cluster's members; its
     best-AS tie set is computed from those scores.
   * tie == 1  -> the read is COMPATIBLE with that one member (a certain anchor).
@@ -147,7 +147,7 @@ def assign_cluster_reads(
     em_max_iter: int = 200,
     em_tol: float = 1e-9,
 ) -> ClusterAssignment:
-    """Assign one cluster's reads to its members (M3 compat matrix -> EM) + survivors.
+    """Assign one cluster's reads to members via compatibility EM.
 
     Args:
         members: member intron chains (index == member id used everywhere else).
@@ -173,7 +173,7 @@ def assign_cluster_reads(
     res = ClusterAssignment()
     n = len(members)
 
-    # --- Build the M3 compatibility sets (which members each read can come from). ---
+    # Build compatibility sets: which members each read can come from.
     compat: Dict[str, List[int]] = {}
     for rid, row in as_rows.items():
         if not row:

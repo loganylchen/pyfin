@@ -1,11 +1,7 @@
-"""Build EM input matrices from M1/M2/M3 according to em_matrix_subset.
+"""Build M1/M2 EM input matrices for alignment and signal ablations.
 
-This module assembles ``dist_read_to_tx`` and ``dist_read_to_read`` for
-``em_with_coherence`` given the seven supported ablation subsets and the
-already-computed M1/M2/M3 matrices.
-
-Public function:
-    build_em_matrices(subset, m1, m2, m3, em_beta) -> (d_tx, d_rr, beta_use)
+Production M1/M2 modes do not use read-by-read coherence, so this helper always
+returns a zero read-distance matrix and ``beta=0``.
 """
 from __future__ import annotations
 
@@ -17,7 +13,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-VALID_SUBSETS = ("m1", "m2", "m3", "m1+m2", "m1+m3", "m2+m3", "all")
+VALID_SUBSETS = ("m1", "m2", "m1+m2")
 
 
 def _row_zscore(M: np.ndarray) -> np.ndarray:
@@ -84,44 +80,20 @@ def build_em_matrices(
     subset: str,
     m1: np.ndarray,
     m2: np.ndarray,
-    m3: np.ndarray,
-    em_beta: float,
     m2_norm: str = "none",
     m1m2_fusion: str = "zscore_mean",
 ) -> Tuple[np.ndarray, np.ndarray, float]:
-    """Assemble ``(d_tx, d_rr, beta_use)`` for ``em_with_coherence``.
+    """Assemble ``(d_tx, zero_d_rr, 0.0)`` for ``em_with_coherence``.
 
-    Args:
-        subset: One of :data:`VALID_SUBSETS`. Selects which of M1/M2/M3
-            enter EM. Subsets containing "m3" pass ``em_beta`` through;
-            subsets without "m3" force ``beta=0`` (no coherence term).
-        m1: (n_reads, n_tx) mappy distance matrix. Pass zeros if unused.
-        m2: (n_reads, n_tx) eventalign distance matrix. Pass zeros if unused.
-        m3: (n_reads, n_reads) read-read distance matrix. Pass zeros if
-            unused.
-        em_beta: Coherence weight (used only when subset includes "m3").
-        m2_norm: Normalization for M2 before entering EM. "none" = raw,
-            "center" = per-row min subtraction (best→0, like M1),
-            "zscore" = per-row z-score then shift non-negative.
-        m1m2_fusion: Fusion method for "m1+m2" and "all" subsets.
-            "zscore_mean" = per-row z-score then element-wise mean (legacy).
-            "rank" = reciprocal rank fusion (scale-invariant).
-
-    Returns:
-        d_tx: (n_reads, n_tx) non-negative read×tx distance.
-        d_rr: (n_reads, n_reads) non-negative read×read distance.
-        beta_use: Effective beta (0 when M3 not selected).
-
-    Raises:
-        ValueError: If ``subset`` is not in :data:`VALID_SUBSETS`.
+    ``subset`` may be ``m1``, ``m2``, or ``m1+m2``. The remaining arguments
+    control M2 normalization and M1/M2 fusion for historical ablations.
     """
     if subset not in VALID_SUBSETS:
         raise ValueError(
             f"em_matrix_subset must be one of {VALID_SUBSETS}, got {subset!r}"
         )
 
-    n_reads, n_tx = m2.shape
-    zeros_tx = np.zeros((n_reads, n_tx), dtype=np.float32)
+    n_reads = m2.shape[0]
     zeros_rr = np.zeros((n_reads, n_reads), dtype=np.float32)
 
     # Apply M2 normalization when M2 is used standalone.
@@ -136,24 +108,14 @@ def build_em_matrices(
         m2_normed = m2.astype(np.float32)
 
     if subset == "m1":
-        d_tx, d_rr, beta_use = m1.astype(np.float32), zeros_rr, 0.0
+        d_tx = m1.astype(np.float32)
     elif subset == "m2":
-        d_tx, d_rr, beta_use = m2_normed, zeros_rr, 0.0
-    elif subset == "m3":
-        # No read×tx information; rely entirely on coherence.
-        d_tx, d_rr, beta_use = zeros_tx, m3.astype(np.float32), float(em_beta)
-    elif subset == "m1+m2":
-        if m1m2_fusion == "rank":
-            d_tx = _rank_fusion(m1, m2)
-        else:
-            d_tx = _zscore_mean(m1, m2)
-        d_rr, beta_use = zeros_rr, 0.0
-    elif subset == "m1+m3":
-        d_tx, d_rr, beta_use = m1.astype(np.float32), m3.astype(np.float32), float(em_beta)
-    elif subset == "m2+m3":
-        d_tx, d_rr, beta_use = m2.astype(np.float32), m3.astype(np.float32), float(em_beta)
-    else:  # "all"
-        d_tx, d_rr, beta_use = _zscore_mean(m1, m2), m3.astype(np.float32), float(em_beta)
+        d_tx = m2_normed
+    elif m1m2_fusion == "rank":
+        d_tx = _rank_fusion(m1, m2)
+    else:
+        d_tx = _zscore_mean(m1, m2)
+    d_rr, beta_use = zeros_rr, 0.0
 
     # Defensive: EM requires non-negative distances. Floor any small
     # numerical drift below zero (can happen after z-scoring).

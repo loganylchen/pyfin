@@ -1396,12 +1396,13 @@ def m2_resolve_tie(
             decide (fewer than 2 candidates, no discrimination window, or no
             candidate has signal in the window) -> caller should fall back to its
             default (1/K split).
-          * ``margin`` = runner-up NLL - best NLL (>= 0); ``inf`` when exactly one
-            tied candidate has window signal; ``0.0`` when ``best_local_idx`` is
-            None. Larger = more confident; gate with ``margin >= threshold``.
+          * ``margin`` = runner-up NLL - best NLL (>= 0); ``0.0`` when fewer
+            than two hypotheses score. Larger = more confident; gate with
+            ``margin >= threshold``.
           * ``scored_idxs`` (only with ``return_scored``): local indices of the
             tied candidates with finite window NLL, sorted best (lowest NLL)
-            first. Empty when none scored.
+            first. Empty unless at least two hypotheses score, so technical
+            missingness cannot narrow the caller's M1 fallback split.
     """
     if len(tied_cands) < 2 or not read_seq:
         return (None, 0.0, []) if return_scored else (None, 0.0)
@@ -1454,11 +1455,11 @@ def m2_resolve_tie(
         if n_ev > 0 and math.isfinite(nll):
             scored.append((idx, nll))
 
-    if not scored:
+    if len(scored) < 2:
         return (None, 0.0, []) if return_scored else (None, 0.0)
     scored.sort(key=lambda t: t[1])
     best_idx = scored[0][0]
-    margin = float("inf") if len(scored) == 1 else scored[1][1] - scored[0][1]
+    margin = scored[1][1] - scored[0][1]
     if return_scored:
         return best_idx, margin, [idx for idx, _ in scored]
     return best_idx, margin

@@ -120,7 +120,7 @@ All four are already enumerated in `benchmarks/run_benchmark.sh`; missing binari
 - Per AC-27, **at least one** of the following must be true on the primary dataset:
   - pyfin F1 > Bambu F1 OR pyfin F1 > IsoQuant F1 (assembly), AND/OR
   - pyfin fusion recall > JAFFAL recall OR pyfin fusion F1 > LongGF F1.
-- If neither holds: tune `score_alpha`, `prior_weight_cap`, `em_beta` on a held-out subset, then rerun.
+- If neither holds: diagnose the failing transcript classes and validate one active profile lever on a held-out subset before rerunning.
 
 ### Phase G — Publish
 - [ ] Write `benchmarks/RESULTS.md` with table of metrics, hardware, versions, commit SHA, command lines.

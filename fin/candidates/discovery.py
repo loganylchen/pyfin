@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from typing import List, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from fin.candidates.dataclasses import CandidateSet, IntronChain, TranscriptCandidate
 from fin.candidates.canonical import parse_motifs
@@ -22,11 +23,31 @@ from fin.io.interval_manager import (
 logger = logging.getLogger(__name__)
 
 
-def _generate_novel_id() -> str:
-    """Generate a short unique ID for a novel candidate."""
-    import uuid
+def _generate_novel_id(
+    chrom: str,
+    strand: str,
+    start: int,
+    end: int,
+    chain: IntronChain,
+) -> str:
+    """Generate a stable structural ID for a novel candidate."""
+    introns = ";".join(f"{donor}-{acceptor}" for donor, acceptor in chain.introns)
+    payload = f"{chrom}|{strand}|{start}|{end}|{introns}".encode("ascii")
+    return "novel_" + hashlib.blake2b(payload, digest_size=8).hexdigest()
 
-    return "novel_" + uuid.uuid4().hex[:8]
+
+def _generate_family_id(chrom: str, strand: str, chains) -> str:
+    """Generate a stable ID from every distinct splice chain in one family."""
+    normalized = sorted({
+        tuple(chain.introns) if isinstance(chain, IntronChain) else tuple(chain)
+        for chain in chains
+    })
+    chain_text = "/".join(
+        ";".join(f"{donor}-{acceptor}" for donor, acceptor in chain)
+        for chain in normalized
+    )
+    payload = f"{chrom}|{strand}|{chain_text}".encode("utf-8")
+    return "fam_" + hashlib.blake2b(payload, digest_size=8).hexdigest()
 
 
 def _intron_chains_match(a: IntronChain, b: IntronChain) -> bool:
@@ -259,15 +280,18 @@ def _chain_cluster_candidates(
         if q is not None:
             spans[q] = (ref_start, rd.get("reference_end", ref_start))
 
+    family_result = None
+    read_family_count = 0
     if clustering == "families":
         from fin.candidates.chain_cluster import (
             ChainCluster, GenCandidate, cluster_families, collapse)
         from fin.candidates.dataclasses import IntronChain
-        result = cluster_families(
+        family_result = cluster_families(
             read_chains, wobble_bp=wobble_bp, cassette_max_exon_bp=cassette_max_exon_bp)
+        read_family_count = len(family_result.families)
         clusters = [collapse(fam, span_guard=fold_span_guard, read_spans=spans)
-                    for fam in result.families]
-        mono_ids = set(result.mono_reads)
+                    for fam in family_result.families]
+        mono_ids = set(family_result.mono_reads)
         # When the effective fold_monoexon_contained flag is on (the runner keeps it on unless a
         # post-EM mono_resolve will run), fold contained mono reads into a multi member at
         # generation to suppress single-exon truncation FPs; otherwise the bucket is emitted
@@ -308,6 +332,31 @@ def _chain_cluster_candidates(
             gtf_candidates.append(gc)
             gtf_by_chain.setdefault(chain, gc)   # first GTF wins on an exact-chain tie
 
+    cluster_family_ids: List[Optional[str]] = [None] * len(clusters)
+    if family_result is not None:
+        from fin.candidates.chain_cluster import _attach_gtf_variants
+
+        _attach_gtf_variants(
+            family_result.families,
+            [(gc.candidate_id, tuple(gc.intron_chain.introns)) for gc in gtf_candidates],
+            wobble_bp,
+            cassette_max_exon_bp,
+        )
+        family_ids = [
+            _generate_family_id(
+                interval.chrom,
+                strand,
+                list(family.variants) + [chain for _, chain in family.gtf_members],
+            )
+            for family in family_result.families
+        ]
+        for family, family_id in zip(family_result.families, family_ids):
+            gtf_ids = {candidate_id for candidate_id, _ in family.gtf_members}
+            for gc in gtf_candidates:
+                if gc.candidate_id in gtf_ids:
+                    gc.family_id = family_id
+        cluster_family_ids[:read_family_count] = family_ids[:read_family_count]
+
     # Single-exon (empty-chain) GTF transcripts, matched to mono members by genomic
     # overlap (NOT by empty-chain equality, which would collapse them all to one).
     mono_gtf = [(gc, gc.start, gc.end)
@@ -323,33 +372,40 @@ def _chain_cluster_candidates(
     # Each shadow: (intron_chain_tuple, sorted_read_id_tuple). GTF ids can recur
     # across clusters (same annotation matched twice) -> merge the shadow lists.
     shadow_map: Dict[str, List[Tuple[Tuple[Tuple[int, int], ...], Tuple[str, ...]]]] = {}
-    def _emit(chain, member_reads, start, end, gc):
-        """Merge ``member_reads`` into GTF ``gc`` (if any) else emit a novel candidate.
-        Returns the candidate_id, or None when the spliced sequence cannot be built."""
+    def _emit(chain, member_reads, start, end, gc, family_id=None):
+        """Merge reads into a GTF or emit a novel with its discovery family."""
         if gc is not None:                        # GTF match -> merge
             gc.supporting_read_ids.update(member_reads)
+            if family_id is not None:
+                gc.family_id = family_id
             return gc.candidate_id
         seq = _build_spliced_sequence(genome_fasta, start, end, chain, strand)
         if not seq:
             return None
-        cid = _generate_novel_id()
+        cid = _generate_novel_id(
+            interval.chrom, strand, start, end, chain
+        )
         candidates.append(TranscriptCandidate(
             candidate_id=cid, intron_chain=chain,
             three_prime_pos=(end if strand == "+" else start), sequence=seq,
             source="novel", supporting_read_ids=set(member_reads),
-            chrom=interval.chrom, strand=strand, start=start, end=end))
+            chrom=interval.chrom, strand=strand, start=start, end=end,
+            family_id=family_id))
         return cid
 
-    for cl in clusters:
+    for cluster_index, cl in enumerate(clusters):
         ids: List[str] = []
+        family_id = cluster_family_ids[cluster_index]
         for m in cl.members:
             if m.chain.introns:                   # multi-exon: exact-chain GTF match
                 starts = [spans[r][0] for r in m.read_ids if r in spans]
                 ends = [spans[r][1] for r in m.read_ids if r in spans]
                 if not starts:
                     continue
-                cand_id = _emit(m.chain, m.read_ids, min(starts), max(ends),
-                                gtf_by_chain.get(m.chain))
+                cand_id = _emit(
+                    m.chain, m.read_ids, min(starts), max(ends),
+                    gtf_by_chain.get(m.chain), family_id,
+                )
                 if cand_id is None:
                     continue
                 ids.append(cand_id)
@@ -460,6 +516,11 @@ def discover_candidates(
         ):
             rd = bam.alignment_to_dict(alignment)
             if not rd or not rd.get("is_mapped"):
+                continue
+            # Secondary mappings are alternative placements of the same query,
+            # not independent structural support. Letting them enter generation
+            # breaks the family invariant that one read belongs to one variant.
+            if rd.get("is_secondary"):
                 continue
             # Honor strand-separated intervals. bam.fetch returns reads on BOTH
             # strands overlapping the region, but each read belongs to its own
@@ -644,7 +705,9 @@ def discover_candidates(
 
             candidates.append(
                 TranscriptCandidate(
-                    candidate_id=_generate_novel_id(),
+                    candidate_id=_generate_novel_id(
+                        interval.chrom, strand, ref_start, ref_end, chain
+                    ),
                     intron_chain=chain,
                     three_prime_pos=consensus_3prime,
                     sequence=spliced_seq,

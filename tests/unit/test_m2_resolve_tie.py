@@ -7,10 +7,10 @@ in the Docker ablation), so these tests run on a host without krill.
 """
 from __future__ import annotations
 
-import math
-
 import fin.scoring.m2_junction_nll as m2
 from fin.candidates.dataclasses import IntronChain, TranscriptCandidate
+from fin.pipeline.assignment import _m2_score_region
+from fin.pipeline.config import PipelineConfig
 
 
 def _cand(cid, introns, start, end, strand="+", seq=None):
@@ -49,6 +49,30 @@ def _wobble_pair():
     a = _cand("a", [(200, 300), (400, 500)], 100, 600)
     b = _cand("b", [(200, 300), (410, 500)], 100, 600)
     return a, b
+
+
+def test_assignment_summed_metric_uses_tight_windows():
+    a, b = _wobble_pair()
+    cfg = PipelineConfig(
+        bam_path="/tmp/x.bam", m2_metric="summed_llr", m2_summed_llr_flank=6
+    )
+    gset, windows = _m2_score_region(cfg, [a, b])
+    assert gset is None
+    assert windows == m2.diff_junction_windows([a, b], flank=6)
+    assert windows
+
+
+def test_assignment_summed_metric_abstains_on_containment():
+    short = _cand("short", [(400, 500)], 300, 600)
+    long = _cand("long", [(200, 300), (400, 500)], 100, 600)
+    cfg = PipelineConfig(bam_path="/tmp/x.bam", m2_metric="summed_llr")
+    assert _m2_score_region(cfg, [short, long]) == (None, [])
+
+
+def test_assignment_off_metric_has_no_signal_window():
+    a, b = _wobble_pair()
+    cfg = PipelineConfig(bam_path="/tmp/x.bam", m2_metric="off")
+    assert _m2_score_region(cfg, [a, b]) == (None, [])
 
 
 # --- early returns (no signal deps) ---------------------------------------
@@ -133,17 +157,14 @@ def test_winner_is_global_min_regardless_of_order(monkeypatch):
     assert margin == 2.5
 
 
-def test_single_covered_candidate_is_infinite_margin(monkeypatch):
-    # Only candidate a has events in the window; b has none -> a is the confident
-    # winner (the read's junction signal only fits a's claimed exon structure).
+def test_single_scored_candidate_abstains(monkeypatch):
+    # Technical scoring absence for b is not biological evidence against b.
     a, b = _wobble_pair()
     _patch_scores(monkeypatch, {"a": (1.2, 7), "b": (float("nan"), 0)})
-    idx, margin = m2.m2_resolve_tie(
+    assert m2.m2_resolve_tie(
         "r0", "ACGT", [a, b], "/x.blow5",
         krill_aligner=object(), mappy_aligners=[object(), object()],
-    )
-    assert idx == 0
-    assert math.isinf(margin)
+    ) == (None, 0.0)
 
 
 def test_no_candidate_covered_returns_none(monkeypatch):
@@ -156,17 +177,13 @@ def test_no_candidate_covered_returns_none(monkeypatch):
     assert out == (None, 0.0)
 
 
-def test_none_mappy_aligner_skips_candidate(monkeypatch):
-    # A None aligner (candidate had no sequence) is skipped; the other wins.
+def test_none_mappy_aligner_causes_abstention(monkeypatch):
     a, b = _wobble_pair()
     _patch_scores(monkeypatch, {"a": (1.0, 5), "b": (0.1, 5)})
-    idx, margin = m2.m2_resolve_tie(
+    assert m2.m2_resolve_tie(
         "r0", "ACGT", [a, b], "/x.blow5",
         krill_aligner=object(), mappy_aligners=[object(), None],
-    )
-    # b is skipped (None aligner) -> only a scored -> infinite margin.
-    assert idx == 0
-    assert math.isinf(margin)
+    ) == (None, 0.0)
 
 
 # --- return_scored: score-gated fallback split (mk1) ----------------------
@@ -186,18 +203,14 @@ def test_return_scored_both_scored_best_first(monkeypatch):
     assert scored == [1, 0]
 
 
-def test_return_scored_mixed_excludes_unscored(monkeypatch):
-    # Only a scores -> scored_idxs == [0]; b (no events) is excluded for this read.
+def test_return_scored_mixed_preserves_full_m1_fallback(monkeypatch):
     a, b = _wobble_pair()
     _patch_scores(monkeypatch, {"a": (1.2, 7), "b": (float("nan"), 0)})
-    idx, margin, scored = m2.m2_resolve_tie(
+    assert m2.m2_resolve_tie(
         "r0", "ACGT", [a, b], "/x.blow5",
         krill_aligner=object(), mappy_aligners=[object(), object()],
         return_scored=True,
-    )
-    assert idx == 0
-    assert math.isinf(margin)
-    assert scored == [0]
+    ) == (None, 0.0, [])
 
 
 def test_return_scored_none_scored_empty_list(monkeypatch):

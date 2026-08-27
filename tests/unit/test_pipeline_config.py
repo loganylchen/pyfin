@@ -1,4 +1,10 @@
-from fin.pipeline.config import PipelineConfig
+import pytest
+
+from fin.pipeline.config import (
+    PIPELINE_PROFILES,
+    PipelineConfig,
+    resolve_profile_values,
+)
 
 
 def test_config_minimal_instantiation():
@@ -41,6 +47,14 @@ def test_config_mono_exon_gate_defaults_off():
     assert c.drop_mono_exon_novel is False
     assert c.min_mono_exon_reads == 0
     assert c.min_mono_exon_length == 0
+
+
+def test_config_junction_snap_defaults_off():
+    c = PipelineConfig(bam_path="/tmp/x.bam")
+    assert c.junction_snap is False
+    assert c.junction_snap_tolerance == 6
+    assert c.junction_snap_min_support == 2
+    assert c.junction_snap_min_ratio == 2.0
 
 
 def test_config_junction_support_gate_default_on():
@@ -99,3 +113,127 @@ def test_config_backward_compat_no_new_args():
         output_gtf="/tmp/out.gtf",
     )
     assert c.output_gtf == "/tmp/out.gtf"
+
+
+def test_config_isoform_fraction_uses_family_locus_by_default():
+    c = PipelineConfig(bam_path="/tmp/x.bam")
+    assert c.isoform_fraction_locus == "family"
+
+
+def test_config_m2_metric_defaults():
+    c = PipelineConfig(bam_path="/tmp/x.bam")
+    assert c.m2_metric == "mean"
+    assert c.m2_summed_llr_margin == 2.0
+    assert c.m2_summed_llr_flank == 6
+
+
+def test_named_profiles_separate_sirv_and_real_finalize_gates():
+    assert PIPELINE_PROFILES["sirv"]["min_abundance"] == 3.0
+    assert PIPELINE_PROFILES["sirv"]["strict_novel_abundance_floor"] is False
+    assert PIPELINE_PROFILES["sirv"]["floor_gtf_abundance"] is True
+    assert PIPELINE_PROFILES["sirv"]["min_fulllen_fraction"] == 0.1
+    assert PIPELINE_PROFILES["sirv"]["min_polya5p_reads"] == 0
+    assert PIPELINE_PROFILES["sirv"]["m2_metric"] == "auto"
+    assert PIPELINE_PROFILES["sirv"]["m2_summed_llr_margin"] == 1.0
+    assert PIPELINE_PROFILES["sirv"]["m2_summed_llr_flank"] == 4
+    assert PIPELINE_PROFILES["real-drna"]["min_abundance"] == 1.0
+    assert PIPELINE_PROFILES["real-drna"]["strict_novel_abundance_floor"] is True
+    assert PIPELINE_PROFILES["real-drna"]["max_soft_mass_ratio"] == 0.0
+    assert PIPELINE_PROFILES["real-drna"]["min_fulllen_fraction"] == 0.0
+    assert PIPELINE_PROFILES["real-drna"]["min_polya5p_reads"] == 0
+    assert PIPELINE_PROFILES["real-drna"]["drop_mono_exon_novel"] is True
+    assert PIPELINE_PROFILES["real-drna"]["min_mono_exon_reads"] == 5
+    assert PIPELINE_PROFILES["real-drna"]["junction_snap"] is True
+    assert PIPELINE_PROFILES["real-drna"]["junction_snap_tolerance"] == 6
+    assert PIPELINE_PROFILES["real-drna"]["junction_snap_min_support"] == 2
+    assert PIPELINE_PROFILES["real-drna"]["junction_snap_min_ratio"] == 2.0
+    assert PIPELINE_PROFILES["real-drna"]["m2_metric"] == "summed_llr"
+    assert PIPELINE_PROFILES["real-drna"]["m2_summed_llr_margin"] == 1.0
+    assert PIPELINE_PROFILES["real-drna"]["m2_summed_llr_flank"] == 8
+    assert PIPELINE_PROFILES["real-drna-precision"]["min_novel_reads"] == 2
+    assert PIPELINE_PROFILES["real-drna-precision"]["min_mono_exon_reads"] == 5
+
+
+def test_profile_resolution_preserves_explicit_overrides():
+    values = {
+        "min_abundance": 99.0,
+        "min_fulllen_fraction": 99.0,
+        "m2_metric": "off",
+    }
+    resolved = resolve_profile_values(
+        "sirv", values, explicit_fields={"min_abundance", "m2_metric"}
+    )
+    assert resolved["min_abundance"] == 99.0
+    assert resolved["m2_metric"] == "off"
+    assert resolved["min_fulllen_fraction"] == 0.1
+
+
+def test_profile_resolution_rejects_unknown_name():
+    with pytest.raises(ValueError, match="unknown profile"):
+        resolve_profile_values("unknown", {})
+
+
+def test_programmatic_from_profile_matches_cli_precedence():
+    c = PipelineConfig.from_profile(
+        "sirv", bam_path="/tmp/x.bam", min_abundance=2.0, m2_metric="off"
+    )
+    assert c.profile == "sirv"
+    assert c.min_abundance == 2.0
+    assert c.floor_gtf_abundance is True
+    assert c.min_polya5p_reads == 0
+    assert c.m2_metric == "off"
+    assert c.profile_overrides == ("m2_metric", "min_abundance")
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("junction_snap_tolerance", 0),
+        ("junction_snap_min_support", 0),
+        ("junction_snap_min_ratio", 0.5),
+    ],
+)
+def test_config_validate_rejects_invalid_junction_snap_values(
+    tmp_path, field, value
+):
+    bam = tmp_path / "input.bam"
+    bam.touch()
+    config = PipelineConfig(bam_path=str(bam))
+    setattr(config, field, value)
+    with pytest.raises(ValueError, match=field):
+        config.validate()
+
+
+def test_programmatic_sirv_auto_metric_routes_by_guide(tmp_path):
+    unguided = PipelineConfig.from_profile("sirv", bam_path="/tmp/x.bam")
+    assert unguided.m2_metric == "summed_llr"
+    assert unguided.m2_metric_route == "auto-unguided"
+
+    gtf = tmp_path / "guide.gtf"
+    gtf.write_text(
+        "chr1\tt\ttranscript\t1\t10\t.\t+\t.\ttranscript_id \"a\";\n"
+        "chr1\tt\ttranscript\t20\t30\t.\t+\t.\ttranscript_id \"b\";\n"
+    )
+    guided = PipelineConfig.from_profile(
+        "sirv", bam_path="/tmp/x.bam", gtf_path=str(gtf)
+    )
+    assert guided.m2_metric == "mean"
+    assert guided.m2_metric_route == "auto-guided"
+
+
+def test_config_validate_rejects_invalid_isoform_fraction_locus(tmp_path):
+    bam = tmp_path / "x.bam"
+    bam.touch()
+    c = PipelineConfig(
+        bam_path=str(bam), isoform_fraction_locus="gene"
+    )
+    with pytest.raises(ValueError, match="isoform_fraction_locus"):
+        c.validate()
+
+
+def test_config_validate_rejects_invalid_m2_metric(tmp_path):
+    bam = tmp_path / "input.bam"
+    bam.touch()
+    c = PipelineConfig(bam_path=str(bam), m2_metric="invalid")
+    with pytest.raises(ValueError, match="m2_metric"):
+        c.validate()

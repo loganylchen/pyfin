@@ -24,6 +24,7 @@ from fin.io.interval_manager import GenomicInterval, generate_isolated_intervals
 from fin.pipeline.assignment import Assigner
 from fin.pipeline.config import PipelineConfig
 from fin.pipeline.finalize import finalize_outputs, write_unfiltered_diagnostic
+from fin.pipeline.junction_snap import apply_junction_snap
 from fin.pipeline.selection import (
     canonical_gate_select,
     junction_dominance_select,
@@ -146,6 +147,9 @@ class PipelineRunner:
         )
         aggregated, _global_outcomes = select_global(
             self.config, aggregated, self._apply_polya5p_filter,
+        )
+        aggregated = apply_junction_snap(
+            self.config, aggregated, getattr(self, "_genome_fasta", None)
         )
         return finalize_outputs(
             self.config, aggregated, output_gtf, output_tsv, self._gtf_reader,
@@ -348,6 +352,7 @@ class PipelineRunner:
                 start=cand.start,
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
+                family_id=cand.family_id,
                 assigned_read_ids=tuple(assigned[j]),
                 breakpoint_left=cand.breakpoint_left,
                 breakpoint_right=cand.breakpoint_right,
@@ -511,6 +516,7 @@ class PipelineRunner:
                 start=cand.start,
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
+                family_id=cand.family_id,
                 assigned_read_ids=tuple(assigned[j]),
                 breakpoint_left=cand.breakpoint_left,
                 breakpoint_right=cand.breakpoint_right,
@@ -809,17 +815,19 @@ class PipelineRunner:
                             TranscriptCandidate,
                         )
 
+                        short_chain = IntronChain(introns=schain)
                         seq = _build_spliced_sequence(
-                            genome_seq, start, end,
-                            IntronChain(introns=schain), strand,
+                            genome_seq, start, end, short_chain, strand,
                         )
                         if not seq:
                             continue
 
-                        new_id = _generate_novel_id()
+                        new_id = _generate_novel_id(
+                            cand.chrom, strand, start, end, short_chain
+                        )
                         new_cand = TranscriptCandidate(
                             candidate_id=new_id,
-                            intron_chain=IntronChain(introns=schain),
+                            intron_chain=short_chain,
                             three_prime_pos=(end if strand == "+" else start),
                             sequence=seq,
                             source="novel",
@@ -828,6 +836,7 @@ class PipelineRunner:
                             strand=strand,
                             start=start,
                             end=end,
+                            family_id=cand.family_id,
                         )
                         # Append in lockstep with the parallel accumulators so the
                         # emission loop (which enumerates cand_list) picks it up.
@@ -863,6 +872,7 @@ class PipelineRunner:
                 start=cand.start,
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
+                family_id=cand.family_id,
                 assigned_read_ids=tuple(assigned[j]) if kept else (),
                 breakpoint_left=cand.breakpoint_left,
                 breakpoint_right=cand.breakpoint_right,
@@ -1068,10 +1078,7 @@ class PipelineRunner:
 
         m1 = compute_mappy_distance(read_seqs, cand_list, kept_read_ids)
         m2_dummy = np.zeros((n_reads_em, n_cands_em), dtype=np.float32)
-        m3_dummy = np.zeros((n_reads_em, n_reads_em), dtype=np.float32)
-        dist_read_to_tx, _, _ = build_em_matrices(
-            "m1", m1, m2_dummy, m3_dummy, em_beta=0.0,
-        )
+        dist_read_to_tx, _, _ = build_em_matrices("m1", m1, m2_dummy)
         dist_read_to_read = np.zeros((n_reads_em, n_reads_em), dtype=np.float32)
         R, hard_assignments, _ = em_with_coherence(
             dist_read_to_tx=dist_read_to_tx,
@@ -1152,11 +1159,9 @@ class PipelineRunner:
         M1/AS is used ONLY as a hard selector — it picks each read's best-AS tie
         set and masks mappability — and the per-event junction NLL is the SOLE
         graded distance over that tie set (m2_resolve_tie semantics, NOT the dense
-        read×candidate matrix, which collapses). Optionally adds the M3 read×read
-        junction-window DTW coherence when ``config.m3_coherence`` is True
-        (β=em_beta); OFF by default because the pairwise DTW is expensive. All
-        signal scoring is in-memory krill — no f5c CLI. (``m4_source`` does not
-        affect this path.)
+        read×candidate matrix, which collapses). Production uses no read×read
+        coherence term. All signal scoring is in-memory krill; there is no f5c
+        CLI path.
         """
         qo = self._assigner.assign(
             candidate_set, read_ids,
@@ -1169,9 +1174,9 @@ class PipelineRunner:
         )
         logger.info(
             "m2_em interval %s: %d reads -> %d candidates "
-            "(ties=%d refined=%d m3=%s beta=%.2f)",
+            "(ties=%d refined=%d)",
             interval.region_string, len(read_ids), len(qo.cand_list),
-            qo.n_ties, qo.n_refined, self.config.m3_coherence, qo.beta_use,
+            qo.n_ties, qo.n_refined,
         )
         return quant_results
 

@@ -13,8 +13,8 @@ that tie set. The d_tx skeleton rules are:
 
 where sigma2 = max(median of the positive scored cells, 1e-3).
 
-M3 read×read DTW coherence is opt-in (``m3_coherence``): default OFF means
-``build_m3_coherence`` is never called and the EM runs with beta=0.
+Production M1/M2 assignment has no read-by-read coherence term and runs the
+EM engine with ``beta=0``.
 
 These tests mock the I/O boundaries (mappy multimap, the krill ``_tie_nll`` pass,
 ``em_with_coherence``, ``quantify_transcripts``) so only the seed math is exercised.
@@ -97,7 +97,7 @@ def _fake_tie_nll(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
     return dict(NLLS), dict(TIES), n_ties, n_refined, {}
 
 
-def _run(cfg, captured, m3_matrix=None, tie_nll_fn=_fake_tie_nll):
+def _run(cfg, captured, tie_nll_fn=_fake_tie_nll):
     """Run _quant_m2_em with all I/O boundaries mocked; capture EM inputs."""
 
     def _fake_em(**kwargs):
@@ -121,13 +121,8 @@ def _run(cfg, captured, m3_matrix=None, tie_nll_fn=_fake_tie_nll):
         "fin.pipeline.assignment.em_with_coherence", side_effect=_fake_em
     ), patch(
         "fin.pipeline.assignment.quantify_transcripts", return_value=[]
-    ), patch(
-        "fin.scoring.m3_junction_coherence.build_m3_coherence",
-        return_value=(m3_matrix if m3_matrix is not None
-                      else np.zeros((N_R, N_R), dtype=np.float32)),
-    ) as mock_m3:
+    ):
         runner._quant_m2_em(cs, list(READ_IDS), _interval())
-    return mock_m3
 
 
 class TestPureSeedSkeleton:
@@ -139,7 +134,7 @@ class TestPureSeedSkeleton:
             bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
             m2_diff_cover_gate=False,
         )
-        self.mock_m3 = _run(cfg, self.captured)
+        _run(cfg, self.captured)
         self.d_tx = np.asarray(self.captured["dist_read_to_tx"])
         # sigma2 = median of positive scored cells [3, 3, 4] = 3.0
         self.sigma2 = 3.0
@@ -171,8 +166,7 @@ class TestPureSeedSkeleton:
         assert self.d_tx[3, 0] == pytest.approx(0.0)
         assert self.d_tx[3, 1] == pytest.approx(0.0)
 
-    def test_m3_off_means_no_dtw_and_beta_zero(self):
-        self.mock_m3.assert_not_called()
+    def test_read_coherence_is_disabled(self):
         assert self.captured["beta"] == 0.0
         d_rr = np.asarray(self.captured["dist_read_to_read"])
         assert d_rr.shape == (N_R, N_R)
@@ -367,7 +361,7 @@ class TestTieNllKrillUnavailable:
     path (so the gate's unique-best/drop logic is well-defined), but leaves them
     empty on the gate-OFF path (legacy byte-identical behavior)."""
 
-    def _call(self, gate):
+    def _call(self, gate, metric="mean"):
         cands = [_cand(f"c{j}") for j in range(N_C)]
         kept = ["r0", "r1"]
         read_seqs = {"r0": "ACGT" * 25, "r1": "ACGT" * 25}
@@ -377,7 +371,7 @@ class TestTieNllKrillUnavailable:
         )
         cfg = PipelineConfig(
             bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
-            m2_diff_cover_gate=gate,
+            m2_diff_cover_gate=gate, m2_metric=metric,
         )
         runner = PipelineRunner(cfg)
         with patch(
@@ -396,23 +390,32 @@ class TestTieNllKrillUnavailable:
         assert ties == {}
         assert nlls == {} and cover == {}
 
+    def test_metric_off_exposes_m1_ties_without_krill(self):
+        nlls, ties, n_ties, n_ref, cover = self._call(gate=False, metric="off")
+        assert ties == {0: [1], 1: [0, 2]}
+        assert n_ties == 1
+        assert nlls == {} and n_ref == 0 and cover == {}
 
-class TestM3Gate:
-    """m3_coherence=True turns on the DTW term at beta=em_beta."""
 
-    def test_m3_on_calls_build_and_uses_em_beta(self):
+def _fake_tie_nll_partial(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+    ties = {i: [0, 1] for i in range(N_R)}
+    # A single technically scorable hypothesis is not a biological contrast.
+    return {0: {0: 1.0}}, ties, N_R, 0, {0: True}
+
+
+class TestM2PartialScoringAbstains:
+    def test_single_scored_hypothesis_keeps_flat_m1_tie(self):
         captured = {}
-        # Non-zero DTW so the sigma3 normalization path runs.
-        m3 = np.full((N_R, N_R), 2.0, dtype=np.float32)
-        np.fill_diagonal(m3, 0.0)
         cfg = PipelineConfig(
-            bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
-            m3_coherence=True, em_beta=1.0, m2_diff_cover_gate=False,
+            bam_path="/tmp/x.bam",
+            quant_mode="m2_em",
+            use_gpu=False,
+            m2_metric="summed_llr",
+            m2_diff_cover_gate=True,
+            m2_summed_llr_margin=2.0,
         )
-        mock_m3 = _run(cfg, captured, m3_matrix=m3)
-        mock_m3.assert_called_once()
-        assert captured["beta"] == 1.0
-        d_rr = np.asarray(captured["dist_read_to_read"])
-        assert d_rr.shape == (N_R, N_R)
-        # sigma3 = median of non-zero DTW (all 2.0) -> normalized to 1.0.
-        assert d_rr.max() == pytest.approx(1.0)
+        _run(cfg, captured, tie_nll_fn=_fake_tie_nll_partial)
+        d_tx = np.asarray(captured["dist_read_to_tx"])
+        assert d_tx[0, 0] == pytest.approx(0.0)
+        assert d_tx[0, 1] == pytest.approx(0.0)
+        assert d_tx[0, 2] == pytest.approx(MISSING)

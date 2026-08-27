@@ -1,4 +1,10 @@
-# pyfin — current production state (2026-07-22)
+# pyfin — production-state snapshot (2026-07-22, superseded)
+
+> Historical evidence only. This file predates the committed family pipeline and
+> the 2026-08-26/27 profile integration, guide-aware SIRV M2 routing, real mono
+> selection, junction consensus, and stable IDs. Current named defaults, metrics,
+> and artifact paths are authoritative in `PROFILE_OPTIMIZATION.md` and each
+> run's source-hashed `run_manifest.json`.
 
 Snapshot of the DEFAULT `fin` CLI pipeline as it stands on `dev` (HEAD `828565a` + the
 uncommitted generation/quant body about to be committed). Written to give a faithful

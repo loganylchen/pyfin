@@ -63,30 +63,27 @@ def _ablation_result(row_id: str = "R3", label: str = "test",
 # ---------------------------------------------------------------------------
 
 class TestAblationRowsDefinitions:
-    def test_seven_rows_defined(self):
-        assert len(ABLATION_ROWS) == 7
+    def test_six_rows_defined(self):
+        assert len(ABLATION_ROWS) == 6
 
     def test_row_ids_ordered(self):
         ids = [r.row_id for r in ABLATION_ROWS]
-        assert ids == ["R1a", "R1b", "R1c", "R2", "R3", "R4", "R5"]
+        assert ids == ["R1a", "R1b", "R1c", "R2", "R3", "R5"]
 
     def test_r1a_argmax_unfiltered(self):
         r1a = next(r for r in ABLATION_ROWS if r.row_id == "R1a")
         assert r1a.quant_mode == "argmax"
-        assert r1a.m4_source == "none"
         assert r1a.em_max_iter_override is None
         assert r1a.enable_score_filter is False
 
     def test_r1b_argmax_filtered(self):
         r1b = next(r for r in ABLATION_ROWS if r.row_id == "R1b")
         assert r1b.quant_mode == "argmax"
-        assert r1b.m4_source == "none"
         assert r1b.enable_score_filter is True
 
     def test_r1c_mappy_em_filtered(self):
         r1c = next(r for r in ABLATION_ROWS if r.row_id == "R1c")
         assert r1c.quant_mode == "m1_em"
-        assert r1c.m4_source == "none"
         assert r1c.em_max_iter_override is None
         assert r1c.enable_score_filter is True
 
@@ -94,32 +91,17 @@ class TestAblationRowsDefinitions:
         r2 = next(r for r in ABLATION_ROWS if r.row_id == "R2")
         assert r2.quant_mode == "m2_em"
         assert r2.em_max_iter_override == 1
-        # R2 isolates "single-step EM" as the only variable vs R4 (coherence on).
-        assert r2.m4_source == "diff_region"
-        assert r2.m3_coherence is True
         assert r2.enable_score_filter is False
 
-    def test_r3_no_coherence(self):
-        """AC5: R3 disables coherence (m3_coherence=False -> EM beta=0)."""
+    def test_r3_unfiltered(self):
         r3 = next(r for r in ABLATION_ROWS if r.row_id == "R3")
         assert r3.quant_mode == "m2_em"
-        assert r3.m4_source == "none"
-        assert r3.m3_coherence is False
         assert r3.em_max_iter_override is None
         assert r3.enable_score_filter is False
 
-    def test_r4_diff_region(self):
-        r4 = next(r for r in ABLATION_ROWS if r.row_id == "R4")
-        assert r4.quant_mode == "m2_em"
-        assert r4.m4_source == "diff_region"
-        assert r4.m3_coherence is True
-        assert r4.enable_score_filter is False
-
-    def test_r5_diff_region_scored(self):
+    def test_r5_filtered(self):
         r5 = next(r for r in ABLATION_ROWS if r.row_id == "R5")
         assert r5.quant_mode == "m2_em"
-        assert r5.m4_source == "diff_region"
-        assert r5.m3_coherence is True
         assert r5.enable_score_filter is True
 
 
@@ -132,8 +114,6 @@ class TestAblationRowConfigDefaults:
         cfg = AblationRowConfig(row_id="X", label="test")
         assert cfg.quant_mode == "m2_em"
         assert cfg.em_max_iter_override is None
-        assert cfg.m4_source == "diff_region"
-        assert cfg.m3_coherence is False
         assert cfg.enable_score_filter is True
 
 
@@ -247,7 +227,7 @@ class TestAblationIO:
         from fin.ablation.io import write_ablation_summary
         import csv
 
-        results = [self._make_result("R3", "em_no_coherence")]
+        results = [self._make_result("R3", "m2_em_unfiltered")]
         with tempfile.TemporaryDirectory() as tmp:
             path = write_ablation_summary(results, tmp)
             with open(path, newline="") as f:
@@ -255,7 +235,7 @@ class TestAblationIO:
                 rows = list(reader)
         assert len(rows) == 2  # tx1 + tx2
         assert rows[0]["row_id"] == "R3"
-        assert rows[0]["label"] == "em_no_coherence"
+        assert rows[0]["label"] == "m2_em_unfiltered"
         # Sorted by candidate_id
         assert rows[0]["candidate_id"] == "tx1"
         assert rows[1]["candidate_id"] == "tx2"
@@ -281,18 +261,18 @@ class TestAblationIO:
     def test_write_per_row_tsv_creates_file(self):
         from fin.ablation.io import write_per_row_tsv
 
-        result = self._make_result("R4", "diff_region_dtw")
+        result = self._make_result("R3", "m2_em_unfiltered")
         with tempfile.TemporaryDirectory() as tmp:
             path = write_per_row_tsv(result, tmp)
             assert Path(path).exists()
-            assert "R4" in Path(path).name
-            assert "diff_region_dtw" in Path(path).name
+            assert "R3" in Path(path).name
+            assert "m2_em_unfiltered" in Path(path).name
 
     def test_write_per_row_tsv_content(self):
         from fin.ablation.io import write_per_row_tsv
         import csv
 
-        result = self._make_result("R5", "diff_region_dtw_scored")
+        result = self._make_result("R5", "m2_em_filtered")
         with tempfile.TemporaryDirectory() as tmp:
             path = write_per_row_tsv(result, tmp)
             with open(path, newline="") as f:

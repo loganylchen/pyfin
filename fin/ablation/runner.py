@@ -1,28 +1,17 @@
-"""Ablation runner: sweeps quant-mode configurations over a fixed interval set.
+"""Ablation runner for active quantification configurations.
 
-Each ablation row (R1..R5) maps to a PipelineConfig override that isolates one
-component of the pipeline. The benchmark driver (``benchmarks/ablation_5rows.py``)
-runs the full ``PipelineRunner`` once per row, applying the row's overrides via
-``dataclasses.replace``; all signal scoring is in-memory krill (no f5c CLI).
+Each row maps to a ``PipelineConfig`` override applied by
+``benchmarks/ablation_5rows.py``. The former R4 read-by-read DTW coherence row
+was retired with M3; its prototype is preserved under
+``experiments/m3_coherence``.
 
-Row definitions (AC1):
-  R1a quant_mode="argmax"           mappy argmax + M2 tiebreak, no EM
-  R1b quant_mode="argmax"           + score filters on
-  R1c quant_mode="m1_em"            mappy-distance EM (β=0), score filters on
-  R2  quant_mode="m2_em",           single-step krill EM + DTW coherence
-      em_max_iter_override=1,        (isolates iteration count vs R4)
-      m3_coherence=True
-  R3  quant_mode="m2_em",           krill EM, coherence disabled (β=0)
-      m3_coherence=False
-  R4  quant_mode="m2_em",           krill EM + junction-window DTW coherence
-      m3_coherence=True
-  R5  quant_mode="m2_em",           R4 + score filters on (production-equivalent)
-      m3_coherence=True,
-      enable_score_filter=True
-
-Note: the m2_em assembly path gates M3 read×read DTW coherence on
-``PipelineConfig.m3_coherence`` (NOT ``m4_source``). ``m4_source`` is retained
-because the ablation rows below still use it to select the coherence source.
+Active rows:
+  R1a  mappy argmax + M2 tiebreak, filters off
+  R1b  mappy argmax + M2 tiebreak, filters on
+  R1c  mappy-distance EM, filters on
+  R2   single-step M2-seeded EM, filters off
+  R3   converged M2-seeded EM, filters off
+  R5   converged M2-seeded EM, filters on
 """
 
 from __future__ import annotations
@@ -40,39 +29,30 @@ from fin.pipeline.config import PipelineConfig
 class AblationRowConfig:
     """One row in the ablation sweep."""
 
-    row_id: str          # e.g. "R1a", "R2", ...
-    label: str           # human-readable description
-    quant_mode: str = "m2_em"   # "argmax" | "m1_em" | "m2_em"
+    row_id: str
+    label: str
+    quant_mode: str = "m2_em"
     em_max_iter_override: Optional[int] = None
-    m4_source: str = "diff_region"   # "diff_region" | "none" (ablation coherence src)
-    m3_coherence: bool = False  # gate read×read DTW coherence in the m2_em path
     enable_score_filter: bool = True
 
 
-# Canonical ablation rows (AC1).
 ABLATION_ROWS: List[AblationRowConfig] = [
     AblationRowConfig(
         row_id="R1a",
         label="mappy_argmax_only",
         quant_mode="argmax",
-        em_max_iter_override=None,
-        m4_source="none",
         enable_score_filter=False,
     ),
     AblationRowConfig(
         row_id="R1b",
         label="mappy_argmax_filtered",
         quant_mode="argmax",
-        em_max_iter_override=None,
-        m4_source="none",
         enable_score_filter=True,
     ),
     AblationRowConfig(
         row_id="R1c",
         label="mappy_em_filtered",
         quant_mode="m1_em",
-        em_max_iter_override=None,
-        m4_source="none",
         enable_score_filter=True,
     ),
     AblationRowConfig(
@@ -80,35 +60,18 @@ ABLATION_ROWS: List[AblationRowConfig] = [
         label="single_step_em",
         quant_mode="m2_em",
         em_max_iter_override=1,
-        m4_source="diff_region",
-        m3_coherence=True,
         enable_score_filter=False,
     ),
     AblationRowConfig(
         row_id="R3",
-        label="em_no_coherence",
+        label="m2_em_unfiltered",
         quant_mode="m2_em",
-        em_max_iter_override=None,
-        m4_source="none",
-        m3_coherence=False,
-        enable_score_filter=False,
-    ),
-    AblationRowConfig(
-        row_id="R4",
-        label="diff_region_dtw",
-        quant_mode="m2_em",
-        em_max_iter_override=None,
-        m4_source="diff_region",
-        m3_coherence=True,
         enable_score_filter=False,
     ),
     AblationRowConfig(
         row_id="R5",
-        label="diff_region_dtw_scored",
+        label="m2_em_filtered",
         quant_mode="m2_em",
-        em_max_iter_override=None,
-        m4_source="diff_region",
-        m3_coherence=True,
         enable_score_filter=True,
     ),
 ]
@@ -136,7 +99,7 @@ class AblationResult:
 
 
 def _nan_to_row_mean(m: np.ndarray) -> np.ndarray:
-    """AC8: replace NaN cells with the row mean; if entire row is NaN use 0."""
+    """AC8: replace NaN cells with the row mean; all-NaN rows become zero."""
     out = m.copy()
     for i in range(out.shape[0]):
         row = out[i]

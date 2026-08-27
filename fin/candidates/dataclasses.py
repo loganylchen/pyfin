@@ -51,6 +51,9 @@ class TranscriptCandidate:
     strand: str
     start: int
     end: int
+    # Stable discovery splice-family identity. None for mono, fusion, and
+    # legacy discovery paths that do not construct structural families.
+    family_id: Optional[str] = None
 
     # Fusion-specific (populated only when source == "fusion")
     fusion_junction: Optional[Tuple[int, int]] = None

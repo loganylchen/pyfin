@@ -2,6 +2,7 @@
 import pytest
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 BENCH_SH = Path(__file__).resolve().parent.parent.parent / "benchmarks" / "run_benchmark.sh"
@@ -49,7 +50,7 @@ def test_compare_results_produces_tsv(tmp_path):
 
     out = tmp_path / "cmp.tsv"
     r = subprocess.run(
-        ["python", str(COMPARE_PY), "--input-dir", str(input_dir), "--output", str(out)],
+        [sys.executable, str(COMPARE_PY), "--input-dir", str(input_dir), "--output", str(out)],
         capture_output=True,
         text=True,
     )
@@ -70,7 +71,7 @@ def test_compare_results_handles_empty_input_dir(tmp_path):
     out = tmp_path / "empty.tsv"
 
     r = subprocess.run(
-        ["python", str(COMPARE_PY), "--input-dir", str(input_dir), "--output", str(out)],
+        [sys.executable, str(COMPARE_PY), "--input-dir", str(input_dir), "--output", str(out)],
         capture_output=True,
         text=True,
     )
@@ -101,7 +102,7 @@ def test_compare_results_counts_gtf_transcripts(tmp_path):
 
     out = tmp_path / "cmp.tsv"
     r = subprocess.run(
-        ["python", str(COMPARE_PY), "--input-dir", str(input_dir), "--output", str(out)],
+        [sys.executable, str(COMPARE_PY), "--input-dir", str(input_dir), "--output", str(out)],
         capture_output=True,
         text=True,
     )

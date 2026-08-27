@@ -18,10 +18,20 @@ from fin.candidates.dataclasses import IntronChain
 from fin.candidates.discovery import (
     _build_spliced_sequence,
     _exons_from_chain,
+    _generate_novel_id,
     _reverse_complement,
     discover_candidates,
 )
 from fin.io.interval_manager import GenomicInterval
+
+
+def test_novel_candidate_id_is_stable_and_structure_derived():
+    chain = IntronChain(introns=((200, 300), (400, 500)))
+    first = _generate_novel_id("chr1", "+", 100, 600, chain)
+    assert first == _generate_novel_id("chr1", "+", 100, 600, chain)
+    assert first.startswith("novel_")
+    assert first != _generate_novel_id("chr1", "+", 101, 600, chain)
+    assert first != _generate_novel_id("chr1", "-", 100, 600, chain)
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +57,8 @@ def _write_bam_with_spliced_reads(tmp_path: str, chrom: str, chrom_len: int,
             mlen = sum(length for op, length in r["cigar"] if op in (0, 1, 4, 7, 8))
             seg.query_sequence = "A" * mlen
             seg.flag = 0x10 if r.get("reverse", False) else 0
+            if r.get("secondary", False):
+                seg.flag |= 0x100
             seg.reference_id = 0
             seg.reference_start = r["pos"]
             seg.mapping_quality = 60
@@ -132,6 +144,35 @@ class TestBuildSplicedSequence:
 
 
 class TestDiscoverCandidatesNoGTF:
+    def test_secondary_alignment_does_not_generate_a_second_structure(self, tmp_path):
+        genome = "A" * 500
+        reads = [
+            {
+                "name": "multi",
+                "pos": 20,
+                "cigar": [(0, 80), (3, 100), (0, 80)],
+            },
+            {
+                "name": "multi",
+                "pos": 20,
+                "secondary": True,
+                "cigar": [(0, 40), (3, 40), (0, 40), (3, 40), (0, 40)],
+            },
+        ]
+        bam_path = _write_bam_with_spliced_reads(
+            str(tmp_path), "chr1", chrom_len=500, reads=reads
+        )
+        result = discover_candidates(
+            interval=GenomicInterval(chrom="chr1", start=0, end=400, strand="+"),
+            bam_path=bam_path,
+            gtf_reader=None,
+            genome_fasta=genome,
+        )
+        assert result.read_ids == {"multi"}
+        assert len(result.candidates) == 1
+        assert result.candidates[0].intron_chain.introns == ((100, 200),)
+        assert result.candidates[0].supporting_read_ids == {"multi"}
+
     def test_novel_candidates_have_nonempty_sequences(self, tmp_path):
         """gtf_reader=None: every novel candidate must carry a non-empty,
         correctly spliced sequence assembled from the genome FASTA."""

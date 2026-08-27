@@ -6,6 +6,8 @@ port of the ``benchmarks/diag_fp_gtf_features.py`` relabund lever (Cufflinks
 """
 from __future__ import annotations
 
+import pytest
+
 from fin.analysis.quantification import QuantResult, isoform_fraction_drops
 
 
@@ -19,6 +21,7 @@ def _qr(
     start=0,
     end=1000,
     exons=None,
+    family_id=None,
 ):
     if exons is None:
         exons = ((start, 400), (600, end))  # 2 exons => multi-exon
@@ -33,11 +36,49 @@ def _qr(
         start=start,
         end=end,
         exons=exons,
+        family_id=family_id,
     )
 
 
-def _drops(results, thr):
-    return isoform_fraction_drops({qr.candidate_id: qr for qr in results}, thr)
+def _drops(results, thr, locus="family"):
+    return isoform_fraction_drops(
+        {qr.candidate_id: qr for qr in results}, thr, locus=locus
+    )
+
+
+def test_family_mode_keeps_overlap_from_another_family():
+    dominant = _qr("dom", 100.0, family_id="fam_a")
+    minor = _qr("min", 0.5, family_id="fam_b")
+    assert _drops([dominant, minor], 0.01) == set()
+
+
+def test_family_mode_drops_minor_inside_same_family():
+    dominant = _qr("dom", 100.0, family_id="fam_a")
+    minor = _qr("min", 0.5, family_id="fam_a")
+    assert _drops([dominant, minor], 0.01) == {"min"}
+
+
+def test_attached_gtf_contributes_to_family_maximum():
+    gtf = _qr("gtf", 100.0, source="gtf", family_id="fam_a")
+    minor = _qr("min", 0.5, family_id="fam_a")
+    assert _drops([gtf, minor], 0.01) == {"min"}
+
+
+def test_gtf_from_another_family_does_not_suppress_novel():
+    gtf = _qr("gtf", 100.0, source="gtf", family_id="fam_a")
+    minor = _qr("min", 0.5, family_id="fam_b")
+    assert _drops([gtf, minor], 0.01) == set()
+
+
+def test_overlap_mode_restores_historical_denominator():
+    dominant = _qr("dom", 100.0, family_id="fam_a")
+    minor = _qr("min", 0.5, family_id="fam_b")
+    assert _drops([dominant, minor], 0.01, locus="overlap") == {"min"}
+
+
+def test_invalid_locus_mode_is_rejected():
+    with pytest.raises(ValueError, match="locus"):
+        _drops([_qr("a", 1.0)], 0.01, locus="gene")
 
 
 def test_minor_overlapping_isoform_below_fraction_is_dropped():
