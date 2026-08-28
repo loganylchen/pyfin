@@ -188,6 +188,7 @@ def refit_survivor_abundance(
 
     forced_reads = 0
     forced_conflicts = 0
+    forced_orphaned_reads = 0
     renormalized_reads = 0
     orphaned_reads = 0
     pre_refit_survivor_mass = 0.0
@@ -229,7 +230,8 @@ def refit_survivor_abundance(
 
         if not probabilities:
             orphaned_reads += 1
-            max_conservation_error = max(max_conservation_error, 0.0)
+            if is_forced:
+                forced_orphaned_reads += 1
             continue
 
         assigned_mass = sum(probabilities.values())
@@ -324,9 +326,25 @@ def refit_survivor_abundance(
         "structural_identity": "not_checked_in_single_run",
         "input_reads": len(input_reads),
         "assignable_reads": len(assignable_reads),
+        # Scope: reads that entered interval quantification but received no
+        # responsibility row. Intervals skipped before quantification (no reads,
+        # no candidates) contribute nothing, so this is NOT a BAM-wide unaligned
+        # count. The legacy key is retained as an alias for existing consumers.
+        "interval_quantification_unassigned_reads": len(
+            input_reads - assignable_reads
+        ),
         "alignment_unassigned_reads": len(input_reads - assignable_reads),
+        # forced_reads and selection_orphaned_reads intentionally overlap: a
+        # forced read whose parent did not survive is counted in both.
+        # forced_orphaned_reads is that intersection, so
+        # forced + renormalized + orphaned - forced_orphaned = assignable.
+        "counter_semantics": (
+            "forced_reads and selection_orphaned_reads overlap by "
+            "forced_orphaned_reads; they are not a partition"
+        ),
         "forced_reads": forced_reads,
         "forced_conflict_reads": forced_conflicts,
+        "forced_orphaned_reads": forced_orphaned_reads,
         "renormalized_reads": renormalized_reads,
         "selection_orphaned_reads": orphaned_reads,
         "unassigned_mass": unassigned_mass,

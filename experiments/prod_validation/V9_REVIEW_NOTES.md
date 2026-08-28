@@ -3,6 +3,18 @@
 Reviewed source hash `42e1210dea81860686e76aaf9fa058fc8a65808e0a31367570d8526f4da17954`.
 No source change was made as a result of this review.
 
+Shipped as commit `05e303ab99e04d1f6f783140c9eddb5a0df68973` on `dev`.
+
+## Retired history backup
+
+Before the `experiments/` data paths were stripped from 20 unpublished commits,
+the full local history was preserved on branch `backup/dev-local-full` at
+`ba4fb7a0c4d87cdc66af15ac50627c76e7f4e579`. After the rewritten history was
+accepted and pushed, that branch was deleted and its unreachable objects were
+garbage-collected to reclaim Git storage. The large files themselves were never
+deleted; they remain on disk, untracked. Recording the SHA here keeps the
+provenance chain readable even though the objects are gone.
+
 ## Verified correct
 
 1. **Structural freeze is architectural, not incidental.** `min_gtf_abundance` /
@@ -82,7 +94,7 @@ responsibilities*, exact for single-interval reads and a documented
 equal-weight merge for the 0.0037% carried by several intervals. It is not a
 global EM or softmax rerun. `ALGORITHM.md` was updated to state this.
 
-### B. Diagnostics counters are not a partition
+### B. Diagnostics counters are not a partition [FIXED]
 
 `forced_reads + renormalized_reads + selection_orphaned_reads` exceeds
 `assignable_reads` because a forced read whose target did not survive is counted
@@ -92,35 +104,43 @@ in both `forced_reads` and `selection_orphaned_reads`.
   (overlap 6,382)
 - SIRV: 289 + 953 + 78 = 1,320 vs 1,310 assignable (overlap 10)
 
-Mass balance is still exact. A `forced_orphaned_reads` key would remove the
-ambiguity.
+Mass balance is still exact. **Fixed:** `forced_orphaned_reads` now records the
+intersection and `counter_semantics` documents it, so
+`forced + renormalized + orphaned - forced_orphaned = assignable` holds exactly.
+Measured live: SIRV 10, balanced 6,382, precision 4,657, replicate3 8,330.
 
-### C. `alignment_unassigned_reads` is a scoped metric
+### C. `alignment_unassigned_reads` is a scoped metric [FIXED]
 
 It counts reads that entered interval quantification but received no
 responsibility row. Intervals returning `None` early (no reads, no candidates)
 contribute nothing, so it is not a BAM-global unaligned count. Real balanced
-reports 851, whereas the BAM holds 295,252 distinct read names.
+reports 851, whereas the BAM holds 295,252 distinct read names. **Fixed:**
+`interval_quantification_unassigned_reads` is the scoped name;
+`alignment_unassigned_reads` is retained as a compatibility alias.
 
-### D. Audit mutates the artifact it audits
+### D. Audit mutates the artifact it audits [FIXED]
 
 `abundance_refit_audit.py::audit()` writes `structural_identity: "passed"` back
 into `abundance_refit.json` in place. The three-artifact determinism evidence
 remains valid because both compared runs were stamped identically, but a
-stamped run compared against an unstamped one would fail spuriously. Writing
-only `refit_identity.json` would remove the coupling.
+stamped run compared against an unstamped one would fail spuriously. **Fixed:**
+the verdict is written only to `refit_identity.json`; `abundance_refit.json` is
+never rewritten, and a regression test asserts byte equality across an audit.
 
-### E. Stale comment in `fin/pipeline/parallel.py`
+### E. Stale comment in `fin/pipeline/parallel.py` [FIXED]
 
 `run_parallel()` now states that aggregation is order-independent. Float
 summation is order-sensitive, which is precisely why
 `_order_interval_outputs()` exists. The comment could mislead a maintainer into
-deleting the canonicalization.
+deleting the canonicalization. **Fixed:** the docstring now states that
+aggregation is commutative but not bitwise associative and points at the
+canonicalization.
 
-### F. Dead statement
+### F. Dead statement [FIXED]
 
-`fin/analysis/abundance_refit.py` updates `max_conservation_error` with a
-constant `0.0` in the orphan branch; the statement has no effect.
+`fin/analysis/abundance_refit.py` updated `max_conservation_error` with a
+constant `0.0` in the orphan branch; the statement had no effect. **Fixed:**
+removed and replaced by the `forced_orphaned_reads` accounting.
 
 ## Empirical caveat worth surfacing
 
@@ -134,26 +154,49 @@ high-coverage loci. No survivor ended at abundance 0 in either run.
 ## Open design question: should the gates rerun after the refit?
 
 v9 requantifies a frozen survivor set. It is therefore *correct quantification
-under that set*, not a *fixed point of the abundance gates*. Offline audit of
-the absolute abundance floor only:
+under that set*, not a *fixed point of the abundance gates*.
 
-| Profile | Rows | Floor violations | Rate |
-| --- | ---: | ---: | ---: |
-| SIRV p00 (`>=3.0`, GTF floor raised to 3.0) | 81 | 0 | 0.000% |
-| balanced tuning (`>1.0`) | 11,281 | 2 | 0.018% |
-| balanced replicate3 (`>1.0`) | 15,656 | 2 | 0.013% |
-| precision tuning (`>1.0`) | 10,217 | 0 | 0.000% |
+`post_refit_gate_audit.py` reapplies every assignment-dependent gate to the
+refitted results inside a live run and reports what would be dropped, without
+changing the run. All four audit runs produced `assembly.gtf` and `scores.tsv`
+byte-identical to the release artifacts, proving zero perturbation. Full-length
+support is recomputed from post-refit `assigned_read_ids`; cached `fulllen_frac`
+is stale evidence and is not used.
 
-The four balanced/replicate3 violations are novel mono models that fell from
-`2.00` to `1.00` because a forced mono read moved to another parent. Direction
-of change is otherwise strongly one-way: 7,252 rows increased, 5 decreased,
-4,024 unchanged.
+| Profile | Survivors | Floor | Isoform fraction | Soft-mass | Mono | Full-length | Union | Rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| SIRV p00 | 81 | 0 | 0 | 0 | n/a | 0 | 0 | 0.000% |
+| balanced tuning | 11,281 | 2 | 0 | n/a | 0 | n/a | 2 | 0.018% |
+| balanced replicate3 | 15,656 | 2 | 3 | n/a | 0 | n/a | 5 | 0.032% |
+| precision tuning | 10,217 | 0 | 0 | n/a | 0 | n/a | 0 | 0.000% |
 
-This rate covers the absolute floor only. `min_isoform_fraction`,
-`max_soft_mass_ratio`, the mono hard-read floor, `min_fulllen_fraction`, and
-`min_polya5p_reads` also consume refit-changed `num_reads`/assigned reads
-(3,707 balanced rows changed `num_reads`) and have not been audited, so the
-full fixed-point gap is not established.
+`n/a` means the gate is inactive in that profile. `min_polya5p_reads` is 0
+everywhere, so it is reported as active=false/unevaluated rather than as zero
+violations; it needs the signal-derived polyA map to audit.
+
+Every violator is a **novel multi-exon** model, not a mono model. The floor
+violators all hold a single read at abundance `1.00` (balanced `chr22+`, 3
+exons; replicate3 `chr7-` 3 exons and `chr10-` 9 exons) and fell from `2.00`
+because a forced mono read moved to another parent. The replicate3
+isoform-fraction violators are larger models (`chr15+` 4 exons at `20.0`,
+`chr1-` 12 exons at `2.0`, `chr15+` 3 exons at `23.0`) whose family sibling grew
+enough to push them under the 1% relative floor — a relative, not absolute,
+effect. No candidate violates two gates at once.
+
+Direction of change is otherwise strongly one-way: 7,252 balanced rows
+increased, 5 decreased, 4,024 unchanged.
+
+Simulated drop (remove the violators, rescore with the same gffcompare/truth
+contract):
+
+| Profile | Transcripts | T3 F1 | Delta | Released mass |
+| --- | --- | --- | ---: | --- |
+| balanced tuning | 11,281 -> 11,279 | 39.422 unchanged | 0.0000 | 2.0 of 244,316 |
+| balanced replicate3 | 15,656 -> 15,651 | 38.6018 -> 38.5991 | -0.0027 | 47.0 of 485,404 |
+
+So enforcing the fixed point is **not an accuracy win**: it is a consistency
+change that costs a small amount of recall on replicate3 (2 of the 5 dropped
+models matched truth) and changes nothing on balanced.
 
 Why a naive rerun is wrong: every threshold was tuned against v8's diluted
 abundance. Since refit almost always raises abundance, reusing the same numbers
@@ -161,20 +204,68 @@ changes effective filter strength. Structural/evidence gates (canonical,
 junction evidence, containment, M2) do not depend on final abundance and should
 not rerun.
 
-Registered as the next independent batch: audit every assignment-dependent gate
-offline across all profiles, then compare freeze-once, a single post-refit
-filter, and a shrink-only fixed-point loop (candidates only leave, so it
-terminates, but it is path-dependent and cannot recover a first-round
-mis-drop). Do not widen v9 to include it.
+### Measured with `post_refit_fixed_point_probe.py`
+
+The union audit above is not by itself proof, because production
+`select_global()` applies gates *sequentially* (each sees the previous gate's
+survivors) and because "released mass" is not the same as an orphan-mass change
+until the set is actually re-refitted. The fixed-point probe closes both gaps:
+it applies the gates in production order and performs a real refit after every
+shrink.
+
+| Profile | freeze_once | once | fixed_point | Shrink rounds | Orphan mass delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SIRV p00 | 81 | 81 | 81 | 0 | 0.0 |
+| balanced tuning | 11,281 | 11,279 | 11,279 | 1 | +2.0 |
+| precision tuning | 10,217 | 10,217 | 10,217 | 0 | 0.0 |
+| balanced replicate3 | 15,656 | 15,651 | 15,651 | 1 | +47.0 |
+
+Results:
+
+* **`once` and `fixed_point` produce identical survivor sets on all four
+  profiles.** There is no cascade: the round after any drop removes nothing, so
+  the loop converges immediately.
+* Sequential gating selected exactly the same candidates as the independent
+  union audit, so the earlier simulated-drop F1 numbers are valid for the true
+  fixed point.
+* **Released mass is not absorbed by surviving siblings; it becomes orphan
+  mass.** Balanced assigned mass falls 244,316 -> 244,314 while orphan rises
+  49,795 -> 49,797; replicate3 falls 485,404 -> 485,357 while orphan rises
+  109,027 -> 109,074. Every released unit is accounted for, and the mass simply
+  moves from "assigned" to "orphaned". This is the behaviour predicted for
+  forced mono reads whose parent is deleted: they orphan immediately instead of
+  flowing to another model.
+* Structural F1 does not improve: balanced is unchanged and replicate3 loses
+  `0.0027` (2 of its 5 dropped models matched truth).
+
+### Decision
+
+Against the pre-registered rule - drops confined to 2/5 transcripts, at most one
+shrink round, no F1 gain, negligible orphan change - **production keeps
+`freeze_once`.** No `post_refit_filter_mode` is added. Enforcing the fixed point
+would delete a handful of real transcripts, convert their reads into orphan
+mass, and slightly reduce recall, in exchange for internal tidiness alone.
+
+The residual inconsistency is documented rather than fixed: the emitted set can
+contain a small number of models that no longer satisfy the abundance or
+isoform-fraction gate under refit accounting (0.000-0.032%, all novel
+multi-exon). `post_refit_fixed_point_probe.py` is retained so the claim can be
+re-measured whenever gates or thresholds change.
 
 ## Recommendation
 
 Items A-F are wording, diagnostics, and provenance issues. None changes a
 number, a structure, or an acceptance verdict. Item A was resolved by
-measurement and corrected in `ALGORITHM.md` (documentation only). Fixing B-F
-touches `fin/` source and would rotate the release hash, invalidating every
-live acceptance artifact, so they belong in a follow-up batch rather than this
-release.
+measurement and corrected in `ALGORITHM.md` (documentation only).
+
+Items B-F were fixed in a follow-up cleanup batch after `05e303ab` shipped,
+rotating the source hash once to
+`90c8117a958a2b0653ecef1235d6521ebc0a614315f5ea6e8cc55f1909e63eeb`. The cleanup
+is provably numerically inert: SIRV p00, balanced tuning, precision tuning, and
+replicate3 all reproduce `assembly.gtf` and `scores.tsv` byte-identically to the
+`05e303ab` release. Only `abundance_refit.json` changes, by gaining
+`forced_orphaned_reads`, `interval_quantification_unassigned_reads`, and
+`counter_semantics`.
 
 No correctness blocker was found. The two semantic checks requested during
 review both cleared:

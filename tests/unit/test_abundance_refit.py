@@ -94,8 +94,35 @@ def test_selection_orphan_is_separate_from_alignment_unassigned():
     assert out == {}
     assert diagnostics["assignable_reads"] == 1
     assert diagnostics["alignment_unassigned_reads"] == 1
+    # Scoped replacement key carries the same value as the legacy alias.
+    assert diagnostics["interval_quantification_unassigned_reads"] == 1
     assert diagnostics["selection_orphaned_reads"] == 1
     assert diagnostics["unassigned_mass"] == pytest.approx(1.0)
+    assert diagnostics["mass_balance_error"] == pytest.approx(0.0)
+
+
+def test_forced_orphan_is_counted_in_both_overlapping_counters():
+    """A forced read whose parent did not survive is forced AND orphaned."""
+    ledger = ResponsibilityLedger(
+        weights={"r1": {"gone": 1.0}, "r2": {"kept": 0.5, "gone": 0.5}},
+        input_read_ids=("r1", "r2"),
+        forced={"r1": "gone"},
+    )
+    results = {"kept": _result("kept", abundance=1.0)}
+    _out, diagnostics = refit_survivor_abundance(results, [ledger])
+
+    assert diagnostics["forced_reads"] == 1
+    assert diagnostics["selection_orphaned_reads"] == 1
+    assert diagnostics["forced_orphaned_reads"] == 1
+    assert diagnostics["renormalized_reads"] == 1
+    # The three counters overlap by exactly forced_orphaned_reads.
+    assert (
+        diagnostics["forced_reads"]
+        + diagnostics["renormalized_reads"]
+        + diagnostics["selection_orphaned_reads"]
+        - diagnostics["forced_orphaned_reads"]
+        == diagnostics["assignable_reads"]
+    )
     assert diagnostics["mass_balance_error"] == pytest.approx(0.0)
 
 

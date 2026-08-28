@@ -724,8 +724,14 @@ if different intervals force different parents, the highest pre-refit final
 abundance wins with candidate ID as deterministic tie-break. The pass recomputes
 abundance, hard IDs/counts, confidence, and `max_R`. Forced mono reads contribute
 to abundance/hard count but not the EM-confidence mean. `abundance_refit.json`
-separates alignment-unassigned reads from selection-orphaned reads and asserts
-`assigned mass + unassigned mass = assignable reads`. Paired on/off structural
+separates reads that never received a responsibility row
+(`interval_quantification_unassigned_reads`, aliased by the legacy
+`alignment_unassigned_reads`; both are scoped to intervals that reached
+quantification and are not BAM-wide unaligned counts) from selection-orphaned
+reads, and asserts `assigned mass + unassigned mass = assignable reads`. The
+read counters deliberately overlap: a forced read whose parent did not survive
+is both forced and orphaned, so
+`forced + renormalized + orphaned - forced_orphaned = assignable`. Paired on/off structural
 checks compare normalized GTF record multisets because equal `(chrom,start)`
 gene groups retain their upstream insertion order; independent refit-on repeats
 must still be byte-identical. `custom` and explicit

@@ -454,8 +454,8 @@ configured formal suite.
 
 Observed in the repository SIF with the final profile-integration source:
 
-- Unit: 1031 passed, 1 skipped in 11.79 s (`singularity --nv`).
-- Integration: 15 passed, 3 skipped in 2.47 s.
+- Unit: 1032 passed, 1 skipped in 9.76 s (`singularity --nv`).
+- Integration: 15 passed, 3 skipped in 1.95 s.
 - Retired M3 prototype: 5 passed in 1.05 s.
 - CLI parameter tests now create their own existence-only temporary inputs, so
   they reach `threads`/`gpu_workers` validation instead of failing on absent

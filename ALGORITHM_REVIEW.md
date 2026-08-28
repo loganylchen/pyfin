@@ -603,19 +603,22 @@ The best concise description is:
 1. **Done for production beta=0 M2:** real mono/junction existence is validated and final survivors are requantified without re-filtering.
 2. **Done:** mass-conservation, alignment-unassigned, selection-orphaned, forced-read, and TPM-shift diagnostics are written per run.
 3. **Done:** propagate stable splice-family IDs and use them for isoform fraction.
-4. Decide post-refit selection consistency. v9 requantifies the frozen survivor
-   set, so the output is correct quantification under that set but is not a
-   fixed point of the assignment-dependent gates. Offline audit of the absolute
-   abundance floor found 0 violations on SIRV p00 and precision tuning and 2
-   each on balanced tuning (0.018%) and replicate3 (0.013%), all novel mono
-   models that lost a forced read. The isoform-fraction, soft-mass-ratio, mono
-   hard-read, full-length, and poly(A) gates also consume refit-changed
-   `num_reads`/assigned reads and remain unaudited, so the absolute-floor rate
-   is not evidence that the full fixed-point gap is equally small. Thresholds
-   were tuned against v8 diluted abundance and 7,252 of 11,281 balanced rows
-   increased, so reusing them unchanged would silently alter filter strength.
-   Compare freeze-once, a single post-refit filter, and a shrink-only
-   fixed-point loop before promoting any of them.
+4. **Resolved — production keeps `freeze_once`.** v9 requantifies the frozen
+   survivor set, so its output is correct quantification under that set but is
+   not a fixed point of the assignment-dependent gates.
+   `post_refit_gate_audit.py` reapplied every such gate, and
+   `post_refit_fixed_point_probe.py` re-ran them in production order with a real
+   refit after each shrink. Violations are 0 on SIRV p00 and precision tuning, 2
+   on balanced tuning (0.018%), and 5 on replicate3 (0.032%, 2 abundance floor
+   plus 3 isoform fraction), all novel multi-exon. `once` and `fixed_point`
+   yield identical survivor sets and converge after a single shrink round, so
+   there is no cascade. Enforcing the fixed point does not improve structural
+   F1 (balanced unchanged, replicate3 `-0.0027`) and converts the released mass
+   into orphan mass rather than redistributing it (balanced orphan `+2.0`,
+   replicate3 `+47.0`), because forced mono reads whose parent is deleted orphan
+   immediately. The inconsistency is therefore documented, not filtered away.
+   Revisit only if gates or thresholds change, since thresholds were tuned
+   against v8 diluted abundance and 7,252 of 11,281 balanced rows increased.
 5. Represent endpoint states inside a splice-chain family after higher-impact existence work; measured current impact is 1.38% of missed T3 multi-exon truth.
 6. Calibrate candidate-specific M2 event-set likelihoods inside shared genomic
    disagreement windows; do not require one-to-one event correspondence.

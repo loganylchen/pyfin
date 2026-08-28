@@ -98,8 +98,11 @@ def run_parallel(
 ) -> List[Tuple[List[QuantResult], Optional[ResponsibilityLedger]]]:
     """Run ``process_interval`` over all intervals in a spawn process pool.
 
-    Returns non-empty interval ``(results, ledger)`` pairs in arbitrary order;
-    quantification aggregation and global refit are both order-independent.
+    Returns non-empty interval ``(results, ledger)`` pairs in completion order.
+    Aggregation is mathematically commutative but NOT bitwise associative, so
+    completion order perturbs floating-point sums. The refit-enabled path must
+    therefore canonicalize this list before aggregating; see
+    ``runner._order_interval_outputs``. Do not assume this output is ordered.
     """
     n = len(intervals)
     ctx = mp.get_context("spawn")

@@ -49,13 +49,19 @@ def test_audit_accepts_numeric_only_changes_and_legacy_identity(tmp_path):
     _write_run(on, abundance=1.0, diagnostics=True)
     _write_run(off, abundance=0.5)
     _write_run(legacy, abundance=0.5)
+    before = (on / "abundance_refit.json").read_bytes()
     report = audit(on, off, legacy)
     assert report["gtf_structural_identity"] is True
     assert report["legacy_gtf_byte_identity"] is True
     assert report["legacy_tsv_byte_identity"] is True
     assert report["tsv_quant_columns_changed"]["abundance"] == 1
-    diagnostics = json.loads((on / "abundance_refit.json").read_text())
-    assert diagnostics["structural_identity"] == "passed"
+    assert report["structural_identity"] == "passed"
+
+    # The audited artifact must never be rewritten: stamping it would make an
+    # audited run differ byte-wise from an unaudited one.
+    assert (on / "abundance_refit.json").read_bytes() == before
+    verdict = json.loads((on / "refit_identity.json").read_text())
+    assert verdict["structural_identity"] == "passed"
 
 
 def test_audit_accepts_same_coordinate_gtf_record_reordering(tmp_path):

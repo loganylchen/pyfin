@@ -117,10 +117,10 @@ def audit(on_dir: Path, off_dir: Path, legacy_dir: Path | None = None) -> dict:
         "unassigned_mass": diagnostics["unassigned_mass"],
         "rescued_mass": diagnostics["rescued_mass"],
     }
-    diagnostics["structural_identity"] = "passed"
-    tmp = diagnostics_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(diagnostics, indent=2, sort_keys=True) + "\n")
-    tmp.replace(diagnostics_path)
+    # The audited artifact is never mutated: stamping structural_identity back
+    # into abundance_refit.json would make a stamped run compare unequal to an
+    # unstamped one, which breaks byte-identity determinism checks.
+    report["structural_identity"] = "passed"
     report_path = on_dir / "refit_identity.json"
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     return report
