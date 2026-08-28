@@ -3,7 +3,7 @@
 Date: 2026-08-26 to 2026-08-27
 
 Final live-source SHA-256:
-`e4b2764b12dd5e966b85ba914421fe3f9e2e0d8c4e40aa90922d0d13988e5256`
+`42e1210dea81860686e76aaf9fa058fc8a65808e0a31367570d8526f4da17954`
 
 This report records the experiments used to turn the former single,
 SIRV-oriented CLI operating point into separate SIRV and real-dRNA profiles.
@@ -328,6 +328,43 @@ gates; persistent discovery families can retain connections through bridge
 variants later removed by those gates, explaining why the live effect is much
 smaller than that upper bound.
 
+### Final-survivor abundance refit
+
+v9 separates existence selection from final quantification. Named profiles keep
+the established survivor set, carry sparse beta=0 responsibilities across
+intervals, redirect containment and finalized-junction merges, preserve explicit
+mono parent assignments, and renormalize each read over final survivors. Reads
+with no surviving compatible model are reported as selection-orphaned rather
+than silently disappearing.
+
+| Sample/profile | Assignable reads | Selection-orphaned | Rescued survivor mass | Abundance rows changed | Conservation error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SIRV p00 | 1,310 | 78 (5.95%) | 54.56 | 25 / 81 | 2.3e-13 |
+| real balanced tuning | 294,111 | 49,795 (16.93%) | 25,622.35 | 7,257 / 11,281 | 3.5e-10 |
+| real balanced replicate3 | 594,431 | 109,027 (18.34%) | 52,651.97 | 10,703 / 15,656 | 5.8e-10 |
+| real precision tuning | 283,352 | 24,988 (8.82%) | 10,741.66 | 4,564 / 10,217 | 1.5e-10 |
+
+For every pair, transcript/exon record multisets, IDs, coordinates, and
+structure metrics were identical; refit-off GTF/TSV was byte-identical to v8/v6. Only abundance,
+TPM, confidence, hard-read count, `max_R`, and their corresponding GTF attributes
+may change. Structural F1 therefore stayed 78.988 on SIRV, 39.422 on balanced
+tuning, 38.602 on independent replicate3, and 40.510 on precision tuning. On 68
+exact-match SIRV models, log-TPM
+Spearman/Pearson improved 0.247/0.192 to 0.264/0.203 and log-MAE improved
+0.891 to 0.870; this is a small single-sample abundance check, not a new tuning
+criterion. Release-source balanced tuning runtime was 676.5 s with refit versus
+666.1 s without, while an independent refit repeat took 664.0 s; scheduler noise
+dominates and peak RSS differed by only about 8 MB. Refit-enabled runs
+canonicalize interval aggregation order before global selection so serial/parallel
+worker completion order cannot perturb threshold
+boundaries or diagnostics. Refit-off intentionally retains legacy completion
+order for byte reproduction; the paired structural-identity audit catches the
+measure-zero case where a legacy floating value would sit exactly on a gate.
+For on/off comparison it uses normalized GTF record multisets: equal-coordinate
+gene groups legitimately retain different upstream insertion order. Independent
+release-source refit-on repeats produced byte-identical raw GTF, TSV, and
+diagnostics artifacts.
+
 ## 7. Resolved profile values
 
 | Setting | `sirv` | `real-drna` | `real-drna-precision` |
@@ -342,6 +379,7 @@ smaller than that upper bound.
 | `floor_gtf_abundance` | on | off | off |
 | `min_isoform_fraction` | 0.01 | 0.01 | 0.01 |
 | isoform-fraction locus | family | family | family |
+| final-survivor abundance refit | on | on | on |
 | `max_soft_mass_ratio` | 2.0 | off | off |
 | `min_fulllen_fraction` | 0.1 | off | off |
 | `min_polya5p_reads` | off | off | off |
@@ -380,6 +418,8 @@ Integrated into `fin/`:
     active ablations; its prototype remains under `experiments/m3_coherence/`.
 16. Stable splice-family IDs propagated through discovery/quantification and
     selected by default for isoform-fraction denominators, with overlap fallback.
+17. Sparse final-survivor responsibility refit with containment/snap redirects,
+    explicit mono parents, orphaned-mass accounting, and atomic diagnostics.
 
 Post-removal v7/v5 validation produced byte-identical `assembly.gtf` and
 `scores.tsv` files for real balanced, real precision, SIRV p00, and SIRV full.
@@ -415,7 +455,7 @@ Kept optional or rejected as defaults:
 - Six-sample true-p00 SUM/mean matrix:
   `experiments/prod_validation/sirv4/_goal_opt/sum_guide_split_true_p00/results.tsv`
 - Final SIRV auto manifests:
-  `experiments/prod_validation/sirv4/_goal_opt/final_auto_v6/baseline/SGNex_H9_directRNA_replicate3_run2/p00/run_manifest.json`
+  `experiments/prod_validation/sirv4/_goal_opt/final_auto_v7_release/baseline/SGNex_H9_directRNA_replicate3_run2/p00/run_manifest.json`
   and the sibling `full/run_manifest.json`
 - Real one-factor aggregate:
   `experiments/prod_validation/gencode/_goal_opt/profile_sweep_retry/real_one_factor_results.tsv`
@@ -430,10 +470,14 @@ Kept optional or rejected as defaults:
   `experiments/prod_validation/gencode/_goal_opt/final_profiles_v8/balanced/results.tsv`
 - Original family/isoform-fraction audit:
   `experiments/prod_validation/gencode/_goal_opt/final_profiles_v7/balanced/family_fraction_audit.json`
-- Final balanced manifests:
-  `experiments/prod_validation/gencode/_goal_opt/final_profiles_v8/balanced/baseline/`
-- Final precision result/manifests:
-  `experiments/prod_validation/gencode/_goal_opt/final_profiles_v8/precision/`
+- Final-survivor refit audit driver:
+  `experiments/prod_validation/abundance_refit_audit.py`
+- Final balanced manifests/diagnostics:
+  `experiments/prod_validation/gencode/_goal_opt/final_profiles_v9_release/balanced/baseline/`
+- Final precision manifests/diagnostics:
+  `experiments/prod_validation/gencode/_goal_opt/final_profiles_v9_release/precision/`
+- Release-source deterministic balanced repeat:
+  `experiments/prod_validation/gencode/_goal_opt/final_profiles_v9_repeat_release/balanced/`
 - Deterministic precision-repeat evidence (pre-canonical-consistency source):
   `experiments/prod_validation/gencode/_goal_opt/final_profiles_v5/precision_a/`
   and `precision_b/`

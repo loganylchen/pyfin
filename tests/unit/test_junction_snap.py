@@ -98,6 +98,30 @@ def test_snap_uses_zero_based_introns_and_merges_mass():
     assert out["guided_duplicate"].exons == ((100, 200), (300, 400))
 
 
+def test_snap_can_return_absorbed_candidate_redirects():
+    weak = _qr(
+        "weak", ((100, 200), (300, 400)), abundance=1.0, assigned=("r1",)
+    )
+    strong = _qr(
+        "strong", ((100, 203), (297, 400)), abundance=3.0, assigned=("r2",)
+    )
+    observed = {
+        ("chr1", "+"): Counter({(200, 300): 1, (203, 297): 6})
+    }
+    out, snapped, merged, redirects = snap_quant_results(
+        {"weak": weak, "strong": strong},
+        observed,
+        tolerance=6,
+        min_support=2,
+        min_ratio=2.0,
+        return_redirects=True,
+    )
+    assert set(out) == {"strong"}
+    assert snapped == 1
+    assert merged == 1
+    assert redirects == {"weak": "strong"}
+
+
 def test_snap_reuses_canonical_gate_for_target_junction():
     candidate = _qr("candidate", ((100, 200), (300, 400)))
     observed = {

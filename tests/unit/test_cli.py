@@ -37,6 +37,7 @@ def test_default_help_shows_assembly_flags():
         "--m2-summed-llr-margin",
         "--strict-novel-abundance-floor",
         "--isoform-fraction-locus",
+        "--post-selection-refit",
     ]:
         assert flag in r.stdout, f"Missing flag in fin --help: {flag}"
 

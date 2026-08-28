@@ -9,6 +9,13 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pysam
 
+from fin.analysis.abundance_refit import (
+    ResponsibilityLedger,
+    annotate_selection_metadata,
+    build_responsibility_ledger,
+    refit_survivor_abundance,
+    write_abundance_refit_diagnostics,
+)
 from fin.analysis.assignments import em_with_coherence
 from fin.analysis.quantification import (
     QuantResult,
@@ -43,6 +50,25 @@ logger = logging.getLogger(__name__)
 # an unscorable tie cell (a tied candidate the eventalign window could not score).
 _M2_EM_FLANK = 2
 _M2_EM_PAD = 1.0
+
+
+IntervalOutput = Tuple[List[QuantResult], Optional[ResponsibilityLedger]]
+
+
+def _order_interval_outputs(
+    outputs: List[IntervalOutput], refit_effective: bool
+) -> List[IntervalOutput]:
+    """Canonicalize aggregation order only for the refit-enabled path."""
+    if not refit_effective:
+        return outputs
+    if any(ledger is None for _, ledger in outputs):
+        raise RuntimeError(
+            "post-selection refit requires a responsibility ledger for every "
+            "quantified interval"
+        )
+    # Genomic lexical order is sufficient; interval_key includes strand and is
+    # unique for the isolated interval construction.
+    return sorted(outputs, key=lambda pair: pair[1].interval_key)
 
 
 class PipelineRunner:
@@ -104,18 +130,18 @@ class PipelineRunner:
         logger.info("Generated %d intervals", len(intervals))
 
         # Process each interval (serial by default; opt-in process parallelism).
-        all_quant_results: List[List[QuantResult]] = []
+        interval_outputs: List[IntervalOutput] = []
         if self.config.threads <= 1:
             for i, interval in enumerate(intervals):
                 logger.info("Processing interval %d/%d: %s", i + 1, len(intervals), interval.region_string)
                 quant = self.process_interval(interval)
-                if quant:
-                    all_quant_results.append(quant)
+                if quant is not None:
+                    interval_outputs.append(quant)
         else:
             from fin.pipeline.parallel import run_parallel
 
             log_level = logging.getLevelName(logging.getLogger("fin").getEffectiveLevel())
-            all_quant_results = run_parallel(
+            interval_outputs = run_parallel(
                 self.config,
                 intervals,
                 self.config.threads,
@@ -123,12 +149,28 @@ class PipelineRunner:
                 log_level,
             )
 
-        # Aggregate across intervals
+        refit_effective = bool(getattr(
+            self.config, "post_selection_refit_effective", False
+        ))
+        interval_outputs = _order_interval_outputs(
+            interval_outputs, refit_effective
+        )
+        all_quant_results: List[List[QuantResult]] = []
+        responsibility_ledgers: List[ResponsibilityLedger] = []
+        for results, ledger in interval_outputs:
+            if results:
+                all_quant_results.append(results)
+            if ledger is not None:
+                responsibility_ledgers.append(ledger)
+
+        # Aggregate across intervals. Responsibility ledgers remain separate so
+        # the historical aggregation/selection evidence is not changed by refit.
         aggregated = aggregate_across_intervals(all_quant_results)
         return self._finalize_and_write(
             aggregated,
             output_gtf=self.config.output_gtf,
             output_tsv=self.config.output_tsv,
+            responsibility_ledgers=responsibility_ledgers,
         )
 
     def _finalize_and_write(
@@ -136,6 +178,7 @@ class PipelineRunner:
         aggregated: Dict[str, QuantResult],
         output_gtf: Optional[str],
         output_tsv: Optional[str],
+        responsibility_ledgers: Optional[List[ResponsibilityLedger]] = None,
     ) -> Dict[str, QuantResult]:
         """Finalize: diagnostic dump -> GLOBAL selection -> gene-id resolution + writers.
 
@@ -148,21 +191,62 @@ class PipelineRunner:
         aggregated, _global_outcomes = select_global(
             self.config, aggregated, self._apply_polya5p_filter,
         )
-        aggregated = apply_junction_snap(
-            self.config, aggregated, getattr(self, "_genome_fasta", None)
-        )
+        refit_effective = bool(getattr(
+            self.config, "post_selection_refit_effective", False
+        ))
+        if refit_effective:
+            aggregated, snap_redirects = apply_junction_snap(
+                self.config,
+                aggregated,
+                getattr(self, "_genome_fasta", None),
+                return_redirects=True,
+            )
+            ledgers = responsibility_ledgers or []
+            if aggregated and not ledgers:
+                raise RuntimeError(
+                    "post-selection refit is enabled but no responsibility "
+                    "ledgers reached global finalization"
+                )
+            aggregated, diagnostics = refit_survivor_abundance(
+                aggregated, ledgers, snap_redirects=snap_redirects
+            )
+            write_abundance_refit_diagnostics(
+                Path(self.config.work_dir) / "abundance_refit.json",
+                diagnostics,
+            )
+        else:
+            aggregated = apply_junction_snap(
+                self.config, aggregated, getattr(self, "_genome_fasta", None)
+            )
+            if (
+                getattr(self.config, "post_selection_refit", False)
+                and getattr(
+                    self.config, "post_selection_refit_disable_reason", None
+                )
+            ):
+                write_abundance_refit_diagnostics(
+                    Path(self.config.work_dir) / "abundance_refit.json",
+                    {
+                        "schema_version": 1,
+                        "mode": "post_selection_survivor_renormalization",
+                        "effective": False,
+                        "disable_reason": self.config.post_selection_refit_disable_reason,
+                        "structural_identity": "not_applicable",
+                    },
+                )
         return finalize_outputs(
             self.config, aggregated, output_gtf, output_tsv, self._gtf_reader,
         )
 
     def process_interval(
         self, interval: GenomicInterval
-    ) -> Optional[List[QuantResult]]:
+    ) -> Optional[Tuple[List[QuantResult], Optional[ResponsibilityLedger]]]:
         """Discover candidates and quantify a single interval via ``quant_mode``.
 
         Returns:
-            - List[QuantResult] from the dispatched quant_mode engine.
-            - None when the interval has no candidates or no reads.
+            ``(results, ledger)`` for a quantified interval. The ledger is
+            populated only when post-selection refit is effectively enabled.
+            Returns ``None`` when the interval has no candidates or no reads.
         """
         work_dir = Path(self.config.work_dir) / interval.region_string.replace(":", "_").replace("-", "_")
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -250,16 +334,22 @@ class PipelineRunner:
         # Quantification engine dispatch (quant_mode). All three modes are
         # krill-only (no f5c CLI).
         quant_mode = getattr(self.config, "quant_mode", "m2_em")
+        ledger: Optional[ResponsibilityLedger] = None
         if quant_mode == "argmax":
             results = self._quant_argmax_keep(candidate_set, read_ids, interval)
         elif quant_mode == "m1_em":
             results = self._quant_m1_em(candidate_set, read_ids, interval)
         elif quant_mode == "m2_em":
-            results = self._quant_m2_em(candidate_set, read_ids, interval)
+            results, ledger = self._quant_m2_em(
+                candidate_set, read_ids, interval
+            )
         elif quant_mode == "cluster":
             results = self._quant_cluster(candidate_set, read_ids, interval)
         else:
             raise ValueError(f"unknown quant_mode: {quant_mode!r}")
+        if not results and ledger is None:
+            return None
+
         # Full-length end-coherence: compute fulllen_frac per candidate over its
         # assigned reads (the non-circular population; the fulllen METRIC itself
         # uses BAM spans only — no signal). Gated by the same switches as the
@@ -272,7 +362,7 @@ class PipelineRunner:
             and getattr(self.config, "min_fulllen_fraction", 0.0) > 0.0
         ):
             self._annotate_fulllen_frac(results, interval)
-        return results
+        return results, ledger
 
     def _quant_argmax_first(
         self,
@@ -1153,7 +1243,7 @@ class PipelineRunner:
         candidate_set: CandidateSet,
         read_ids: List[str],
         interval: GenomicInterval,
-    ) -> Optional[List[QuantResult]]:
+    ) -> Tuple[List[QuantResult], Optional[ResponsibilityLedger]]:
         """quant_mode='m2_em' (production default): pure tie-break junction-NLL EM.
 
         M1/AS is used ONLY as a hard selector — it picks each read's best-AS tie
@@ -1168,17 +1258,41 @@ class PipelineRunner:
             tie_nll_fn=self._tie_nll, eff_lengths_fn=self._eff_lengths,
         )
         if qo is None:
-            return []
-        quant_results, _outcomes = select_m2_interval(
+            return [], None
+        ledger = None
+        if getattr(self.config, "post_selection_refit_effective", False):
+            ledger = build_responsibility_ledger(
+                qo.R,
+                qo.kept_read_ids,
+                [candidate.candidate_id for candidate in qo.cand_list],
+                input_read_ids=read_ids,
+                interval_key=(
+                    f"{interval.chrom}:{interval.start}-{interval.end}:"
+                    f"{interval.strand}"
+                ),
+            )
+        quant_results, outcomes = select_m2_interval(
             self.config, qo, candidate_set, interval, self._observed_junctions,
         )
+        if ledger is not None:
+            annotate_selection_metadata(
+                ledger,
+                candidates=qo.cand_list,
+                read_ids=qo.kept_read_ids,
+                hard_assignments=qo.hard_assignments,
+                surviving_results=quant_results,
+                outcomes=outcomes,
+                mono_resolve_applied=bool(getattr(
+                    self.config, "mono_resolve_post_em", False
+                )),
+            )
         logger.info(
             "m2_em interval %s: %d reads -> %d candidates "
             "(ties=%d refined=%d)",
             interval.region_string, len(read_ids), len(qo.cand_list),
             qo.n_ties, qo.n_refined,
         )
-        return quant_results
+        return quant_results, ledger
 
     def _get_fusion_genome_aligner(self):
         """Lazily build and cache the genome-wide mappy aligner for fusion arms."""

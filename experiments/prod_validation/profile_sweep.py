@@ -30,6 +30,7 @@ REAL_SAMPLE_SHEET = NANORNA_ROOT / "benchmark/sgnex/batches/gencode_full_sweep/s
 
 SIRV_VARIANTS = {
     "baseline": [],
+    "refit_off": ["--no-post-selection-refit"],
     "overlap_locus": ["--isoform-fraction-locus", "overlap"],
     "legacy_profile": ["--no-floor-gtf-abundance", "--min-polya5p-reads", "1"],
     "m2_sum": ["--m2-metric", "summed_llr"],
@@ -66,6 +67,7 @@ SIRV_VARIANTS = {
 
 REAL_VARIANTS = {
     "baseline": [],
+    "refit_off": ["--no-post-selection-refit"],
     "overlap_locus": ["--isoform-fraction-locus", "overlap"],
     "mono3": ["--drop-mono-exon-novel", "--min-mono-exon-reads", "3"],
     "mono5": ["--drop-mono-exon-novel", "--min-mono-exon-reads", "5"],

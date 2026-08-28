@@ -64,6 +64,9 @@ def test_default_cli_profile_is_real_drna(monkeypatch, tmp_path):
     assert cfg.min_fulllen_fraction == 0.0
     assert cfg.min_polya5p_reads == 0
     assert cfg.isoform_fraction_locus == "family"
+    assert cfg.post_selection_refit is True
+    assert cfg.post_selection_refit_effective is True
+    assert cfg.post_selection_refit_disable_reason is None
     assert cfg.drop_mono_exon_novel is True
     assert cfg.min_mono_exon_reads == 5
     assert cfg.junction_snap is True
@@ -78,6 +81,7 @@ def test_default_cli_profile_is_real_drna(monkeypatch, tmp_path):
     assert manifest["profile"] == "real-drna"
     assert manifest["config"]["m2_metric"] == "summed_llr"
     assert manifest["config"]["isoform_fraction_locus"] == "family"
+    assert manifest["config"]["post_selection_refit_effective"] is True
     assert manifest["source_root"].endswith("/pyfin")
     assert len(manifest["source_sha256"]) == 64
     assert manifest["git_dirty"] in (True, False, None)
@@ -102,6 +106,17 @@ def test_isoform_fraction_overlap_mode_is_explicit(monkeypatch, tmp_path):
     assert cfg.isoform_fraction_locus == "overlap"
     manifest = json.loads((output / "run_manifest.json").read_text())
     assert manifest["config"]["isoform_fraction_locus"] == "overlap"
+
+
+def test_named_profile_refit_can_be_explicitly_disabled(monkeypatch, tmp_path):
+    cfg, output = _invoke(
+        monkeypatch, tmp_path, "--no-post-selection-refit"
+    )
+    assert cfg.post_selection_refit is False
+    assert cfg.post_selection_refit_effective is False
+    assert "post_selection_refit" in cfg.profile_overrides
+    manifest = json.loads((output / "run_manifest.json").read_text())
+    assert manifest["config"]["post_selection_refit"] is False
 
 
 def test_real_profile_mono_gate_can_be_explicitly_disabled(monkeypatch, tmp_path):

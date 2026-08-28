@@ -2,7 +2,7 @@
 
 Scope: original review at `dev` `a2c4be4e`, followed by the verified profile
 integration worktree with source SHA-256
-`e4b2764b12dd5e966b85ba914421fe3f9e2e0d8c4e40aa90922d0d13988e5256`.
+`42e1210dea81860686e76aaf9fa058fc8a65808e0a31367570d8526f4da17954`.
 Evidence includes formal tests, fresh SIRV tuning/holdout, full real p00 sweeps,
 production manifests, and Advisor guidance.
 
@@ -21,7 +21,7 @@ production manifests, and Advisor guidance.
 | Medium 8: config validation dead | Resolved | CLI calls `cfg.validate()` and reports Click usage errors |
 | Medium 10/13: reproducibility/integration drift | Substantially resolved | Atomic source-hashed manifest and `PROFILE_OPTIMIZATION.md` ledger |
 | High 5: endpoint isoforms | Open, measured lower impact | Only 62/4,477 (1.38%) missed T3 multi-exon truths were same-chain endpoint collapses with an emitted chain |
-| High 6: post-drop abundance refit | Open | Structure output improved; abundance remains model-filtered unless redesigned |
+| High 6: post-drop abundance refit | Resolved for production beta=0 M2 | Named profiles renormalize sparse read responsibilities on final survivors and report explicit orphaned mass |
 
 The findings below preserve the original evidence and rationale. Resolution
 paragraphs state where the live source now supersedes the reviewed snapshot.
@@ -252,9 +252,35 @@ model for TSS because dRNA 5-prime ends are frequently censored. Emit only
 read-supported TSS/TES pairs rather than a Cartesian product, cap splitting,
 and rerun abundance estimation after separation.
 
-### High 6: Most candidate drops destroy read mass instead of re-estimating abundance
+### High 6 [Resolved for production]: Candidate drops destroyed read mass
 
-Evidence:
+Resolution: named profiles now carry each interval's final beta=0 M2
+responsibilities as a sparse read ledger while leaving the existence cascade on
+its original evidence. Refit-enabled interval outputs are canonically ordered
+before aggregation so worker completion order cannot move floating threshold
+boundaries. After global selection and junction-snap merges, candidate
+folds redirect complete soft columns, mono-resolved reads retain an explicit
+mass-1 parent, and every other read is renormalized over final survivors. A read
+with no surviving compatible column contributes one unit of selection-orphaned
+mass instead of disappearing. The pass recomputes abundance, hard IDs/counts,
+confidence, and `max_R`; `abundance_refit.json` separates alignment-unassigned
+from selection-orphaned reads and asserts per-read and total conservation.
+
+Paired live acceptance kept all structural record multisets and metrics
+unchanged; equal-coordinate GTF groups may differ only in line order because
+refit-on canonicalizes interval insertion while legacy off preserves worker
+completion order. Independent release-source refit-on repeats produced
+byte-identical GTF, TSV, and diagnostics artifacts. SIRV p00
+recovered 54.56 read-mass with 78/1,310 assignable reads orphaned. Real tuning
+recovered 25,622.35 read-mass; 49,795/294,111 assignable reads (16.93%) were
+honestly unassigned because every compatible model was filtered. Independent
+replicate3 recovered 52,651.97 mass with 109,027/594,431 reads (18.34%)
+selection-orphaned. Refit-off
+GTF/TSV remained byte-identical to v8/v6. Runtime and peak RSS were unchanged
+within scheduler noise. Abundance-feedback and non-M2 modes warn-disable the
+profile-implied pass; an explicit incompatible feedback/refit request errors.
+
+Historical evidence:
 
 - M2 cluster-recheck, junction-support, M2-support, containment-cluster, and
   wobble drops add columns to `drop_cols`; `selection.py:312-321` filters those
@@ -267,7 +293,7 @@ Evidence:
 - TPM is recomputed on surviving abundance, so it renormalizes the remaining
   mass rather than refitting reads to the survivor set.
 
-Impact:
+Impact in the reviewed snapshot:
 
 For structure-only assembly, filtering a model and discarding its assignments is
 standard and can be acceptable. The High severity is scoped to the simultaneous
@@ -279,7 +305,7 @@ Sequential filters also use masses estimated in the presence of candidates that
 later disappear. An alternative to requantification is to label these values
 explicitly as model-filtered counts rather than transcript abundance.
 
-Recommendation:
+Implemented strategy:
 
 Separate existence selection from final quantification. After fixing the
 survivor set, rebuild the compatibility matrix and rerun abundance estimation,
@@ -551,14 +577,14 @@ are strong:
 | M1 sequence evidence | Reasonable | Simple, inspectable, and empirically informative; exact-tie boundary is overly rigid |
 | M2 raw-signal tie refinement | Integrated in a bounded niche | Real uses tight sum; SIRV routes by guide; same-count/two-score/invalid-read abstention constrain claims |
 | Read-by-read coherence | Removed from production | M3 prototype retained under experiments; M4 has no production wiring |
-| Abundance/TPM | Heuristic, not a coherent final estimator | Selection removes candidate mass without refitting |
+| Abundance/TPM | Coherent on final survivors for production beta=0 M2 | Named profiles conserve each assignable read or report it as selection-orphaned; feedback/other modes remain unsupported |
 | Fusion calling | Experimental | Off by default; support/cluster rules need precision validation |
 
 The best concise description is:
 
 > PyFIN is a competitive structural heuristic assembler with a narrow
-> signal-assisted tie resolver. It is not yet a unified, calibrated
-> signal-generative transcript assembler and quantifier.
+> signal-assisted tie resolver and a mass-accounted final-survivor quantifier.
+> It is not yet a unified, calibrated signal-generative transcript assembler.
 
 ## Prioritized remediation
 
@@ -574,13 +600,26 @@ The best concise description is:
 
 ### P1: make existence and abundance coherent
 
-1. **Partially done:** real mono existence and finalized junction consensus are cross-sample validated; rerun abundance on the final survivor set remains open.
-2. Add mass-conservation and assignment-coverage diagnostics.
+1. **Done for production beta=0 M2:** real mono/junction existence is validated and final survivors are requantified without re-filtering.
+2. **Done:** mass-conservation, alignment-unassigned, selection-orphaned, forced-read, and TPM-shift diagnostics are written per run.
 3. **Done:** propagate stable splice-family IDs and use them for isoform fraction.
-4. Represent endpoint states inside a splice-chain family after higher-impact existence work; measured current impact is 1.38% of missed T3 multi-exon truth.
-5. Calibrate candidate-specific M2 event-set likelihoods inside shared genomic
+4. Decide post-refit selection consistency. v9 requantifies the frozen survivor
+   set, so the output is correct quantification under that set but is not a
+   fixed point of the assignment-dependent gates. Offline audit of the absolute
+   abundance floor found 0 violations on SIRV p00 and precision tuning and 2
+   each on balanced tuning (0.018%) and replicate3 (0.013%), all novel mono
+   models that lost a forced read. The isoform-fraction, soft-mass-ratio, mono
+   hard-read, full-length, and poly(A) gates also consume refit-changed
+   `num_reads`/assigned reads and remain unaudited, so the absolute-floor rate
+   is not evidence that the full fixed-point gap is equally small. Thresholds
+   were tuned against v8 diluted abundance and 7,252 of 11,281 balanced rows
+   increased, so reusing them unchanged would silently alter filter strength.
+   Compare freeze-once, a single post-refit filter, and a shrink-only
+   fixed-point loop before promoting any of them.
+5. Represent endpoint states inside a splice-chain family after higher-impact existence work; measured current impact is 1.38% of missed T3 multi-exon truth.
+6. Calibrate candidate-specific M2 event-set likelihoods inside shared genomic
    disagreement windows; do not require one-to-one event correspondence.
-6. Reconsider every default-on structural gate using independent real samples and
+7. Reconsider every default-on structural gate using independent real samples and
    per-isoform-class recall.
 
 ### P2: optional algorithms and reproducibility
@@ -628,8 +667,9 @@ The best concise description is:
 ## Advisor adjudication
 
 The original adversarial pass highlighted M2 technical missingness, endpoint
-loss, and abundance semantics. Follow-up execution resolved per-read missingness
-and metric routing, and clarified that hypothesis-specific event sets inside a
-shared genomic region are intentional. SUM count-scale calibration and post-drop
-abundance refitting remain open. The endpoint audit narrowed current practical
-impact to 1.38% of missed T3 multi-exon truth, and M3 was removed from production.
+loss, and abundance semantics. Follow-up execution resolved per-read missingness,
+metric routing, family propagation, and production beta=0 post-selection
+abundance refitting. Hypothesis-specific event sets inside a shared genomic
+region remain intentional; SUM count-scale calibration is still open. The
+endpoint audit narrowed current practical impact to 1.38% of missed T3
+multi-exon truth, and M3 was removed from production.

@@ -132,6 +132,7 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
 @click.option("--floor-gtf-abundance/--no-floor-gtf-abundance", "floor_gtf_abundance", default=False, show_default=True, help="Raise the GTF abundance floor to the NOVEL floor: GTF must clear max(--min-gtf-abundance, --min-abundance) (never lowers the explicit GTF floor). The real-dRNA/custom default is OFF; the optimized SIRV profile turns it ON for the expressed-truth operating point (e.g. T=3 -> Sn 43.2 / Pr 91.6). SIRV-tuned: on real data this drops genuine low-abundance annotated isoforms — leave OFF unless benchmarking. Fusion stays exempt regardless.")
 @click.option("--min-isoform-fraction", default=0.01, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose abundance is below this fraction of the dominant transcript in their selected locus (Cufflinks/StringTie minor-isoform suppression). GTF/fusion/mono exempt; 0.0 disables.")
 @click.option("--isoform-fraction-locus", type=click.Choice(["family", "overlap"]), default="family", show_default=True, help="Denominator for --min-isoform-fraction. 'family' uses the persisted discovery splice family and falls back to overlap only for family-less candidates; 'overlap' restores the historical same-strand genomic-overlap behavior.")
+@click.option("--post-selection-refit/--no-post-selection-refit", default=False, show_default=True, help="After the final survivor set and junction snapping are fixed, renormalize each assignable read over surviving candidates and report selection-orphaned mass. Named profiles enable this; custom/raw defaults leave historical model-filtered abundance unchanged.")
 @click.option("--min-fulllen-fraction", default=0.1, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose fraction of full-length assigned reads (read genomic 5' AND 3' both within --fulllen-window-bp of the candidate's ends) is below this (FLAIR/TALON-style full-length read support; signal-free). Orthogonal to --min-isoform-fraction. GTF/fusion/mono and unreachable candidates exempt; 0.0 disables. The SIRV profile resolves 0.1; real-dRNA resolves 0 because genuine 5'-truncated isoforms would otherwise lose recall.")
 @click.option("--max-soft-mass-ratio", default=2.0, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose EM soft abundance / hard argmax read count is >= this (0 hard reads always dropped). Real isoforms deposit ~1 soft mass per hard read (ratio ~1); wobble shadows borrow fractional soft crumbs from a high-abundance structural near-copy and show an inflated ratio — catches the high-relative-abundance shadows the fraction/cluster-recheck levers miss. Pure EM evidence (no GTF). GTF/fusion/mono exempt; 0.0 disables. SIRV-tuned default 2.0 (24-cell F1@3 up-or-equal, recall held); re-tune on real dRNA.")
 @click.option("--fulllen-window-bp", default=25, show_default=True, type=int, help="bp tolerance for a read genomic end to count as full-length wrt a candidate's 5'/3' end (used by --min-fulllen-fraction).")
@@ -253,6 +254,7 @@ def main(
     floor_gtf_abundance,
     min_isoform_fraction,
     isoform_fraction_locus,
+    post_selection_refit,
     max_soft_mass_ratio,
     min_fulllen_fraction,
     fulllen_window_bp,
@@ -411,6 +413,7 @@ def main(
     min_gtf_abundance = resolved["min_gtf_abundance"]
     floor_gtf_abundance = resolved["floor_gtf_abundance"]
     min_isoform_fraction = resolved["min_isoform_fraction"]
+    post_selection_refit = resolved["post_selection_refit"]
     max_soft_mass_ratio = resolved["max_soft_mass_ratio"]
     min_fulllen_fraction = resolved["min_fulllen_fraction"]
     min_polya5p_reads = resolved["min_polya5p_reads"]
@@ -460,6 +463,7 @@ def main(
         floor_gtf_abundance=floor_gtf_abundance,
         min_isoform_fraction=min_isoform_fraction,
         isoform_fraction_locus=isoform_fraction_locus,
+        post_selection_refit=post_selection_refit,
         max_soft_mass_ratio=max_soft_mass_ratio,
         min_fulllen_fraction=min_fulllen_fraction,
         fulllen_window_bp=fulllen_window_bp,
@@ -551,7 +555,7 @@ def main(
     import logging
 
     logging.getLogger(__name__).info(
-        "Resolved profile=%s overrides=%s m2_metric=%s(%s) abundance=%s%s/%s full=%s polyA=%s",
+        "Resolved profile=%s overrides=%s m2_metric=%s(%s) abundance=%s%s/%s refit=%s full=%s polyA=%s",
         cfg.profile,
         ",".join(cfg.profile_overrides) or "none",
         cfg.m2_metric,
@@ -559,6 +563,7 @@ def main(
         ">" if cfg.strict_novel_abundance_floor else ">=",
         cfg.min_abundance,
         cfg.min_gtf_abundance,
+        cfg.post_selection_refit_effective,
         cfg.min_fulllen_fraction,
         cfg.min_polya5p_reads,
     )

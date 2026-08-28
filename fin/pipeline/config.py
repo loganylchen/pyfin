@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Iterable, Literal, Mapping, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 # CLI operating points. Programmatic PipelineConfig construction keeps the
@@ -16,6 +20,7 @@ PIPELINE_PROFILES: dict[str, dict[str, object]] = {
         "min_gtf_abundance": 1.0,
         "floor_gtf_abundance": True,
         "min_isoform_fraction": 0.01,
+        "post_selection_refit": True,
         "max_soft_mass_ratio": 2.0,
         "min_fulllen_fraction": 0.1,
         "min_polya5p_reads": 0,
@@ -36,6 +41,7 @@ PIPELINE_PROFILES: dict[str, dict[str, object]] = {
         "min_gtf_abundance": 1.0,
         "floor_gtf_abundance": False,
         "min_isoform_fraction": 0.01,
+        "post_selection_refit": True,
         "max_soft_mass_ratio": 0.0,
         "min_fulllen_fraction": 0.0,
         "min_polya5p_reads": 0,
@@ -188,6 +194,14 @@ class PipelineConfig:
     # ID fall back to historical same-strand genomic overlap. "overlap" forces
     # the historical denominator for every candidate.
     isoform_fraction_locus: Literal["family", "overlap"] = "family"
+
+    # Refit read responsibilities after GLOBAL selection and finalized junction
+    # snapping. Named production profiles enable this; the raw/programmatic
+    # default stays off for historical reproduction. The effective/disable
+    # fields are resolved by validate() and serialized in the run manifest.
+    post_selection_refit: bool = False
+    post_selection_refit_effective: bool = False
+    post_selection_refit_disable_reason: Optional[str] = None
 
     # Soft-mass / hard-read ratio ceiling. Drop a NOVEL multi-exon candidate
     # whose EM soft abundance (R.sum) divided by its hard argmax read count
@@ -699,6 +713,38 @@ class PipelineConfig:
             )
         if self.m2_metric not in ("off", "mean", "summed_llr"):
             raise ValueError(f"unknown m2_metric: {self.m2_metric!r}")
+
+        self.post_selection_refit_effective = False
+        self.post_selection_refit_disable_reason = None
+        if self.post_selection_refit:
+            if self.quant_mode != "m2_em":
+                self.post_selection_refit_disable_reason = (
+                    f"unsupported quant_mode={self.quant_mode}; requires m2_em"
+                )
+                logger.warning(
+                    "Post-selection abundance refit disabled: %s",
+                    self.post_selection_refit_disable_reason,
+                )
+            elif self.abundance_feedback:
+                profile_implied = (
+                    self.profile != "custom"
+                    and "post_selection_refit" not in self.profile_overrides
+                )
+                if not profile_implied:
+                    raise ValueError(
+                        "post_selection_refit is not equivalent to rerunning "
+                        "abundance-feedback EM; disable one of them"
+                    )
+                self.post_selection_refit_disable_reason = (
+                    "abundance_feedback requires a full EM rerun"
+                )
+                logger.warning(
+                    "Post-selection abundance refit disabled: %s",
+                    self.post_selection_refit_disable_reason,
+                )
+            else:
+                self.post_selection_refit_effective = True
+
         if self.m2_diff_cover_margin < 0 or self.m2_summed_llr_margin < 0:
             raise ValueError("M2 margins must be >= 0")
         if self.m2_summed_llr_flank < 1:

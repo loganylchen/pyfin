@@ -1,19 +1,20 @@
 # PyFIN Repository Map
 
-Snapshot: branch `dev`, commit `a2c4be4e` (`feat(candidates): cluster-level
-structural diff-region engine`), inspected and updated through 2026-08-27. The branch is 19
-commits ahead of `origin/dev` (`b9c58db8`). This document describes the current
-working tree, not only the remote branch or the older production notes.
+Snapshot: branch `dev`, clean baseline commit `97029eae` (`feat(pipeline): add
+validated profiles and family-aware selection`), plus the v9 abundance-refit
+working tree with source SHA-256 `42e1210d...7954`, updated through 2026-08-27.
+The baseline branch is synchronized with `origin/dev`; this document describes
+the current working tree, not only the last pushed commit.
 
 ## 1. Scope and evidence
 
-- Core index: 178 files from `fin/`, `tests/unit/`, `tests/integration/`,
+- Core index: 181 files from `fin/`, `tests/unit/`, `tests/integration/`,
   `benchmarks/`, README, packaging metadata, and current `.omc` plans/specs.
-- Experiment index: 289 Python, shell, Markdown, YAML, TOML, and JSON files
-  under `experiments/`. Generated result trees and raw signal/alignment data
-  were deliberately not content-scanned.
+- Experiment/provenance index: 262 tracked or pending Python, shell, SBATCH,
+  and Markdown files under `experiments/`. Generated result trees and raw
+  signal/alignment data were deliberately not content-scanned.
 - Infrastructure index: 7 CI, Docker, history, and repository-policy files.
-- Static architecture map: 66 Python modules, 112 internal import edges, 81
+- Static architecture map: 67 Python modules, 115 internal import edges, 83
   formal unit/integration test files, and direct test-import relationships.
 - The repository requests the `code-review-graph` MCP, but those tools were not
   exposed in this session. The fallback was a Git-bounded inventory plus AST
@@ -21,11 +22,12 @@ working tree, not only the remote branch or the older production notes.
 - Source at `HEAD` is treated as authoritative where README, `record.md`,
   `PRODUCTION_STATE.md`, plans, comments, or old experiments disagree.
 
-The repository has 17,613 tracked files. `experiments/` contains 17,325 of
-them and about 25.12 GB, including reference genomes, reads, comparison output,
-and a 1.87 GB production SIF. Reading every byte of those artifacts would not
-improve code understanding; their paths, roles, and generating scripts are
-mapped, while product source and executable experiment code are indexed in full.
+The pushed baseline has 551 tracked files; this v9 batch adds eight source,
+test, audit, and SBATCH files. Generated experiment data was removed from Git
+history before the prior push. Roughly 25 GB of reference genomes, reads,
+comparison output, and the 1.87 GB production SIF remain available locally as
+untracked artifacts; their generating scripts and roles are mapped without
+committing or scanning every byte.
 
 ## 2. Product boundary
 
@@ -48,6 +50,8 @@ Primary outputs:
 - `scores.tsv`: candidate identity, locus, source, abundance, confidence,
   coherence/discrimination/combined scores, hard-read count, TPM, and `max_R`.
 - `fusions.bedpe`: fusion breakpoints when fusion detection is enabled.
+- `abundance_refit.json`: final-survivor mass conservation, orphaned reads,
+  and abundance/TPM shift diagnostics for named profiles.
 - Optional unfiltered diagnostic TSV and persisted responsibility matrices.
 
 Internal genomic intervals, exons, and introns are represented as 0-based,
@@ -72,10 +76,12 @@ fin CLI
           -> pre-assignment canonical and junction-dominance gates
           -> one of argmax / m1_em / m2_em / cluster assignment
           -> m2 interval-level structural selection
-          -> per-interval QuantResult objects
+          -> per-interval QuantResult objects + sparse responsibility ledger
        -> commutative cross-interval aggregation
        -> optional unfiltered diagnostic
        -> global selection cascade
+       -> finalized junction consensus/merge
+       -> final-survivor responsibility refit + orphaned-mass audit
        -> gene-id resolution and GTF/TSV/BEDPE writers
   -> PipelineRunner.cleanup()
 ```
@@ -229,6 +235,7 @@ tests can exercise modules with a zero in this column.
 | `fin.ablation.mappy_argmax` | 230 | 0 | M1-only assignment and responsibilities |
 | `fin.ablation.runner` | 126 | 1 | Active M1/M2 quantification ablation rows |
 | `fin.analysis` | 14 | 0 | Analysis namespace |
+| `fin.analysis.abundance_refit` | 376 | 1 | Final-survivor responsibility refit and mass diagnostics |
 | `fin.analysis.assignments` | 285 | 4 | Coherence-aware EM |
 | `fin.analysis.clustering` | 305 | 1 | Legacy 3-prime BAM clustering workflow |
 | `fin.analysis.quantification` | 652 | 17 | Quantification, family-aware fraction, TPM, filters, aggregation |
@@ -242,7 +249,7 @@ tests can exercise modules with a zero in this column.
 | `fin.candidates.intron_chains` | 582 | 3 | Chain extraction, snapping, grouping, representatives |
 | `fin.candidates.isoform_recovery` | 120 | 1 | Post-EM 5-prime/TSS peak recovery |
 | `fin.candidates.junction_graph` | 193 | 1 | De-novo intron graph and chain assembly |
-| `fin.cli` | 578 | 1 | Click CLI, named profiles, and manifest config mapping |
+| `fin.cli` | 583 | 1 | Click CLI, named profiles, and manifest config mapping |
 | `fin.fusion` | 46 | 0 | Fusion API exports |
 | `fin.fusion.arm_assembly` | 285 | 2 | Fusion arm clustering and splice inference |
 | `fin.fusion.chimeric` | 255 | 3 | Chimeric reads and clipped-arm re-alignment |
@@ -264,12 +271,12 @@ tests can exercise modules with a zero in this column.
 | `fin.pipeline` | 9 | 2 | Pipeline namespace |
 | `fin.pipeline.assignment` | 592 | 1 | M2 assignment, tie NLL, and per-read batch abstention |
 | `fin.pipeline.cluster_quant` | 212 | 1 | Within-family assignment |
-| `fin.pipeline.config` | 719 | 14 | 124-field configuration and named-profile contract |
+| `fin.pipeline.config` | 765 | 14 | 127-field configuration and named-profile contract |
 | `fin.pipeline.evidence` | 93 | 0 | Reusable per-interval junction evidence |
 | `fin.pipeline.finalize` | 109 | 0 | Diagnostics, gene IDs, output wiring |
-| `fin.pipeline.junction_snap` | 220 | 1 | Finalized novel-junction consensus and mass/family-preserving merge |
-| `fin.pipeline.parallel` | 134 | 0 | Spawn worker lifecycle and partitioning |
-| `fin.pipeline.runner` | 1282 | 10 | End-to-end interval/pipeline orchestrator |
+| `fin.pipeline.junction_snap` | 235 | 1 | Finalized junction consensus, merges, and ledger redirects |
+| `fin.pipeline.parallel` | 139 | 0 | Spawn worker lifecycle, partitioning, and ledger transport |
+| `fin.pipeline.runner` | 1396 | 10 | End-to-end interval/pipeline/refit orchestrator |
 | `fin.pipeline.selection` | 619 | 0 | All pre/interval/global survivor decisions |
 | `fin.scoring` | 16 | 0 | Scoring namespace |
 | `fin.scoring.candidate_align` | 182 | 1 | Family-scoped M1 goodness foundation |
@@ -289,14 +296,14 @@ tests can exercise modules with a zero in this column.
 | `fin.utils.sequences` | 28 | 1 | Reverse complement |
 
 The largest and most change-sensitive modules are
-`scoring/m2_junction_nll.py` (1,464 LOC), `pipeline/runner.py` (1,282),
+`scoring/m2_junction_nll.py` (1,464 LOC), `pipeline/runner.py` (1,396),
 `candidates/discovery.py` (935), `scoring/diff_region_dtw.py` (821), and
 `io/io_read_manager.py` (675). Responsibility extraction reduced runner size,
 but these remain the primary review hotspots.
 
 ## 5. Configuration contract
 
-`PipelineConfig` has 124 fields. The Click CLI exposes 101 options. Programmatic
+`PipelineConfig` has 127 fields. The Click CLI exposes 102 options. Programmatic
 defaults intentionally differ from raw Click and named-profile defaults: the
 dataclass uses `min_abundance=0.0` and `min_gtf_abundance=0.0`, raw Click uses
 3.0 and 1.0, and the default `real-drna` profile resolves strict >1.0 plus its
@@ -323,6 +330,7 @@ Generation:
 Global selection:
   min_abundance=0.0; floor_gtf_abundance=False; min_gtf_abundance=0.0;
   min_isoform_fraction=0.01; isoform_fraction_locus='family';
+  post_selection_refit=False (named profiles=True; effective resolved by validate);
   max_soft_mass_ratio=2.0;
   min_fulllen_fraction=0.1; fulllen_window_bp=25; fulllen_min_reads=4;
   min_polya5p_reads=1; polya5p_window_bp=25; min_polya_length=10.0;
@@ -446,8 +454,8 @@ configured formal suite.
 
 Observed in the repository SIF with the final profile-integration source:
 
-- Unit: 1008 passed, 1 skipped in 11.39 s (`singularity --nv`).
-- Integration: 12 passed, 5 skipped in 1.17 s.
+- Unit: 1031 passed, 1 skipped in 11.79 s (`singularity --nv`).
+- Integration: 15 passed, 3 skipped in 2.47 s.
 - Retired M3 prototype: 5 passed in 1.05 s.
 - CLI parameter tests now create their own existence-only temporary inputs, so
   they reach `threads`/`gpu_workers` validation instead of failing on absent
@@ -519,8 +527,9 @@ truth.
 2. Historical product truth remains distributed across source and experiments;
    `PROFILE_OPTIMIZATION.md` plus source-hashed manifests now define the current
    profile evidence, but older mutable notes still need archival labels.
-3. `experiments/` stores 25+ GB and 17k+ tracked files. Source review, clone
-   performance, and change detection are dominated by generated artifacts.
+3. `experiments/` still stores 25+ GB locally, but generated data is no longer
+   tracked. Repository hygiene now depends on adding durable ignore rules so a
+   future broad `git add` cannot reintroduce those artifacts.
 4. `candidate_align`, `diff_regions`, and `explore` are tested foundations but
    not production-wired; they have no winning end-to-end evidence.
 5. Several I/O modules and extracted pipeline layers have no direct-import test
@@ -530,8 +539,8 @@ truth.
    change.
 7. CI branch names still do not include `dev`; benchmark Python portability is
    fixed, but ordinary pushes to the active branch can miss package CI.
-8. Same-chain endpoint isoforms, post-drop abundance refitting, and family-level
-   novel gene IDs remain open. Stable structural novel IDs are now landed.
+8. Same-chain endpoint isoforms and family-level novel gene IDs remain open.
+   Production beta=0 post-drop abundance refitting and stable IDs are landed.
 9. Real profile optimization now includes the tuning sample plus two independent
    H9 samples. Balanced/precision overrides and manifests remain necessary
    because no finite benchmark proves universal transcriptome optimality.
@@ -547,7 +556,9 @@ For future work, use this ownership sequence:
 - Survivor-policy changes: `pipeline/selection.py` and the corresponding
   structural helper in `m2_junction_nll.py`/quantification.
 - Finalized structural correction: `pipeline/junction_snap.py`; preserve read
-  IDs and abundance whenever corrected models merge.
+  IDs and emit absorbed-to-representative redirects whenever models merge.
+- Final abundance changes: `analysis/abundance_refit.py`; keep existence frozen,
+  conserve one unit per assignable read, and report selection-orphaned mass.
 - Output changes: `pipeline/finalize.py` plus standalone writer tests; do not
   change selection there.
 - Parallel changes: preserve spawn, deterministic interval ordering, bounded

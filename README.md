@@ -26,10 +26,14 @@ Candidate Discovery         Fusion Detection (--fusion)
                   - signal-refined soft responsibilities
                 |
                 v
-        Phase 4: Quantification + outputs
-                  - assembly.gtf  (with abundance attributes)
-                  - scores.tsv    (per-candidate metrics + TPM)
-                  - fusions.bedpe (when --fusion)
+        Phase 4: Existence selection + junction consensus
+                |
+                v
+        Phase 5: Survivor-set abundance refit + outputs
+                  - assembly.gtf       (with abundance attributes)
+                  - scores.tsv         (per-candidate metrics + TPM)
+                  - abundance_refit.json (mass/TPM diagnostics)
+                  - fusions.bedpe      (when --fusion)
 ```
 
 ### Phase Details
@@ -38,7 +42,8 @@ Candidate Discovery         Fusion Detection (--fusion)
 1.5. **Fusion Detection** *(optional, `--fusion`)* - Parses SA tags, clusters breakpoints, builds spliced fusion candidates merged into the same `CandidateSet`
 2. **Signal Scoring** - M1 supplies a mappy structural mask; krill M2 junction NLL refines exact ties inside shared genomic disagreement windows
 3. **Assignment** - Probabilistic read-to-transcript responsibilities with production read-by-read coherence disabled (`beta=0`)
-4. **Quantification** - Probability-weighted abundance + TPM, written to GTF / TSV / BEDPE
+4. **Existence selection** - Structural/support gates fix the final transcript set; real profiles then apply read-supported junction consensus
+5. **Quantification** - Named profiles renormalize each assignable read over the final survivors, report orphaned mass, and write coherent abundance/TPM to GTF/TSV
 
 ## Installation
 
@@ -104,14 +109,16 @@ option defaults. Any explicitly supplied CLI option overrides its profile value.
 
 | Profile | Intended data | Key resolved behavior |
 | --- | --- | --- |
-| `real-drna` | Biological nanopore dRNA, balanced | Tight summed LLR; strict >1 abundance; novel mono >=5 hard reads; read-supported junction consensus; soft-mass/full-length/polyA gates off |
-| `real-drna-precision` | Biological nanopore dRNA, precision-prioritized | Balanced real settings plus generation support >=2; higher T3 F1 with about 1 pp lower T1/T3 recall |
-| `sirv` | SIRV synthetic benchmark | M2 auto-routes to summed LLR (1,4) without a usable GTF and mean with a guide; inclusive >=3 abundance and expressed-GTF/full-length gates |
-| `custom` | Manual/legacy experiments | No profile overlay; pass `--isoform-fraction-locus overlap` to reproduce pre-family selection |
+| `real-drna` | Biological nanopore dRNA, balanced | Tight summed LLR; strict >1 abundance; novel mono >=5 hard reads; read-supported junction consensus; final survivor-set abundance refit |
+| `real-drna-precision` | Biological nanopore dRNA, precision-prioritized | Balanced real settings plus generation support >=2 and final survivor-set abundance refit |
+| `sirv` | SIRV synthetic benchmark | M2 auto-routes to summed LLR (1,4) without a usable GTF and mean with a guide; inclusive >=3 abundance; final survivor-set abundance refit |
+| `custom` | Manual/legacy experiments | No profile overlay or refit; pass `--isoform-fraction-locus overlap` to reproduce pre-family selection |
 
 Every run writes `run_manifest.json` beside the GTF. It records the selected
 profile, explicit overrides, resolved configuration, source SHA-256, Git commit
-when available, and result-changing environment variables.
+when available, and result-changing environment variables. Refit-enabled runs
+also write `abundance_refit.json` with assignable/alignment-unassigned reads,
+selection-orphaned mass, conservation error, and abundance/TPM shifts.
 
 ```bash
 # Biological sample (default profile shown explicitly for reproducibility)
@@ -141,8 +148,9 @@ pyfin \
 ```
 
 Outputs:
-- `pyfin_out/assembly.gtf` — assembled transcripts (gtf + novel) with `coherence_score`, `discrimination_score`, `combined_score`, `tpm` attributes
-- `pyfin_out/scores.tsv` — per-candidate metrics table
+- `pyfin_out/assembly.gtf` — assembled transcripts with abundance, confidence, hard-read count, source, and diagnostic score attributes
+- `pyfin_out/scores.tsv` — per-candidate metrics and TPM table
+- `pyfin_out/abundance_refit.json` — survivor-refit mass conservation and abundance/TPM shift diagnostics (named profiles)
 - `pyfin_out/run_manifest.json` — resolved profile, overrides, configuration, source hash/commit, and result-changing environment
 
 ### CLI — assembly + fusion detection
@@ -178,6 +186,7 @@ config = PipelineConfig.from_profile(
     use_gpu=True,
     em_sigma=1.0,
 )
+config.validate()  # resolves profile routes and effective compatibility state
 
 runner = PipelineRunner(config)
 runner.setup()
@@ -321,6 +330,7 @@ fin/
 | `output_bedpe` | str | None | Output fusion BEDPE path (with `fusion_enabled`) |
 | `three_prime_threshold` | int | 24 | 3' end clustering distance (bp) |
 | `isoform_fraction_locus` | str | "family" | Use persistent splice families for minor-isoform denominators; "overlap" restores legacy behavior |
+| `post_selection_refit` | bool | False | Renormalize beta=0 M2 responsibilities over final survivors; named profiles enable it |
 | `em_sigma` | float | 1.0 | EM temperature (lower = harder assignments) |
 | `em_max_iter` | int | 1000 | Maximum EM iterations |
 | `em_tol` | float | 1e-4 | EM convergence tolerance |

@@ -2,7 +2,7 @@
 
 Snapshot: `dev` at `a2c4be4e` plus the verified profile-integration worktree,
 source SHA-256
-`e4b2764b12dd5e966b85ba914421fe3f9e2e0d8c4e40aa90922d0d13988e5256`,
+`42e1210dea81860686e76aaf9fa058fc8a65808e0a31367570d8526f4da17954`,
 2026-08-26. This document describes what the current source actually executes.
 Older README, production-state, and experiment notes are evidence but do not
 override the live source and run manifests.
@@ -80,6 +80,7 @@ abundance_feedback       = False
 min_gtf_abundance        = 1.0
 min_isoform_fraction     = 0.01
 isoform_fraction_locus   = family
+post_selection_refit     = True (named profiles)
 use_gpu                  = True
 threads                  = 1
 gpu_workers              = 0
@@ -611,8 +612,9 @@ candidate list.
    surviving multi-exon candidates containing its span inside one exon. Fold to
    the sole host or highest-EM-abundance host. The mono retains uncovered reads
    and is dropped if fewer than 2 remain.
-8. Remove every column marked by a non-fold drop. Those candidates' soft/hard
-   read mass is not re-estimated or transferred.
+8. Remove every column marked by a non-fold drop. Interval selection does not
+   re-estimate those columns; named profiles carry the original responsibility
+   ledger to the final survivor-set refit in Section 20.
 
 Observed junction evidence skips secondary/supplementary/unmapped records and is
 memoized per interval. Missing/unreadable evidence disables support gates.
@@ -646,7 +648,8 @@ order:
    polyA scoring disables the filter.
 
 These are sequential: later locus-relative filters see only earlier survivors.
-No global drop reruns assignment.
+The survivor set is intentionally frozen on these pre-refit values; refitted
+abundance is not fed back through the existence filters.
 
 ### 19.1 Finalized-model junction consensus
 
@@ -657,9 +660,11 @@ than twice current-coordinate support. With the canonical gate on, the target
 must pass the same configured motif set. GTF, fusion, and mono models are exempt.
 Models that become identical in complete exon coordinates merge; soft abundance
 is summed, hard read IDs are unioned, confidence is hard-read weighted, and
-`max_R` takes the maximum. This is annotation-free and runs after existence
-selection, so it cannot change the EM competition set. It gained T3 F1 on three
-real samples while retaining or increasing recall. SIRV leaves it off.
+`max_R` takes the maximum. The merge also records absorbed-to-representative IDs
+so the later responsibility ledger follows the same structural identity. This is
+annotation-free and runs after existence selection, so it cannot change the EM
+competition set. It gained T3 F1 on three real samples while retaining or
+increasing recall. SIRV leaves it off.
 
 ## 20. Abundance, confidence, aggregation, and TPM
 
@@ -693,8 +698,38 @@ RPK_j = abundance_j / (spliced_length_j / 1000)
 TPM_j = RPK_j / sum_k RPK_k * 1e6
 ```
 
-Assignment is not rerun after candidate removal. TPM therefore renormalizes the
-remaining soft mass, not a posterior recomputed on the survivor set.
+Named profiles first order interval `(QuantResult, ledger)` pairs by a
+strand-aware genomic key before legacy aggregation, then run
+`fin/analysis/abundance_refit.py` after global selection and junction snapping.
+Per interval, the final beta=0 responsibility matrix is
+stored sparsely as `read -> {candidate: weight}`. For each unique read, interval
+weights are summed, containment and snap merges redirect candidate IDs, and the
+surviving weights are renormalized:
+
+```text
+S_i = sum_{j in final survivors} w_ij
+R'_ij = w_ij / S_i                         when S_i > 0
+unassigned_i = 1                           when S_i == 0
+```
+
+For a read carried by a single interval this is exactly the beta=0 softmax
+result after deleting non-survivor columns. A read whose responsibilities come
+from several intervals is not a single softmax row: its per-interval rows are
+summed first, which weights each interval's opinion equally, and only then
+renormalized. Instrumented measurement on real balanced tuning found 11 of
+294,111 assignable reads (0.0037%) in more than one ledger, bounding the
+affected mass at 0.0045% of assigned mass.
+Mono-resolved fragment reads instead retain their explicit mass-1 parent mapping;
+if different intervals force different parents, the highest pre-refit final
+abundance wins with candidate ID as deterministic tie-break. The pass recomputes
+abundance, hard IDs/counts, confidence, and `max_R`. Forced mono reads contribute
+to abundance/hard count but not the EM-confidence mean. `abundance_refit.json`
+separates alignment-unassigned reads from selection-orphaned reads and asserts
+`assigned mass + unassigned mass = assignable reads`. Paired on/off structural
+checks compare normalized GTF record multisets because equal `(chrom,start)`
+gene groups retain their upstream insertion order; independent refit-on repeats
+must still be byte-identical. `custom` and explicit
+`--no-post-selection-refit` retain the historical model-filtered values.
 
 GTF gene IDs are resolved after selection. Novel candidates default to
 `gene_id=candidate_id`, so novel isoforms are not grouped into a shared output
@@ -736,7 +771,8 @@ BAM primary (non-secondary) interval seeds
   -> post-EM mono read folding
   -> cross-interval aggregation and profile-specific finalization
   -> optional finalized-model junction consensus + mass-preserving merge
-  -> GTF / scoring TSV / manifest / optional BEDPE
+  -> survivor-set responsibility refit + orphaned-mass diagnostics
+  -> GTF / scoring TSV / refit audit / manifest / optional BEDPE
 ```
 
 `real-drna` (raw CLI default):
@@ -747,6 +783,7 @@ tight summed LLR (margin 1, flank 8, same intron count only)
   -> novel mono hard-read floor 5
   -> isoform fraction 1%
   -> read-supported junction consensus (6 bp / support 2 / ratio 2)
+  -> survivor-set abundance refit
   -> soft/hard, full-length, and polyA gates OFF
 
 real-drna-precision adds generation support >=2; balanced real keeps 1.
@@ -758,6 +795,7 @@ real-drna-precision adds generation support >=2; balanced real keeps 1.
 SUM (margin 1/flank 4) when unguided; wide mean (margin 0.5) when guided
   -> novel/GTF abundance 3/1 with GTF floor raised to 3
   -> isoform fraction 1%, soft/hard ratio 2x, full-length 10%
+  -> survivor-set abundance refit
   -> polyA gate OFF
 ```
 

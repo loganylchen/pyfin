@@ -26,8 +26,9 @@ import copy
 import logging
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import List
+from typing import List, Optional, Tuple
 
+from fin.analysis.abundance_refit import ResponsibilityLedger
 from fin.analysis.quantification import QuantResult
 from fin.pipeline.config import PipelineConfig
 
@@ -74,7 +75,9 @@ def _worker_init(config: PipelineConfig, counter, gpu_workers: int, log_level: s
     logger.info("worker %d ready (gpu=%s)", _WORKER_ID, role_gpu)
 
 
-def _worker_process_index(i: int) -> List[QuantResult]:
+def _worker_process_index(
+    i: int,
+) -> Optional[Tuple[List[QuantResult], Optional[ResponsibilityLedger]]]:
     """Process the interval at deterministic index ``i`` in this worker."""
     interval = _WORKER_INTERVALS[i]
     try:
@@ -92,16 +95,18 @@ def run_parallel(
     threads: int,
     gpu_workers: int,
     log_level: str,
-) -> List[List[QuantResult]]:
+) -> List[Tuple[List[QuantResult], Optional[ResponsibilityLedger]]]:
     """Run ``process_interval`` over all intervals in a spawn process pool.
 
-    Returns the list of non-empty per-interval result lists (order arbitrary;
-    downstream aggregation is commutative).
+    Returns non-empty interval ``(results, ledger)`` pairs in arbitrary order;
+    quantification aggregation and global refit are both order-independent.
     """
     n = len(intervals)
     ctx = mp.get_context("spawn")
     counter = ctx.Value("i", 0)
-    all_results: List[List[QuantResult]] = []
+    all_results: List[
+        Tuple[List[QuantResult], Optional[ResponsibilityLedger]]
+    ] = []
 
     ex = ProcessPoolExecutor(
         max_workers=threads,
@@ -119,7 +124,7 @@ def run_parallel(
             logger.info(
                 "Completed interval %d/%d: %s", done, n, intervals[i].region_string
             )
-            if quant:
+            if quant is not None:
                 all_results.append(quant)
     except BaseException:
         # Fail fast on any worker crash or KeyboardInterrupt: cancel not-yet-started

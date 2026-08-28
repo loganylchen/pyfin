@@ -191,13 +191,36 @@ def test_process_interval_m2_em_smoke(tmp_path):
     with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
          patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
          patches["em_with_coherence"], patches["quantify_transcripts"]:
-        results = runner.process_interval(_make_interval())
+        interval_output = runner.process_interval(_make_interval())
 
-    assert results is not None
+    assert interval_output is not None
+    results, ledger = interval_output
+    assert ledger is None
     assert len(results) == 2
     for qr in results:
         # max_R is stamped from the (uniform) EM responsibility matrix.
         assert qr.max_R == pytest.approx(0.5)
+
+
+def test_process_interval_builds_refit_ledger_when_effective(tmp_path):
+    cfg = _make_config(
+        work_dir=str(tmp_path), post_selection_refit=True
+    )
+    cfg.validate()
+    runner = _make_runner(cfg)
+    patches, _, _ = _patch_m2_phases(num_reads=4, num_cands=2)
+
+    with patches["discover_candidates"], patches["mappy_multimap_responsibilities"], \
+         patches["mappy_aligner"], patches["tie_nll"], patches["eff_lengths"], \
+         patches["em_with_coherence"], patches["quantify_transcripts"]:
+        interval_output = runner.process_interval(_make_interval())
+
+    assert interval_output is not None
+    results, ledger = interval_output
+    assert len(results) == 2
+    assert ledger is not None
+    assert set(ledger.weights) == {f"read_{i}" for i in range(4)}
+    assert ledger.weights["read_0"] == {"tx0": 0.5, "tx1": 0.5}
 
 
 def test_process_interval_use_gpu_threaded(tmp_path):
@@ -281,9 +304,12 @@ def test_process_interval_fusion_enabled(tmp_path):
          patch("fin.io.io_bam.BamReader", fake_bam), \
          patch("fin.fusion.detect_fusion_candidates",
                return_value=[fusion_cand]) as det:
-        results = runner.process_interval(_make_interval())
+        interval_output = runner.process_interval(_make_interval())
 
     det.assert_called_once()
+    assert interval_output is not None
+    results, ledger = interval_output
+    assert ledger is None
     ids = {qr.candidate_id for qr in results}
     assert "fusion_abc" in ids
 

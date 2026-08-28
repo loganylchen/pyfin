@@ -140,7 +140,8 @@ def snap_quant_results(
     genome_fasta: Optional[Dict[str, str]] = None,
     canonical_motifs: Sequence[str] = (),
     require_canonical: bool = False,
-) -> tuple[Dict[str, QuantResult], int, int]:
+    return_redirects: bool = False,
+):
     """Correct novel junctions and merge models that become structurally equal."""
     motif_set = None
     if require_canonical:
@@ -183,11 +184,17 @@ def snap_quant_results(
         groups[key].append(qr)
 
     merged: Dict[str, QuantResult] = {}
+    redirects: Dict[str, str] = {}
     merged_models = 0
     for group in groups.values():
         result = _merge_group(group)
         merged[result.candidate_id] = result
+        for member in group:
+            if member.candidate_id != result.candidate_id:
+                redirects[member.candidate_id] = result.candidate_id
         merged_models += len(group) - 1
+    if return_redirects:
+        return merged, snapped_junctions, merged_models, redirects
     return merged, snapped_junctions, merged_models
 
 
@@ -195,14 +202,16 @@ def apply_junction_snap(
     config,
     results: Dict[str, QuantResult],
     genome_fasta: Optional[Dict[str, str]] = None,
-) -> Dict[str, QuantResult]:
+    *,
+    return_redirects: bool = False,
+):
     """Apply the optional finalized-model correction, failing open on BAM errors."""
     if not getattr(config, "junction_snap", False):
-        return results
+        return (results, {}) if return_redirects else results
     observed = collect_junction_support(config.bam_path)
     if not observed:
-        return results
-    corrected, snapped, merged = snap_quant_results(
+        return (results, {}) if return_redirects else results
+    snap_output = snap_quant_results(
         results,
         observed,
         tolerance=int(config.junction_snap_tolerance),
@@ -211,10 +220,16 @@ def apply_junction_snap(
         genome_fasta=genome_fasta,
         canonical_motifs=getattr(config, "canonical_motifs", ()),
         require_canonical=bool(getattr(config, "canonical_gate", False)),
+        return_redirects=return_redirects,
     )
+    if return_redirects:
+        corrected, snapped, merged, redirects = snap_output
+    else:
+        corrected, snapped, merged = snap_output
+        redirects = {}
     logger.info(
         "Junction consensus snapped %d junctions and merged %d duplicate models",
         snapped,
         merged,
     )
-    return corrected
+    return (corrected, redirects) if return_redirects else corrected

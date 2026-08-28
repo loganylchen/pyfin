@@ -120,6 +120,13 @@ def test_config_isoform_fraction_uses_family_locus_by_default():
     assert c.isoform_fraction_locus == "family"
 
 
+def test_config_post_selection_refit_raw_default_off():
+    c = PipelineConfig(bam_path="/tmp/x.bam")
+    assert c.post_selection_refit is False
+    assert c.post_selection_refit_effective is False
+    assert c.post_selection_refit_disable_reason is None
+
+
 def test_config_m2_metric_defaults():
     c = PipelineConfig(bam_path="/tmp/x.bam")
     assert c.m2_metric == "mean"
@@ -133,6 +140,7 @@ def test_named_profiles_separate_sirv_and_real_finalize_gates():
     assert PIPELINE_PROFILES["sirv"]["floor_gtf_abundance"] is True
     assert PIPELINE_PROFILES["sirv"]["min_fulllen_fraction"] == 0.1
     assert PIPELINE_PROFILES["sirv"]["min_polya5p_reads"] == 0
+    assert PIPELINE_PROFILES["sirv"]["post_selection_refit"] is True
     assert PIPELINE_PROFILES["sirv"]["m2_metric"] == "auto"
     assert PIPELINE_PROFILES["sirv"]["m2_summed_llr_margin"] == 1.0
     assert PIPELINE_PROFILES["sirv"]["m2_summed_llr_flank"] == 4
@@ -141,6 +149,7 @@ def test_named_profiles_separate_sirv_and_real_finalize_gates():
     assert PIPELINE_PROFILES["real-drna"]["max_soft_mass_ratio"] == 0.0
     assert PIPELINE_PROFILES["real-drna"]["min_fulllen_fraction"] == 0.0
     assert PIPELINE_PROFILES["real-drna"]["min_polya5p_reads"] == 0
+    assert PIPELINE_PROFILES["real-drna"]["post_selection_refit"] is True
     assert PIPELINE_PROFILES["real-drna"]["drop_mono_exon_novel"] is True
     assert PIPELINE_PROFILES["real-drna"]["min_mono_exon_reads"] == 5
     assert PIPELINE_PROFILES["real-drna"]["junction_snap"] is True
@@ -219,6 +228,56 @@ def test_programmatic_sirv_auto_metric_routes_by_guide(tmp_path):
     )
     assert guided.m2_metric == "mean"
     assert guided.m2_metric_route == "auto-guided"
+
+
+def test_config_validate_enables_named_profile_refit(tmp_path):
+    bam = tmp_path / "x.bam"
+    bam.touch()
+    c = PipelineConfig.from_profile("real-drna", bam_path=str(bam))
+    c.validate()
+    assert c.post_selection_refit_effective is True
+    assert c.post_selection_refit_disable_reason is None
+
+
+def test_config_validate_warn_disables_profile_refit_for_other_mode(
+    tmp_path, caplog
+):
+    bam = tmp_path / "x.bam"
+    bam.touch()
+    c = PipelineConfig.from_profile(
+        "real-drna", bam_path=str(bam), quant_mode="argmax"
+    )
+    c.validate()
+    assert c.post_selection_refit is True
+    assert c.post_selection_refit_effective is False
+    assert "unsupported quant_mode" in c.post_selection_refit_disable_reason
+    assert "refit disabled" in caplog.text.lower()
+
+
+def test_config_validate_warn_disables_profile_refit_for_feedback(
+    tmp_path, caplog
+):
+    bam = tmp_path / "x.bam"
+    bam.touch()
+    c = PipelineConfig.from_profile(
+        "real-drna", bam_path=str(bam), abundance_feedback=True
+    )
+    c.validate()
+    assert c.post_selection_refit_effective is False
+    assert "full EM rerun" in c.post_selection_refit_disable_reason
+    assert "refit disabled" in caplog.text.lower()
+
+
+def test_config_validate_rejects_explicit_refit_with_feedback(tmp_path):
+    bam = tmp_path / "x.bam"
+    bam.touch()
+    c = PipelineConfig(
+        bam_path=str(bam),
+        post_selection_refit=True,
+        abundance_feedback=True,
+    )
+    with pytest.raises(ValueError, match="abundance-feedback EM"):
+        c.validate()
 
 
 def test_config_validate_rejects_invalid_isoform_fraction_locus(tmp_path):
