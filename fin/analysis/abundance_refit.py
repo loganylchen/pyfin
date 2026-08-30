@@ -145,6 +145,8 @@ def refit_survivor_abundance(
     ledgers: Sequence[ResponsibilityLedger],
     *,
     snap_redirects: Mapping[str, str] | None = None,
+    split_routes: Mapping[str, Mapping[str, str]] | None = None,
+    split_primary: Mapping[str, str] | None = None,
 ) -> tuple[Dict[str, QuantResult], dict]:
     """Renormalize each assignable read over final surviving candidates.
 
@@ -154,8 +156,25 @@ def refit_survivor_abundance(
     over those columns. A read with no surviving column contributes one unit of
     explicit selection-orphaned mass. Mono-resolved reads use their forced
     parent mapping instead of this renormalization.
+
+    ``split_routes``/``split_primary`` (EndpointRefine) carry read-conditional
+    redirects: when a resolved target was split into endpoint states, a read
+    routed to a specific state sends its weight there and every unrouted read
+    follows the primary state, so split candidates are requantified by the
+    same conservation-checked machinery as everything else.
     """
     snap_redirects = snap_redirects or {}
+    split_routes = split_routes or {}
+    split_primary = split_primary or {}
+
+    def _route(target: str, rid: str) -> str:
+        routes = split_routes.get(target)
+        if routes is None:
+            return target
+        routed = routes.get(rid, split_primary.get(target, target))
+        # A split state may itself have been absorbed by a later snap merge.
+        return _resolve_redirect(routed, snap_redirects)
+
     survivors = set(results)
     merged_weights: Dict[str, Dict[str, float]] = defaultdict(
         lambda: defaultdict(float)
@@ -169,14 +188,14 @@ def refit_survivor_abundance(
             for candidate_id, weight in sorted(ledger.weights[rid].items()):
                 if not math.isfinite(weight) or weight <= 0.0:
                     continue
-                target = _resolve_redirect(
+                target = _route(_resolve_redirect(
                     candidate_id, ledger.redirects, snap_redirects
-                )
+                ), rid)
                 merged_weights[rid][target] += float(weight)
         for rid, candidate_id in sorted(ledger.forced.items()):
-            target = _resolve_redirect(
+            target = _route(_resolve_redirect(
                 candidate_id, ledger.redirects, snap_redirects
-            )
+            ), rid)
             forced_targets[rid].append(target)
 
     assignable_reads = set(merged_weights)

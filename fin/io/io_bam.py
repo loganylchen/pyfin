@@ -2,6 +2,7 @@
 BAM/SAM file format parser using pysam
 """
 
+from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Iterator, Tuple, Any, Generator
 from pathlib import Path
 import logging
@@ -16,6 +17,21 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RegionReadBatch:
+    """Region fetch result with an explicit completeness contract.
+
+    ``complete`` is True only when the region iterator was exhausted without
+    an error and without an early ``max_reads`` stop. Consumers that derive
+    HARD-NEGATIVE evidence ("no read supports X") must require
+    ``complete=True``; a partial batch can only support positive statements.
+    """
+
+    reads: List[Dict[str, Any]] = field(default_factory=list)
+    complete: bool = True
+    error: Optional[str] = None
 
 
 class BamReader:
@@ -246,21 +262,39 @@ class BamReader:
             max_reads: Maximum number of reads to return
 
         Returns:
-            List of read dictionaries
+            List of read dictionaries. Legacy contract: a mid-iteration fetch
+            error is swallowed and whatever was accumulated is returned, so
+            the list may silently be INCOMPLETE. Evidence consumers that
+            treat absence as zero support must use
+            :meth:`get_reads_in_region_checked` instead.
+        """
+        return self.get_reads_in_region_checked(region, max_reads).reads
+
+    def get_reads_in_region_checked(
+        self, region: str, max_reads: Optional[int] = None
+    ) -> RegionReadBatch:
+        """Fetch region reads with an explicit completeness verdict.
+
+        Returns a :class:`RegionReadBatch`. ``complete`` is False when the
+        underlying iterator raised mid-fetch (``error`` records it) or when
+        ``max_reads`` stopped the scan early — in both cases the batch must
+        not be used as exhaustive (hard-negative) evidence.
         """
         if self._alignment_file is None:
             raise RuntimeError("Alignment file not opened. Call open() first.")
 
-        reads = []
+        batch = RegionReadBatch()
         try:
             for i, alignment in enumerate(self._alignment_file.fetch(region=region)):
                 if max_reads is not None and i >= max_reads:
+                    batch.complete = False
                     break
-                reads.append(self.alignment_to_dict(alignment))
+                batch.reads.append(self.alignment_to_dict(alignment))
         except Exception as e:
             logger.error(f"Failed to get reads in region {region}: {e}")
-
-        return reads
+            batch.complete = False
+            batch.error = f"{type(e).__name__}: {e}"
+        return batch
 
     def iterate_alignments(self) -> Generator[Dict[str, Any], None, None]:
         """

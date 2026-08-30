@@ -203,6 +203,61 @@ class PipelineConfig:
     post_selection_refit_effective: bool = False
     post_selection_refit_disable_reason: Optional[str] = None
 
+    # Emit candidate_evidence.tsv: one row per post-selection survivor with
+    # inference-time observable features (junction support, family share,
+    # end support, canonicality, containment geometry). Read-only diagnostic:
+    # never changes candidates, abundances, or ordinary outputs. Off by
+    # default; the ranking work consumes this table offline.
+    candidate_evidence: bool = False
+
+    # Calibrated candidate ranking (fin/analysis/candidate_ranking.py).
+    # "filter" scores every post-selection survivor with the frozen v1
+    # logistic model over inference-time observable evidence and removes
+    # NOVEL candidates below the frozen operating point BEFORE junction
+    # snapping and the final abundance refit (GTF/fusion always exempt).
+    # Trained on H9 r2r2 only; threshold frozen on the tuning frontier under
+    # the hard T1-not-lower constraint and validated untouched on r3r1.
+    # "off" preserves the historical selection exactly.
+    ranking_mode: Literal["off", "filter"] = "off"
+    # None -> the frozen model threshold; explicit values override (expert).
+    ranking_threshold: Optional[float] = None
+
+    # EXPERIMENTAL observability: also write per-interval machine-readable M2
+    # contrast records (per-comparison event counts/values/margins plus one
+    # aggregate line) as JSONL under <work_dir>/m2_contrasts/. Off by
+    # default; log lines always exist.
+    m2_contrast_stats_jsonl: bool = False
+
+    # EndpointRefine (EXPERIMENTAL, off by default; requires the final
+    # abundance refit because post-split requantification is mandatory).
+    # Splits a novel multi-exon survivor into at most endpoint_max_splits
+    # endpoint states when strand-aware read-end modes support distinct
+    # (TSS, TES) pairs; interior-TSS (degradation-direction) modes need
+    # 2x support, and every read is re-routed through the refit so mass
+    # conservation is enforced by the existing invariants.
+    endpoint_refine: bool = False
+    endpoint_window_bp: int = 25
+    endpoint_min_reads: int = 3
+    endpoint_min_pair_frac: float = 0.15
+    endpoint_max_splits: int = 2
+
+    # TSS evidence (EXPERIMENTAL). Decides whether a CONTAINED shorter model
+    # is a real transcript or a 5'-degradation artifact of the longer one, by
+    # testing its start against the local conditional-termination-hazard
+    # background (fin/analysis/tss_evidence.py). "audit" records verdicts
+    # without changing output; "require" keeps only endpoint states whose
+    # alternative TSS is `supported`. An `unidentifiable` verdict never drops
+    # a model - insufficient evidence is not evidence of absence.
+    tss_evidence_mode: Literal["off", "audit", "require"] = "off"
+
+    # Genome access. lazy_genome=True (default) opens the FASTA through an
+    # indexed lazy mapping holding at most genome_cache_chroms chromosomes
+    # per process - measured to be the dominant worker-memory hotspot when
+    # loaded eagerly (~3.1 GB x N workers). False restores the historical
+    # eager whole-genome dict.
+    lazy_genome: bool = True
+    genome_cache_chroms: int = 2
+
     # Soft-mass / hard-read ratio ceiling. Drop a NOVEL multi-exon candidate
     # whose EM soft abundance (R.sum) divided by its hard argmax read count
     # (num_assigned_reads) is >= this value (a candidate with 0 hard reads is
@@ -369,7 +424,14 @@ class PipelineConfig:
     # class-window mean NLL. "summed_llr" uses tight differing-junction windows
     # and undivided per-event NLL, restricted to same-intron-count contrasts.
     # "off" retains the M1 exact tie and assigns it without signal refinement.
-    m2_metric: Literal["off", "mean", "summed_llr", "auto"] = "mean"
+    m2_metric: Literal["off", "mean", "summed_llr", "sqrt_count_mean_llr", "auto"] = "mean"
+    # "sqrt_count_mean_llr" (EXPERIMENTAL, never auto-routed): same tight
+    # differing-junction footprint and same-intron-count guard as summed_llr,
+    # but each candidate's MEAN window NLL is rescaled by sqrt(min effective
+    # event count), so the decision margin is a z-like difference of means
+    # instead of an undivided sum whose magnitude tracks event count. Gated by
+    # the same m2_summed_llr_margin threshold. Promote only after paired live
+    # validation; observation counters are logged for both tight metrics.
     m2_metric_route: str = "fixed"
     m2_summed_llr_margin: float = 2.0
     m2_summed_llr_flank: int = 6
@@ -711,7 +773,32 @@ class PipelineConfig:
             raise ValueError(
                 "isoform_fraction_locus must be 'family' or 'overlap'"
             )
-        if self.m2_metric not in ("off", "mean", "summed_llr"):
+        if getattr(self, "ranking_mode", "off") not in ("off", "filter"):
+            raise ValueError(f"unknown ranking_mode: {self.ranking_mode!r}")
+        if getattr(self, "tss_evidence_mode", "off") not in (
+            "off", "audit", "require"
+        ):
+            raise ValueError(
+                f"unknown tss_evidence_mode: {self.tss_evidence_mode!r}"
+            )
+        if getattr(self, "tss_evidence_mode", "off") != "off" and not getattr(
+            self, "endpoint_refine", False
+        ):
+            raise ValueError(
+                "tss_evidence_mode requires --endpoint-refine: the TSS test "
+                "scores the alternative starts that EndpointRefine proposes"
+            )
+        if getattr(self, "endpoint_refine", False) and not (
+            self.post_selection_refit and self.quant_mode == "m2_em"
+            and not self.abundance_feedback
+        ):
+            raise ValueError(
+                "endpoint_refine requires the post-selection refit "
+                "(quant_mode=m2_em, post_selection_refit on, no "
+                "abundance_feedback): post-split requantification is "
+                "mandatory, splitting without it is not supported"
+            )
+        if self.m2_metric not in ("off", "mean", "summed_llr", "sqrt_count_mean_llr"):
             raise ValueError(f"unknown m2_metric: {self.m2_metric!r}")
 
         self.post_selection_refit_effective = False
@@ -744,6 +831,30 @@ class PipelineConfig:
                 )
             else:
                 self.post_selection_refit_effective = True
+
+        # Inert-parameter transparency (review Medium 7): the production
+        # m2_em path is a single beta=0 softmax with sigma hardcoded to 1.0,
+        # so EM iteration/sigma knobs cannot change its output. Non-default
+        # values are accepted for the other quant modes but must not be
+        # silently ignored here.
+        if self.quant_mode == "m2_em" and not self.abundance_feedback:
+            inert = []
+            if self.em_sigma != 1.0:
+                inert.append(f"em_sigma={self.em_sigma} (m2_em fixes sigma=1.0)")
+            if self.em_max_iter != 1000:
+                inert.append(f"em_max_iter={self.em_max_iter}")
+            if self.em_tol != 1e-4:
+                inert.append(f"em_tol={self.em_tol}")
+            if self.em_max_iter_override is not None:
+                inert.append(
+                    f"em_max_iter_override={self.em_max_iter_override}"
+                )
+            if inert:
+                logger.warning(
+                    "Inert under quant_mode=m2_em without abundance_feedback "
+                    "(single beta=0 softmax; values have no effect): %s",
+                    "; ".join(inert),
+                )
 
         if self.m2_diff_cover_margin < 0 or self.m2_summed_llr_margin < 0:
             raise ValueError("M2 margins must be >= 0")

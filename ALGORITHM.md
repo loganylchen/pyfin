@@ -666,6 +666,113 @@ annotation-free and runs after existence selection, so it cannot change the EM
 competition set. It gained T3 F1 on three real samples while retaining or
 increasing recall. SIRV leaves it off.
 
+## 19b. Candidate evidence layer and the frozen evidence ranker (optional)
+
+After global selection and before junction snapping/refit, the pipeline can
+compute one observable-feature row per survivor
+(`fin/analysis/candidate_evidence.py`): weakest/median BAM junction support,
+family share/rank from persisted discovery families, sibling sub/superchain
+geometry, strand-aware 5'/3'/full-length read-end agreement, per-junction
+canonical fraction, mono/exon-count/length, and EM quantities. One whole-BAM
+pass (`collect_ranking_bam_evidence`) supplies junction support and primary
+read ends together and carries an explicit completeness flag. Sentinel -1
+means "evidence source unavailable", never "low". `--candidate-evidence`
+writes `candidate_evidence.tsv` (read-only diagnostic; outputs unchanged).
+
+`--ranking-mode filter` (EXPERIMENTAL, off by default and enabled by no
+profile) scores each row with a frozen L2-logistic model
+(`fin/analysis/candidate_ranking.py`, exact constants mirrored bit-for-bit in
+`experiments/prod_validation/models/candidate_ranker_v1.json`) and removes
+NOVEL candidates whose raw logit falls below the frozen operating point;
+GTF/fusion are always exempt, an incomplete BAM scan refuses to filter, and
+an explicitly requested filter that cannot compute evidence raises instead of
+silently keeping everything. Filtering runs BEFORE snapping and the
+survivor-abundance refit, so released read mass follows the ordinary refit
+accounting (renormalized or explicitly orphaned). The score is a ranking
+logit, not a calibrated probability; the `confidence` column is untouched.
+
+Provenance: trained on the H9 r2r2 tuning sample only (labels = gffcompare
+exact-match vs GENCODE, used only as labels); chromosome-grouped CV AUC
+0.809; threshold frozen on the tuning frontier under a hard T1-not-lower
+constraint. Frozen evaluation: r3r1 T1 38.044->38.600 / T3 39.732->42.077
+(both above StringTie3/IsoQuant); one-shot r4r2 audit T1 38.580->38.256 /
+T3 39.788->40.758 (T3 gap to IsoQuant halved but not closed, own T1
+slightly lower) - which is why the mode ships experimental rather than
+default, pending the reserved unopened holdouts.
+
+## 19c. EndpointRefine (EXPERIMENTAL, off by default)
+
+`--endpoint-refine` splits a novel multi-exon survivor into at most
+`--endpoint-max-splits` endpoint states when strand-aware read-end modes
+support distinct (TSS, TES) pairs: 25 bp mode clustering of assigned reads'
+genomic ends, pair support >= 3 reads and >= 15% of end-mapped reads,
+interior-TSS (5'-degradation-direction) modes requiring 2x support, stable
+BLAKE2b endpoint IDs, and mono/GTF/fusion exempt. Post-split
+requantification is mandatory and structural: the split plan emits per-read
+routes that `refit_survivor_abundance` consumes (`split_routes` /
+`split_primary`), so every read's mass is re-dealt over the endpoint states
+under the same conservation invariants, and `validate()` rejects
+`endpoint_refine` without the effective refit. Poly(A)-supported TES
+strengthening is a declared v2 hook (`polya_read_ids`); v1 is signal-free.
+Measured upper bound of the addressed error class: 62/4,477 (1.38%) of
+missed T3 multi-exon truths. Off in every profile pending holdout data.
+
+## 19d. TSS evidence for contained models (EXPERIMENTAL, off by default)
+
+`--tss-evidence-mode audit|require` (needs `--endpoint-refine`) decides whether
+a CONTAINED shorter model is a real transcript or a 5'-degradation artifact of
+the longer one. dRNA reads 3'->5', so the 3' end is reliable and the 5' end is
+degraded; when a short model shares the parent's chain AND TES and differs only
+by an internal TSS, the two explanations are mathematically unidentifiable, so
+the verdict is three-way: `supported` / `unsupported` / `unidentifiable`.
+
+Evidence is routed by identifiability rung. A state with its OWN 3' end is
+decided by `evaluate_tes_support` on the reliable end (reads terminating at the
+candidate's 3' cluster, which degradation cannot fake) after restricting the
+read pool to reads ending there. A state sharing the parent's 3' end has no
+internal TSS signal available except the conditional termination hazard
+`ends_at(d)/at_risk(d)` in spliced coordinates, tested against a LOCAL
+neighbourhood-median null (a single global hazard mislabelled degradation
+hotspots at a 52% rate).
+
+Three statistical guards, all of which change the answer. (i) SELECTION: the
+candidate bin was chosen because it looked extreme and is then tested on the
+same reads, so the pointwise bootstrap p is Bonferroni-adjusted by the size of
+the search space actually scanned -- in the pipeline the FIRST EXON's length
+in bins, which is deterministic and is exactly the region EndpointRefine may
+propose a start in. A simulated max-statistic was implemented first and
+rejected: it needs the risk set at every candidate bin, and reusing the
+candidate's own `n_at_risk` understates the null spread. (ii) The bootstrap is
+empirical, not asymptotic chi-square, because the mixture weight is a boundary
+parameter. (iii) MULTIPLICITY, two levels: each alternative gets
+`p_within = min(1, p * k)` for the k alternatives on its parent model, the
+parent contributes the minimum of those upward, and Benjamini-Yekutieli runs
+across parent models -- BY, not BH, because alternatives share reads, coverage
+and the degradation background so positive dependence is not guaranteed. A
+candidate survives only if BOTH its own `p_within` and its parent q clear
+alpha, so one strong start cannot certify its weak siblings.
+
+This is parent-MODEL FDR, not gene-locus FDR: de novo assembly has no gene
+annotation, and the grouping key is the parent candidate id. Structural decisions and abstentions carry
+`p_value = None` (JSON null, never NaN) and never enter the family, so FDR is
+claimed for every calibrated HAZARD test (including `own_tes` candidates with
+a distinct TSS) and never for the structural TES-only or parent-unobserved
+rules. Peak sharpness (`peak_mad`) rejects broad humps,
+including on the no-upstream-reads path. `unidentifiable` never drops a model.
+
+Validation, reported per rung and per locus; no pooled AUC is computed because
+the two rungs are scored by rules that are not calibrated to a common scale.
+SIRV, deduplicated per short transcript, after the full correction: all 3
+positive loci `supported`, the fourth positive transcript abstaining (retained
+but unverified), and ZERO false positives among the 85 negative rows
+(84 `unsupported`, 1 abstention). Ground-truth simulation of the hardest rung:
+zero false positives among all 151 decided negatives (the FPR is undefined at
+depth 10, where every negative abstains); recall 0.097 / 0.741 / 1.000 at
+depth 20 for 10% / 25% / 50% short fractions, 0.625 / 1.000 / 1.000 at depth
+50, and abstention below 20 reads. Live human sample: `audit` byte-identical
+to `--endpoint-refine` alone, mass error 1.46e-10, repeat runs byte-identical.
+Full study: `TSS_CONTAINMENT_STUDY.md`.
+
 ## 20. Abundance, confidence, aggregation, and TPM
 
 For responsibility matrix `R` and hard labels `h`:
@@ -742,6 +849,13 @@ GTF gene IDs are resolved after selection. Novel candidates default to
 gene unless another layer assigns one.
 
 ## 21. Parallel execution
+
+Genome access is lazy by default (`fin/io/lazy_genome.py`): each process
+opens the indexed FASTA and holds at most `genome_cache_chroms` (2)
+chromosomes, replacing the eager whole-genome dict that dominated worker
+memory (measured 67.1 -> 40.9 GB whole-job peak on the tuning sample with
+byte-identical outputs; `lazy_genome=False` restores the historical eager
+load).
 
 `fin/pipeline/parallel.py:run_parallel` uses multiprocessing `spawn`:
 

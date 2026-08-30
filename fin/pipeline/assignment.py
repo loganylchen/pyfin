@@ -21,6 +21,8 @@ Byte-identical extraction. The runner keeps thin ``_tie_nll`` / ``_eff_lengths``
 from __future__ import annotations
 
 import logging
+import math
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -74,10 +76,13 @@ def _m2_score_region(config, tied_cands) -> Tuple[Optional[set], List[Tuple[int,
     )
 
     metric = getattr(config, "m2_metric", "mean")
-    if metric == "summed_llr":
+    if metric in ("summed_llr", "sqrt_count_mean_llr"):
         # Containment/cassette contrasts have asymmetric candidate-private event
         # populations. The validated summed contrast is the same-intron-count
-        # wobble niche; other structural classes abstain.
+        # wobble niche; other structural classes abstain. The experimental
+        # sqrt-count variant shares the footprint but rescales by effective
+        # event count, so unequal per-candidate coverage cannot masquerade as
+        # signal strength.
         intron_counts = {len(c.intron_chain.introns) for c in tied_cands}
         if len(intron_counts) != 1:
             return None, []
@@ -91,6 +96,145 @@ def _m2_score_region(config, tied_cands) -> Tuple[Optional[set], List[Tuple[int,
         )
         return gset, []
     return None, []
+
+
+def _record_abstention(stats, rid, tie, cand_list, reason):
+    """Machine-readable abstention record (capture mode only)."""
+    stats[f"abstain_{reason}"] += 1
+    records = stats.get("_records")
+    if isinstance(records, list):
+        records.append({
+            "kind": "abstention",
+            "read_id": str(rid),
+            "reason": reason,
+            "tie_candidates": [
+                getattr(cand_list[j], "candidate_id", str(j)) for j in tie
+            ],
+        })
+
+
+def _finalize_contrast(metric, nlls, evs, stats, *, read_id=None,
+                       cand_ids=None, coverage=None):
+    """Record contrast observability and apply the sqrt-count rescale.
+
+    For the summed/sqrt-count footprint the two best hypotheses may rest on
+    unequal effective event counts; the stats make that visible per run. The
+    experimental ``sqrt_count_mean_llr`` metric multiplies each candidate's MEAN
+    window NLL by sqrt(min event count over scored hypotheses), so the margin
+    behaves like a z-scale difference of means instead of an undivided sum
+    whose magnitude tracks event count. Ordering within a read is preserved
+    (positive common scale); ``summed_llr`` values pass through unchanged.
+    """
+    if metric not in ("summed_llr", "sqrt_count_mean_llr"):
+        return nlls
+    ordered = sorted(nlls.items(), key=lambda kv: kv[1])
+    (j1, v1), (j2, v2) = ordered[0], ordered[1]
+    e1, e2 = evs.get(j1, 0), evs.get(j2, 0)
+    stats["decided"] += 1
+    stats["same_event_count"] += 1 if e1 == e2 else 0
+    stats["diff_event_count"] += 0 if e1 == e2 else 1
+    stats["min_ev_sum"] += min(e1, e2)
+    if metric == "sqrt_count_mean_llr":
+        scale = math.sqrt(max(min(evs[j] for j in nlls), 1))
+        nlls = {j: v * scale for j, v in nlls.items()}
+        ordered = sorted(nlls.items(), key=lambda kv: kv[1])
+    margin = ordered[1][1] - ordered[0][1]
+    stats["margin_sum"] += margin
+    records = stats.get("_records")
+    if isinstance(records, list):
+        # Per-comparison experimental record. v1/v2 are the metric's raw
+        # per-hypothesis values BEFORE any sqrt-count rescale; mean and sum
+        # NLL are both materialized (same event set, so mean = sum / n_ev).
+        # The same-intron-count guard already held or this contrast would
+        # not exist.
+        if metric == "summed_llr":
+            sum1, sum2 = float(v1), float(v2)
+            mean1 = sum1 / e1 if e1 else float("nan")
+            mean2 = sum2 / e2 if e2 else float("nan")
+        else:  # sqrt_count_mean_llr: raw values are means
+            mean1, mean2 = float(v1), float(v2)
+            sum1, sum2 = mean1 * e1, mean2 * e2
+        j_best, j_runner = int(ordered[0][0]), int(ordered[1][0])
+        records.append({
+            "kind": "comparison",
+            "read_id": None if read_id is None else str(read_id),
+            "winner_col": j_best,
+            "winner_id": (cand_ids or {}).get(j_best),
+            "runner_id": (cand_ids or {}).get(j_runner),
+            "margin": round(float(margin), 6),
+            "nll_mean_best": round(mean1, 6),
+            "nll_mean_runner": round(mean2, 6),
+            "nll_sum_best": round(sum1, 6),
+            "nll_sum_runner": round(sum2, 6),
+            "nll_mean_delta": round(mean2 - mean1, 6),
+            "nll_sum_delta": round(sum2 - sum1, 6),
+            "ev_best": int(e1),
+            "ev_runner": int(e2),
+            "n_scored": len(nlls),
+            "coverage": coverage,
+            "same_intron_count": True,
+        })
+    return nlls
+
+
+def _log_contrast_stats(metric, stats, config=None):
+    """Observability for the tight-window metrics.
+
+    Always logs one compact line per interval. When
+    ``config.m2_contrast_stats_jsonl`` is enabled (experimental), also
+    appends a machine-readable JSON record under
+    ``<work_dir>/m2_contrasts/`` (one file per interval batch, pid+counter
+    named, aggregate afterwards) so calibration/reliability analysis does not
+    have to parse log text.
+    """
+    if metric not in ("summed_llr", "sqrt_count_mean_llr"):
+        return
+    decided = int(stats.get("decided", 0))
+    # ANY abstention reason must produce output: a locus that abstained
+    # entirely (no krill backend, no mappy alignment, missing batch rows) is
+    # exactly the case calibration analysis must be able to see.
+    if not decided and not any(
+        k.startswith("abstain_") and v for k, v in stats.items()
+    ):
+        return
+    logger.info(
+        "M2 %s contrasts: decided=%d abstained_lt2=%d abstain_window=%d "
+        "abstain_count=%d abstain_payload=%d same_events=%d diff_events=%d "
+        "mean_min_ev=%.1f mean_margin=%.2f",
+        metric, decided, int(stats.get("abstain_lt2_scored", 0)),
+        int(stats.get("abstain_no_window", 0)),
+        int(stats.get("abstain_unequal_intron_count", 0)),
+        int(stats.get("abstain_invalid_payload", 0)),
+        int(stats.get("same_event_count", 0)),
+        int(stats.get("diff_event_count", 0)),
+        stats.get("min_ev_sum", 0.0) / decided if decided else 0.0,
+        stats.get("margin_sum", 0.0) / decided if decided else 0.0,
+    )
+    if config is not None and getattr(config, "m2_contrast_stats_jsonl", False):
+        try:
+            import json
+            import os
+            import time
+            from pathlib import Path
+
+            out_dir = Path(config.work_dir) / "m2_contrasts"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            lines = []
+            for rec in stats.get("_records") or []:
+                rec = dict(rec)
+                rec.setdefault("kind", "comparison")
+                rec["metric"] = metric
+                lines.append(json.dumps(rec, sort_keys=True))
+            aggregate = {
+                "kind": "aggregate", "metric": metric,
+                **{k: float(v) for k, v in sorted(stats.items())
+                   if not k.startswith("_")},
+            }
+            lines.append(json.dumps(aggregate, sort_keys=True))
+            path = out_dir / f"{os.getpid()}_{time.monotonic_ns()}.jsonl"
+            path.write_text("\n".join(lines) + "\n")
+        except Exception:  # experimental diagnostics never break a run
+            logger.exception("m2 contrast JSONL emission failed")
 
 
 def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
@@ -133,6 +277,9 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
     nlls_by_read: Dict[int, Dict[int, float]] = {}
     ties_by_read: Dict[int, List[int]] = {}
     cover_by_read: Dict[int, bool] = {}
+    stats: Dict[str, object] = defaultdict(float)
+    if getattr(config, "m2_contrast_stats_jsonl", False):
+        stats["_records"] = []
     krill_aligner, eff_gpu = make_krill_aligner(
         krill, config.krill_pore, config.use_gpu,
         hmm_confidence=False, num_thread=num_threads,
@@ -154,6 +301,12 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
                 ties_by_read[i] = [
                     j for j in range(n_c) if finite[j] and row[j] >= best_as - 1e-9
                 ]
+        for i, tie in ties_by_read.items():
+            if len(tie) >= 2:
+                _record_abstention(
+                    stats, kept_read_ids[i], tie, cand_list, "no_backend",
+                )
+        _log_contrast_stats(metric, stats, config)
         return nlls_by_read, ties_by_read, 0, 0, cover_by_read
 
     pore = config.krill_pore
@@ -186,6 +339,12 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
         tied_cands = [cand_list[j] for j in tie]
         gset, windows = _m2_score_region(config, tied_cands)
         if not gset and not windows:
+            _record_abstention(
+                stats, rid, tie, cand_list,
+                "unequal_intron_count"
+                if len({len(c.intron_chain.introns) for c in tied_cands}) != 1
+                else "no_window",
+            )
             continue
         if gate:
             spans_by_read[i] = wobble_diff_spans(
@@ -214,6 +373,7 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
             per_starts[cand.candidate_id] = best_hit.r_st
             per_cidj[cand.candidate_id] = j
         if not per_seqs:
+            _record_abstention(stats, rid, tie, cand_list, "no_alignment")
             continue
         if not _eventalignable_variants(per_seqs):
             # One invalid hypothesis must not poison eventalign for the entire
@@ -221,6 +381,7 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
             # replacing ambiguous bases or scoring only a subset would turn
             # technical missingness into biological evidence.
             n_invalid_payloads += 1
+            _record_abstention(stats, rid, tie, cand_list, "invalid_payload")
             continue
         if gset:
             gset_by_read[i] = gset
@@ -237,6 +398,9 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
             n_invalid_payloads,
         )
     if not reads_variants:
+        # Every tied read abstained in pass 1; still emit the record set so a
+        # fully-abstaining locus is visible in the calibration data.
+        _log_contrast_stats(metric, stats, config)
         return nlls_by_read, ties_by_read, n_ties, 0, cover_by_read
 
     # --- Pass 2: ONE batched eventalign over every tied pair (per-pair start
@@ -258,6 +422,14 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
             use_batch = False
 
     if use_batch and batch_out is not None:
+        for rid in cidj_by_read:
+            if rid not in batch_out:
+                i_missing = rid_to_i.get(rid)
+                _record_abstention(
+                    stats, rid,
+                    ties_by_read.get(i_missing, []) if i_missing is not None else [],
+                    cand_list, "batch_output_missing",
+                )
         for rid, res_list in batch_out.items():
             i = rid_to_i.get(rid)
             if i is None:
@@ -266,10 +438,14 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
             windows = windows_by_read.get(i, [])
             if metric == "mean" and gset is None:
                 continue
-            if metric == "summed_llr" and not windows:
+            if metric in ("summed_llr", "sqrt_count_mean_llr") and not windows:
+                _record_abstention(
+                    stats, rid, ties_by_read.get(i, []), cand_list, "no_window",
+                )
                 continue
             by_label = {x.get("variant_label"): x for x in res_list}
             nlls: Dict[int, float] = {}
+            evs: Dict[int, int] = {}
             spans = spans_by_read.get(i) if gate else None
             span_cov = [False] * len(spans) if spans else None
             for cid, j in cidj_by_read.get(rid, {}).items():
@@ -280,10 +456,15 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
                     nll, n_ev = _mean_nll_in_window(
                         res, cand_list[j], windows, reduce="sum"
                     )
+                elif metric == "sqrt_count_mean_llr":
+                    nll, n_ev = _mean_nll_in_window(
+                        res, cand_list[j], windows, reduce="mean"
+                    )
                 else:
                     nll, n_ev = _mean_nll_in_gset(res, cand_list[j], gset)
                 if n_ev > 0 and np.isfinite(nll):
                     nlls[j] = float(nll)
+                    evs[j] = int(n_ev)
                 if span_cov is not None:
                     egp = event_genomic_positions(res, cand_list[j])
                     if egp:
@@ -291,12 +472,24 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
                             if not span_cov[s_idx] and read_straddles(egp, lo, hi):
                                 span_cov[s_idx] = True
             if len(nlls) >= 2:
+                cover_val = (all(span_cov) if span_cov else True) if gate else None
+                nlls = _finalize_contrast(
+                    metric, nlls, evs, stats, read_id=rid,
+                    cand_ids={j: cand_list[j].candidate_id for j in nlls},
+                    coverage=cover_val,
+                )
                 n_refined += 1
                 nlls_by_read[i] = nlls
-                if gate:
+                if gate and cover_val is not None:
                     # covered iff every wobbling diff span is straddled by the
                     # read on >=1 candidate (empty spans -> vacuously covered).
-                    cover_by_read[i] = all(span_cov) if span_cov else True
+                    cover_by_read[i] = cover_val
+            elif evs or cidj_by_read.get(rid):
+                _record_abstention(
+                    stats, rid, ties_by_read.get(i, []), cand_list,
+                    "lt2_scored",
+                )
+        _log_contrast_stats(metric, stats, config)
         return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
 
     for rid, per_cidj in cidj_by_read.items():
@@ -307,6 +500,7 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
         windows = windows_by_read.get(i, [])
         seq = read_seqs[rid]
         nlls = {}
+        evs = {}
         for j in per_cidj.values():
             nll, n_ev = read_cand_mean_nll(
                 rid, seq, cand_list[j], windows, krill_aligner, aligners[j],
@@ -316,12 +510,23 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
             )
             if n_ev > 0 and np.isfinite(nll):
                 nlls[j] = float(nll)
+                evs[j] = int(n_ev)
         if len(nlls) >= 2:
+            nlls = _finalize_contrast(
+                metric, nlls, evs, stats, read_id=rid,
+                cand_ids={j: cand_list[j].candidate_id for j in nlls},
+                coverage=None,
+            )
             n_refined += 1
             nlls_by_read[i] = nlls
+        elif evs or per_cidj:
+            _record_abstention(
+                stats, rid, ties_by_read.get(i, []), cand_list, "lt2_scored",
+            )
     # Per-read fallback path does not expose eventalign positions, so the
     # coverage map is left empty here, so fallback contrasts never seed the
     # covered-read redistribution prior.
+    _log_contrast_stats(metric, stats, config)
     return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
 
 
@@ -475,7 +680,7 @@ class Assigner:
             # (no junction signal, or covered-but-indistinguishable that did not
             # straddle every diff span) are deferred to Pass B.
             metric = getattr(self.config, "m2_metric", "mean")
-            if metric == "summed_llr":
+            if metric in ("summed_llr", "sqrt_count_mean_llr"):
                 margin_thr = float(
                     getattr(self.config, "m2_summed_llr_margin", 2.0)
                 )

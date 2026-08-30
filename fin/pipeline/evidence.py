@@ -39,10 +39,12 @@ def compute_observed_junctions(
     unreadable BAM so every support gate self-disables (fail-open) rather than treating "no
     evidence" as "zero support".
 
-    CAVEAT (unchanged from the original ``_observed_junctions``): ``get_reads_in_region``
-    swallows a fetch exception and returns whatever it accumulated first, so a mid-iteration
-    failure yields an INCOMPLETE non-empty map (support counts can under-count). Inherent to the
-    shared source, preserved here verbatim.
+    Completeness contract (resolves review finding Medium 9): the fetch goes
+    through ``get_reads_in_region_checked``. If the region scan did not finish
+    (mid-iteration error, truncation), the partial counts are DISCARDED and
+    ``None`` is returned, so every support gate abstains for the interval
+    instead of reading an undercount as biological zero. Hard-negative
+    junction evidence therefore only ever comes from a complete region scan.
     """
     if not bam_path or not Path(bam_path).exists():
         return None
@@ -52,7 +54,15 @@ def compute_observed_junctions(
     region = f"{interval.chrom}:{max(interval.start + 1, 1)}-{interval.end}"
     try:
         with BamReader(bam_path) as bam:
-            for rd in bam.get_reads_in_region(region):
+            batch = bam.get_reads_in_region_checked(region)
+            if not batch.complete:
+                logger.warning(
+                    "observed-junction fetch incomplete for %s (%s); discarding "
+                    "partial evidence so support gates abstain for this interval",
+                    interval.region_string, batch.error or "early stop",
+                )
+                return None
+            for rd in batch.reads:
                 if (rd.get("is_secondary") or rd.get("is_supplementary")
                         or not rd.get("is_mapped", True)):
                     continue

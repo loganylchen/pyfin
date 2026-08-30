@@ -17,8 +17,9 @@ production manifests, and Advisor guidance.
 | Medium 1: family ownership lost before selection | Resolved | Stable discovery family IDs propagate through assignment/aggregation; family-aware fraction default passed two real paired tests |
 | Medium 2: random candidate IDs | Resolved | Stable structural BLAKE2b IDs remove run-random output and equal-abundance tie breaks |
 | Medium 4: M3 missingness semantics | Resolved by removal | Production M3 wiring removed; prototype preserved under `experiments/m3_coherence/` |
-| Medium 7: no M2 route control | Partially resolved | Explicit metric/margins/auto route added; one-softmax semantics and inert options remain |
+| Medium 7: no M2 route control | Resolved | Explicit metric/margins/auto route; `validate()` now warns whenever inert EM knobs (`em_sigma`/`em_max_iter`/`em_tol`/`em_max_iter_override`) carry non-default values under single-softmax m2_em |
 | Medium 8: config validation dead | Resolved | CLI calls `cfg.validate()` and reports Click usage errors |
+| Medium 9: partial BAM fetch as zero support | Resolved | `RegionReadBatch` completeness contract; `compute_observed_junctions` discards partial scans so support gates abstain instead of reading undercounts as biological zero |
 | Medium 10/13: reproducibility/integration drift | Substantially resolved | Atomic source-hashed manifest and `PROFILE_OPTIMIZATION.md` ledger |
 | High 5: endpoint isoforms | Open, measured lower impact | Only 62/4,477 (1.38%) missed T3 multi-exon truths were same-chain endpoint collapses with an emitted chain |
 | High 6: post-drop abundance refit | Resolved for production beta=0 M2 | Named profiles renormalize sparse read responsibilities on final survivors and report explicit orphaned mass |
@@ -395,7 +396,12 @@ Report canonical status as evidence and make strict removal a profile choice.
 A high-support noncanonical chain should be allowed under a stronger read/signal
 bar rather than categorically impossible.
 
-### Medium 7 [Partially resolved]: `m2_em` exposes an iterative-EM interface but defaults to one softmax
+### Medium 7 [Resolved]: `m2_em` exposes an iterative-EM interface but defaults to one softmax
+
+Resolution: `PipelineConfig.validate()` now emits an explicit warning listing
+every inert knob whose non-default value cannot change the single-softmax
+m2_em output, so configuration space equals behavior space at the log level.
+Original finding preserved below.
 
 A direct execution check confirmed:
 
@@ -435,7 +441,15 @@ Call it immediately after construction and translate errors to `click.UsageError
 This is an implementation defect rather than a scientific issue, but it permits
 invalid execution states.
 
-### Medium 9: Observed-junction evidence can be incomplete without disabling gates
+### Medium 9 [Resolved]: Observed-junction evidence can be incomplete without disabling gates
+
+Resolution: `BamReader.get_reads_in_region_checked` returns a
+`RegionReadBatch` whose `complete` flag is true only for an exhausted,
+error-free scan; `compute_observed_junctions` discards partial batches and
+returns `None`, so every hard-negative support gate abstains for that
+interval. The legacy list-returning API is preserved for positive-evidence
+callers. The evidence-ranking layer applies the same rule: an incomplete
+whole-BAM scan refuses to rank. Original finding preserved below.
 
 `compute_observed_junctions` fails open when BAM reading raises. Its own caveat
 states that `BamReader.get_reads_in_region` may swallow a mid-iteration error and

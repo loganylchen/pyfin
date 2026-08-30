@@ -150,8 +150,30 @@ pyfin \
 Outputs:
 - `pyfin_out/assembly.gtf` — assembled transcripts with abundance, confidence, hard-read count, source, and diagnostic score attributes
 - `pyfin_out/scores.tsv` — per-candidate metrics and TPM table
+- `pyfin_out/candidate_evidence.tsv` — optional (`--candidate-evidence`):
+  per-survivor inference-time observable features (junction support, family
+  share, end support, canonicality, containment geometry); read-only
+  diagnostic feeding the experimental evidence ranker (`--ranking-mode
+  filter`, off by default)
 - `pyfin_out/abundance_refit.json` — survivor-refit mass conservation and abundance/TPM shift diagnostics (named profiles)
+- `pyfin_out/endpoint_refine.json` — optional (`--endpoint-refine`): endpoint
+  modes, pair support, poly(A) support, and read routes per split model
+- `pyfin_out/m2_contrasts/*.jsonl` — optional
+  (`--m2-contrast-stats-jsonl`): per-attempt M2 contrast records (event
+  counts, mean/sum NLL, margin, coverage, abstention reason)
 - `pyfin_out/run_manifest.json` — resolved profile, overrides, configuration, source hash/commit, and result-changing environment
+
+Experimental opt-in flags (off in every profile; each requires its own
+validation before promotion):
+
+| Flag | Effect |
+| --- | --- |
+| `--candidate-evidence` | write the observable-feature table (read-only) |
+| `--ranking-mode filter` | drop novel candidates below the frozen evidence-ranker operating point before snapping/refit |
+| `--endpoint-refine` | split novel multi-exon models into supported TSS/TES states, with mandatory post-split requantification |
+| `--m2-metric sqrt_count_mean_llr` | event-count-rescaled tight-window M2 contrast |
+| `--m2-contrast-stats-jsonl` | machine-readable M2 contrast records |
+| `--no-lazy-genome` | restore the eager whole-genome dict (higher worker RSS) |
 
 ### CLI — assembly + fusion detection
 

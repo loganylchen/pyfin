@@ -1408,9 +1408,18 @@ def m2_resolve_tie(
         return (None, 0.0, []) if return_scored else (None, 0.0)
 
     summed = metric == "summed_llr"
+    sqrt_count = metric == "sqrt_count_mean_llr"
     windows: List[Tuple[int, int]] = []
     gset: Optional[set] = None
-    if summed:
+    if summed or sqrt_count:
+        # Same-intron-count guard, identical to the batched assignment path
+        # (`_m2_score_region`): the tight differing-junction contrast is only
+        # validated for equal-length chains, because containment/cassette
+        # contrasts have asymmetric candidate-private event populations.
+        # Abstaining here keeps standalone/cluster semantics equal to the
+        # production batch semantics instead of silently scoring more.
+        if len({len(c.intron_chain.introns) for c in tied_cands}) != 1:
+            return (None, 0.0, []) if return_scored else (None, 0.0)
         windows = diff_junction_windows(tied_cands, flank=llr_flank)
         if not windows:
             return (None, 0.0, []) if return_scored else (None, 0.0)
@@ -1443,6 +1452,7 @@ def m2_resolve_tie(
         ]
 
     scored: List[Tuple[int, float]] = []
+    evs: Dict[int, int] = {}
     for idx, cand in enumerate(tied_cands):
         aln = mappy_aligners[idx] if idx < len(mappy_aligners) else None
         if aln is None:
@@ -1454,9 +1464,16 @@ def m2_resolve_tie(
         )
         if n_ev > 0 and math.isfinite(nll):
             scored.append((idx, nll))
+            evs[idx] = int(n_ev)
 
     if len(scored) < 2:
         return (None, 0.0, []) if return_scored else (None, 0.0)
+    if sqrt_count:
+        # Same semantics as the batched path: rescale MEAN window NLL by
+        # sqrt(min event count over scored hypotheses) so the margin is a
+        # z-like difference of means. Common positive scale preserves order.
+        scale = math.sqrt(max(min(evs[idx] for idx, _ in scored), 1))
+        scored = [(idx, v * scale) for idx, v in scored]
     scored.sort(key=lambda t: t[1])
     best_idx = scored[0][0]
     margin = scored[1][1] - scored[0][1]

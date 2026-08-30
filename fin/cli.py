@@ -133,6 +133,18 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
 @click.option("--min-isoform-fraction", default=0.01, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose abundance is below this fraction of the dominant transcript in their selected locus (Cufflinks/StringTie minor-isoform suppression). GTF/fusion/mono exempt; 0.0 disables.")
 @click.option("--isoform-fraction-locus", type=click.Choice(["family", "overlap"]), default="family", show_default=True, help="Denominator for --min-isoform-fraction. 'family' uses the persisted discovery splice family and falls back to overlap only for family-less candidates; 'overlap' restores the historical same-strand genomic-overlap behavior.")
 @click.option("--post-selection-refit/--no-post-selection-refit", default=False, show_default=True, help="After the final survivor set and junction snapping are fixed, renormalize each assignable read over surviving candidates and report selection-orphaned mass. Named profiles enable this; custom/raw defaults leave historical model-filtered abundance unchanged.")
+@click.option("--candidate-evidence/--no-candidate-evidence", default=False, show_default=True, help="Write candidate_evidence.tsv beside the outputs: one row per post-selection survivor with inference-time observable features (weakest junction support, family share, end support, canonicality, containment geometry). Read-only diagnostic; never changes the GTF/TSV.")
+@click.option("--ranking-mode", type=click.Choice(["off", "filter"]), default="off", show_default=True, help="Evidence-ranked candidate filtering (raw-logit score; NOT a calibrated probability). 'filter' removes NOVEL candidates scoring below the frozen v1 logistic operating point BEFORE junction snapping and the abundance refit (GTF/fusion exempt; released mass follows ordinary refit accounting; incomplete BAM evidence aborts instead of silently keeping everything). Model trained on H9 r2r2 only; threshold frozen on the tuning frontier under a hard T1-not-lower constraint and validated untouched on replicate3. 'off' preserves historical selection exactly.")
+@click.option("--ranking-threshold", type=float, default=None, help="Expert override of the frozen ranking score threshold (raw logit scale). Default: the frozen v1 operating point.")
+@click.option("--endpoint-refine/--no-endpoint-refine", default=False, show_default=True, help="EXPERIMENTAL: split a novel multi-exon survivor into at most --endpoint-max-splits endpoint states when strand-aware read-end modes support distinct (TSS,TES) pairs (interior/degradation-direction TSS modes need 2x support; measured upper bound of the addressed error class is 1.38%% of missed T3 multi-exon truths). Requires the post-selection refit: every read is re-routed through it, so post-split requantification and mass conservation are mandatory, not optional.")
+@click.option("--endpoint-max-splits", type=int, default=2, show_default=True, help="(--endpoint-refine) Hard cap on endpoint states per split model (primary included).")
+@click.option("--endpoint-window-bp", type=int, default=25, show_default=True, help="(--endpoint-refine) bp window for end-mode clustering and read-to-mode routing.")
+@click.option("--endpoint-min-reads", type=int, default=3, show_default=True, help="(--endpoint-refine) Minimum reads jointly supporting an endpoint (TSS,TES) pair; interior/degradation-direction TSS modes need 2x this.")
+@click.option("--endpoint-min-pair-frac", type=float, default=0.15, show_default=True, help="(--endpoint-refine) Minimum fraction of end-mapped reads an endpoint pair must carry.")
+@click.option("--tss-evidence-mode", type=click.Choice(["off", "audit", "require"]), default="off", show_default=True, help="EXPERIMENTAL (requires --endpoint-refine): decide whether a CONTAINED shorter model is a real transcript or a 5'-degradation artifact of the longer one. Tests each alternative start against the local conditional-termination-hazard background estimated from the data itself. 'audit' records verdicts in endpoint_refine.json (tss_verdicts) and leaves output byte-identical; 'require' additionally drops endpoint states whose alternative start is 'unsupported', and reverts a model to unsplit if every alternative is refuted. An 'unidentifiable' verdict never drops a model - in dRNA the same-chain/same-TES case can be mathematically unidentifiable, and insufficient evidence is not evidence of absence.")
+@click.option("--m2-contrast-stats-jsonl/--no-m2-contrast-stats-jsonl", default=False, show_default=True, help="EXPERIMENTAL observability: write per-attempt machine-readable M2 contrast records (per-comparison event counts, mean+sum NLL, margins, coverage, and abstention reasons, plus one aggregate line) as JSONL under <work_dir>/m2_contrasts/.")
+@click.option("--lazy-genome/--no-lazy-genome", default=True, show_default=True, help="Open the genome FASTA as an indexed lazy mapping holding at most --genome-cache-chroms chromosomes per process instead of an eager whole-genome dict. Measured on the tuning sample: whole-job peak RSS 67.1 GB -> 40.9 GB with byte-identical outputs, because each spawn worker no longer duplicates the full genome. --no-lazy-genome restores the historical eager load.")
+@click.option("--genome-cache-chroms", type=int, default=2, show_default=True, help="(--lazy-genome) Chromosomes retained per process in the lazy genome LRU.")
 @click.option("--min-fulllen-fraction", default=0.1, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose fraction of full-length assigned reads (read genomic 5' AND 3' both within --fulllen-window-bp of the candidate's ends) is below this (FLAIR/TALON-style full-length read support; signal-free). Orthogonal to --min-isoform-fraction. GTF/fusion/mono and unreachable candidates exempt; 0.0 disables. The SIRV profile resolves 0.1; real-dRNA resolves 0 because genuine 5'-truncated isoforms would otherwise lose recall.")
 @click.option("--max-soft-mass-ratio", default=2.0, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose EM soft abundance / hard argmax read count is >= this (0 hard reads always dropped). Real isoforms deposit ~1 soft mass per hard read (ratio ~1); wobble shadows borrow fractional soft crumbs from a high-abundance structural near-copy and show an inflated ratio — catches the high-relative-abundance shadows the fraction/cluster-recheck levers miss. Pure EM evidence (no GTF). GTF/fusion/mono exempt; 0.0 disables. SIRV-tuned default 2.0 (24-cell F1@3 up-or-equal, recall held); re-tune on real dRNA.")
 @click.option("--fulllen-window-bp", default=25, show_default=True, type=int, help="bp tolerance for a read genomic end to count as full-length wrt a candidate's 5'/3' end (used by --min-fulllen-fraction).")
@@ -159,10 +171,10 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
 @click.option("--m2-tiebreak-junction-k", default=10, show_default=True, type=int, help="Transcript-frame bp on each side of the wobbling junction for the M2 discrimination window (SIRV sweet spot 10).")
 @click.option(
     "--m2-metric",
-    type=click.Choice(["off", "mean", "summed_llr", "auto"]),
+    type=click.Choice(["off", "mean", "summed_llr", "sqrt_count_mean_llr", "auto"]),
     default="mean",
     show_default=True,
-    help="(--quant-mode m2_em) Signal refinement for exact M1 ties. 'mean' is the legacy wide-window mean NLL; 'summed_llr' uses tight differing-junction windows and an undivided NLL sum; 'off' keeps the M1 tie; 'auto' selects mean with a usable GTF and summed_llr when unguided. Profile-controlled unless explicitly set.",
+    help="(--quant-mode m2_em) Signal refinement for exact M1 ties. 'mean' is the legacy wide-window mean NLL; 'summed_llr' uses tight differing-junction windows and an undivided NLL sum; 'sqrt_count_mean_llr' (EXPERIMENTAL, never auto-routed) shares the tight footprint but rescales mean NLL by sqrt(min event count) so unequal per-candidate coverage cannot masquerade as signal; 'off' keeps the M1 tie; 'auto' selects mean with a usable GTF and summed_llr when unguided. Profile-controlled unless explicitly set.",
 )
 @click.option("--m2-summed-llr-margin", default=2.0, show_default=True, type=float, help="(--m2-metric summed_llr) Minimum summed-NLL runner-up gap for a hard winner. Sum has a different scale from the legacy mean margin.")
 @click.option("--m2-summed-llr-flank", default=6, show_default=True, type=int, help="(--m2-metric summed_llr) Genomic bp flank around each differing junction boundary in the tight scoring window.")
@@ -255,6 +267,18 @@ def main(
     min_isoform_fraction,
     isoform_fraction_locus,
     post_selection_refit,
+    candidate_evidence,
+    ranking_mode,
+    ranking_threshold,
+    endpoint_refine,
+    endpoint_max_splits,
+    endpoint_window_bp,
+    endpoint_min_reads,
+    endpoint_min_pair_frac,
+    tss_evidence_mode,
+    m2_contrast_stats_jsonl,
+    lazy_genome,
+    genome_cache_chroms,
     max_soft_mass_ratio,
     min_fulllen_fraction,
     fulllen_window_bp,
@@ -464,6 +488,18 @@ def main(
         min_isoform_fraction=min_isoform_fraction,
         isoform_fraction_locus=isoform_fraction_locus,
         post_selection_refit=post_selection_refit,
+        candidate_evidence=candidate_evidence,
+        ranking_mode=ranking_mode,
+        ranking_threshold=ranking_threshold,
+        endpoint_refine=endpoint_refine,
+        endpoint_max_splits=endpoint_max_splits,
+        endpoint_window_bp=endpoint_window_bp,
+        endpoint_min_reads=endpoint_min_reads,
+        endpoint_min_pair_frac=endpoint_min_pair_frac,
+        tss_evidence_mode=tss_evidence_mode,
+        m2_contrast_stats_jsonl=m2_contrast_stats_jsonl,
+        lazy_genome=lazy_genome,
+        genome_cache_chroms=genome_cache_chroms,
         max_soft_mass_ratio=max_soft_mass_ratio,
         min_fulllen_fraction=min_fulllen_fraction,
         fulllen_window_bp=fulllen_window_bp,

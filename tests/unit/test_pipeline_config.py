@@ -120,6 +120,31 @@ def test_config_isoform_fraction_uses_family_locus_by_default():
     assert c.isoform_fraction_locus == "family"
 
 
+def test_validate_warns_on_inert_m2_em_iteration_knobs(tmp_path, caplog):
+    import logging
+    bam = tmp_path / "x.bam"
+    bam.touch()
+    cfg = PipelineConfig(bam_path=str(bam), em_sigma=2.5, em_max_iter=50,
+                         em_max_iter_override=3)
+    with caplog.at_level(logging.WARNING, logger="fin.pipeline.config"):
+        cfg.validate()
+    text = caplog.text
+    assert "Inert under quant_mode=m2_em" in text
+    assert "em_sigma=2.5" in text
+    assert "em_max_iter=50" in text
+    assert "em_max_iter_override=3" in text
+
+
+def test_validate_silent_when_m2_em_knobs_default(tmp_path, caplog):
+    import logging
+    bam = tmp_path / "x.bam"
+    bam.touch()
+    cfg = PipelineConfig(bam_path=str(bam))
+    with caplog.at_level(logging.WARNING, logger="fin.pipeline.config"):
+        cfg.validate()
+    assert "Inert under quant_mode=m2_em" not in caplog.text
+
+
 def test_config_post_selection_refit_raw_default_off():
     c = PipelineConfig(bam_path="/tmp/x.bam")
     assert c.post_selection_refit is False

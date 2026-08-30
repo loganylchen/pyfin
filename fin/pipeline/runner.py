@@ -191,9 +191,115 @@ class PipelineRunner:
         aggregated, _global_outcomes = select_global(
             self.config, aggregated, self._apply_polya5p_filter,
         )
+        want_evidence = bool(getattr(self.config, "candidate_evidence", False))
+        want_ranking = (
+            getattr(self.config, "ranking_mode", "off") == "filter"
+        )
+        if want_evidence or want_ranking:
+            evidence_rows = self._compute_candidate_evidence_rows(
+                aggregated, strict=want_ranking,
+            )
+            if want_evidence and evidence_rows is not None:
+                from fin.analysis.candidate_evidence import (
+                    write_candidate_evidence,
+                )
+                write_candidate_evidence(
+                    Path(self.config.work_dir) / "candidate_evidence.tsv",
+                    evidence_rows,
+                )
+            if want_ranking:
+                if evidence_rows is None:
+                    # An explicitly requested filter must never silently
+                    # degrade into a no-op baseline run.
+                    raise RuntimeError(
+                        "ranking_mode=filter requires complete candidate "
+                        "evidence, but the evidence computation failed"
+                    )
+                from fin.analysis.candidate_ranking import ranking_filter
+
+                aggregated, _scores, dropped = ranking_filter(
+                    aggregated,
+                    evidence_rows,
+                    threshold=getattr(
+                        self.config, "ranking_threshold", None
+                    ),
+                )
+                if dropped:
+                    logger.info(
+                        "Ranking filter removed %d candidates before "
+                        "finalization", len(dropped),
+                    )
         refit_effective = bool(getattr(
             self.config, "post_selection_refit_effective", False
         ))
+        endpoint_routes: dict = {}
+        endpoint_primary: dict = {}
+        if refit_effective and getattr(self.config, "endpoint_refine", False):
+            from fin.analysis.endpoint_refine import (
+                apply_endpoint_splits,
+                plan_endpoint_splits,
+            )
+
+            bam_ev = getattr(self, "_ranking_bam_evidence", None)
+            if bam_ev is None:
+                from fin.analysis.candidate_evidence import (
+                    collect_ranking_bam_evidence,
+                )
+                bam_ev = collect_ranking_bam_evidence(self.config.bam_path)
+                self._ranking_bam_evidence = bam_ev
+            if not bam_ev.complete:
+                raise RuntimeError(
+                    "endpoint_refine requires a complete BAM end-evidence "
+                    f"scan ({bam_ev.error})"
+                )
+            polya_read_ids = self._endpoint_polya_read_ids()
+            tss_mode = getattr(self.config, "tss_evidence_mode", "off")
+            background = 0.0
+            if tss_mode != "off":
+                background = self._estimate_degradation_background(
+                    aggregated, bam_ev.read_ends,
+                    bin_bp=int(getattr(self.config, "endpoint_window_bp", 25)),
+                )
+            plan = plan_endpoint_splits(
+                aggregated,
+                bam_ev.read_ends,
+                tss_evidence_mode=tss_mode,
+                background_hazard=background,
+                window_bp=int(getattr(self.config, "endpoint_window_bp", 25)),
+                min_end_reads=int(getattr(self.config, "endpoint_min_reads", 3)),
+                min_pair_frac=float(
+                    getattr(self.config, "endpoint_min_pair_frac", 0.15)
+                ),
+                max_splits=int(getattr(self.config, "endpoint_max_splits", 2)),
+                polya_read_ids=polya_read_ids,
+            )
+            import json as _json
+            diag_path = Path(self.config.work_dir) / "endpoint_refine.json"
+            tmp = diag_path.with_suffix(".json.tmp")
+            tmp.write_text(_json.dumps({
+                "schema_version": 1,
+                "polya_available": polya_read_ids is not None,
+                "n_polya_reads": (
+                    len(polya_read_ids) if polya_read_ids is not None else None
+                ),
+                "tss_evidence_mode": tss_mode,
+                "degradation_background_hazard": background,
+                "models_split": len(plan.replacements),
+                "endpoint_states": plan.n_splits,
+                "details": plan.details,
+                "tss_verdicts": plan.tss_verdicts,
+            }, indent=2, sort_keys=True) + "\n")
+            tmp.replace(diag_path)
+            if plan.replacements:
+                aggregated = apply_endpoint_splits(aggregated, plan)
+                endpoint_routes = plan.read_routes
+                endpoint_primary = plan.primary
+                logger.info(
+                    "EndpointRefine split %d models into %d endpoint states "
+                    "(polyA %s)",
+                    len(plan.replacements), plan.n_splits,
+                    "available" if polya_read_ids is not None else "unavailable",
+                )
         if refit_effective:
             aggregated, snap_redirects = apply_junction_snap(
                 self.config,
@@ -208,7 +314,8 @@ class PipelineRunner:
                     "ledgers reached global finalization"
                 )
             aggregated, diagnostics = refit_survivor_abundance(
-                aggregated, ledgers, snap_redirects=snap_redirects
+                aggregated, ledgers, snap_redirects=snap_redirects,
+                split_routes=endpoint_routes, split_primary=endpoint_primary,
             )
             write_abundance_refit_diagnostics(
                 Path(self.config.work_dir) / "abundance_refit.json",
@@ -237,6 +344,146 @@ class PipelineRunner:
         return finalize_outputs(
             self.config, aggregated, output_gtf, output_tsv, self._gtf_reader,
         )
+
+    def _estimate_degradation_background(
+        self, aggregated: Dict[str, QuantResult],
+        read_ends: Mapping[str, tuple], *, bin_bp: int = 25,
+    ) -> float:
+        """Pooled 5'-termination hazard from models with no contained sibling.
+
+        The null must describe degradation, so it is estimated only from
+        models that no other surviving model is nested inside: a locus that
+        already holds a shorter sibling would contaminate the background with
+        that sibling's genuine TSS.
+        """
+        from fin.analysis.tss_evidence import (
+            build_hazard_profile,
+            genomic_to_offset,
+            pooled_background_hazard,
+            spliced_length,
+        )
+
+        def chain(ex):
+            ex = sorted(ex)
+            return tuple((ex[i][1], ex[i + 1][0]) for i in range(len(ex) - 1))
+
+        by_key: Dict[tuple, list] = {}
+        for cid, qr in aggregated.items():
+            by_key.setdefault((qr.chrom, qr.strand), []).append(cid)
+        has_nested = set()
+        for _key, ids in by_key.items():
+            for a in ids:
+                ca = chain(aggregated[a].exons)
+                for b in ids:
+                    if a == b:
+                        continue
+                    qb = aggregated[b]
+                    qa = aggregated[a]
+                    if qb.start <= qa.start and qa.end <= qb.end and \
+                            (qa.end - qa.start) < (qb.end - qb.start):
+                        has_nested.add(b)
+        profiles = []
+        for cid, qr in aggregated.items():
+            if cid in has_nested or len(qr.exons) < 2:
+                continue
+            offs = []
+            plus = qr.strand == "+"
+            for rid in getattr(qr, "assigned_read_ids", ()) or ():
+                sp = read_ends.get(rid)
+                if sp is None:
+                    continue
+                r5 = sp[0] if plus else sp[1]
+                o = genomic_to_offset(r5, qr.exons, qr.strand)
+                if o is not None:
+                    offs.append(o)
+            if len(offs) >= 20:
+                profiles.append(build_hazard_profile(
+                    offs, spliced_length(qr.exons), bin_bp=bin_bp))
+        bg = pooled_background_hazard(profiles)
+        logger.info(
+            "TSS evidence: degradation background %.6f per %dbp bin from %d "
+            "nesting-free models", bg, bin_bp, len(profiles),
+        )
+        return bg
+
+    def _endpoint_polya_read_ids(self) -> Optional[set]:
+        """Poly(A)-confident read IDs for EndpointRefine TES support.
+
+        Reuses the same krill whole-read polyA pass and confidence predicate
+        as the polyA+5' filter. Returns None (documented degraded mode: TES
+        modes rely on end sharpness alone) when no signal file is configured
+        or krill yields nothing; EndpointRefine logs which mode ran.
+        """
+        if not getattr(self.config, "signal_path", None):
+            return None
+        try:
+            from fin.analysis.quantification import polya_read_passes
+            from fin.scoring.polya import compute_polya
+
+            read_seqs, _read_ends = self._fetch_read_seqs_and_ends()
+            polya_map = compute_polya(
+                read_seqs,
+                self.config.signal_path,
+                pore=self.config.krill_pore,
+                use_gpu=self.config.use_gpu,
+            )
+            if not polya_map:
+                return None
+            min_len = float(getattr(self.config, "min_polya_length", 15.0))
+            return {
+                rid for rid in polya_map
+                if polya_read_passes(rid, polya_map, min_len)
+            }
+        except Exception:
+            logger.exception(
+                "endpoint polyA pass failed; TES support degrades to "
+                "end-sharpness only"
+            )
+            return None
+
+    def _compute_candidate_evidence_rows(
+        self, aggregated: Dict[str, QuantResult], *, strict: bool = False
+    ) -> Optional[list]:
+        """Observable-feature rows for the post-selection survivor set.
+
+        Computed BEFORE junction snapping and the abundance refit, so rows
+        show exactly the feature view the selection-stage scorer sees. One
+        whole-BAM pass supplies junction support and read ends together.
+
+        ``strict=False`` (pure audit): failures and incomplete BAM scans are
+        logged and tolerated (partial evidence may still be written for
+        inspection). ``strict=True`` (the ranking filter): an incomplete BAM
+        scan or any failure returns None so the caller refuses to filter -
+        undercounted junction support must never depress ranking scores.
+        """
+        try:
+            from fin.analysis.candidate_evidence import (
+                collect_ranking_bam_evidence,
+                compute_candidate_evidence,
+            )
+            from fin.candidates.canonical import parse_motifs
+
+            bam_ev = collect_ranking_bam_evidence(self.config.bam_path)
+            self._ranking_bam_evidence = bam_ev
+            if strict and not bam_ev.complete:
+                logger.error(
+                    "ranking evidence BAM scan incomplete (%s); refusing to "
+                    "rank on partial junction support", bam_ev.error,
+                )
+                return None
+            return compute_candidate_evidence(
+                aggregated,
+                junction_support=bam_ev.junction_support,
+                read_ends=bam_ev.read_ends,
+                genome=self._genome_fasta,
+                canonical_motifs=parse_motifs(
+                    getattr(self.config, "canonical_motifs", ()) or ()
+                ),
+                end_window_bp=int(getattr(self.config, "fulllen_window_bp", 25)),
+            )
+        except Exception:
+            logger.exception("candidate-evidence computation failed")
+            return None
 
     def process_interval(
         self, interval: GenomicInterval
@@ -787,12 +1034,22 @@ class PipelineRunner:
                                _la=local_aligners):
                     tied_cands = [_mc[j] for j in tie_local]
                     tied_aligners = [_la[j] for j in tie_local]
+                    # Honor the configured tight-window metric so the
+                    # experimental sqrt_count variant behaves consistently in
+                    # cluster mode; anything else keeps the validated summed
+                    # contrast this resolver was built around.
+                    _metric = (
+                        self.config.m2_metric
+                        if getattr(self.config, "m2_metric", "summed_llr")
+                        in ("summed_llr", "sqrt_count_mean_llr")
+                        else "summed_llr"
+                    )
                     out = m2_resolve_tie(
                         rid, read_sequences[rid], tied_cands,
                         self.config.signal_path, pore=self.config.krill_pore,
                         krill_aligner=krill_aligner, mappy_aligners=tied_aligners,
                         use_gpu=eff_gpu, num_thread=krill_threads,
-                        metric="summed_llr",
+                        metric=_metric,
                     )
                     best, margin = out
                     if best is None:
@@ -1369,16 +1626,26 @@ class PipelineRunner:
             self._gtf_reader.close()
         if self._signal_reader:
             self._signal_reader.close()
+        genome = getattr(self, "_genome_fasta", None)
+        if genome is not None and hasattr(genome, "close"):
+            genome.close()
 
-    def _load_genome_fasta(self, path: str) -> Dict[str, str]:
-        """Load genome FASTA into a dict of chrom -> sequence."""
-        from fin.io.io_fasta import FASTAReader
+    def _load_genome_fasta(self, path: str):
+        """Open the genome as a mapping (lazy indexed access by default).
 
-        seqs = {}
-        with FASTAReader(path) as reader:
-            for record in reader.iterate_records():
-                seqs[record.id] = record.sequence
-        return seqs
+        Memory attribution showed the eager whole-genome dict dominated
+        worker RSS (~3.1 GB per spawn worker); the lazy mapping keeps the
+        same ``chrom -> sequence`` contract while holding only a bounded
+        chromosome cache per process. ``lazy_genome=False`` restores the
+        historical eager dict.
+        """
+        from fin.io.lazy_genome import open_genome
+
+        return open_genome(
+            path,
+            lazy=bool(getattr(self.config, "lazy_genome", True)),
+            cache_chroms=int(getattr(self.config, "genome_cache_chroms", 2)),
+        )
 
     def _open_signal_reader(self):
         """Open the appropriate signal reader."""

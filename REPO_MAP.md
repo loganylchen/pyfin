@@ -14,7 +14,7 @@ the current working tree, not only the last pushed commit.
   and Markdown files under `experiments/`. Generated result trees and raw
   signal/alignment data were deliberately not content-scanned.
 - Infrastructure index: 7 CI, Docker, history, and repository-policy files.
-- Static architecture map: 67 Python modules, 115 internal import edges, 83
+- Static architecture map: 72 Python modules, 123 internal import edges, 90
   formal unit/integration test files, and direct test-import relationships.
 - The repository requests the `code-review-graph` MCP, but those tools were not
   exposed in this session. The fallback was a Git-bounded inventory plus AST
@@ -303,7 +303,7 @@ but these remain the primary review hotspots.
 
 ## 5. Configuration contract
 
-`PipelineConfig` has 127 fields. The Click CLI exposes 102 options. Programmatic
+`PipelineConfig` has 139 fields. The Click CLI exposes 114 options. Programmatic
 defaults intentionally differ from raw Click and named-profile defaults: the
 dataclass uses `min_abundance=0.0` and `min_gtf_abundance=0.0`, raw Click uses
 3.0 and 1.0, and the default `real-drna` profile resolves strict >1.0 plus its
@@ -454,9 +454,10 @@ configured formal suite.
 
 Observed in the repository SIF with the final profile-integration source:
 
-- Unit: 1032 passed, 1 skipped in 9.76 s (`singularity --nv`).
-- Integration: 15 passed, 3 skipped in 1.95 s.
-- Retired M3 prototype: 5 passed in 1.05 s.
+- Unit: 1134 passed, 1 skipped (`singularity --nv`).
+- Integration: 15 passed, 3 skipped in 1.91 s.
+- Unit + integration together: 1149 passed, 4 skipped.
+- Retired M3 prototype: 5 passed in 0.82 s.
 - CLI parameter tests now create their own existence-only temporary inputs, so
   they reach `threads`/`gpu_workers` validation instead of failing on absent
   ignored fixtures.
