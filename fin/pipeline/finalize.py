@@ -70,6 +70,27 @@ def finalize_outputs(
     gene-id resolution loop, the three optional writers, and the final "Pipeline complete" log. No
     candidate is dropped here.
     """
+    # Catalog completion (opt-in). Runs BEFORE gene-id resolution so completed
+    # entries get the same gene-id treatment as assembled ones, and before the
+    # writers so every output carries the same set. In "off" mode this is a
+    # no-op that returns the very same object, keeping output byte-identical.
+    catalog_mode = getattr(config, "catalog_mode", "off")
+    if catalog_mode != "off":
+        from fin.analysis.catalog_completion import complete_from_catalog
+
+        aggregated, catalog_audit = complete_from_catalog(
+            aggregated, gtf_reader, mode=catalog_mode,
+        )
+        work_dir = getattr(config, "work_dir", None)
+        if work_dir:
+            import json as _json
+            from pathlib import Path as _Path
+
+            path = _Path(work_dir) / "catalog_completion.json"
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(_json.dumps(catalog_audit, indent=2, sort_keys=True))
+            tmp.replace(path)
+
     # Resolve gene_ids from GTF annotation
     for cid, qr in aggregated.items():
         if qr.source == "gtf" and gtf_reader:

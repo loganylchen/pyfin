@@ -56,6 +56,12 @@ class QuantResult:
     # argmax assignment population (which may use the M2-tiebreak signal); see
     # fulllen_fraction_drops.
     fulllen_frac: float = -1.0
+    # Weakest per-junction indel-clean attestation depth among exact
+    # complete-chain reads, copied from the discovery candidate (see
+    # TranscriptCandidate.complete_chain_weakest_indel_clean_depth). 0 for mono/
+    # fusion/legacy paths and when evidence collection is disabled. Powers
+    # the opt-in complete_chain_rescue_reads exemption; never serialized.
+    complete_chain_weakest_indel_clean_depth: int = 0
 
 
 def _exons_from_candidate(c: TranscriptCandidate) -> Tuple[Tuple[int, int], ...]:
@@ -119,6 +125,8 @@ def quantify_transcripts(
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
                 family_id=cand.family_id,
+                complete_chain_weakest_indel_clean_depth=getattr(
+                    cand, "complete_chain_weakest_indel_clean_depth", 0),
                 assigned_read_ids=assigned_ids,
                 breakpoint_left=cand.breakpoint_left,
                 breakpoint_right=cand.breakpoint_right,
@@ -549,6 +557,7 @@ def aggregate_across_intervals(
                     "fusion_junction": qr.fusion_junction,
                     "max_R": 0.0,
                     "fulllen_frac": -1.0,
+                    "complete_chain_weakest_indel_clean_depth": 0,
                 }
             a = agg[qr.candidate_id]
             if qr.family_id is not None:
@@ -563,6 +572,9 @@ def aggregate_across_intervals(
             # on the strength of an interval that couldn't score it.
             if qr.fulllen_frac > a["fulllen_frac"]:
                 a["fulllen_frac"] = qr.fulllen_frac
+            nccr = getattr(qr, "complete_chain_weakest_indel_clean_depth", 0)
+            if nccr > a["complete_chain_weakest_indel_clean_depth"]:
+                a["complete_chain_weakest_indel_clean_depth"] = nccr
             # P0-6: track per-interval abundance and dedup read IDs across
             # intervals. Naive sum double-counts reads that overlap interval
             # boundaries; we instead average per-read abundance across the
@@ -647,6 +659,7 @@ def aggregate_across_intervals(
             assigned_read_ids=tuple(sorted(unique_ids)),
             max_R=a["max_R"],
             fulllen_frac=a["fulllen_frac"],
+            complete_chain_weakest_indel_clean_depth=a["complete_chain_weakest_indel_clean_depth"],
         )
 
     return result

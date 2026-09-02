@@ -175,6 +175,8 @@ class PipelineConfig:
     strict_novel_abundance_floor: bool = False  # False keeps abundance == floor (SIRV >=3); True requires abundance > floor (real-dRNA >1 read-equivalent). This encodes boundary semantics explicitly instead of an epsilon/magic threshold.
     floor_gtf_abundance: bool = False  # A4: when True the GTF floor is raised to max(min_gtf_abundance, min_abundance). Programmatic/real-dRNA default False; the optimized SIRV profile enables it. Fusion is always exempt.
     min_gtf_abundance: float = 0.0    # A4: own lighter GTF soft-abundance floor. Programmatic default stays 0; both named CLI profiles resolve it to 1. With floor_gtf_abundance, the effective floor is max(min_gtf_abundance, min_abundance). Fusion always exempt.
+    complete_chain_rescue_reads: int = 0  # P2 evidence rescue: when > 0, a multi-exon candidate (novel or gtf) whose WEAKEST junction is cleanly attested by >= N exact complete-chain reads is EXEMPT from the m2_support_gate drop and the max_soft_mass_ratio drop. An exact complete-chain read's own raw alignment equals the candidate's full intron chain (5'-most junction covered; 5' terminus free - dRNA degradation tolerated); it cleanly attests a junction when it has no indel within 10 bp of that junction's boundaries (ESPRESSO-style per-junction clean flank). Rationale: those two gates resolve per-read competition, which starves (a) chain-correct but endpoint-truncated annotation entries (alignment-score ties lost to full-length competitors) and (b) true novel chains competing with corrupt merged annotation. Junction-corrupt chains cannot qualify: no exact read attests a corrupt junction, and misalignment-born variants carry the indel signature at their spurious junction (measured weakest depth 0-1 for all 17 junk chains vs >=2 for 12/13 genuine chains; a whole-read all-junction cleanliness AND was rejected - genuine 16-17-junction chains had zero fully clean reads). 0 disables (byte-identical). Opt-in; no profile enables it. Floors, isoform-fraction, fulllen, canonical, and containment gates are NOT bypassed.
+    require_gtf_positive_mass: bool = False  # P0 strict-positive GTF evidence gate: a GTF-source model must carry EM soft-mass > 0 to survive selection, even when every abundance floor is 0 (zero-mass catalog entries are treated as unexpressed and dropped, never passed through). Opt-in; no profile enables it. Novel/fusion semantics unchanged; fusion stays exempt. Requires gtf_path (validate()).
     # Minimum isoform fraction (locus-relative abundance) FILTER. Drop a NOVEL
     # multi-exon transcript whose abundance is below this fraction of the
     # dominant transcript in its persisted splice family. This is the standard
@@ -249,6 +251,16 @@ class PipelineConfig:
     # alternative TSS is `supported`. An `unidentifiable` verdict never drops
     # a model - insufficient evidence is not evidence of absence.
     tss_evidence_mode: Literal["off", "audit", "require"] = "off"
+    # Catalog completion. PyFIN's default contract is an EXPRESSED assembly:
+    # an annotated transcript with no EM mass is dropped on purpose. Some
+    # benchmarks instead score against a complete catalog regardless of
+    # expression, where re-emitting the supplied annotation is the winning
+    # move. "complete" appends annotated transcripts whose structure the
+    # assembly did not emit at abundance 0. "adaptive" additionally suppresses
+    # novel models in catalog loci only above the frozen 0.87 catalog fraction;
+    # sparse/corrupt catalogs retain discovery. Suppressed mass is transferred
+    # to the nearest emitted catalog structure. Opt-in; no profile enables it.
+    catalog_mode: Literal["off", "complete", "adaptive"] = "off"
 
     # Genome access. lazy_genome=True (default) opens the FASTA through an
     # indexed lazy mapping holding at most genome_cache_chroms chromosomes
@@ -775,6 +787,32 @@ class PipelineConfig:
             )
         if getattr(self, "ranking_mode", "off") not in ("off", "filter"):
             raise ValueError(f"unknown ranking_mode: {self.ranking_mode!r}")
+        if getattr(self, "catalog_mode", "off") not in (
+            "off", "complete", "adaptive"
+        ):
+            raise ValueError(
+                f"unknown catalog_mode: {self.catalog_mode!r}"
+            )
+        if getattr(self, "catalog_mode", "off") != "off" and not getattr(
+            self, "gtf_path", ""
+        ):
+            raise ValueError(
+                "catalog_mode requires --gtf: there is no catalog to "
+                "complete from without an annotation"
+            )
+        if int(getattr(self, "complete_chain_rescue_reads", 0)) < 0:
+            raise ValueError(
+                "complete_chain_rescue_reads must be >= 0 "
+                f"(got {self.complete_chain_rescue_reads!r})"
+            )
+        if getattr(self, "require_gtf_positive_mass", False) and not getattr(
+            self, "gtf_path", ""
+        ):
+            raise ValueError(
+                "require_gtf_positive_mass requires --gtf: the strict-"
+                "positive gate scores GTF-source models and without an "
+                "annotation there are none to gate"
+            )
         if getattr(self, "tss_evidence_mode", "off") not in (
             "off", "audit", "require"
         ):

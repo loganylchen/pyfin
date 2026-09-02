@@ -34,6 +34,7 @@ from fin.pipeline.finalize import finalize_outputs, write_unfiltered_diagnostic
 from fin.pipeline.junction_snap import apply_junction_snap
 from fin.pipeline.selection import (
     canonical_gate_select,
+    enforce_gtf_positive_after_refit,
     junction_dominance_select,
     select_global,
     select_m2_interval,
@@ -317,6 +318,23 @@ class PipelineRunner:
                 aggregated, ledgers, snap_redirects=snap_redirects,
                 split_routes=endpoint_routes, split_primary=endpoint_primary,
             )
+            # P0 strict-positive GTF gate, post-refit enforcement: the refit
+            # can zero a GTF survivor that passed the pre-refit A4 gate; the
+            # row carries no mass or reads, so removal conserves every
+            # accounting invariant. Runs BEFORE the diagnostics write so the
+            # JSON always describes the emitted survivor set.
+            aggregated, zero_gtf_ids = enforce_gtf_positive_after_refit(
+                aggregated, diagnostics,
+                enabled=bool(getattr(
+                    self.config, "require_gtf_positive_mass", False
+                )),
+            )
+            if zero_gtf_ids:
+                logger.info(
+                    "Strict-positive GTF gate removed %d zero-mass GTF "
+                    "survivor(s) after refit (gtf_zero_mass): %s",
+                    len(zero_gtf_ids), ",".join(zero_gtf_ids[:8]),
+                )
             write_abundance_refit_diagnostics(
                 Path(self.config.work_dir) / "abundance_refit.json",
                 diagnostics,
@@ -325,6 +343,22 @@ class PipelineRunner:
             aggregated = apply_junction_snap(
                 self.config, aggregated, getattr(self, "_genome_fasta", None)
             )
+            # Defensive sweep on the non-refit path: A4 already applied the
+            # strict boundary pre-snap and snapping only merges mass, so this
+            # is expected to be a no-op; it guarantees the flag's output
+            # contract (no zero-mass GTF survivor) regardless of path.
+            aggregated, zero_gtf_ids = enforce_gtf_positive_after_refit(
+                aggregated, None,
+                enabled=bool(getattr(
+                    self.config, "require_gtf_positive_mass", False
+                )),
+            )
+            if zero_gtf_ids:
+                logger.info(
+                    "Strict-positive GTF gate removed %d zero-mass GTF "
+                    "survivor(s) after snap (gtf_zero_mass): %s",
+                    len(zero_gtf_ids), ",".join(zero_gtf_ids[:8]),
+                )
             if (
                 getattr(self.config, "post_selection_refit", False)
                 and getattr(
@@ -525,6 +559,9 @@ class PipelineRunner:
             chain_cluster_fold_span_guard=getattr(
                 self.config, "chain_cluster_fold_span_guard", False),
             clustering=getattr(self.config, "clustering", "read_chains"),
+            collect_chain_evidence=bool(
+                int(getattr(self.config, "complete_chain_rescue_reads", 0)) > 0
+            ),
             canonical_search_bp=self.config.canonical_search_bp,
             max_chains_per_read=self.config.max_chains_per_read,
             canonical_motifs=self.config.canonical_motifs,
@@ -690,6 +727,8 @@ class PipelineRunner:
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
                 family_id=cand.family_id,
+                complete_chain_weakest_indel_clean_depth=getattr(
+                    cand, "complete_chain_weakest_indel_clean_depth", 0),
                 assigned_read_ids=tuple(assigned[j]),
                 breakpoint_left=cand.breakpoint_left,
                 breakpoint_right=cand.breakpoint_right,
@@ -854,6 +893,8 @@ class PipelineRunner:
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
                 family_id=cand.family_id,
+                complete_chain_weakest_indel_clean_depth=getattr(
+                    cand, "complete_chain_weakest_indel_clean_depth", 0),
                 assigned_read_ids=tuple(assigned[j]),
                 breakpoint_left=cand.breakpoint_left,
                 breakpoint_right=cand.breakpoint_right,
@@ -1220,6 +1261,8 @@ class PipelineRunner:
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
                 family_id=cand.family_id,
+                complete_chain_weakest_indel_clean_depth=getattr(
+                    cand, "complete_chain_weakest_indel_clean_depth", 0),
                 assigned_read_ids=tuple(assigned[j]) if kept else (),
                 breakpoint_left=cand.breakpoint_left,
                 breakpoint_right=cand.breakpoint_right,

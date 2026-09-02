@@ -194,6 +194,28 @@ def select_m2_interval(
             cand_list, ties_by_read, nlls_by_read,
             tie_ok=bool(getattr(config, "m2_support_gate_tie", True)),
         )
+        # Opt-in complete-chain rescue: direct structural evidence beats the
+        # per-read M1/M2 contest. A candidate (novel OR gtf) whose EVERY
+        # junction is cleanly attested by >= K exact complete-chain reads
+        # cannot be starved out of the per-read contests - e.g. an
+        # endpoint-truncated annotation entry whose intron chain is correct
+        # loses every alignment-score tie to full-length competitors, and a
+        # true novel chain loses them to a corrupt merged annotation. The
+        # per-junction weakest-depth metric preserves the gate's
+        # anti-corruption purpose: junction-corrupt (jitter/flip) chains have
+        # NO exact complete-chain reads, and misalignment-born variant chains
+        # carry the indel signature at their spurious junction (measured
+        # weakest depth 0-1 for all 17 junk chains vs >=2 for 12/13 genuine
+        # chains).
+        _d, n_rescued = apply_complete_chain_rescue(
+            _d, cand_list,
+            int(getattr(config, "complete_chain_rescue_reads", 0)),
+        )
+        if n_rescued:
+            logger.info(
+                "m2_em interval %s: complete-chain rescue kept %d "
+                "support-gate candidates", interval.region_string, n_rescued,
+            )
         drop_cols |= _d
         _record_drops(_d, "m2_support_gate")
 
@@ -321,6 +343,121 @@ def select_m2_interval(
     return quant_results, outcomes
 
 
+# Single-junction NOVEL chains are the classic RT/template-switching artifact
+# class: on the SIRV4 grid a 1-junction artifact reached weakest depth 8
+# while genuine merge-freed 1-junction chains span 4-34, so no low threshold
+# separates them. This higher bar (dev-fitted on the six H9 samples; kills
+# the observed artifact, keeps 7/12 genuine single-junction recoveries)
+# applies ONLY to novel single-junction chains. Independent validation is
+# required before any default promotion.
+COMPLETE_CHAIN_RESCUE_NOVEL_MONO_JUNC_MIN = 10
+
+
+def complete_chain_rescue_ok(
+    source: str, n_junctions: int, weakest_depth: int, min_reads: int
+) -> bool:
+    """Shared rescue policy for the support-gate and soft-mass exemptions.
+
+    - gtf: weakest depth >= min_reads (a chain-correct endpoint-truncated
+      annotation entry qualifies; junction-corrupt annotation cannot - no
+      exact complete-chain read attests a corrupt junction);
+    - novel, >=2 junctions: weakest depth >= min_reads + 1 (one extra read
+      over the annotation bar for structures with no annotation prior);
+    - novel, single junction: weakest depth >=
+      COMPLETE_CHAIN_RESCUE_NOVEL_MONO_JUNC_MIN (artifact class, above);
+    - anything else (fusion, mono): never rescued.
+    """
+    if min_reads <= 0 or n_junctions <= 0 or weakest_depth <= 0:
+        return False
+    if source == "gtf":
+        return weakest_depth >= min_reads
+    if source == "novel":
+        if n_junctions >= 2:
+            return weakest_depth >= min_reads + 1
+        return weakest_depth >= COMPLETE_CHAIN_RESCUE_NOVEL_MONO_JUNC_MIN
+    return False
+
+
+def apply_complete_chain_rescue(
+    drop_cols: set, cand_list, min_reads: int
+) -> Tuple[set, int]:
+    """Remove from ``drop_cols`` every candidate accepted by
+    :func:`complete_chain_rescue_ok` (weakest-junction clean attestation by
+    exact complete-splice-chain reads; see
+    TranscriptCandidate.complete_chain_weakest_indel_clean_depth). ``min_reads <= 0``
+    disables the rescue and returns ``drop_cols`` unchanged (byte-identical
+    default path). Returns (filtered_drop_cols, n_rescued)."""
+    if min_reads <= 0 or not drop_cols:
+        return drop_cols, 0
+    kept = {
+        col
+        for col in drop_cols
+        if not complete_chain_rescue_ok(
+            getattr(cand_list[col], "source", ""),
+            len(getattr(
+                getattr(cand_list[col], "intron_chain", None),
+                "introns", (),
+            ) or ()),
+            getattr(cand_list[col], "complete_chain_weakest_indel_clean_depth", 0),
+            min_reads,
+        )
+    }
+    return kept, len(drop_cols) - len(kept)
+
+
+def strip_zero_mass_gtf_survivors(
+    aggregated: Dict[str, "object"], *, enabled: bool
+) -> Tuple[Dict[str, "object"], List[str]]:
+    """P0 strict-positive GTF gate, post-refit enforcement.
+
+    The A4 gate tests pre-refit EM soft mass, but the post-selection survivor
+    renormalization can reassign every read away from a GTF model and leave an
+    exact-zero survivor. Zero abundance here means zero retained read mass
+    (the refit conserves mass), so removing the row is mass- and read-neutral
+    and never changes any other survivor's abundance. Returns the (possibly
+    same) dict and the sorted dropped candidate ids (reason: gtf_zero_mass).
+    """
+    if not enabled:
+        return aggregated, []
+    zero_ids = sorted(
+        cid
+        for cid, qr in aggregated.items()
+        if qr.source == "gtf" and qr.abundance <= 0.0
+    )
+    if not zero_ids:
+        return aggregated, []
+    zero_set = set(zero_ids)
+    kept = {
+        cid: qr for cid, qr in aggregated.items() if cid not in zero_set
+    }
+    return kept, zero_ids
+
+
+def enforce_gtf_positive_after_refit(
+    aggregated: Dict[str, "object"],
+    diagnostics: Optional[dict],
+    *,
+    enabled: bool,
+) -> Tuple[Dict[str, "object"], List[str]]:
+    """Apply the post-refit strict-positive GTF sweep and keep diagnostics
+    consistent with the emitted survivor set.
+
+    ``refit_survivor_abundance`` reports ``surviving_candidates`` for its
+    input set; when the sweep then removes zero-mass GTF survivors, the
+    written diagnostics must record the drop explicitly so the JSON always
+    matches the emitted output. Fields are added only when the gate is
+    enabled so default runs stay byte-identical.
+    """
+    aggregated, zero_ids = strip_zero_mass_gtf_survivors(
+        aggregated, enabled=enabled
+    )
+    if enabled and diagnostics is not None:
+        diagnostics["post_refit_zero_gtf_dropped"] = len(zero_ids)
+        diagnostics["post_refit_zero_gtf_ids"] = list(zero_ids)
+        diagnostics["output_surviving_candidates"] = len(aggregated)
+    return aggregated, zero_ids
+
+
 def select_global(
     config,
     aggregated: Dict[str, "object"],
@@ -361,13 +498,23 @@ def select_global(
     # --min-abundance 0 / --min-gtf-abundance 0.
     # NOTE: the separate ablation harness (fin/ablation/runner.py) keeps GTF
     # exempt regardless — that divergence is intentional (no-GTF de novo).
+    # P0 strict-positive gate (require_gtf_positive_mass): a GTF-source model
+    # must additionally carry EM soft-mass > 0, even when every floor is 0 —
+    # zero-mass catalog entries are unexpressed pass-through, not evidence.
     floor_gtf = config.floor_gtf_abundance
     gtf_floor = (
         max(config.min_gtf_abundance, config.min_abundance)
         if floor_gtf
         else config.min_gtf_abundance
     )
-    if _score_filter_on and (config.min_abundance > 0.0 or gtf_floor > 0.0):
+    require_gtf_positive = bool(
+        getattr(config, "require_gtf_positive_mass", False)
+    )
+    if _score_filter_on and (
+        config.min_abundance > 0.0
+        or gtf_floor > 0.0
+        or require_gtf_positive
+    ):
         before = len(aggregated)
         strict_novel = bool(
             getattr(config, "strict_novel_abundance_floor", False)
@@ -377,7 +524,10 @@ def select_global(
             for cid, qr in aggregated.items()
             if qr.source == "fusion"
             or (
-                qr.abundance >= gtf_floor
+                (
+                    qr.abundance >= gtf_floor
+                    and (not require_gtf_positive or qr.abundance > 0.0)
+                )
                 if qr.source == "gtf"
                 else (
                     qr.abundance > config.min_abundance
@@ -388,16 +538,29 @@ def select_global(
         }
         dropped = before - len(kept)
         if dropped:
-            _record(set(aggregated) - set(kept), "min_abundance")
+            dropped_ids = set(aggregated) - set(kept)
+            zero_mass_ids = {
+                cid
+                for cid in dropped_ids
+                if require_gtf_positive
+                and aggregated[cid].source == "gtf"
+                and aggregated[cid].abundance <= 0.0
+                and aggregated[cid].abundance >= gtf_floor
+            }
+            if zero_mass_ids:
+                _record(zero_mass_ids, "gtf_zero_mass")
+            _record(dropped_ids - zero_mass_ids, "min_abundance")
             logger.info(
                 "Dropped %d transcripts failing abundance floor "
-                "(keep novel %s %.3f, gtf >= %.3f)",
+                "(keep novel %s %.3f, gtf >= %.3f%s)",
                 dropped,
                 ">" if strict_novel else ">=",
                 config.min_abundance,
                 gtf_floor,
+                " and > 0" if require_gtf_positive else "",
             )
         aggregated = kept
+
 
     # Minimum isoform fraction (locus-relative abundance) filter. Drops
     # NOVEL multi-exon transcripts whose abundance is below
@@ -440,6 +603,33 @@ def select_global(
         drop_ids = soft_mass_ratio_drops(
             aggregated, config.max_soft_mass_ratio
         )
+        # Opt-in complete-chain rescue (mirrors the interval support-gate
+        # rescue): a candidate whose every junction is cleanly attested by
+        # >= K exact complete-chain reads is direct structural evidence, not
+        # EM-borrowed soft mass - a competing corrupt annotation model
+        # inflates the true chain's soft/hard ratio, and dropping the true
+        # chain for that competition artifact is wrong. (The soft-mass
+        # filter itself only ever drops novel candidates.)
+        _ccr = int(getattr(config, "complete_chain_rescue_reads", 0))
+        if _ccr > 0 and drop_ids:
+            rescued = {
+                cid
+                for cid in drop_ids
+                if complete_chain_rescue_ok(
+                    getattr(aggregated[cid], "source", ""),
+                    max(len(getattr(aggregated[cid], "exons", ()) or ()) - 1, 0),
+                    getattr(
+                        aggregated[cid], "complete_chain_weakest_indel_clean_depth", 0
+                    ),
+                    _ccr,
+                )
+            }
+            if rescued:
+                drop_ids = drop_ids - rescued
+                logger.info(
+                    "Complete-chain rescue kept %d soft-mass candidates",
+                    len(rescued),
+                )
         if drop_ids:
             aggregated = {
                 cid: qr

@@ -130,6 +130,8 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
 @click.option("--strict-novel-abundance-floor/--inclusive-novel-abundance-floor", "strict_novel_abundance_floor", default=False, show_default=True, help="Boundary semantics for --min-abundance. Strict requires abundance > floor; inclusive keeps abundance == floor. The real-dRNA profile uses strict >1 read-equivalent; SIRV uses inclusive >=3.")
 @click.option("--min-gtf-abundance", default=1.0, show_default=True, type=float, help="Abundance floor for GTF-annotated transcripts on soft EM abundance (default 1: a GTF candidate must accrue at least one read of EM soft-mass to be kept, so pyfin is not a copy-annotation tool). Independent of --min-abundance (which gates novel); fusion always exempt. With --floor-gtf-abundance the effective GTF floor becomes max(this, --min-abundance). Set 0 to disable and keep every GTF candidate in an expressed locus. SIRV-tuned: on real data a nonzero floor can drop genuine low-abundance annotated isoforms.")
 @click.option("--floor-gtf-abundance/--no-floor-gtf-abundance", "floor_gtf_abundance", default=False, show_default=True, help="Raise the GTF abundance floor to the NOVEL floor: GTF must clear max(--min-gtf-abundance, --min-abundance) (never lowers the explicit GTF floor). The real-dRNA/custom default is OFF; the optimized SIRV profile turns it ON for the expressed-truth operating point (e.g. T=3 -> Sn 43.2 / Pr 91.6). SIRV-tuned: on real data this drops genuine low-abundance annotated isoforms — leave OFF unless benchmarking. Fusion stays exempt regardless.")
+@click.option("--complete-chain-rescue-reads", "complete_chain_rescue_reads", default=0, show_default=True, type=int, help="P2 evidence rescue (0 disables): a multi-exon candidate (novel or gtf) whose WEAKEST junction is cleanly attested by >= N exact complete-chain reads (read's own alignment equals the full intron chain; no indel within 10 bp of that junction; 5' terminus free, so dRNA 5' degradation is tolerated) is exempt from the m2 support gate and the soft-mass ratio filter. Protects chain-correct candidates from per-read competition artifacts (endpoint-truncated annotation losing alignment-score ties; true chains competing with corrupt merged annotation) while junction-corrupt chains cannot qualify. Other gates unaffected. Opt-in.")
+@click.option("--require-gtf-positive-mass/--no-require-gtf-positive-mass", "require_gtf_positive_mass", default=False, show_default=True, help="Strict-positive GTF evidence gate: a GTF-annotated transcript must end selection with EM soft-mass > 0 or it is dropped as unexpressed, even when --min-gtf-abundance is 0 and --no-floor-gtf-abundance is set. Never adds catalog entries; novel and fusion semantics are unchanged (fusion stays exempt). Expression-truth benchmark evidence: with --min-gtf-abundance 0 --no-floor-gtf-abundance this gate lifted SIRV4 expressed-truth F1 85.58 -> 89.02 with zero regressing cells. Requires --gtf.")
 @click.option("--min-isoform-fraction", default=0.01, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose abundance is below this fraction of the dominant transcript in their selected locus (Cufflinks/StringTie minor-isoform suppression). GTF/fusion/mono exempt; 0.0 disables.")
 @click.option("--isoform-fraction-locus", type=click.Choice(["family", "overlap"]), default="family", show_default=True, help="Denominator for --min-isoform-fraction. 'family' uses the persisted discovery splice family and falls back to overlap only for family-less candidates; 'overlap' restores the historical same-strand genomic-overlap behavior.")
 @click.option("--post-selection-refit/--no-post-selection-refit", default=False, show_default=True, help="After the final survivor set and junction snapping are fixed, renormalize each assignable read over surviving candidates and report selection-orphaned mass. Named profiles enable this; custom/raw defaults leave historical model-filtered abundance unchanged.")
@@ -141,6 +143,7 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
 @click.option("--endpoint-window-bp", type=int, default=25, show_default=True, help="(--endpoint-refine) bp window for end-mode clustering and read-to-mode routing.")
 @click.option("--endpoint-min-reads", type=int, default=3, show_default=True, help="(--endpoint-refine) Minimum reads jointly supporting an endpoint (TSS,TES) pair; interior/degradation-direction TSS modes need 2x this.")
 @click.option("--endpoint-min-pair-frac", type=float, default=0.15, show_default=True, help="(--endpoint-refine) Minimum fraction of end-mapped reads an endpoint pair must carry.")
+@click.option("--catalog-mode", type=click.Choice(["off", "complete", "adaptive"]), default="off", show_default=True, help="EXPERIMENTAL (requires --gtf): adapt PyFIN's expressed-assembly output to benchmarks scored against a complete catalog. 'complete' appends catalog structures the assembly did not reach at abundance 0 with transcript_source \"catalog\"; its original expressed set is recoverable by source filtering. 'adaptive' also suppresses NOVEL models inside catalog-covered loci, but only when catalog-derived structures make up at least the frozen 0.87 fraction of catalog+novel output structures; sparse or structurally corrupted catalogs keep discovery intact. Adaptive mass may transfer to a catalog entry, so exact recovery requires catalog_completion.json rather than source filtering alone. The threshold was selected on three SIRV4 H9 samples and checked at that threshold on three held-out H9 replicates; this is not cross-tissue validation. Never branches on benchmark condition names. Opt-in; no profile enables it.")
 @click.option("--tss-evidence-mode", type=click.Choice(["off", "audit", "require"]), default="off", show_default=True, help="EXPERIMENTAL (requires --endpoint-refine): decide whether a CONTAINED shorter model is a real transcript or a 5'-degradation artifact of the longer one. Tests each alternative start against the local conditional-termination-hazard background estimated from the data itself. 'audit' records verdicts in endpoint_refine.json (tss_verdicts) and leaves output byte-identical; 'require' additionally drops endpoint states whose alternative start is 'unsupported', and reverts a model to unsplit if every alternative is refuted. An 'unidentifiable' verdict never drops a model - in dRNA the same-chain/same-TES case can be mathematically unidentifiable, and insufficient evidence is not evidence of absence.")
 @click.option("--m2-contrast-stats-jsonl/--no-m2-contrast-stats-jsonl", default=False, show_default=True, help="EXPERIMENTAL observability: write per-attempt machine-readable M2 contrast records (per-comparison event counts, mean+sum NLL, margins, coverage, and abstention reasons, plus one aggregate line) as JSONL under <work_dir>/m2_contrasts/.")
 @click.option("--lazy-genome/--no-lazy-genome", default=True, show_default=True, help="Open the genome FASTA as an indexed lazy mapping holding at most --genome-cache-chroms chromosomes per process instead of an eager whole-genome dict. Measured on the tuning sample: whole-job peak RSS 67.1 GB -> 40.9 GB with byte-identical outputs, because each spawn worker no longer duplicates the full genome. --no-lazy-genome restores the historical eager load.")
@@ -264,6 +267,8 @@ def main(
     strict_novel_abundance_floor,
     min_gtf_abundance,
     floor_gtf_abundance,
+    complete_chain_rescue_reads,
+    require_gtf_positive_mass,
     min_isoform_fraction,
     isoform_fraction_locus,
     post_selection_refit,
@@ -276,6 +281,7 @@ def main(
     endpoint_min_reads,
     endpoint_min_pair_frac,
     tss_evidence_mode,
+    catalog_mode,
     m2_contrast_stats_jsonl,
     lazy_genome,
     genome_cache_chroms,
@@ -485,6 +491,8 @@ def main(
         strict_novel_abundance_floor=strict_novel_abundance_floor,
         min_gtf_abundance=min_gtf_abundance,
         floor_gtf_abundance=floor_gtf_abundance,
+        complete_chain_rescue_reads=complete_chain_rescue_reads,
+        require_gtf_positive_mass=require_gtf_positive_mass,
         min_isoform_fraction=min_isoform_fraction,
         isoform_fraction_locus=isoform_fraction_locus,
         post_selection_refit=post_selection_refit,
@@ -497,6 +505,7 @@ def main(
         endpoint_min_reads=endpoint_min_reads,
         endpoint_min_pair_frac=endpoint_min_pair_frac,
         tss_evidence_mode=tss_evidence_mode,
+        catalog_mode=catalog_mode,
         m2_contrast_stats_jsonl=m2_contrast_stats_jsonl,
         lazy_genome=lazy_genome,
         genome_cache_chroms=genome_cache_chroms,

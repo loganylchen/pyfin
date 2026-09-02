@@ -55,6 +55,23 @@ class TranscriptCandidate:
     # legacy discovery paths that do not construct structural families.
     family_id: Optional[str] = None
 
+    # Complete-splice-chain evidence (families discovery only; collected
+    # only when the runner requests it - complete_chain_rescue_reads > 0 -
+    # so default runs pay nothing).
+    # An exact complete-chain read's OWN raw alignment (primary, MAPQ >= 1)
+    # equals this candidate's full intron chain (every junction traversed at
+    # the same coordinates; the 5' terminus may sit anywhere inside the
+    # first exon - dRNA 5' degradation tolerated); folded sub-chain
+    # (degraded) reads never count. A read INDEL-cleanly attests one
+    # junction when it has no insertion/deletion within 10 bp of that
+    # junction's boundaries (cigar-level only: mismatches/base quality are
+    # NOT inspected - documented limitation).
+    # complete_chain_junction_depths[i] = indel-clean attestation count of
+    # junction i (5'->3' genomic order); the weakest field is min(depths).
+    # () / 0 for mono, fusion, legacy paths, and disabled collection.
+    complete_chain_junction_depths: Tuple[int, ...] = ()
+    complete_chain_weakest_indel_clean_depth: int = 0
+
     # Fusion-specific (populated only when source == "fusion")
     fusion_junction: Optional[Tuple[int, int]] = None
     breakpoint_left: Optional[Tuple[str, int, str]] = None   # (chrom, pos, strand)

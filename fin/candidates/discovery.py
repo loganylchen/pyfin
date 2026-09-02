@@ -196,6 +196,57 @@ def _three_prime_within_threshold(pos_a: int, pos_b: int, threshold: int) -> boo
     return abs(pos_a - pos_b) <= threshold
 
 
+def junction_clean_depths(
+    chain, member_read_ids, folded_read_ids, indels_by_read,
+    flank_bp: int = 10,
+) -> Tuple[int, ...]:
+    """Per-junction indel-clean attestation depths of a complete-chain read
+    set (5'->3' genomic junction order).
+
+    Exact complete-chain reads = member reads minus folded sub-chain
+    (degraded) reads: each such read's OWN raw alignment equals the
+    candidate's full intron chain (traverses the 5'-most junction; the 5'
+    terminus may sit anywhere inside the first exon - dRNA 5' degradation
+    tolerated). A read indel-cleanly attests one junction when its alignment
+    has no insertion/deletion within ``flank_bp`` of that junction's donor
+    or acceptor (ESPRESSO-style PER-JUNCTION clean flank; cigar-level only -
+    mismatches are not inspected). Reads absent from ``indels_by_read``
+    (e.g. MAPQ-filtered at collection) never count.
+
+    Why per-junction rather than per-read: a whole-read all-junction
+    cleanliness AND was measured and rejected (genuine 16-17-junction SIRV
+    chains with 7-12 exact reads had ZERO fully clean reads), while raw
+    exact-count-only was also rejected (misalignment-born variant chains
+    carry >=2 exact reads, but at their spurious junction EVERY exact read
+    bears the indel signature: measured weakest depth 0-1 for all 17 revived
+    junk chains vs >=2 for 12/13 genuine chains). Mono chains return ().
+    """
+    introns = tuple(chain.introns) if hasattr(chain, "introns") else tuple(chain)
+    if not introns:
+        return ()
+    exact = [
+        rid for rid in set(member_read_ids) - set(folded_read_ids)
+        if rid in indels_by_read
+    ]
+    if not exact:
+        return (0,) * len(introns)
+    depths = []
+    for donor, acceptor in introns:
+        depth = 0
+        for rid in exact:
+            clean = True
+            for lo, hi in indels_by_read[rid]:
+                if (lo - flank_bp <= donor <= hi + flank_bp) or (
+                    lo - flank_bp <= acceptor <= hi + flank_bp
+                ):
+                    clean = False
+                    break
+            if clean:
+                depth += 1
+        depths.append(depth)
+    return tuple(depths)
+
+
 def _graph_groups(non_fusion_reads, strand, tol, min_edge_reads,
                   tss_brake=True, tss_tol=20, tss_min_reads=3, tss_frac=0.4):
     """Build novel-candidate read groups via intron-graph assembly: extend each
@@ -248,6 +299,7 @@ def _chain_cluster_candidates(
     interval, non_fusion_reads, all_read_ids, read_sequences, gtf_reader,
     genome_fasta, strand, min_novel_reads, *, wobble_bp, cassette_max_exon_bp,
     fold_monoexon_contained=False, fold_span_guard=False, clustering="read_chains",
+    collect_chain_evidence=False,
 ) -> CandidateSet:
     """NEW generation: build candidates via intron-chain clustering.
 
@@ -270,6 +322,10 @@ def _chain_cluster_candidates(
     """
     read_chains = []
     spans: dict = {}
+    # Complete-chain evidence collection is strictly opt-in (rescue
+    # requested): default runs skip the per-read scan and keep the
+    # dataclass defaults.
+    indels_by_read: dict = {}
     for rd in non_fusion_reads:
         cigar = rd.get("cigartuples")
         ref_start = rd.get("reference_start")
@@ -279,6 +335,22 @@ def _chain_cluster_candidates(
         q = rd.get("query_name")
         if q is not None:
             spans[q] = (ref_start, rd.get("reference_end", ref_start))
+            if collect_chain_evidence and int(
+                rd.get("mapping_quality") or 0
+            ) >= 1:
+                pos = ref_start
+                ind = []
+                for op, ln in cigar:
+                    if op in (0, 7, 8):    # M/=/X consume reference
+                        pos += ln
+                    elif op == 2:          # D: reference span
+                        ind.append((pos, pos + ln))
+                        pos += ln
+                    elif op == 1:          # I: reference point
+                        ind.append((pos, pos))
+                    elif op == 3:          # N: junction
+                        pos += ln
+                indels_by_read[q] = tuple(ind)
 
     family_result = None
     read_family_count = 0
@@ -372,12 +444,19 @@ def _chain_cluster_candidates(
     # Each shadow: (intron_chain_tuple, sorted_read_id_tuple). GTF ids can recur
     # across clusters (same annotation matched twice) -> merge the shadow lists.
     shadow_map: Dict[str, List[Tuple[Tuple[Tuple[int, int], ...], Tuple[str, ...]]]] = {}
-    def _emit(chain, member_reads, start, end, gc, family_id=None):
+    def _emit(chain, member_reads, start, end, gc, family_id=None,
+              junction_depths=()):
         """Merge reads into a GTF or emit a novel with its discovery family."""
+        weakest = min(junction_depths) if junction_depths else 0
         if gc is not None:                        # GTF match -> merge
             gc.supporting_read_ids.update(member_reads)
             if family_id is not None:
                 gc.family_id = family_id
+            if weakest > gc.complete_chain_weakest_indel_clean_depth or not (
+                gc.complete_chain_junction_depths
+            ):
+                gc.complete_chain_junction_depths = tuple(junction_depths)
+                gc.complete_chain_weakest_indel_clean_depth = int(weakest)
             return gc.candidate_id
         seq = _build_spliced_sequence(genome_fasta, start, end, chain, strand)
         if not seq:
@@ -390,7 +469,11 @@ def _chain_cluster_candidates(
             three_prime_pos=(end if strand == "+" else start), sequence=seq,
             source="novel", supporting_read_ids=set(member_reads),
             chrom=interval.chrom, strand=strand, start=start, end=end,
-            family_id=family_id))
+            family_id=family_id,
+            complete_chain_junction_depths=tuple(junction_depths),
+            complete_chain_weakest_indel_clean_depth=(
+                min(junction_depths) if junction_depths else 0
+            )))
         return cid
 
     for cluster_index, cl in enumerate(clusters):
@@ -402,9 +485,18 @@ def _chain_cluster_candidates(
                 ends = [spans[r][1] for r in m.read_ids if r in spans]
                 if not starts:
                     continue
+                folded_reads: Set[str] = set()
+                for f in m.folded:
+                    folded_reads.update(f.read_ids)
                 cand_id = _emit(
                     m.chain, m.read_ids, min(starts), max(ends),
                     gtf_by_chain.get(m.chain), family_id,
+                    junction_depths=(
+                        junction_clean_depths(
+                            m.chain, m.read_ids, folded_reads,
+                            indels_by_read)
+                        if collect_chain_evidence else ()
+                    ),
                 )
                 if cand_id is None:
                     continue
@@ -480,6 +572,7 @@ def discover_candidates(
     chain_cluster_fold_monoexon: bool = False,
     chain_cluster_fold_span_guard: bool = False,
     clustering: str = "read_chains",
+    collect_chain_evidence: bool = False,
 ) -> CandidateSet:
     """Discover transcript candidates for a genomic interval.
 
@@ -570,6 +663,7 @@ def discover_candidates(
             fold_monoexon_contained=chain_cluster_fold_monoexon,
             fold_span_guard=chain_cluster_fold_span_guard,
             clustering=clustering,
+            collect_chain_evidence=collect_chain_evidence,
         )
 
     # 2. Group reads by 3' + intron chain → novel candidate groups.

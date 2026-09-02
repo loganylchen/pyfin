@@ -158,6 +158,10 @@ Outputs:
 - `pyfin_out/abundance_refit.json` — survivor-refit mass conservation and abundance/TPM shift diagnostics (named profiles)
 - `pyfin_out/endpoint_refine.json` — optional (`--endpoint-refine`): endpoint
   modes, pair support, poly(A) support, and read routes per split model
+- `pyfin_out/catalog_completion.json` — optional (`--catalog-mode complete`
+  or `adaptive`): catalog additions, adaptive decision, exact mass-transfer
+  map, and strict before/after conservation audit. In adaptive mode, source
+  filtering alone does not reconstruct pre-transfer abundance.
 - `pyfin_out/m2_contrasts/*.jsonl` — optional
   (`--m2-contrast-stats-jsonl`): per-attempt M2 contrast records (event
   counts, mean/sum NLL, margin, coverage, abstention reason)
@@ -171,6 +175,7 @@ validation before promotion):
 | `--candidate-evidence` | write the observable-feature table (read-only) |
 | `--ranking-mode filter` | drop novel candidates below the frozen evidence-ranker operating point before snapping/refit |
 | `--endpoint-refine` | split novel multi-exon models into supported TSS/TES states, with mandatory post-split requantification |
+| `--catalog-mode complete\|adaptive` | catalog-structure benchmark adapter only: full-GTF gffcompare rewards zero-abundance entries, but expression-conditioned rescoring shows large precision loss; never enabled by a profile and not an expression-performance mode ([study](SIRV4_GRID_STUDY.md)) |
 | `--m2-metric sqrt_count_mean_llr` | event-count-rescaled tight-window M2 contrast |
 | `--m2-contrast-stats-jsonl` | machine-readable M2 contrast records |
 | `--no-lazy-genome` | restore the eager whole-genome dict (higher worker RSS) |
@@ -353,6 +358,8 @@ fin/
 | `three_prime_threshold` | int | 24 | 3' end clustering distance (bp) |
 | `isoform_fraction_locus` | str | "family" | Use persistent splice families for minor-isoform denominators; "overlap" restores legacy behavior |
 | `post_selection_refit` | bool | False | Renormalize beta=0 M2 responsibilities over final survivors; named profiles enable it |
+| `complete_chain_rescue_reads` | int | 0 | P2 evidence rescue (`--complete-chain-rescue-reads`): a multi-exon candidate whose weakest junction is cleanly attested by enough exact complete-chain reads (gtf >= N; novel multi-junction >= N+1; novel single-junction >= 10) is exempt from the m2 support gate and soft-mass filter. SIRV4 expressed-truth evidence at N=2 on top of the strict-positive gate: F1 89.02 -> 89.29, `c_trunc3p50` +1.96, 3/156 cells regress <= 0.42. Opt-in; 0 disables |
+| `require_gtf_positive_mass` | bool | False | Strict-positive GTF evidence gate (`--require-gtf-positive-mass`): a GTF-annotated transcript must end selection with EM soft-mass > 0 or it is dropped as unexpressed, even when every abundance floor is 0 (enforced both at the pre-refit A4 floor and again after the survivor refit). Never adds catalog entries; novel/fusion semantics unchanged. Requires `gtf_path`. Opt-in; no profile enables it. SIRV4 expressed-truth evidence (with `--min-gtf-abundance 0 --no-floor-gtf-abundance`): F1 85.58 -> 89.02, zero regressing cells |
 | `em_sigma` | float | 1.0 | EM temperature (lower = harder assignments) |
 | `em_max_iter` | int | 1000 | Maximum EM iterations |
 | `em_tol` | float | 1e-4 | EM convergence tolerance |
