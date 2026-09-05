@@ -83,6 +83,87 @@ def select_m2_interval(
                 cand_list[j].candidate_id, "drop", reason,
             ))
 
+    # --- P2 containment decision layer (opt-in). Evaluate every contained
+    #     short-in-long candidate pair with the degradation-aware TES/TSS
+    #     tests BEFORE any drop, while both hypotheses and their EM read
+    #     assignments still exist. audit: record only (byte-inert).
+    #     require: 'contradicted' shorts (independently supported parent +
+    #     rejecting test) are dropped here; 'supported' shorts are exempt
+    #     from the competition gates below; abstention never acts. ---
+    containment_exempt_ids: set = set()
+    _cmode = getattr(config, "containment_evidence_mode", "off")
+    if _cmode != "off":
+        from fin.analysis.containment_evidence import (
+            containment_interval_actions,
+            evaluate_containment,
+            write_containment_tsv,
+        )
+
+        c_rows = evaluate_containment(
+            cand_list, quant_results,
+            getattr(candidate_set, "read_spans", None) or {},
+            interval_name=interval.region_string,
+        )
+        c_drop_ids, containment_exempt_ids = containment_interval_actions(
+            c_rows, _cmode)
+        verdict_by_id = {r.short_id: r.verdict for r in c_rows}
+        for q in quant_results:
+            v = verdict_by_id.get(q.candidate_id)
+            if v:
+                q.containment_verdict = v
+        if c_rows:
+            shard_dir = Path(config.work_dir) / "_containment_shards"
+            shard_dir.mkdir(parents=True, exist_ok=True)
+            name = (f"{interval.chrom}_{interval.start}_{interval.end}_"
+                    f"{interval.strand or 'u'}.tsv")
+            write_containment_tsv(shard_dir / name, c_rows)
+        if c_drop_ids:
+            cols = {
+                j for j, c in enumerate(cand_list)
+                if c.candidate_id in c_drop_ids
+            }
+            drop_cols |= cols
+            _record_drops(cols, "containment_contradicted_tes")
+            logger.info(
+                "m2_em interval %s: containment TES evidence contradicted "
+                "%d contained model(s)", interval.region_string, len(cols),
+            )
+
+    # --- P3 signal-ballot junction election (opt-in). Nearby junction
+    #     variants with a cigar-level screen imbalance are put to a raw-
+    #     signal per-read vote (the validated M2 wobble NLL over contested
+    #     windows). Supermajority + quorum elect; 'defeated' chains drop in
+    #     require mode; every insufficient outcome retains. audit only
+    #     writes the artifact (byte-inert). ---
+    _jmode = getattr(config, "junction_election_mode", "off")
+    if _jmode != "off":
+        from fin.analysis.junction_election import (
+            run_junction_election,
+            write_election_tsv,
+        )
+
+        je_drop_ids, je_rows = run_junction_election(
+            config, cand_list, quant_results, candidate_set,
+            interval_name=interval.region_string,
+        )
+        if je_rows:
+            shard_dir = Path(config.work_dir) / "_jelection_shards"
+            shard_dir.mkdir(parents=True, exist_ok=True)
+            name = (f"{interval.chrom}_{interval.start}_{interval.end}_"
+                    f"{interval.strand or 'u'}.tsv")
+            write_election_tsv(shard_dir / name, je_rows)
+        if je_drop_ids:
+            cols = {
+                j for j, c in enumerate(cand_list)
+                if c.candidate_id in je_drop_ids
+            }
+            drop_cols |= cols
+            _record_drops(cols, "junction_election_defeated")
+            logger.info(
+                "m2_em interval %s: junction election defeated %d "
+                "candidate(s)", interval.region_string, len(cols),
+            )
+
     # --- Cluster-internal wobble recheck (post-EM, data-layer shadow kill).
     #     Cluster ALL multi-exon candidates by structure (same intron count +
     #     every junction within +-bp); within a cluster the highest-EM-abundance
@@ -135,6 +216,12 @@ def select_m2_interval(
                     config, "m2_cluster_recheck_gtf_min_jct_reads", 1
                 )),
             )
+            if containment_exempt_ids:
+                _d = {
+                    j for j in _d
+                    if cand_list[j].candidate_id
+                    not in containment_exempt_ids
+                }
             drop_cols |= _d
             _record_drops(_d, "cluster_recheck")
 
@@ -216,6 +303,18 @@ def select_m2_interval(
                 "m2_em interval %s: complete-chain rescue kept %d "
                 "support-gate candidates", interval.region_string, n_rescued,
             )
+        if containment_exempt_ids:
+            before_exempt = len(_d)
+            _d = {
+                j for j in _d
+                if cand_list[j].candidate_id not in containment_exempt_ids
+            }
+            if len(_d) != before_exempt:
+                logger.info(
+                    "m2_em interval %s: containment evidence kept %d "
+                    "supported contained model(s) at the support gate",
+                    interval.region_string, before_exempt - len(_d),
+                )
         drop_cols |= _d
         _record_drops(_d, "m2_support_gate")
 
@@ -243,6 +342,11 @@ def select_m2_interval(
                 config, "containment_cluster_max_shadow_reads", 0)),
             exclude=set(drop_cols),
         )
+        if containment_exempt_ids:
+            _d = {
+                j for j in _d
+                if cand_list[j].candidate_id not in containment_exempt_ids
+            }
         drop_cols |= _d
         _record_drops(_d, "containment_cluster")
 
@@ -611,7 +715,8 @@ def select_global(
         # chain for that competition artifact is wrong. (The soft-mass
         # filter itself only ever drops novel candidates.)
         _ccr = int(getattr(config, "complete_chain_rescue_reads", 0))
-        if _ccr > 0 and drop_ids:
+        _cmode_g = getattr(config, "containment_evidence_mode", "off")
+        if (_ccr > 0 or _cmode_g == "require") and drop_ids:
             rescued = {
                 cid
                 for cid in drop_ids
@@ -622,6 +727,11 @@ def select_global(
                         aggregated[cid], "complete_chain_weakest_indel_clean_depth", 0
                     ),
                     _ccr,
+                )
+                or (
+                    _cmode_g == "require"
+                    and getattr(aggregated[cid], "containment_verdict", "")
+                    == "supported"
                 )
             }
             if rescued:

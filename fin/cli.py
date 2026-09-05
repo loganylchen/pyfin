@@ -131,6 +131,16 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
 @click.option("--min-gtf-abundance", default=1.0, show_default=True, type=float, help="Abundance floor for GTF-annotated transcripts on soft EM abundance (default 1: a GTF candidate must accrue at least one read of EM soft-mass to be kept, so pyfin is not a copy-annotation tool). Independent of --min-abundance (which gates novel); fusion always exempt. With --floor-gtf-abundance the effective GTF floor becomes max(this, --min-abundance). Set 0 to disable and keep every GTF candidate in an expressed locus. SIRV-tuned: on real data a nonzero floor can drop genuine low-abundance annotated isoforms.")
 @click.option("--floor-gtf-abundance/--no-floor-gtf-abundance", "floor_gtf_abundance", default=False, show_default=True, help="Raise the GTF abundance floor to the NOVEL floor: GTF must clear max(--min-gtf-abundance, --min-abundance) (never lowers the explicit GTF floor). The real-dRNA/custom default is OFF; the optimized SIRV profile turns it ON for the expressed-truth operating point (e.g. T=3 -> Sn 43.2 / Pr 91.6). SIRV-tuned: on real data this drops genuine low-abundance annotated isoforms — leave OFF unless benchmarking. Fusion stays exempt regardless.")
 @click.option("--complete-chain-rescue-reads", "complete_chain_rescue_reads", default=0, show_default=True, type=int, help="P2 evidence rescue (0 disables): a multi-exon candidate (novel or gtf) whose WEAKEST junction is cleanly attested by >= N exact complete-chain reads (read's own alignment equals the full intron chain; no indel within 10 bp of that junction; 5' terminus free, so dRNA 5' degradation is tolerated) is exempt from the m2 support gate and the soft-mass ratio filter. Protects chain-correct candidates from per-read competition artifacts (endpoint-truncated annotation losing alignment-score ties; true chains competing with corrupt merged annotation) while junction-corrupt chains cannot qualify. Other gates unaffected. Opt-in.")
+@click.option("--junction-election-mode", "junction_election_mode", type=click.Choice(["off", "audit", "require"]), default="off", show_default=True, help="P3 signal-ballot junction election: junction variants within 15 bp whose indel-clean support is <= 1 while a competitor holds >= max(3, 3x) are put to a per-read RAW-SIGNAL vote (krill eventalign mean NLL over the contested +-8 bp windows; the validated M2 wobble metric). Quorum 5 + 0.75 supermajority elect; defeated chains are dropped in require mode; upheld/split/no-quorum always retain. GTF junctions participate as ordinary nominees. audit writes junction_election.tsv only (byte-inert). Requires --quant-mode m2_em and --signal. Opt-in.")
+@click.option("--junction-election-ballot", "junction_election_ballot", type=click.Choice(["signal", "m1", "screen", "shuffle"]), default="signal", show_default=True, help="DEVELOPMENT ablation for --junction-election-mode: signal (production raw-signal ballots), m1 (base-space alignment-score ballots), screen (nomination screen acts alone), shuffle (permuted-signal negative control). Only 'signal' is a production setting.")
+@click.option("--junction-election-burden", "junction_election_burden", type=click.Choice(["prosecution", "defense"]), default="prosecution", show_default=True, help="Burden of proof for --junction-election-mode require. prosecution (conservative): retain unless the signal vote convicts. defense (aggressive): a nominated junction is dropped unless the vote exonerates it; abstention follows the nomination screen. Measured: ballots 97.6%% accurate when decisive, 45%% abstention.")
+@click.option("--junction-correction-mode", "junction_correction_mode", type=click.Choice(["off", "audit", "require"]), default="off", show_default=True, help="Step 5a per-READ junction correction, applied BEFORE clustering. Every read junction with a registry neighbour within --junction-correction-tol-bp is put to a raw-signal ballot: the read's own chain and one chain per neighbour are eventaligned against the read's signal in one batched call with the SAME fixed initial scaling, and the read adopts the best fit. No support threshold, no per-interval cap. Recovers the case where every candidate in a cluster carries the same wrong junction while the right coordinates exist in another cluster. Corrected chains then flow through ordinary discovery and every existing gate (no exemption). audit writes junction_correction.tsv only (byte-inert). Requires --signal, --genome and chain-cluster discovery. Opt-in.")
+@click.option("--junction-correction-tol-bp", "junction_correction_tol_bp", default=15, show_default=True, type=int, help="(--junction-correction-mode) max per-coordinate distance to a registry alternative considered for correction.")
+@click.option("--junction-correction-flank-bp", "junction_correction_flank_bp", default=4, show_default=True, type=int, help="(--junction-correction-mode) shared sequence required on each side of the differing region; the read must have events in both flanks.")
+@click.option("--junction-correction-runner-up-margin", "junction_correction_runner_up_margin", default=10.0, show_default=True, type=float, help="(--junction-correction-mode) the best alternative must beat the second-best alternative by this many NLL units, else abstain.")
+@click.option("--junction-correction-new-chain-min-reads", "junction_correction_new_chain_min_reads", default=2, show_default=True, type=int, help="(--junction-correction-mode) distinct reads that must propose exactly the same corrected chain before a NEW candidate is created.")
+@click.option("--junction-correction-margin", "junction_correction_margin", default=10.0, show_default=True, type=float, help="(--junction-correction-mode) minimum NLL advantage of the best alternative over the read's own junction before the read proposes a correction.")
+@click.option("--containment-evidence-mode", "containment_evidence_mode", type=click.Choice(["off", "audit", "require"]), default="off", show_default=True, help="P2 containment decision layer for nested (contained) candidates, using the degradation-aware tests from the TSS evidence module: distinct-3'-end pairs use the reliable dRNA TES cluster test; same-TES internal-TSS pairs use the conditional termination-hazard test against a local degradation null; verdicts are supported/contradicted/unidentifiable. audit: write containment_evidence.tsv only (byte-inert). require: contradicted short models (with an independently supported long parent) are dropped; supported ones are exempt from the m2 support gate and soft-mass filter; unidentifiable always retained. Requires --quant-mode m2_em.")
 @click.option("--require-gtf-positive-mass/--no-require-gtf-positive-mass", "require_gtf_positive_mass", default=False, show_default=True, help="Strict-positive GTF evidence gate: a GTF-annotated transcript must end selection with EM soft-mass > 0 or it is dropped as unexpressed, even when --min-gtf-abundance is 0 and --no-floor-gtf-abundance is set. Never adds catalog entries; novel and fusion semantics are unchanged (fusion stays exempt). Expression-truth benchmark evidence: with --min-gtf-abundance 0 --no-floor-gtf-abundance this gate lifted SIRV4 expressed-truth F1 85.58 -> 89.02 with zero regressing cells. Requires --gtf.")
 @click.option("--min-isoform-fraction", default=0.01, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose abundance is below this fraction of the dominant transcript in their selected locus (Cufflinks/StringTie minor-isoform suppression). GTF/fusion/mono exempt; 0.0 disables.")
 @click.option("--isoform-fraction-locus", type=click.Choice(["family", "overlap"]), default="family", show_default=True, help="Denominator for --min-isoform-fraction. 'family' uses the persisted discovery splice family and falls back to overlap only for family-less candidates; 'overlap' restores the historical same-strand genomic-overlap behavior.")
@@ -145,6 +155,8 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
 @click.option("--endpoint-min-pair-frac", type=float, default=0.15, show_default=True, help="(--endpoint-refine) Minimum fraction of end-mapped reads an endpoint pair must carry.")
 @click.option("--catalog-mode", type=click.Choice(["off", "complete", "adaptive"]), default="off", show_default=True, help="EXPERIMENTAL (requires --gtf): adapt PyFIN's expressed-assembly output to benchmarks scored against a complete catalog. 'complete' appends catalog structures the assembly did not reach at abundance 0 with transcript_source \"catalog\"; its original expressed set is recoverable by source filtering. 'adaptive' also suppresses NOVEL models inside catalog-covered loci, but only when catalog-derived structures make up at least the frozen 0.87 fraction of catalog+novel output structures; sparse or structurally corrupted catalogs keep discovery intact. Adaptive mass may transfer to a catalog entry, so exact recovery requires catalog_completion.json rather than source filtering alone. The threshold was selected on three SIRV4 H9 samples and checked at that threshold on three held-out H9 replicates; this is not cross-tissue validation. Never branches on benchmark condition names. Opt-in; no profile enables it.")
 @click.option("--tss-evidence-mode", type=click.Choice(["off", "audit", "require"]), default="off", show_default=True, help="EXPERIMENTAL (requires --endpoint-refine): decide whether a CONTAINED shorter model is a real transcript or a 5'-degradation artifact of the longer one. Tests each alternative start against the local conditional-termination-hazard background estimated from the data itself. 'audit' records verdicts in endpoint_refine.json (tss_verdicts) and leaves output byte-identical; 'require' additionally drops endpoint states whose alternative start is 'unsupported', and reverts a model to unsplit if every alternative is refuted. An 'unidentifiable' verdict never drops a model - in dRNA the same-chain/same-TES case can be mathematically unidentifiable, and insufficient evidence is not evidence of absence.")
+@click.option("--candidate-existence-mode", type=click.Choice(["off", "audit"]), default="off", show_default=True, help="EXPERIMENTAL, AUDIT-ONLY (m2_em): evaluate every candidate against a unified evidence-based EXISTENCE test instead of the abundance-proxy gates, and write candidate_existence.tsv. For each candidate in a conflict component (candidates joined by reads that share a raw-AS tie, a finite M2 NLL for both, and demonstrable coverage of the discrimination region), the held-out predictive log-likelihood of the mixture WITH vs WITHOUT it is cross-fitted over 5 read folds. v1 tests only externally specified annotated multi-exon candidates (selection-honest by construction) using the structural channel only. It NEVER changes the output: outcomes are three-state and 'not significant' is not evidence of absence.")
+@click.option("--folded-tss-recovery-mode", type=click.Choice(["off", "audit", "require"]), default="off", show_default=True, help="EXPERIMENTAL (m2_em): after the first assignment/EM pass, test every generation-folded 5'-truncation shadow's proposed TSS against its parent's read-5'-end degradation hazard (local background, selection-corrected over the parent's searchable bins). 'audit' writes tss_shadow_recovery.tsv and leaves output byte-identical; 'require' re-emits each 'supported' shadow as its own candidate (in-bin shadow reads as support, parent 3' end) and reruns assignment/EM once so the second pass decides ownership and abundance. Recovered candidates get no gate exemption.")
 @click.option("--m2-contrast-stats-jsonl/--no-m2-contrast-stats-jsonl", default=False, show_default=True, help="EXPERIMENTAL observability: write per-attempt machine-readable M2 contrast records (per-comparison event counts, mean+sum NLL, margins, coverage, and abstention reasons, plus one aggregate line) as JSONL under <work_dir>/m2_contrasts/.")
 @click.option("--lazy-genome/--no-lazy-genome", default=True, show_default=True, help="Open the genome FASTA as an indexed lazy mapping holding at most --genome-cache-chroms chromosomes per process instead of an eager whole-genome dict. Measured on the tuning sample: whole-job peak RSS 67.1 GB -> 40.9 GB with byte-identical outputs, because each spawn worker no longer duplicates the full genome. --no-lazy-genome restores the historical eager load.")
 @click.option("--genome-cache-chroms", type=int, default=2, show_default=True, help="(--lazy-genome) Chromosomes retained per process in the lazy genome LRU.")
@@ -268,6 +280,16 @@ def main(
     min_gtf_abundance,
     floor_gtf_abundance,
     complete_chain_rescue_reads,
+    junction_election_mode,
+    junction_election_ballot,
+    junction_election_burden,
+    junction_correction_mode,
+    junction_correction_tol_bp,
+    junction_correction_flank_bp,
+    junction_correction_runner_up_margin,
+    junction_correction_new_chain_min_reads,
+    junction_correction_margin,
+    containment_evidence_mode,
     require_gtf_positive_mass,
     min_isoform_fraction,
     isoform_fraction_locus,
@@ -281,6 +303,8 @@ def main(
     endpoint_min_reads,
     endpoint_min_pair_frac,
     tss_evidence_mode,
+    folded_tss_recovery_mode,
+    candidate_existence_mode,
     catalog_mode,
     m2_contrast_stats_jsonl,
     lazy_genome,
@@ -492,6 +516,16 @@ def main(
         min_gtf_abundance=min_gtf_abundance,
         floor_gtf_abundance=floor_gtf_abundance,
         complete_chain_rescue_reads=complete_chain_rescue_reads,
+        junction_election_mode=junction_election_mode,
+        junction_election_ballot=junction_election_ballot,
+        junction_election_burden=junction_election_burden,
+        junction_correction_mode=junction_correction_mode,
+        junction_correction_tol_bp=junction_correction_tol_bp,
+        junction_correction_flank_bp=junction_correction_flank_bp,
+        junction_correction_runner_up_margin=junction_correction_runner_up_margin,
+        junction_correction_new_chain_min_reads=junction_correction_new_chain_min_reads,
+        junction_correction_margin=junction_correction_margin,
+        containment_evidence_mode=containment_evidence_mode,
         require_gtf_positive_mass=require_gtf_positive_mass,
         min_isoform_fraction=min_isoform_fraction,
         isoform_fraction_locus=isoform_fraction_locus,
@@ -505,6 +539,8 @@ def main(
         endpoint_min_reads=endpoint_min_reads,
         endpoint_min_pair_frac=endpoint_min_pair_frac,
         tss_evidence_mode=tss_evidence_mode,
+        folded_tss_recovery_mode=folded_tss_recovery_mode,
+        candidate_existence_mode=candidate_existence_mode,
         catalog_mode=catalog_mode,
         m2_contrast_stats_jsonl=m2_contrast_stats_jsonl,
         lazy_genome=lazy_genome,

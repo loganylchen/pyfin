@@ -55,9 +55,9 @@ class TranscriptCandidate:
     # legacy discovery paths that do not construct structural families.
     family_id: Optional[str] = None
 
-    # Complete-splice-chain evidence (families discovery only; collected
-    # only when the runner requests it - complete_chain_rescue_reads > 0 -
-    # so default runs pay nothing).
+    # Complete-splice-chain evidence (families discovery only; ALWAYS
+    # collected - one CIGAR walk per read - and recorded on the candidate;
+    # only the opt-in gates act on it).
     # An exact complete-chain read's OWN raw alignment (primary, MAPQ >= 1)
     # equals this candidate's full intron chain (every junction traversed at
     # the same coordinates; the 5' terminus may sit anywhere inside the
@@ -71,6 +71,12 @@ class TranscriptCandidate:
     # () / 0 for mono, fusion, legacy paths, and disabled collection.
     complete_chain_junction_depths: Tuple[int, ...] = ()
     complete_chain_weakest_indel_clean_depth: int = 0
+    # Provenance split of supporting_read_ids (which stays the union for every
+    # existing consumer): reads whose RAW alignment chain produced this candidate
+    # vs reads whose signal ballot proposed it (step-5a additive correction).
+    # A correction vote is hypothesis support, not raw complete-chain attestation.
+    raw_supporting_read_ids: Set[str] = field(default_factory=set)
+    correction_supporting_read_ids: Set[str] = field(default_factory=set)
 
     # Fusion-specific (populated only when source == "fusion")
     fusion_junction: Optional[Tuple[int, int]] = None
@@ -119,12 +125,24 @@ class CandidateSet:
     shadows: Optional[
         Dict[str, List[Tuple[Tuple[Tuple[int, int], ...], Tuple[str, ...]]]]
     ] = None
+    # Interval-level junction support (families path, always collected):
+    # (donor, acceptor) -> (raw_reads, indel_clean_reads) over every MAPQ>=1
+    # primary read junction observation. Recorded for every run; consumed by
+    # the opt-in junction election / correction. None on non-families paths.
+    junction_support: Optional[
+        Dict[Tuple[int, int], Tuple[int, int]]
+    ] = None
     # read_id -> (genomic reference_start, reference_end) for reads fetched in this
     # interval. Populated by the chain-cluster discovery path; used by the post-EM
     # mono-exon resolution (quant_mode="m2_em", mono_resolve_post_em) to test whether a
     # single-exon read's genomic span lies inside a surviving multi-exon candidate's
     # exon. None means "not chain-cluster mode" (mono-resolution no-ops).
     read_spans: Optional[Dict[str, Tuple[int, int]]] = None
+    # read_id -> tuple of (lo, hi) reference indel spans (D as [lo,hi), I as a
+    # point) for MAPQ>=1 primary reads of this interval; the raw CIGAR record
+    # behind complete-chain depths. Lets post-EM consumers (folded-TSS
+    # recovery) attest a re-emitted chain from CIGARs, never from EM weights.
+    indels_by_read: Optional[Dict[str, tuple]] = None
 
     @property
     def num_candidates(self) -> int:

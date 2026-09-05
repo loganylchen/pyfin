@@ -150,3 +150,73 @@ def test_families_fold_monoexon_folds_contained_mono():
     assert not any(not c.intron_chain.introns for c in novel)      # NO standalone mono candidate
     multi = [c for c in novel if c.intron_chain.introns]
     assert len(multi) == 1 and multi[0].supporting_read_ids == {"f1", "m1"}   # mono folded in
+
+
+def _run(reads, gtf_list, ivl, **kw):
+    return _chain_cluster_candidates(
+        ivl, reads, {r["query_name"] for r in reads}, {}, _GTFReader(gtf_list),
+        GENOME, "+", 1, wobble_bp=6, cassette_max_exon_bp=70,
+        clustering="families", fold_span_guard=True, **kw)
+
+
+def test_zero_read_gtf_sibling_is_emitted_with_annotation_geometry():
+    # annotation is an ordinary variant key: a wobble sibling with NO reads survives
+    # collapse (not an exact sub-chain) and is emitted with its annotated start/end.
+    exact = _read("exact", 1000, [(100, 900), (1000, 1000), (100, 0)])
+    gtf = _Transcript("gtf_wobble", [(950, 1102), (2000, 3000), (4000, 4300)])
+    ivl = GenomicInterval(chrom="chr1", start=900, end=4400, strand="+")
+    cs = _run([exact], [gtf], ivl)
+    g = next(c for c in cs.candidates if c.source == "gtf")
+    n = next(c for c in cs.candidates if c.source == "novel")
+    assert tuple(g.intron_chain.introns) == ((1102, 2000), (3000, 4000))
+    assert (g.start, g.end) == (950, 4300)
+    assert g.supporting_read_ids == set() and n.supporting_read_ids == {"exact"}
+    assert g.family_id == n.family_id                     # same family, both members
+    cl = next(ids for ids in cs.clusters if g.candidate_id in ids)
+    assert n.candidate_id in cl
+
+
+def test_zero_read_gtf_exact_subchain_is_emitted_not_folded():
+    # an annotated exact sub-chain is never a foldee: it is emitted as its own
+    # zero-read candidate in the same family/cluster as the read container.
+    full = _read("full", 1000, [(100, 900), (1000, 1000), (100, 0)])
+    gtf = _Transcript("gtf_short", [(2900, 3000), (4000, 4100)])   # chain ((3000,4000),)
+    ivl = GenomicInterval(chrom="chr1", start=900, end=4400, strand="+")
+    cs = _run([full], [gtf], ivl)
+    g = next(c for c in cs.candidates if c.source == "gtf")
+    n = next(c for c in cs.candidates if c.source == "novel")
+    assert g.supporting_read_ids == set() and n.supporting_read_ids == {"full"}
+    assert g.family_id == n.family_id
+    assert sorted(cs.clusters[0]) == sorted([g.candidate_id, n.candidate_id])
+    assert cs.shadows.get(n.candidate_id, []) == []
+
+
+def test_gtf_exact_chain_key_carries_reads_no_novel_duplicate():
+    exact = _read("exact", 1000, [(100, 900), (1000, 1000), (100, 0)])
+    gtf = _Transcript("gtf_exact", [(950, 1100), (2000, 3000), (4000, 4300)])
+    ivl = GenomicInterval(chrom="chr1", start=900, end=4400, strand="+")
+    cs = _run([exact], [gtf], ivl)
+    assert [c.source for c in cs.candidates] == ["gtf"]
+    g = cs.candidates[0]
+    assert g.supporting_read_ids == {"exact"} and (g.start, g.end) == (950, 4300)
+    assert g.family_id is not None
+
+
+def test_two_gtf_models_on_one_chain_are_both_emitted():
+    exact = _read("exact", 1000, [(100, 900), (1000, 1000), (100, 0)])
+    g1 = _Transcript("gtf_a", [(950, 1100), (2000, 3000), (4000, 4300)])
+    g2 = _Transcript("gtf_b", [(1050, 1100), (2000, 3000), (4000, 4150)])
+    ivl = GenomicInterval(chrom="chr1", start=900, end=4400, strand="+")
+    cs = _run([exact], [g1, g2], ivl)
+    ids = sorted(c.candidate_id for c in cs.candidates)
+    assert ids == ["gtf_a", "gtf_b"]
+    assert all(c.supporting_read_ids == {"exact"} for c in cs.candidates)
+    assert len(cs.clusters) == 1 and sorted(cs.clusters[0]) == ids
+
+
+def test_gtf_only_interval_emits_annotation_without_reads():
+    gtf = _Transcript("gtf_alone", [(950, 1100), (2000, 3000), (4000, 4300)])
+    ivl = GenomicInterval(chrom="chr1", start=900, end=4400, strand="+")
+    cs = _run([], [gtf], ivl)
+    assert [c.candidate_id for c in cs.candidates] == ["gtf_alone"]
+    assert cs.candidates[0].supporting_read_ids == set()

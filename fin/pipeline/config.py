@@ -176,6 +176,16 @@ class PipelineConfig:
     floor_gtf_abundance: bool = False  # A4: when True the GTF floor is raised to max(min_gtf_abundance, min_abundance). Programmatic/real-dRNA default False; the optimized SIRV profile enables it. Fusion is always exempt.
     min_gtf_abundance: float = 0.0    # A4: own lighter GTF soft-abundance floor. Programmatic default stays 0; both named CLI profiles resolve it to 1. With floor_gtf_abundance, the effective floor is max(min_gtf_abundance, min_abundance). Fusion always exempt.
     complete_chain_rescue_reads: int = 0  # P2 evidence rescue: when > 0, a multi-exon candidate (novel or gtf) whose WEAKEST junction is cleanly attested by >= N exact complete-chain reads is EXEMPT from the m2_support_gate drop and the max_soft_mass_ratio drop. An exact complete-chain read's own raw alignment equals the candidate's full intron chain (5'-most junction covered; 5' terminus free - dRNA degradation tolerated); it cleanly attests a junction when it has no indel within 10 bp of that junction's boundaries (ESPRESSO-style per-junction clean flank). Rationale: those two gates resolve per-read competition, which starves (a) chain-correct but endpoint-truncated annotation entries (alignment-score ties lost to full-length competitors) and (b) true novel chains competing with corrupt merged annotation. Junction-corrupt chains cannot qualify: no exact read attests a corrupt junction, and misalignment-born variants carry the indel signature at their spurious junction (measured weakest depth 0-1 for all 17 junk chains vs >=2 for 12/13 genuine chains; a whole-read all-junction cleanliness AND was rejected - genuine 16-17-junction chains had zero fully clean reads). 0 disables (byte-identical). Opt-in; no profile enables it. Floors, isoform-fraction, fulllen, canonical, and containment gates are NOT bypassed.
+    junction_election_mode: str = "off"  # off|audit|require. P3 signal-ballot junction election: nearby junction variants (accused: indel-clean support <= 1; champion within +-15 bp with clean >= max(3, 3x)) are put to a per-read RAW-SIGNAL vote - each spanning read's krill eventalign mean NLL over the contested +-8 bp windows against both representative candidates (the validated M2 wobble metric, pooled per-read accuracy 86.2% on SIRV wobble pairs). Quorum >= 5 valid ballots and a >= 0.75 supermajority elect; 'defeated' accused chains are dropped in require mode; upheld/split/no-quorum always retain (abstention never removes). GTF junctions participate as ordinary nominees - the signal decides. audit writes junction_election.tsv only (byte-inert). Requires quant_mode=m2_em and --signal. Opt-in; no profile enables it; thresholds are six-H9-sample development fits.
+    junction_election_ballot: str = "signal"  # signal|m1|screen|shuffle. DEVELOPMENT ablation knob for junction_election_mode, to prove the raw signal (not the cigar nomination screen) carries the decision: signal = production krill eventalign NLL ballots; m1 = base-space mappy alignment-score ballots; screen = defeat on nomination alone (no ballots); shuffle = signal ballots with a deterministic per-read hypothesis permutation (negative control). Only 'signal' is a production setting.
+    junction_election_burden: str = "prosecution"  # prosecution|defense. Burden of proof for junction_election_mode=require. prosecution (default, conservative): a nominated junction is retained unless the signal vote CONVICTS it (quorum + supermajority against); abstention retains. defense (aggressive): a nominated junction already carries the misalignment signature, so it is dropped unless the vote EXONERATES it (upheld with quorum + supermajority); abstention follows the screen and drops. Grid measurement: ballots are 97.6% accurate when they decide but abstain 45% of the time.
+    containment_evidence_mode: str = "off"  # off|audit|require. P2 containment decision layer: for every contained pair (short candidate whose chain/span nests inside a longer candidate, discovered from inference-time interval candidates only), run the degradation-aware evidence ladder from fin/analysis/tss_evidence.py - distinct 3' end -> evaluate_tes_support (dRNA's reliable end); same-TES internal TSS -> evaluate_internal_tss (conditional termination hazard vs local degradation null); mono short models -> span route. Verdicts are tri-state. audit: write containment_evidence.tsv, change nothing (byte-inert). require: 'contradicted' (parent independently supported by >=2 indel-clean unique-junction reads AND the test rejects the short model) drops the short model; 'supported' additionally exempts it from the m2 support gate and soft-mass filter; 'unidentifiable' always retains. Requires quant_mode=m2_em. Opt-in; no profile enables it.
+    junction_correction_mode: str = "off"  # off|audit|require. Step 5a per-READ junction correction, applied BEFORE clustering (fin/analysis/junction_correction.py). For each read junction that has ANY registry neighbour within junction_correction_tol_bp (both coordinates, same strand; no support threshold -- the registry only records), the read's OWN chain and one chain per neighbour (that junction replaced) are eventaligned against the read's raw signal in one batched call with the SAME fixed initial scaling (krill >= 0.1.6 init_scale/init_shift from a first full-read run); the scored window is the differing region plus junction_correction_flank_bp of shared sequence on each side, and the read adopts the best-fitting hypothesis when it beats its own by more than junction_correction_margin. Every read with such a junction is scored (no per-interval cap). Recovers the case where every candidate in a cluster carries the same mis-assembled junction while the correct coordinates exist in another cluster of the same interval -- no cluster-internal comparison can find that. Corrected chains flow through ordinary discovery (merge with an existing chain, absorption by an exact-chain GTF candidate, or a new candidate subject to min_novel_reads and every selection gate); correction grants NO exemption. audit computes everything and writes junction_correction.tsv but passes the ORIGINAL chains to clustering (byte-inert). Requires --signal, families clustering, and a genome. Opt-in; no profile enables it.
+    junction_correction_tol_bp: int = 15  # Max per-coordinate distance to a registry alternative considered for correction. 15 matches the junction-election nomination window; smaller values (5) restrict correction to minimap-scale splice-site wobble and are safer around genuine tandem splice sites.
+    junction_correction_flank_bp: int = 4  # Shared (identical-in-all-hypotheses) sequence required on EACH side of the differing region for a ballot; the read must have signal events in both flanks or it abstains.
+    junction_correction_runner_up_margin: float = 10.0  # In a K-way ballot the best alternative must also beat the SECOND-best alternative by this many NLL units; two indistinguishable alternatives -> abstain.
+    junction_correction_new_chain_min_reads: int = 2  # Distinct reads that must propose EXACTLY the same corrected full chain before a NEW candidate is instantiated (an existing candidate only gains support from one).
+    junction_correction_margin: float = 10.0  # Minimum NLL advantage (own - best alternative) before a read proposes a correction. Measured on SIRV: margin 0 manufactures FP chains (298 new chains, 0 TP in one p00 cell); 10 is the pre-registered validation setting.
     require_gtf_positive_mass: bool = False  # P0 strict-positive GTF evidence gate: a GTF-source model must carry EM soft-mass > 0 to survive selection, even when every abundance floor is 0 (zero-mass catalog entries are treated as unexpressed and dropped, never passed through). Opt-in; no profile enables it. Novel/fusion semantics unchanged; fusion stays exempt. Requires gtf_path (validate()).
     # Minimum isoform fraction (locus-relative abundance) FILTER. Drop a NOVEL
     # multi-exon transcript whose abundance is below this fraction of the
@@ -251,6 +261,20 @@ class PipelineConfig:
     # alternative TSS is `supported`. An `unidentifiable` verdict never drops
     # a model - insufficient evidence is not evidence of absence.
     tss_evidence_mode: Literal["off", "audit", "require"] = "off"
+    # Post-EM recovery of generation-folded 5'-truncation shadows on the
+    # production m2_em path (fin/analysis/tss_shadow_recovery.py). Each shadow's
+    # proposed TSS is tested against the parent's first-pass read-5'-end hazard
+    # profile; a `supported` shadow is re-emitted as its own candidate and the
+    # interval's assignment/EM is rerun once. "audit" writes
+    # tss_shadow_recovery.tsv only (output byte-identical); "require" also
+    # re-emits. Off = generation fold is final (current behaviour).
+    folded_tss_recovery_mode: Literal["off", "audit", "require"] = "off"
+    # Unified candidate EXISTENCE test (fin/analysis/candidate_existence.py).
+    # v1 is AUDIT-ONLY by construction: it writes candidate_existence.tsv and
+    # changes nothing. It is the intended replacement for the abundance-proxy
+    # gates, but nothing may be wired to it until the audit proves calibration,
+    # determinism and selection honesty (CANDIDATE_EXISTENCE_DESIGN.md section 6).
+    candidate_existence_mode: Literal["off", "audit"] = "off"
     # Catalog completion. PyFIN's default contract is an EXPRESSED assembly:
     # an annotated transcript with no EM mass is dropped on purpose. Some
     # benchmarks instead score against a complete catalog regardless of
@@ -805,6 +829,89 @@ class PipelineConfig:
                 "complete_chain_rescue_reads must be >= 0 "
                 f"(got {self.complete_chain_rescue_reads!r})"
             )
+        if getattr(self, "containment_evidence_mode", "off") not in (
+            "off", "audit", "require"
+        ):
+            raise ValueError(
+                "unknown containment_evidence_mode: "
+                f"{self.containment_evidence_mode!r}"
+            )
+        if getattr(self, "containment_evidence_mode", "off") != "off" and (
+            self.quant_mode != "m2_em"
+        ):
+            raise ValueError(
+                "containment_evidence_mode requires --quant-mode m2_em: the "
+                "containment tests run on the per-interval EM candidate "
+                "pool and read assignments"
+            )
+        if getattr(self, "junction_election_mode", "off") not in (
+            "off", "audit", "require"
+        ):
+            raise ValueError(
+                "unknown junction_election_mode: "
+                f"{self.junction_election_mode!r}"
+            )
+        if getattr(self, "junction_election_mode", "off") != "off":
+            if self.quant_mode != "m2_em":
+                raise ValueError(
+                    "junction_election_mode requires --quant-mode m2_em: "
+                    "ballots are cast over the per-interval EM candidate "
+                    "pool and read assignments"
+                )
+            if not getattr(self, "signal_path", ""):
+                raise ValueError(
+                    "junction_election_mode requires --signal: the ballots "
+                    "are raw-signal eventalign NLL votes; without a signal "
+                    "file there is no election to hold"
+                )
+            if not getattr(self, "chain_cluster_discovery", False):
+                raise ValueError(
+                    "junction_election_mode requires chain-cluster "
+                    "(families) discovery: the nomination screen consumes "
+                    "the per-junction support map that only that path "
+                    "collects"
+                )
+        if getattr(self, "junction_correction_mode", "off") not in (
+            "off", "audit", "require"
+        ):
+            raise ValueError(
+                "unknown junction_correction_mode: "
+                f"{self.junction_correction_mode!r}"
+            )
+        if getattr(self, "junction_correction_mode", "off") != "off":
+            if not getattr(self, "signal_path", ""):
+                raise ValueError(
+                    "junction_correction_mode requires --signal: the per-read "
+                    "ballot is a raw-signal eventalign contrast; without a "
+                    "signal file there is nothing to compare"
+                )
+            if not getattr(self, "chain_cluster_discovery", False):
+                raise ValueError(
+                    "junction_correction_mode requires chain-cluster (families) "
+                    "discovery: correction rewrites the read chains that only "
+                    "that path feeds to clustering"
+                )
+            if not getattr(self, "genome_fasta_path", ""):
+                raise ValueError(
+                    "junction_correction_mode requires --genome: the two "
+                    "hypotheses are stitched from the reference"
+                )
+            if int(getattr(self, "junction_correction_tol_bp", 15)) <= 0:
+                raise ValueError("junction_correction_tol_bp must be > 0")
+        if getattr(self, "junction_election_ballot", "signal") not in (
+            "signal", "m1", "screen", "shuffle"
+        ):
+            raise ValueError(
+                "unknown junction_election_ballot: "
+                f"{self.junction_election_ballot!r}"
+            )
+        if getattr(self, "junction_election_burden", "prosecution") not in (
+            "prosecution", "defense"
+        ):
+            raise ValueError(
+                "unknown junction_election_burden: "
+                f"{self.junction_election_burden!r}"
+            )
         if getattr(self, "require_gtf_positive_mass", False) and not getattr(
             self, "gtf_path", ""
         ):
@@ -812,6 +919,30 @@ class PipelineConfig:
                 "require_gtf_positive_mass requires --gtf: the strict-"
                 "positive gate scores GTF-source models and without an "
                 "annotation there are none to gate"
+            )
+        if getattr(self, "candidate_existence_mode", "off") not in ("off", "audit"):
+            raise ValueError(
+                f"unknown candidate_existence_mode: {self.candidate_existence_mode!r}"
+            )
+        # Both of these run inside _quant_m2_em only. Silently doing nothing under
+        # another engine would look like "the audit found nothing".
+        if (getattr(self, "candidate_existence_mode", "off") != "off"
+                and getattr(self, "quant_mode", "m2_em") != "m2_em"):
+            raise ValueError(
+                "candidate_existence_mode requires --quant-mode m2_em "
+                f"(got {self.quant_mode!r})"
+            )
+        if (getattr(self, "folded_tss_recovery_mode", "off") != "off"
+                and getattr(self, "quant_mode", "m2_em") != "m2_em"):
+            raise ValueError(
+                "folded_tss_recovery_mode requires --quant-mode m2_em "
+                f"(got {self.quant_mode!r})"
+            )
+        if getattr(self, "folded_tss_recovery_mode", "off") not in (
+            "off", "audit", "require",
+        ):
+            raise ValueError(
+                f"unknown folded_tss_recovery_mode: {self.folded_tss_recovery_mode!r}"
             )
         if getattr(self, "tss_evidence_mode", "off") not in (
             "off", "audit", "require"

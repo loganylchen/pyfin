@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from fin.candidates.dataclasses import CandidateSet, IntronChain, TranscriptCandidate
 from fin.candidates.canonical import parse_motifs
+from fin.candidates.chain_cluster import read_alignment_from_cigar
 from fin.candidates.intron_chains import (
     expand_canonical_chain_alternatives_v2,
     extract_intron_chain,
@@ -299,7 +300,7 @@ def _chain_cluster_candidates(
     interval, non_fusion_reads, all_read_ids, read_sequences, gtf_reader,
     genome_fasta, strand, min_novel_reads, *, wobble_bp, cassette_max_exon_bp,
     fold_monoexon_contained=False, fold_span_guard=False, clustering="read_chains",
-    collect_chain_evidence=False,
+    collect_chain_evidence=True, junction_correction=None, junction_correction_apply=None,
 ) -> CandidateSet:
     """NEW generation: build candidates via intron-chain clustering.
 
@@ -322,10 +323,18 @@ def _chain_cluster_candidates(
     """
     read_chains = []
     spans: dict = {}
-    # Complete-chain evidence collection is strictly opt-in (rescue
-    # requested): default runs skip the per-read scan and keep the
-    # dataclass defaults.
+    # Complete-chain / junction evidence is ALWAYS collected (one extra CIGAR
+    # walk per MAPQ>=1 read, no alignment or signal work): per-read indel
+    # positions, per-candidate indel-clean complete-chain depths, and the
+    # interval-wide junction raw/clean registry. Collecting it is unconditional
+    # so every run records it; whether any gate ACTS on it stays opt-in
+    # (complete_chain_rescue_reads, containment/election/correction modes).
+    # Nothing on the default path serializes these fields, so default outputs
+    # are byte-identical.
     indels_by_read: dict = {}
+    junction_counts: dict = {}     # (donor, acceptor) -> [raw, indel_clean]
+    alignments: dict = {}          # query_name -> ReadAlignment (collapse span_guard)
+    _FLANK = 10
     for rd in non_fusion_reads:
         cigar = rd.get("cigartuples")
         ref_start = rd.get("reference_start")
@@ -335,11 +344,11 @@ def _chain_cluster_candidates(
         q = rd.get("query_name")
         if q is not None:
             spans[q] = (ref_start, rd.get("reference_end", ref_start))
-            if collect_chain_evidence and int(
-                rd.get("mapping_quality") or 0
-            ) >= 1:
+            alignments[q] = read_alignment_from_cigar(cigar, ref_start)
+            if int(rd.get("mapping_quality") or 0) >= 1:
                 pos = ref_start
                 ind = []
+                jxs = []
                 for op, ln in cigar:
                     if op in (0, 7, 8):    # M/=/X consume reference
                         pos += ln
@@ -349,20 +358,80 @@ def _chain_cluster_candidates(
                     elif op == 1:          # I: reference point
                         ind.append((pos, pos))
                     elif op == 3:          # N: junction
+                        jxs.append((pos, pos + ln))
                         pos += ln
                 indels_by_read[q] = tuple(ind)
+                for (d, a) in jxs:
+                    ent = junction_counts.setdefault((d, a), [0, 0])
+                    ent[0] += 1
+                    if all(
+                        not (lo - _FLANK <= d <= hi + _FLANK
+                             or lo - _FLANK <= a <= hi + _FLANK)
+                        for lo, hi in ind
+                    ):
+                        ent[1] += 1
+
+    # Step 5a ballots (additive junction correction). The callable returns
+    # proposals only; the RAW read chains below are what clustering sees, so the
+    # baseline candidate set is untouched. Proposals are instantiated as EXTRA
+    # candidates after emission (see the end of this function).
+    jc_result = junction_correction(read_chains, indels_by_read) if junction_correction else None
+
+    # Annotation hypotheses for this (strand-separated) interval. Multi-exon
+    # chains enter clustering as ordinary zero-read variant keys -- they join,
+    # bridge, fold and are emitted exactly like read-derived chains; the only
+    # difference is `source`. Single-exon annotation is matched to mono loci by
+    # genomic overlap below. Several annotated transcripts may share one chain
+    # (alternative TSS/TES): they all ride on that one key.
+    gtf_models: Dict[Tuple[Tuple[int, int], ...], List[TranscriptCandidate]] = {}
+    mono_gtf_candidates: List[TranscriptCandidate] = []
+    if gtf_reader is not None:
+        for tx in gtf_reader.get_transcripts_in_region(
+                interval.chrom, interval.start, interval.end):
+            # Interval is strand-separated (reads are strand-filtered into it), so an
+            # opposite-strand annotation must NOT enter and compete for reads / absorb
+            # same-chain support. (No effect when the interval is unstranded or there is
+            # no GTF, e.g. p00.)
+            if interval.strand is not None and tx.strand != interval.strand:
+                continue
+            chain = gtf_transcript_to_intron_chain(tx)
+            tx.sort_features()
+            three_prime = tx.end if tx.strand == "+" else tx.start
+            gc = TranscriptCandidate(
+                candidate_id=tx.transcript_id, intron_chain=chain,
+                three_prime_pos=three_prime, sequence=tx.get_spliced_sequence(genome_fasta),
+                source="gtf", supporting_read_ids=set(), chrom=interval.chrom,
+                strand=tx.strand, start=tx.start, end=tx.end)
+            if chain.introns:
+                gtf_models.setdefault(tuple(chain.introns), []).append(gc)
+            else:
+                mono_gtf_candidates.append(gc)
+    for models in gtf_models.values():
+        models.sort(key=lambda g: (g.start, g.end, g.candidate_id))
 
     family_result = None
-    read_family_count = 0
+    cluster_family_ids: List[Optional[str]] = []
     if clustering == "families":
         from fin.candidates.chain_cluster import (
             ChainCluster, GenCandidate, cluster_families, collapse)
-        from fin.candidates.dataclasses import IntronChain
         family_result = cluster_families(
-            read_chains, wobble_bp=wobble_bp, cassette_max_exon_bp=cassette_max_exon_bp)
-        read_family_count = len(family_result.families)
-        clusters = [collapse(fam, span_guard=fold_span_guard, read_spans=spans)
-                    for fam in family_result.families]
+            read_chains, wobble_bp=wobble_bp, cassette_max_exon_bp=cassette_max_exon_bp,
+            gtf_variants=[(g.candidate_id, ch)
+                          for ch in sorted(gtf_models) for g in gtf_models[ch]],
+            # Contradiction evidence must come from EVERY read chain that
+            # enters clustering. `junction_counts` is the MAPQ>=1 SUPPORT
+            # registry (raw/clean depths for the election and the audits); using
+            # it here would let a MAPQ=0 read shape the read-derived topology
+            # while being invisible to the gate, so its junction would count as
+            # "the reads are silent" when the reads in fact disagree.
+            observed_junctions={j for _rd, ch in read_chains
+                                for j in ch.introns})
+        clusters = []
+        for fam in family_result.families:
+            cluster_family_ids.append(
+                _generate_family_id(interval.chrom, strand, list(fam.variants)))
+            clusters.append(collapse(fam, span_guard=fold_span_guard,
+                                     read_alignments=alignments))
         mono_ids = set(family_result.mono_reads)
         # When the effective fold_monoexon_contained flag is on (the runner keeps it on unless a
         # post-EM mono_resolve will run), fold contained mono reads into a multi member at
@@ -381,64 +450,22 @@ def _chain_cluster_candidates(
             fold_monoexon_contained=fold_monoexon_contained,
             fold_span_guard=fold_span_guard)
 
-    # GTF candidates (identical to the legacy path).
-    gtf_candidates: List[TranscriptCandidate] = []
-    gtf_by_chain: dict = {}
-    if gtf_reader is not None:
-        for tx in gtf_reader.get_transcripts_in_region(
-                interval.chrom, interval.start, interval.end):
-            # Interval is strand-separated (reads are strand-filtered into it), so an
-            # opposite-strand annotation must NOT enter and compete for reads / absorb
-            # same-chain support. (No effect when the interval is unstranded or there is
-            # no GTF, e.g. p00.)
-            if interval.strand is not None and tx.strand != interval.strand:
-                continue
-            chain = gtf_transcript_to_intron_chain(tx)
-            tx.sort_features()
-            three_prime = tx.end if tx.strand == "+" else tx.start
-            gc = TranscriptCandidate(
-                candidate_id=tx.transcript_id, intron_chain=chain,
-                three_prime_pos=three_prime, sequence=tx.get_spliced_sequence(genome_fasta),
-                source="gtf", supporting_read_ids=set(), chrom=interval.chrom,
-                strand=tx.strand, start=tx.start, end=tx.end)
-            gtf_candidates.append(gc)
-            gtf_by_chain.setdefault(chain, gc)   # first GTF wins on an exact-chain tie
-
-    cluster_family_ids: List[Optional[str]] = [None] * len(clusters)
-    if family_result is not None:
-        from fin.candidates.chain_cluster import _attach_gtf_variants
-
-        _attach_gtf_variants(
-            family_result.families,
-            [(gc.candidate_id, tuple(gc.intron_chain.introns)) for gc in gtf_candidates],
-            wobble_bp,
-            cassette_max_exon_bp,
-        )
-        family_ids = [
-            _generate_family_id(
-                interval.chrom,
-                strand,
-                list(family.variants) + [chain for _, chain in family.gtf_members],
-            )
-            for family in family_result.families
-        ]
-        for family, family_id in zip(family_result.families, family_ids):
-            gtf_ids = {candidate_id for candidate_id, _ in family.gtf_members}
-            for gc in gtf_candidates:
-                if gc.candidate_id in gtf_ids:
-                    gc.family_id = family_id
-        cluster_family_ids[:read_family_count] = family_ids[:read_family_count]
+    # Trailing clusters (mono bucket / legacy path) carry no family id.
+    cluster_family_ids.extend([None] * (len(clusters) - len(cluster_family_ids)))
 
     # Single-exon (empty-chain) GTF transcripts, matched to mono members by genomic
     # overlap (NOT by empty-chain equality, which would collapse them all to one).
-    mono_gtf = [(gc, gc.start, gc.end)
-                for gc in gtf_candidates if not gc.intron_chain.introns]
+    mono_gtf = [(gc, gc.start, gc.end) for gc in mono_gtf_candidates]
 
     # Record each ChainCluster's members by candidate_id (NOT list index): downstream
     # gates (canonical_gate, junction-dominance, fusion) drop/reorder candidate_set
     # candidates after discovery, so an id survives those mutations where an index
     # would go stale. A member with no candidate (empty span/seq) contributes nothing.
-    candidates: List[TranscriptCandidate] = list(gtf_candidates)
+    # Mono annotation is always a candidate; multi-exon annotation is emitted only
+    # through its surviving variant key (a folded annotated key is a dormant shadow,
+    # exactly like a folded read chain).
+    candidates: List[TranscriptCandidate] = list(mono_gtf_candidates)
+    emitted_gtf: Set[str] = {g.candidate_id for g in mono_gtf_candidates}
     cluster_id_lists: List[List[str]] = []
     # container candidate_id -> its folded SHADOW sub-chains (for 5'-TSS recovery).
     # Each shadow: (intron_chain_tuple, sorted_read_id_tuple). GTF ids can recur
@@ -446,18 +473,25 @@ def _chain_cluster_candidates(
     shadow_map: Dict[str, List[Tuple[Tuple[Tuple[int, int], ...], Tuple[str, ...]]]] = {}
     def _emit(chain, member_reads, start, end, gc, family_id=None,
               junction_depths=()):
-        """Merge reads into a GTF or emit a novel with its discovery family."""
+        """Emit the annotation model(s) owning ``chain`` (annotated geometry, key
+        reads as support) or a novel with its discovery family. Returns ids."""
         weakest = min(junction_depths) if junction_depths else 0
-        if gc is not None:                        # GTF match -> merge
-            gc.supporting_read_ids.update(member_reads)
-            if family_id is not None:
-                gc.family_id = family_id
-            if weakest > gc.complete_chain_weakest_indel_clean_depth or not (
-                gc.complete_chain_junction_depths
-            ):
-                gc.complete_chain_junction_depths = tuple(junction_depths)
-                gc.complete_chain_weakest_indel_clean_depth = int(weakest)
-            return gc.candidate_id
+        if gc is not None:                        # annotated key -> its model(s)
+            models = gc if isinstance(gc, list) else [gc]
+            for g in models:
+                g.supporting_read_ids.update(member_reads)
+                g.raw_supporting_read_ids.update(member_reads)
+                if family_id is not None:
+                    g.family_id = family_id
+                if weakest > g.complete_chain_weakest_indel_clean_depth or not (
+                    g.complete_chain_junction_depths
+                ):
+                    g.complete_chain_junction_depths = tuple(junction_depths)
+                    g.complete_chain_weakest_indel_clean_depth = int(weakest)
+                if g.candidate_id not in emitted_gtf:
+                    candidates.append(g)
+                    emitted_gtf.add(g.candidate_id)
+            return [g.candidate_id for g in models]
         seq = _build_spliced_sequence(genome_fasta, start, end, chain, strand)
         if not seq:
             return None
@@ -468,47 +502,47 @@ def _chain_cluster_candidates(
             candidate_id=cid, intron_chain=chain,
             three_prime_pos=(end if strand == "+" else start), sequence=seq,
             source="novel", supporting_read_ids=set(member_reads),
+            raw_supporting_read_ids=set(member_reads),
             chrom=interval.chrom, strand=strand, start=start, end=end,
             family_id=family_id,
             complete_chain_junction_depths=tuple(junction_depths),
             complete_chain_weakest_indel_clean_depth=(
                 min(junction_depths) if junction_depths else 0
             )))
-        return cid
+        return [cid]
 
     for cluster_index, cl in enumerate(clusters):
         ids: List[str] = []
         family_id = cluster_family_ids[cluster_index]
         for m in cl.members:
-            if m.chain.introns:                   # multi-exon: exact-chain GTF match
+            if m.chain.introns:                   # multi-exon variant key
+                models = gtf_models.get(tuple(m.chain.introns))
                 starts = [spans[r][0] for r in m.read_ids if r in spans]
                 ends = [spans[r][1] for r in m.read_ids if r in spans]
-                if not starts:
+                if not starts and not models:
                     continue
                 folded_reads: Set[str] = set()
                 for f in m.folded:
                     folded_reads.update(f.read_ids)
-                cand_id = _emit(
-                    m.chain, m.read_ids, min(starts), max(ends),
-                    gtf_by_chain.get(m.chain), family_id,
-                    junction_depths=(
-                        junction_clean_depths(
-                            m.chain, m.read_ids, folded_reads,
-                            indels_by_read)
-                        if collect_chain_evidence else ()
-                    ),
+                out_ids = _emit(
+                    m.chain, m.read_ids,
+                    min(starts) if starts else 0, max(ends) if ends else 0,
+                    models, family_id,
+                    junction_depths=junction_clean_depths(
+                        m.chain, m.read_ids, folded_reads, indels_by_read),
                 )
-                if cand_id is None:
+                if not out_ids:
                     continue
-                ids.append(cand_id)
-                # folded exact-sub-chain shadows keyed by the candidate it became
+                ids.extend(out_ids)
+                # folded exact-sub-chain shadows keyed by the candidate(s) it became
                 # (5'-TSS recovery). Mono members carry none.
                 member_shadows = [
                     (tuple(f.chain.introns), tuple(sorted(f.read_ids)))
                     for f in m.folded if f.chain.introns
                 ]
                 if member_shadows:
-                    shadow_map.setdefault(cand_id, []).extend(member_shadows)
+                    for cid in out_ids:
+                        shadow_map.setdefault(cid, []).extend(member_shadows)
             else:
                 # mono (single-exon): split the pooled chain-less reads into per-locus
                 # groups so distinct single-exon genes are not bridged, then overlap-match
@@ -517,10 +551,10 @@ def _chain_cluster_candidates(
                     gs = [spans[r][0] for r in group]
                     ge = [spans[r][1] for r in group]
                     lo, hi = min(gs), max(ge)
-                    cand_id = _emit(m.chain, set(group), lo, hi,
+                    out_ids = _emit(m.chain, set(group), lo, hi,
                                     _best_overlap_gtf(mono_gtf, lo, hi))
-                    if cand_id is not None:
-                        ids.append(cand_id)
+                    if out_ids:
+                        ids.extend(out_ids)
         cluster_id_lists.append(ids)
 
     # Drop low-support novels; prune cluster lists to surviving candidate ids.
@@ -535,6 +569,58 @@ def _chain_cluster_candidates(
         # Prune shadow entries whose container candidate was dropped.
         shadow_map = {cid: sh for cid, sh in shadow_map.items() if cid in keep_ids}
 
+    # Step 5a instantiation: aggregate proposals by corrected chain. An existing
+    # candidate (any source) gains correction support; a chain no candidate has
+    # becomes a NEW novel candidate when >= new_chain_min_reads distinct reads
+    # proposed exactly it. Baseline candidates are never removed or re-collapsed.
+    if jc_result is not None and jc_result.proposals and junction_correction_apply:
+        from fin.analysis.junction_correction import aggregate_proposals
+
+        min_votes = int(getattr(junction_correction_apply, "min_reads", 2))
+        by_chain_cand = {}
+        for c in candidates:
+            if c.intron_chain.introns:
+                by_chain_cand.setdefault(tuple(c.intron_chain.introns), c)
+        voter_span = {p.read_id: (p.reference_start, p.reference_end) for p in jc_result.proposals}
+        n_new = n_merged = 0
+        for chain_t, voters in aggregate_proposals(jc_result.proposals, min_reads=1).items():
+            existing = by_chain_cand.get(chain_t)
+            if existing is not None:
+                existing.supporting_read_ids.update(voters)
+                existing.correction_supporting_read_ids.update(voters)
+                n_merged += 1
+                continue
+            if len(voters) < min_votes:
+                continue
+            starts = [voter_span[v][0] for v in voters]
+            ends = [voter_span[v][1] for v in voters]
+            st, en = min(starts), max(ends)
+            seq = _build_spliced_sequence(genome_fasta, st, en, IntronChain(introns=chain_t), strand)
+            if not seq:
+                continue
+            cid = _generate_novel_id(interval.chrom, strand, st, en, IntronChain(introns=chain_t))
+            if cid in {c.candidate_id for c in candidates}:
+                continue
+            # family placement: the family of the voters' raw chains when unique,
+            # else an independent correction family (never rewrites baseline ids)
+            fam_ids = {by_chain_cand[p.original_chain].family_id
+                       for p in jc_result.proposals
+                       if p.read_id in voters and p.original_chain in by_chain_cand}
+            fam_id = next(iter(fam_ids)) if len(fam_ids) == 1 else _generate_family_id(
+                interval.chrom, strand, [IntronChain(introns=chain_t)])
+            candidates.append(TranscriptCandidate(
+                candidate_id=cid, intron_chain=IntronChain(introns=chain_t),
+                three_prime_pos=(en if strand == "+" else st), sequence=seq,
+                source="novel", supporting_read_ids=set(voters),
+                correction_supporting_read_ids=set(voters),
+                chrom=interval.chrom, strand=strand, start=st, end=en, family_id=fam_id))
+            cluster_id_lists.append([cid])
+            by_chain_cand[chain_t] = candidates[-1]
+            n_new += 1
+        if n_new or n_merged:
+            logger.info("Interval %s: junction correction added %d candidate(s), "
+                        "reinforced %d", interval.region_string, n_new, n_merged)
+
     logger.info(
         "Interval %s: %d candidates (%d GTF, %d novel) from %d reads [chain-cluster]",
         interval.region_string, len(candidates),
@@ -544,7 +630,8 @@ def _chain_cluster_candidates(
     return CandidateSet(
         interval=interval, candidates=candidates, read_ids=all_read_ids,
         read_sequences=read_sequences, clusters=cluster_id_lists,
-        shadows=shadow_map, read_spans=spans)
+        shadows=shadow_map, read_spans=spans, indels_by_read=indels_by_read,
+        junction_support={j: (v[0], v[1]) for j, v in junction_counts.items()})
 
 
 def discover_candidates(
@@ -572,7 +659,9 @@ def discover_candidates(
     chain_cluster_fold_monoexon: bool = False,
     chain_cluster_fold_span_guard: bool = False,
     clustering: str = "read_chains",
-    collect_chain_evidence: bool = False,
+    collect_chain_evidence: bool = True,   # retained for API compatibility; evidence is always collected
+    junction_correction=None,
+    junction_correction_apply=None,
 ) -> CandidateSet:
     """Discover transcript candidates for a genomic interval.
 
@@ -664,6 +753,8 @@ def discover_candidates(
             fold_span_guard=chain_cluster_fold_span_guard,
             clustering=clustering,
             collect_chain_evidence=collect_chain_evidence,
+            junction_correction=junction_correction,
+            junction_correction_apply=junction_correction_apply,
         )
 
     # 2. Group reads by 3' + intron chain → novel candidate groups.

@@ -13,6 +13,13 @@ from fin.candidates.dataclasses import TranscriptCandidate
 
 logger = logging.getLogger(__name__)
 
+# Deterministic cross-interval merge precedence for containment verdicts
+# (a candidate practically lives in one interval; ties resolve to the more
+# conservative outcome first: contradicted > supported > unidentifiable).
+_CONTAINMENT_PRECEDENCE = {
+    "unidentifiable": 1, "supported": 2, "contradicted": 3,
+}
+
 
 @dataclass
 class QuantResult:
@@ -62,6 +69,12 @@ class QuantResult:
     # fusion/legacy paths and when evidence collection is disabled. Powers
     # the opt-in complete_chain_rescue_reads exemption; never serialized.
     complete_chain_weakest_indel_clean_depth: int = 0
+    # Containment-evidence verdict for this candidate as the SHORT model of
+    # a containment pair ("" = not evaluated / mode off; else
+    # supported/contradicted/unidentifiable). Set at interval selection when
+    # containment_evidence_mode != off; consumed by the global soft-mass
+    # exemption; never serialized to outputs.
+    containment_verdict: str = ""
 
 
 def _exons_from_candidate(c: TranscriptCandidate) -> Tuple[Tuple[int, int], ...]:
@@ -558,6 +571,7 @@ def aggregate_across_intervals(
                     "max_R": 0.0,
                     "fulllen_frac": -1.0,
                     "complete_chain_weakest_indel_clean_depth": 0,
+                    "containment_verdict": "",
                 }
             a = agg[qr.candidate_id]
             if qr.family_id is not None:
@@ -575,6 +589,11 @@ def aggregate_across_intervals(
             nccr = getattr(qr, "complete_chain_weakest_indel_clean_depth", 0)
             if nccr > a["complete_chain_weakest_indel_clean_depth"]:
                 a["complete_chain_weakest_indel_clean_depth"] = nccr
+            cv = getattr(qr, "containment_verdict", "")
+            if cv and _CONTAINMENT_PRECEDENCE.get(cv, 0) > (
+                _CONTAINMENT_PRECEDENCE.get(a["containment_verdict"], 0)
+            ):
+                a["containment_verdict"] = cv
             # P0-6: track per-interval abundance and dedup read IDs across
             # intervals. Naive sum double-counts reads that overlap interval
             # boundaries; we instead average per-read abundance across the
@@ -660,6 +679,7 @@ def aggregate_across_intervals(
             max_R=a["max_R"],
             fulllen_frac=a["fulllen_frac"],
             complete_chain_weakest_indel_clean_depth=a["complete_chain_weakest_indel_clean_depth"],
+            containment_verdict=a["containment_verdict"],
         )
 
     return result

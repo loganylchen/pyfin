@@ -182,22 +182,27 @@ class TestEmptyAndRepresentative:
         assert res.families[0].representative == ((1000, 2000),)
 
 
-class TestGtfAttach:
+class TestGtfVariantKeys:
+    """Annotation enters cluster_families as ORDINARY zero-read variant keys (no flag,
+    the default): it is listed in ``variants`` and competes like any chain, but it can
+    never BRIDGE two read-derived components, and an annotation-only chain related to
+    several components joins none of them. ``gtf_members`` records which keys are
+    annotated."""
+
     def _one(self, res):
         assert len(res.families) == 1
         return res.families[0]
 
-    def test_gtf_wobble_attaches_zero_read(self):
-        # GTF wobble-matches the read family -> attached as a zero-read gtf_member; the read
-        # pool / variants are UNCHANGED (GTF adds no read mass, no structure).
+    def test_gtf_wobble_joins_as_zero_read_variant(self):
         gtf = [("gA", ((1002, 1998), (3000, 4000)))]
         res = cluster_families([
             _rc("r1", [(1000, 2000), (3000, 4000)]),
             _rc("r2", [(1000, 2000), (3000, 4000)]),
         ], gtf_variants=gtf)
         fam = self._one(res)
-        assert fam.variants == [((1000, 2000), (3000, 4000))]     # read structure unchanged
+        assert fam.variants == [((1000, 2000), (3000, 4000)), ((1002, 1998), (3000, 4000))]
         assert fam.read_pool == {"r1", "r2"}                      # GTF added no reads
+        assert fam.variant_reads[((1002, 1998), (3000, 4000))] == set()
         assert fam.gtf_members == [("gA", ((1002, 1998), (3000, 4000)))]
 
     def test_gtf_unmatched_becomes_gtf_only_family(self):
@@ -206,53 +211,186 @@ class TestGtfAttach:
             _rc("r1", [(1000, 2000)]),
         ], gtf_variants=gtf)
         assert len(res.families) == 2
-        read_fam = [f for f in res.families if f.variants]
-        gtf_fam = [f for f in res.families if not f.variants]
-        assert len(read_fam) == 1 and len(gtf_fam) == 1
-        assert gtf_fam[0].read_pool == set()                     # GTF-only: empty pool
+        gtf_fam = [f for f in res.families if f.read_pool == set()]
+        assert len(gtf_fam) == 1
+        assert gtf_fam[0].variants == [((90000, 91000),)]      # a real (zero-read) key
         assert gtf_fam[0].gtf_members == [("gFar", ((90000, 91000),))]
-        assert gtf_fam[0].representative is None                 # no read variant
 
-    def test_gtf_does_not_bridge_two_read_families(self):
-        # GTF (1000,2000)+(8000,9000) is containment-related to BOTH single-intron read
-        # families, which are NOT related to each other. It must attach to exactly ONE and
-        # NEVER merge the two families.
+    def test_supported_annotation_may_bridge(self):
+        # every junction of the annotated chain is observed in reads -> the data
+        # agrees the connection exists, so it may merge the two components.
+        gtf = [("gBridge", ((1000, 2000), (8000, 9000)))]
+        res = cluster_families([
+            _rc("rA", [(1000, 2000)]),
+            _rc("rB", [(8000, 9000)]),
+        ], gtf_variants=gtf,
+            observed_junctions={(1000, 2000), (8000, 9000)})
+        assert len(res.families) == 1                       # bridged
+        fam = res.families[0]
+        assert fam.read_pool == {"rA", "rB"}
+        assert fam.gtf_members == [("gBridge", ((1000, 2000), (8000, 9000)))]
+
+    def test_uncontradicted_annotation_may_bridge(self):
+        # the annotation's extra junction is unobserved but nothing near it was
+        # observed either: the data is silent, not disagreeing -> it may bridge.
+        gtf = [("gQuiet", ((1000, 2000), (5000, 6000), (8000, 9000)))]
+        res = cluster_families([
+            _rc("rA", [(1000, 2000)]),
+            _rc("rB", [(8000, 9000)]),
+        ], gtf_variants=gtf, observed_junctions={(1000, 2000), (8000, 9000)})
+        assert len(res.families) == 1
+        assert res.families[0].read_pool == {"rA", "rB"}
+
+    def test_nearby_different_junction_contradicts(self):
+        gtf = [("gJit", ((1004, 2000),))]
+        res = cluster_families([
+            _rc("rA", [(1000, 2000)]),
+        ], gtf_variants=gtf, observed_junctions={(1000, 2000)})
+        fam = next(f for f in res.families if f.gtf_members)
+        assert ((1004, 2000),) not in fam.uncontradicted_gtf
+
+    def test_silent_region_is_not_contradiction(self):
+        gtf = [("gFar", ((50000, 51000),))]
+        res = cluster_families([
+            _rc("rA", [(1000, 2000)]),
+        ], gtf_variants=gtf, observed_junctions={(1000, 2000)})
+        fam = next(f for f in res.families if f.gtf_members)
+        assert ((50000, 51000),) in fam.uncontradicted_gtf
+
+    def test_contradicted_junction_may_not_bridge(self):
+        # a read puts a DIFFERENT junction at the annotation's donor (a
+        # jitter/merge signature) -> the annotation may not reshape the topology.
+        gtf = [("gJitter", ((1000, 2000), (5000, 6000), (8000, 9000)))]
+        res = cluster_families([
+            _rc("rA", [(1000, 2000)]),
+            _rc("rB", [(8000, 9000)]),
+            _rc("rC", [(5000, 6400)]),          # same donor, different acceptor
+        ], gtf_variants=gtf,
+            observed_junctions={(1000, 2000), (8000, 9000), (5000, 6400)})
+        fam = next(f for f in res.families if f.gtf_members)
+        assert ((1000, 2000), (5000, 6000), (8000, 9000)) not in fam.uncontradicted_gtf
+
+    def test_fabricated_junction_may_not_bridge(self):
+        # the annotation carries a junction no read ever produced (a merge/jitter
+        # corruption): it must not weld the two real families together.
+        gtf = [("gMerged", ((1000, 2000), (5000, 6000), (8000, 9000)))]
+        res = cluster_families([
+            _rc("rA", [(1000, 2000)]),
+            _rc("rB", [(8000, 9000)]),
+        ], gtf_variants=gtf,
+            observed_junctions={(1000, 2000), (8000, 9000), (5003, 6002)})
+        assert len(res.families) >= 2
+        assert sorted(sorted(f.read_pool) for f in res.families) == [[], ["rA"], ["rB"]]
+
+    def test_bridging_is_off_without_a_registry(self):
+        gtf = [("gBridge", ((1000, 2000), (8000, 9000)))]
+        res = cluster_families([
+            _rc("rA", [(1000, 2000)]),
+            _rc("rB", [(8000, 9000)]),
+        ], gtf_variants=gtf)                    # no observed_junctions
+        assert len(res.families) == 3
+
+    def test_bridging_is_order_invariant(self):
+        gtf = [("gBridge", ((1000, 2000), (8000, 9000)))]
+        obs = {(1000, 2000), (8000, 9000)}
+        reads = [_rc("rA", [(1000, 2000)]), _rc("rB", [(8000, 9000)])]
+        key = lambda r: sorted((tuple(sorted(f.read_pool)),
+                                tuple(sorted(g for g, _ in f.gtf_members)))
+                               for f in r.families)
+        a = cluster_families(list(reads), gtf_variants=gtf, observed_junctions=obs)
+        b = cluster_families(list(reversed(reads)), gtf_variants=gtf,
+                             observed_junctions=obs)
+        assert key(a) == key(b)
+
+    def test_gtf_never_bridges_two_read_families(self):
+        # (1000,2000)+(8000,9000) is containment-related to BOTH single-intron read
+        # chains, which are unrelated to each other. A zero-read annotation must not
+        # merge them: it attaches to exactly one component and the data's partition
+        # is unchanged.
         gtf = [("gBridge", ((1000, 2000), (8000, 9000)))]
         res = cluster_families([
             _rc("rA", [(1000, 2000)]),
             _rc("rB", [(8000, 9000)]),
         ], gtf_variants=gtf)
-        assert len(res.families) == 2                            # NOT merged
-        total_gtf = sum(len(f.gtf_members) for f in res.families)
-        assert total_gtf == 1                                    # attached once, not duplicated
-        # read families keep their own single reads
-        pools = sorted((tuple(sorted(f.read_pool)) for f in res.families))
-        assert pools == [("rA",), ("rB",)]
+        assert len(res.families) == 3                      # rA, rB, and the annotation
+        assert sorted(sorted(f.read_pool) for f in res.families) == [[], ["rA"], ["rB"]]
+        assert sum(len(f.gtf_members) for f in res.families) == 1   # counted once
+        host = next(f for f in res.families if f.gtf_members)
+        assert ((1000, 2000), (8000, 9000)) in host.variants        # a real variant key
+
+    def test_ambiguous_annotation_attaches_to_no_component(self):
+        # related to BOTH read components -> nothing shows which it belongs to, so it
+        # stays its own zero-read component instead of being placed by a tie-break.
+        gtf = [("gB", ((1000, 2000), (8000, 9000)))]
+        reads = [_rc("rA", [(1000, 2000)]), _rc("rB", [(8000, 9000)])]
+        res = cluster_families(list(reads), gtf_variants=gtf)
+        assert len(res.families) == 3
+        host = next(f for f in res.families if f.gtf_members)
+        assert host.read_pool == set()
+        assert host.variants == [((1000, 2000), (8000, 9000))]
+        # ...and the answer does not depend on input order
+        rev = cluster_families(list(reversed(reads)), gtf_variants=gtf)
+        key = lambda r: sorted((tuple(sorted(f.read_pool)),
+                                tuple(sorted(g for g, _ in f.gtf_members)))
+                               for f in r.families)
+        assert key(res) == key(rev)
+
+    def test_unambiguous_annotation_joins_its_single_component(self):
+        gtf = [("gA", ((1002, 1998), (3000, 4000)))]
+        res = cluster_families([
+            _rc("r1", [(1000, 2000), (3000, 4000)]),
+            _rc("r2", [(5000, 6000), (7000, 8000)]),
+        ], gtf_variants=gtf)
+        host = next(f for f in res.families if f.gtf_members)
+        assert host.read_pool == {"r1"}
+        assert ((1002, 1998), (3000, 4000)) in host.variants
+
+    def test_two_gtf_only_chains_do_not_form_a_bridge_chain(self):
+        # g1 relates to rA, g2 relates to rB, and g1~g2: allowing annotation-annotation
+        # edges would merge rA and rB one level down. They must stay separate.
+        gtf = [("g1", ((1000, 2000), (5000, 6000))),
+               ("g2", ((5000, 6000), (8000, 9000)))]
+        res = cluster_families([
+            _rc("rA", [(1000, 2000)]),
+            _rc("rB", [(8000, 9000)]),
+        ], gtf_variants=gtf)
+        assert len(res.families) == 2
+        assert sorted(sorted(f.read_pool) for f in res.families) == [["rA"], ["rB"]]
 
     def test_gtf_none_is_backward_compatible(self):
         res = cluster_families([_rc("r1", [(1000, 2000), (3000, 4000)])], gtf_variants=None)
         assert res.families[0].gtf_members == []
 
     def test_mono_gtf_is_skipped(self):
-        # empty-chain (single-exon) GTF is deferred to the mono finalizer, not attached here.
+        # empty-chain (single-exon) GTF is deferred to the mono finalizer, not a key here.
         res = cluster_families(
             [_rc("r1", [(1000, 2000)])],
             gtf_variants=[("gMono", ())],
         )
         assert len(res.families) == 1
         assert res.families[0].gtf_members == []
+        assert res.families[0].variants == [((1000, 2000),)]
 
-    def test_exact_match_gtf_attaches_not_merges_reads(self):
-        # a GTF whose chain EXACTLY equals the read chain attaches as a 0-read member (the new
-        # design: GTF competes on evidence) -- it does NOT silently absorb the reads at generation.
+    def test_exact_match_gtf_is_the_same_key(self):
+        # a GTF whose chain EXACTLY equals a read chain is the SAME variant key: the
+        # key carries the reads and is annotated -- no duplicate, no read absorption.
         gtf = [("gExact", ((1000, 2000), (3000, 4000)))]
         res = cluster_families([
             _rc("r1", [(1000, 2000), (3000, 4000)]),
         ], gtf_variants=gtf)
         fam = self._one(res)
-        assert fam.read_pool == {"r1"}
+        assert fam.variants == [((1000, 2000), (3000, 4000))]
         assert fam.variant_reads == {((1000, 2000), (3000, 4000)): {"r1"}}
         assert fam.gtf_members == [("gExact", ((1000, 2000), (3000, 4000)))]
+
+    def test_two_gtf_models_share_one_key(self):
+        # two annotated transcripts with the same chain (alternative TSS/TES) -> one key,
+        # two gtf_members entries.
+        gtf = [("gA", ((1000, 2000),)), ("gB", ((1000, 2000),))]
+        res = cluster_families([_rc("r1", [(1000, 2000)])], gtf_variants=gtf)
+        fam = self._one(res)
+        assert fam.variants == [((1000, 2000),)]
+        assert fam.gtf_members == [("gA", ((1000, 2000),)), ("gB", ((1000, 2000),))]
 
     def test_deterministic_with_gtf(self):
         reads = [
@@ -265,8 +403,7 @@ class TestGtfAttach:
         norm = lambda res: [(f.variants, sorted(f.gtf_members)) for f in res.families]
         assert norm(ra) == norm(rb)
 
-    def test_two_gtf_attach_to_same_family(self):
-        # two annotation isoforms both wobble the one read family -> both attach as members.
+    def test_two_gtf_wobble_siblings_join_same_family(self):
         gtf = [
             ("gA", ((1002, 1998), (3000, 4000))),
             ("gB", ((999, 2001), (3000, 4000))),
@@ -277,18 +414,36 @@ class TestGtfAttach:
         fam = self._one(res)
         assert sorted(fam.gtf_members) == sorted(gtf)
         assert fam.read_pool == {"r1"}
+        assert len(fam.variants) == 3
 
-    def test_gtf_only_family_does_not_attract_later_gtf(self):
-        # g1 matches no read -> GTF-only family. g2 is a wobble sibling of g1 but ALSO matches
-        # no read family; it must NOT attach to g1's GTF-only family -> two GTF-only families.
-        gtf = [
-            ("g1", ((50000, 51000),)),
-            ("g2", ((50002, 50998),)),   # wobble of g1, unrelated to the read
-        ]
+    def test_unrelated_gtf_only_chains_stay_separate(self):
+        # neither annotation relates to a read chain: each is its own zero-read
+        # component (they are not joined to each other either).
+        gtf = [("g1", ((50000, 51000),)), ("g2", ((50002, 50998),))]
         res = cluster_families([
             _rc("r1", [(1000, 2000)]),
         ], gtf_variants=gtf)
-        assert len(res.families) == 3                      # 1 read family + 2 GTF-only
-        gtf_only = [f for f in res.families if not f.variants]
+        gtf_only = [f for f in res.families if f.read_pool == set()]
         assert len(gtf_only) == 2
         assert all(len(f.gtf_members) == 1 for f in gtf_only)
+
+
+class TestContradictionRegistryCoversEveryReadChain:
+    """The contradiction evidence must come from every read chain that enters
+    clustering. Using only the MAPQ>=1 SUPPORT registry would let a low-MAPQ read
+    shape the read-derived topology while being invisible to the gate, so its
+    junction would count as 'the reads are silent' when they in fact disagree.
+    """
+
+    def test_a_read_junction_absent_from_the_registry_still_contradicts(self):
+        # the registry omits (5000,6000) -> the annotation would look uncontradicted
+        gtf = [("gMerge", ((1000, 2000), (5000, 6000), (8000, 9000)))]
+        reads = [_rc("rA", [(1000, 2000)]), _rc("rB", [(8000, 9000)]),
+                 _rc("rC", [(5000, 6400)])]
+        # registry built from EVERY read chain (what discovery now passes)
+        obs = {j for _, ch in [(None, type("C", (), {"introns": c})()) for c in
+                               ([(1000, 2000)], [(8000, 9000)], [(5000, 6400)])]
+               for j in ch.introns}
+        res = cluster_families(reads, gtf_variants=gtf, observed_junctions=obs)
+        fam = next(f for f in res.families if f.gtf_members)
+        assert ((1000, 2000), (5000, 6000), (8000, 9000)) not in fam.uncontradicted_gtf

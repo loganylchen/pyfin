@@ -79,17 +79,24 @@ class ChainFamily:
     exact chain each read produced), kept only for choosing a representative and for the
     later path-completion step; it is NOT the final read ownership.
 
-    ``gtf_members`` are annotation transcripts attached to this family as source-tagged, ZERO-read
-    structural hypotheses: each is ``(gtf_id, intron_chain)``. They carry NO reads (never in
-    ``read_pool`` / ``variant_reads``) and get read mass ONLY if their exact model wins the downstream
-    evidence assignment -- annotation is another competitor, never a snap target or a read-pool source.
-    A family with empty ``variants`` but non-empty ``gtf_members`` is a GTF-only family (an annotated
-    transcript that matched no read-derived structure; kept so it survives to the abundance filters).
+    ``gtf_members`` records which of this family's ``variants`` are (also) annotated transcripts:
+    each is ``(gtf_id, intron_chain)``. An annotated chain is an ORDINARY variant of the family -- it
+    is a key in ``variants``, it takes part in the union-find exactly like a read-derived chain (it can
+    join and can bridge), and it takes part in :func:`collapse` as a container or as a foldee. It
+    carries no discovery reads of its own: ``variant_reads`` for a pure-GTF chain is empty and it is
+    never a ``read_pool`` source; a read chain that EXACTLY equals an annotated chain is simply the
+    same variant key. The ``source`` tag lives on the emitted candidate; whether annotation deserves
+    any leniency is decided at final filtering, never here.
     """
     variants: List[Chain]
     read_pool: Set[str] = field(default_factory=set)
     variant_reads: Dict[Chain, Set[str]] = field(default_factory=dict)
     gtf_members: List[Tuple[str, Chain]] = field(default_factory=list)
+    # Annotation-only chains (no reads of their own) that the reads do not
+    # CONTRADICT. Only these may act as fold containers: absorbing a read
+    # sub-chain asserts "those reads are fragments of this annotated transcript",
+    # which a corrupted annotation must not be allowed to assert.
+    uncontradicted_gtf: Set[Chain] = field(default_factory=set)
 
     @property
     def representative(self) -> Optional[Chain]:
@@ -120,6 +127,78 @@ class ClusterResult:
 # ---------------------------------------------------------------------------
 # chain-relation predicates (single interval/strand: no chrom/strand bucketing)
 # ---------------------------------------------------------------------------
+
+# Reference-consuming CIGAR footprint of one read: (match_blocks, deletion_blocks,
+# skip_blocks), each a tuple of half-open genomic [start, end) blocks. Insertions
+# consume no reference and never break reference continuity, so they are not kept.
+ReadAlignment = Tuple[Tuple[Tuple[int, int], ...],
+                      Tuple[Tuple[int, int], ...],
+                      Tuple[Tuple[int, int], ...]]
+
+
+def read_alignment_from_cigar(cigar, ref_start: int) -> ReadAlignment:
+    """Build a :data:`ReadAlignment` from pysam-style ``cigartuples``."""
+    pos = int(ref_start)
+    match: List[Tuple[int, int]] = []
+    dels: List[Tuple[int, int]] = []
+    skips: List[Tuple[int, int]] = []
+    for op, ln in cigar:
+        if op in (0, 7, 8):          # M/=/X
+            match.append((pos, pos + ln))
+            pos += ln
+        elif op == 2:                # D
+            dels.append((pos, pos + ln))
+            pos += ln
+        elif op == 3:                # N
+            skips.append((pos, pos + ln))
+            pos += ln
+        # I/S/H/P consume no reference
+    return tuple(match), tuple(dels), tuple(skips)
+
+
+def _overlap_len(blocks, lo: int, hi: int) -> int:
+    return sum(max(0, min(e, hi) - max(s, lo)) for s, e in blocks)
+
+
+def _cigar_exonically_covers(
+    aln: ReadAlignment, donor: int, acceptor: int, *,
+    flank_bp: int = 10, max_deletion_bp: int = 3, max_total_deletion_bp: int = 6,
+) -> bool:
+    """True iff the read's CIGAR footprint reads exonically THROUGH the intron
+    ``[donor, acceptor)`` -- positive retained-intron / alternative-isoform evidence,
+    as opposed to a 5'-degraded fragment that merely starts downstream of it.
+
+    Window ``W = [donor - flank_bp, acceptor + flank_bp)``. Requires, inside W:
+    the reference footprint (M/=/X/D) covers all of W (a reference_start/_end span
+    is NOT enough: a big D or a soft clip leaves holes); no N; no single D longer
+    than ``max_deletion_bp`` and total D at most ``max_total_deletion_bp``; each
+    exonic flank has >= ``flank_bp - 2`` matched bases; the intron body has at
+    least ``(acceptor - donor) - max_total_deletion_bp`` matched bases. Terminal
+    clips are not a rule of their own -- they simply produce no match block.
+    """
+    match, dels, skips = aln
+    w_lo, w_hi = donor - flank_bp, acceptor + flank_bp
+    if w_hi <= w_lo:
+        return False
+    if any(s < w_hi and e > w_lo for s, e in skips):
+        return False
+    d_in = [(max(s, w_lo), min(e, w_hi)) for s, e in dels if s < w_hi and e > w_lo]
+    if any(e - s > max_deletion_bp for s, e in d_in):
+        return False
+    if sum(e - s for s, e in d_in) > max_total_deletion_bp:
+        return False
+    footprint = _overlap_len(match, w_lo, w_hi) + sum(e - s for s, e in d_in)
+    if footprint < w_hi - w_lo:
+        return False
+    need_flank = max(0, flank_bp - 2)
+    if _overlap_len(match, w_lo, donor) < need_flank:
+        return False
+    if _overlap_len(match, acceptor, w_hi) < need_flank:
+        return False
+    body_need = max(0, (acceptor - donor) - max_total_deletion_bp)
+    return _overlap_len(match, donor, acceptor) >= body_need
+
+
 def _exact_subchain(short: Chain, long_: Chain) -> bool:
     """``short`` is a strict EXACT (identical coords) contiguous sub-chain of ``long_``."""
     n, m = len(long_), len(short)
@@ -391,49 +470,13 @@ def _family_sort_key(fam: ChainFamily):
     return (min(chains), tuple(fam.variants), tuple(sorted(g for g, _ in fam.gtf_members)))
 
 
-def _attach_gtf_variants(
-    families: List[ChainFamily],
-    gtf_variants: List[Tuple[str, Chain]],
-    wobble_bp: int,
-    cassette_max_exon_bp: int,
-) -> None:
-    """Attach each GTF hypothesis to the single most-related read family (in place).
-
-    NON-BRIDGING: a GTF is added to at most ONE family and never merges two read families. A GTF
-    related to no read family becomes its own GTF-only family (empty read pool). Mono (empty-chain)
-    GTF entries are skipped (handled by the later mono finalizer). Deterministic: GTF entries are
-    processed in sorted order and the best family is chosen by (most related variants, then smallest
-    first-variant coords). GTF is a zero-read hypothesis: it is NEVER added to any ``read_pool`` or
-    ``variant_reads``.
-    """
-    read_families = [f for f in families if f.variants]   # snapshot: a GTF-only family never attracts GTF
-    gtf_only: List[ChainFamily] = []
-    for gid, gchain in sorted(gtf_variants, key=lambda gv: (gv[1], gv[0])):
-        if not gchain:                     # mono / empty-chain GTF -> deferred to the mono finalizer
-            continue
-        best = None                        # (n_related, first_variant, family)
-        for fam in read_families:
-            n = sum(1 for v in fam.variants
-                    if _related(gchain, v, wobble_bp, cassette_max_exon_bp))
-            if n == 0:
-                continue
-            if best is None or n > best[0] or (n == best[0] and fam.variants[0] < best[1]):
-                best = (n, fam.variants[0], fam)
-        if best is not None:
-            best[2].gtf_members.append((gid, gchain))
-        else:
-            gtf_only.append(ChainFamily(
-                variants=[], read_pool=set(), variant_reads={},
-                gtf_members=[(gid, gchain)]))
-    families.extend(gtf_only)
-
-
 def cluster_families(
     read_chains: List[Tuple[Dict, IntronChain]],
     *,
     wobble_bp: int = 6,
     cassette_max_exon_bp: int = 70,
     gtf_variants: Optional[List[Tuple[str, Chain]]] = None,
+    observed_junctions: Optional[Set[Tuple[int, int]]] = None,
 ) -> ClusterResult:
     """Clustering ONLY: group an interval's reads into multi-exon structural families.
 
@@ -447,9 +490,11 @@ def cluster_families(
          containment (single-linkage; see :func:`_related`),
       4. returns each family's variant chains + a POOLED read set (reads belong to the
          family, not a member) + the per-variant discovery provenance,
-      5. (optional) attaches each GTF hypothesis to the single best-related read family as a
-         ZERO-read ``gtf_member`` -- NON-BRIDGING (a GTF never merges two read families) and
-         never a read-pool source; a GTF matching no read family becomes a GTF-only family.
+      5. (optional) enters each annotated multi-exon chain as an ORDINARY zero-read variant key,
+         so annotation joins a family, collapses and is emitted exactly like a read-derived chain
+         (only its ``source`` tag differs; leniency, if any, is a final-filter decision). A read
+         chain equal to an annotated chain IS that key. Annotation-only chains are attached AFTER
+         the read-only union-find and never bridge two read-supported components.
 
     Deterministic: families and their variants are coordinate-sorted; ``mono_reads`` is a
     plain set. Fold, path-completion, and mono resolution are SEPARATE later per-cluster
@@ -460,18 +505,27 @@ def cluster_families(
             CIGAR-derived chains, used as-is).
         wobble_bp: per-junction tolerance for wobble / cassette / containment joins.
         cassette_max_exon_bp: max skipped-exon length for a cassette join (0 disables).
-        gtf_variants: optional annotation hypotheses as ``(gtf_id, intron_chain)`` pairs. Each is
-            attached to the single most-related read family (by the same ``_related`` predicate) as a
-            zero-read ``gtf_member``; it NEVER bridges two read families and NEVER contributes to a
-            ``read_pool``. Mono (empty-chain) GTF entries are ignored here (annotation of single-exon
-            transcripts is handled by the later mono finalizer). The read families are formed BEFORE
-            attachment, so annotation cannot change read-derived family structure.
+        gtf_variants: optional annotation hypotheses as ``(gtf_id, intron_chain)`` pairs. An
+            annotated chain that a read also produced is simply that key. An annotation-only chain
+            becomes a zero-read variant key; whether it may merge two read-derived components is
+            decided by ``observed_junctions`` (see below). They never contribute to a
+            ``read_pool``. Mono (empty-chain) GTF entries are ignored here (handled by the later
+            mono finalizer).
+        observed_junctions: the interval's set of ``(donor, acceptor)`` junctions actually seen in
+            read alignments. An annotation-only chain may join the union-find (and hence bridge)
+            only when no junction of it is CONTRADICTED by the reads -- annotation may reshape the
+            topology where the data is silent, but not where the data disagrees. None disables
+            bridging entirely (the conservative choice for callers with no registry).
 
     Returns:
         A :class:`ClusterResult` (multi-exon families + the interval mono bucket).
     """
     # 1. group reads by EXACT chain; single-exon (chain-less) reads -> the mono bucket.
+    #    Annotated multi-exon chains enter the SAME key space as zero-read variants
+    #    (a read chain equal to an annotated chain is the same key). Mono (empty-chain)
+    #    GTF entries are skipped here -- the mono finalizer matches them by overlap.
     by_chain: Dict[Chain, Set[str]] = {}
+    gtf_ids_by_chain: Dict[Chain, List[str]] = {}
     mono_reads: Set[str] = set()
     for rd, chain in read_chains:
         rid = rd.get("query_name")
@@ -482,6 +536,17 @@ def cluster_families(
             mono_reads.add(rid)
         else:
             by_chain.setdefault(introns, set()).add(rid)
+    read_chain_keys = set(by_chain)
+    for gid, gchain in sorted(gtf_variants or (), key=lambda gv: (gv[1], gv[0])):
+        gchain = tuple(gchain)
+        if not gchain:
+            continue
+        by_chain.setdefault(gchain, set())
+        gtf_ids_by_chain.setdefault(gchain, []).append(gid)
+    # Annotated chains that are NOT also read chains: they are hypotheses, and a
+    # hypothesis with zero reads must not change the connectivity of the graph the
+    # DATA produced (see below).
+    gtf_only_keys = set(gtf_ids_by_chain) - read_chain_keys
 
     # 2. union-find the distinct multi-exon chains by wobble / cassette / containment.
     #    Sorted vertex order -> deterministic; the resulting partition (connected
@@ -495,11 +560,89 @@ def cluster_families(
             x = parent[x]
         return x
 
-    for i in range(len(multi)):
-        for j in range(i + 1, len(multi)):
-            a, b = multi[i], multi[j]
+    # Pass 1 operates on the chains the data does not DISAGREE with: every read
+    # chain, plus the annotation-only chains none of whose junctions is
+    # contradicted by a read junction at the same splice site. Those are ordinary
+    # vertices -- they may join and bridge like any read chain.
+    def _uncontradicted(j: Tuple[int, int]) -> bool:
+        """The reads do not DISAGREE with this annotated junction.
+
+        Three cases, and only the middle one blocks:
+          * the junction is observed in a read           -> the data confirms it;
+          * the reads put a DIFFERENT junction within the
+            alignment tolerance of one of its splice sites -> the data contradicts it;
+          * no read junction is anywhere near it         -> the data is silent,
+            which is not disagreement (coverage is finite, and a real junction of
+            a lowly expressed isoform is routinely unobserved).
+        This is what separates a truncated annotation (every junction real, so
+        nothing contradicts it) from a merged or jittered one (its fabricated
+        junction sits right beside the true junction the reads did produce).
+        """
+        if j in observed_junctions:
+            return True
+        d, a = j
+        for od, oa in observed_junctions:
+            if (od, oa) != j and (abs(od - d) <= wobble_bp
+                                  or abs(oa - a) <= wobble_bp):
+                # The reads put a DIFFERENT junction within the alignment
+                # tolerance of one of this junction's splice sites. The window is
+                # the project's existing junction-equivalence tolerance (a
+                # property of alignment precision), NOT a constant chosen against
+                # a benchmark's corruption magnitude.
+                return False
+        return True
+
+    supported_gtf = {
+        g for g in gtf_only_keys
+        if observed_junctions is not None and all(_uncontradicted(j) for j in g)
+    }
+    unsupported_gtf = gtf_only_keys - supported_gtf
+    read_multi = [c for c in multi if c not in unsupported_gtf]
+    for i in range(len(read_multi)):
+        for j in range(i + 1, len(read_multi)):
+            a, b = read_multi[i], read_multi[j]
             if find(a) != find(b) and _related(a, b, wobble_bp, cassette_max_exon_bp):
                 parent[find(a)] = find(b)
+
+    # Pass 2: attach each annotation-only chain to AT MOST ONE existing component.
+    # It is an ordinary variant of the family it joins (a legal fold container, and
+    # emitted through the same path as a read chain), but it can never BRIDGE two
+    # read-supported components: single-linkage would otherwise let one unsupported
+    # -- possibly corrupted -- annotation merge two families and silently rewrite
+    # the collapse containers, the EM competition scope and the isoform-fraction
+    # denominator (Codex gpt-5.6-sol 2026-09-04: "annotation as a prior is fine;
+    # annotation changing the topology the data produced is not").
+    # An annotation-only chain has no reads of its own, so whether it may change
+    # the read-derived partition is decided by the DATA, junction by junction:
+    #
+    #   every junction of the annotated chain is observed in some read  ->  it may
+    #   join ALL related components, bridging them if need be;
+    #   otherwise                                                       ->  it may
+    #   join at most ONE (and none when several are equally related).
+    #
+    # A chain whose junctions are NOT all observed gets the conservative rule: it
+    # may join at most one related component, and none when several are equally
+    # related (nothing shows which it belongs to, and an arbitrary tie-break must
+    # not decide a fold container).
+    #
+    # Rationale, and it is measured rather than assumed. Letting annotation bridge
+    # unconditionally is a large recall win where the annotation is trustworthy
+    # (Sequin expression contract: c_trunc3p +4.8 F1, full/p90/p99/skip/spurious
+    # +3.4) because the annotated chain pools reads that the data alone splits.
+    # But it is exactly how a CORRUPTED annotation does damage: a fabricated
+    # merge junction welds two real families together (c_merge50 -2.4 F1, Pr
+    # -7.9; c_jitter50 -1.3). The junction-support test separates the two cases at
+    # the source: a truncated annotation's junctions are all real, so it bridges;
+    # a merged or jittered annotation contains a junction no read ever produced,
+    # so it cannot. `observed_junctions` is the interval's raw read junction
+    # registry, which discovery collects on every run.
+    for g in sorted(unsupported_gtf):
+        roots = {find(c) for c in read_multi
+                 if _related(g, c, wobble_bp, cassette_max_exon_bp)}
+        if len(roots) == 1:
+            parent[find(g)] = roots.pop()
+    # Annotation-only chains never join each other directly either: two unsupported
+    # annotations forming their own family would recreate the bridge one level down.
 
     comps: Dict[Chain, List[Chain]] = {}
     for c in multi:
@@ -517,21 +660,17 @@ def cluster_families(
             variants=variants,
             read_pool=pool,
             variant_reads={c: set(by_chain[c]) for c in comp},
+            gtf_members=[(gid, c) for c in variants for gid in gtf_ids_by_chain.get(c, ())],
+            uncontradicted_gtf={c for c in variants if c in supported_gtf},
         ))
 
-    # 4. (optional) attach GTF hypotheses to read families -- NON-BRIDGING, zero-read.
-    if gtf_variants:
-        _attach_gtf_variants(families, gtf_variants, wobble_bp, cassette_max_exon_bp)
-
-    # Stable, total family order over every family's chains (read variants + gtf members),
-    # so GTF-only families (empty ``variants``) also sort deterministically.
     families.sort(key=_family_sort_key)
 
     return ClusterResult(families=families, mono_reads=mono_reads)
 
 
 def collapse(family: ChainFamily, *, span_guard: bool = False,
-             read_spans: Optional[Dict[str, Tuple[int, int]]] = None) -> ChainCluster:
+             read_alignments: Optional[Dict[str, ReadAlignment]] = None) -> ChainCluster:
     """Collapse a single (post-explore) family into a :class:`ChainCluster`, folding EXACT
     contiguous sub-chains into their longest exact container.
 
@@ -544,16 +683,17 @@ def collapse(family: ChainFamily, *, span_guard: bool = False,
       end, successively shorter 5') are exactly these exact sub-chains; whether a folded sub-chain
       is a genuine short isoform is decided LATER by the post-EM 5'-TSS read-end recovery -- never
       guessed here from read counts.
-    - **span_guard** (optional, mirrors ``cluster_read_chains``'s ``fold_span_guard``): when set,
-      a sub-chain read folds into its container ONLY if its aligned span does NOT run exonically
-      across one of the container's EXTRA introns (introns the container splices but the sub-chain
-      lacks). A read that spans such an intron read THROUGH it -- positive evidence for a
-      retained-intron / alternative isoform, NOT 5' degradation -- so it is KEPT as its own
-      candidate (the sub-chain survives with only its span-contradicting reads). 5' degradation
-      reads start DOWNSTREAM of the missing introns, so they never span an extra intron and still
-      fold. Needs ``read_spans`` (query_name -> [start, end)); without it, span_guard is a no-op
-      (folds unconditionally). This is the recall-preserving guard that stops collapse from
-      absorbing real retention isoforms.
+    - **span_guard** (optional, the CIGAR-aware successor of ``cluster_read_chains``'s
+      ``fold_span_guard``): when set, a sub-chain read folds into its container ONLY if its
+      CIGAR footprint does NOT read exonically THROUGH one of the container's EXTRA introns
+      (introns the container splices but the sub-chain lacks; see
+      :func:`_cigar_exonically_covers`). A read that genuinely reads through such an intron is
+      positive evidence for a retained-intron / alternative isoform, NOT 5' degradation, so it
+      is KEPT as its own candidate (the sub-chain survives with only its contradicting reads).
+      5' degradation reads start DOWNSTREAM of the missing introns and fold; so do reads whose
+      reference span merely brackets the intron via a large deletion, an N, or a soft clip.
+      Needs ``read_alignments`` (query_name -> :data:`ReadAlignment`); without it, span_guard
+      is a no-op (folds unconditionally).
     - **exact only**: wobble / cassette / non-exact-containment siblings are NOT folded (they
       are not exact sub-chains); they stay as separate members and compete in EM, where the
       abundance-based selection decides (Codex's pre-EM=canonicalisation / post-EM=biological
@@ -578,36 +718,67 @@ def collapse(family: ChainFamily, *, span_guard: bool = False,
     ``read_pool`` (each read is in exactly one variant's set), so no read is lost or double-counted
     and ``cluster.read_ids == family.read_pool``. A variant missing from ``variant_reads`` contributes
     no reads (defensive; e.g. a future explore-assembled variant whose read ownership the adapter must
-    register before calling collapse). A GTF-only family (empty ``variants``) yields an empty cluster.
-    Deterministic (coordinate-sorted); never mutates ``family``.
+    register before calling collapse). An annotated chain that READS also produced is an
+    ordinary key and may contain; an annotation-ONLY key (zero reads) may neither fold nor be
+    folded -- it must not delete a read-supported sub-chain before any evidence is weighed.
+    Annotated chains are never foldees themselves: the fold is a read-level degradation judgement that a
+    genuine 5'-truncated annotated isoform can never win, so annotated keys always stay members
+    and EM + the final GTF gates decide their existence. Deterministic (coordinate-sorted); never
+    mutates ``family``.
     """
     vr = family.variant_reads
-    spans = read_spans or {}
+    alns = read_alignments or {}
+    annotated = {c for _, c in family.gtf_members}
+    # Annotation-only = annotated AND carrying no reads of its own. Such a key may
+    # not ABSORB a read-derived sub-chain: a hypothesis with zero read support must
+    # not delete a read-supported one before any evidence is weighed. (An annotated
+    # chain that reads also produced is an ordinary read key and may contain.)
+    # An annotation-only chain (annotated, no reads of its own) may absorb a read
+    # sub-chain ONLY when the reads do not contradict it. Measured on the Sequin
+    # expression contract: allowing it unconditionally is +3.4 Sn / -1.1 Pr
+    # overall -- a large recall win wherever the annotation is trustworthy
+    # (c_trunc3p +4.6 F1, full/p90/p99/skip/spurious +2.9) because the reads of a
+    # 5'-degraded fragment get pooled onto the right model, but a clear loss
+    # exactly where the annotation is corrupted (c_merge50 -1.7 F1 with Pr -6.6,
+    # c_jitter50 -1.3 with Pr -3.8). The contradiction test separates the two at
+    # the source, so neither case needs a threshold.
+    annotation_only = {c for c in annotated
+                       if not vr.get(c) and c not in family.uncontradicted_gtf}
     # longest-first: `next(exact-subchain of a kept chain)` then picks the LONGEST container.
     chains_sorted = sorted(family.variants, key=lambda c: (-len(c), -len(vr.get(c, ())), c))
     kept: List[Chain] = []
     reads: Dict[Chain, Set[str]] = {}
     folded_of: Dict[Chain, List[Tuple[Chain, Set[str]]]] = {}  # container -> shadow (chain, reads)
     for c in chains_sorted:
-        container = next((k for k in kept if _exact_subchain(c, k)), None)
-        if container is None:
+        container = next((k for k in kept
+                          if k not in annotation_only and _exact_subchain(c, k)), None)
+        if container is None or c in annotated:
+            # An annotated key is never a FOLDEE (it may be a container): the fold
+            # is a read-level "these reads are 5' degradation of the container"
+            # decision, and a genuine 5'-truncated annotated isoform's reads can
+            # never refute that (they always start downstream of the extra
+            # introns), while a zero-read annotated key has nothing to judge on.
+            # Its existence is decided by EM + the final GTF gates, not here.
+            # Measured (156-cell SIRV4 grid, 2026-09-03): folding annotated exact
+            # sub-chains cost -3.0 F1 (Sn -3.8) in every guided condition.
             kept.append(c)
             reads[c] = set(vr.get(c, ()))
             continue
         cr = vr.get(c, set())
-        if not span_guard:
+        if not span_guard or not cr:
+            # no reads and no read evidence -> nothing can contradict the fold
             reads[container] |= cr
             folded_of.setdefault(container, []).append((c, set(cr)))
             continue
-        # span guard: split c's reads into those that fold (5' degradation) and those that span
-        # exonically across one of the container's EXTRA introns (retained-intron / alt isoform).
+        # span guard: split c's reads into those that fold (5' degradation) and those whose
+        # CIGAR reads exonically THROUGH one of the container's EXTRA introns.
         off = _subchain_offset(c, container)
         extra = container[:off] + container[off + len(c):]
         fold_r: Set[str] = set()
         keep_r: Set[str] = set()
         for rid in cr:
-            sp = spans.get(rid)
-            if sp is not None and any(sp[0] <= d and sp[1] >= a for d, a in extra):
+            aln = alns.get(rid)
+            if aln is not None and any(_cigar_exonically_covers(aln, d, a) for d, a in extra):
                 keep_r.add(rid)          # read through an extra intron -> distinct isoform
             else:
                 fold_r.add(rid)

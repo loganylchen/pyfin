@@ -8,13 +8,18 @@ TSS-recovery contracts are unchanged. EM SCOPE may differ (an exact sub-chain ca
 maximals into one family; see TestBridgeAndRobustness) -- an intended behavior change, validated
 by metrics.
 """
-from fin.candidates.chain_cluster import ChainFamily, collapse
+from fin.candidates.chain_cluster import (
+    ChainFamily, _cigar_exonically_covers, collapse, read_alignment_from_cigar)
 
 # introns, genomically ordered with positive exons between
 I1 = (1000, 2000)
 I2 = (3000, 4000)
 I3 = (5000, 6000)
 I4 = (7000, 8000)
+
+
+def _aln(ref_start, cigar):
+    return read_alignment_from_cigar(cigar, ref_start)
 
 
 def _fam(variant_reads):
@@ -113,11 +118,67 @@ class TestInvariants:
         assert fam.variants == before_variants
         assert fam.variant_reads == before_reads
 
-    def test_empty_gtf_only_family(self):
-        fam = ChainFamily(variants=[], read_pool=set(), variant_reads={},
+    def test_gtf_only_family_keeps_zero_read_key(self):
+        # an annotated chain with no reads is an ordinary (zero-read) variant: it is
+        # kept as a member so discovery can emit the annotation model from it.
+        fam = ChainFamily(variants=[(I1, I2)], read_pool=set(),
+                          variant_reads={(I1, I2): set()},
                           gtf_members=[("ENST1", (I1, I2))])
         cl = collapse(fam)
-        assert cl.members == [] and cl.read_ids == set()
+        assert [tuple(m.chain.introns) for m in cl.members] == [(I1, I2)]
+        assert cl.members[0].read_ids == set() and cl.read_ids == set()
+
+    def test_annotated_subchain_is_never_a_foldee(self):
+        # an annotated exact sub-chain (zero reads OR with reads) stays a member: the
+        # fold is a read-level degradation call a true short annotated isoform can
+        # never refute. Measured -3.0 F1 when folded (SIRV4 grid 2026-09-03).
+        fam = ChainFamily(variants=[(I1, I2, I3), (I2, I3)], read_pool={"a"},
+                          variant_reads={(I1, I2, I3): {"a"}, (I2, I3): set()},
+                          gtf_members=[("ENST_short", (I2, I3))])
+        cl = collapse(fam, span_guard=True,
+                      read_alignments={"a": _aln(900, [(0, 8100)])})
+        assert [tuple(m.chain.introns) for m in cl.members] == [(I1, I2, I3), (I2, I3)]
+        assert cl.members[0].folded == []
+        fam2 = ChainFamily(variants=[(I1, I2, I3), (I2, I3)], read_pool={"a", "d"},
+                           variant_reads={(I1, I2, I3): {"a"}, (I2, I3): {"d"}},
+                           gtf_members=[("ENST_short", (I2, I3))])
+        cl2 = collapse(fam2, span_guard=True,
+                       read_alignments={"a": _aln(900, [(0, 8100)]),
+                                        "d": _aln(4500, [(0, 500), (3, 1000), (0, 500)])})
+        by = {tuple(m.chain.introns): m for m in cl2.members}
+        assert by[(I2, I3)].read_ids == {"d"} and by[(I1, I2, I3)].read_ids == {"a"}
+
+    def test_uncontradicted_annotation_may_contain(self):
+        # the reads do not contradict the annotated chain -> it may absorb the
+        # 5'-truncated read sub-chain (those reads are fragments of it).
+        fam = ChainFamily(variants=[(I1, I2, I3), (I2, I3)], read_pool={"b"},
+                          variant_reads={(I1, I2, I3): set(), (I2, I3): {"b"}},
+                          gtf_members=[("ENST_long", (I1, I2, I3))],
+                          uncontradicted_gtf={(I1, I2, I3)})
+        cl = collapse(fam)
+        assert [tuple(m.chain.introns) for m in cl.members] == [(I1, I2, I3)]
+        assert cl.members[0].read_ids == {"b"}
+
+    def test_annotation_only_key_is_not_a_fold_container(self):
+        # a zero-read annotated container must NOT absorb a read-supported sub-chain:
+        # a hypothesis with no reads cannot delete one that has them before any
+        # evidence is weighed. Both survive and compete in assignment.
+        fam = ChainFamily(variants=[(I1, I2, I3), (I2, I3)], read_pool={"b"},
+                          variant_reads={(I1, I2, I3): set(), (I2, I3): {"b"}},
+                          gtf_members=[("ENST_long", (I1, I2, I3))])
+        cl = collapse(fam)
+        assert [tuple(m.chain.introns) for m in cl.members] == [(I1, I2, I3), (I2, I3)]
+        assert {tuple(m.chain.introns): m.read_ids for m in cl.members}[(I2, I3)] == {"b"}
+
+    def test_annotated_key_with_its_own_reads_may_contain(self):
+        # the annotated chain is also a READ chain here -> an ordinary key, so the
+        # exact sub-chain folds into it as usual.
+        fam = ChainFamily(variants=[(I1, I2, I3), (I2, I3)], read_pool={"a", "b"},
+                          variant_reads={(I1, I2, I3): {"a"}, (I2, I3): {"b"}},
+                          gtf_members=[("ENST_long", (I1, I2, I3))])
+        cl = collapse(fam)
+        assert [tuple(m.chain.introns) for m in cl.members] == [(I1, I2, I3)]
+        assert cl.members[0].read_ids == {"a", "b"}
 
 
 class TestBridgeAndRobustness:
@@ -180,9 +241,19 @@ class TestSpanGuard:
             read_pool={"full", "deg", "ret"},
             variant_reads={self.C: {"full"}, self.SUB: {"deg", "ret"}})
 
+    def _alns(self):
+        # full: exact container read. deg: 5'-degraded, starts inside exon 3 (after I2).
+        # ret: reads exonically through I2 = (3000,4000): continuous M from 2500 to 6500
+        # apart from the I3 splice.
+        return {
+            "full": _aln(900, [(0, 100), (3, 1000), (0, 1000), (3, 1000), (0, 1000),
+                               (3, 1000), (0, 100)]),
+            "deg": _aln(4500, [(0, 500), (3, 1000), (0, 500)]),
+            "ret": _aln(2500, [(0, 2500), (3, 1000), (0, 500)]),
+        }
+
     def test_span_guard_keeps_retention_read_folds_degradation(self):
-        spans = {"full": (900, 6100), "deg": (4500, 6500), "ret": (2500, 6500)}
-        cl = collapse(self._fam_sub(), span_guard=True, read_spans=spans)
+        cl = collapse(self._fam_sub(), span_guard=True, read_alignments=self._alns())
         by = {tuple(m.chain.introns): m for m in cl.members}
         assert set(by) == {self.C, self.SUB}          # sub-chain survives (retention kept)
         assert by[self.C].read_ids == {"full", "deg"}  # degradation folded into container
@@ -192,13 +263,74 @@ class TestSpanGuard:
         assert folded == {self.SUB: {"deg"}}
 
     def test_span_guard_off_folds_everything(self):
-        spans = {"full": (900, 6100), "deg": (4500, 6500), "ret": (2500, 6500)}
-        cl = collapse(self._fam_sub(), span_guard=False, read_spans=spans)
+        cl = collapse(self._fam_sub(), span_guard=False, read_alignments=self._alns())
         assert [tuple(m.chain.introns) for m in cl.members] == [self.C]
         assert cl.members[0].read_ids == {"full", "deg", "ret"}
 
-    def test_span_guard_without_spans_is_noop(self):
-        # span_guard=True but no read_spans -> cannot judge -> folds unconditionally.
-        cl = collapse(self._fam_sub(), span_guard=True, read_spans=None)
+    def test_span_guard_without_alignments_is_noop(self):
+        # span_guard=True but no read_alignments -> cannot judge -> folds unconditionally.
+        cl = collapse(self._fam_sub(), span_guard=True, read_alignments=None)
         assert [tuple(m.chain.introns) for m in cl.members] == [self.C]
         assert cl.members[0].read_ids == {"full", "deg", "ret"}
+
+    def test_span_guard_reference_span_alone_is_not_read_through(self):
+        # `ret` brackets I2 by reference span but jumps it with a 900 bp deletion -> fold.
+        alns = self._alns()
+        alns["ret"] = _aln(2500, [(0, 550), (2, 900), (0, 1050), (3, 1000), (0, 500)])
+        cl = collapse(self._fam_sub(), span_guard=True, read_alignments=alns)
+        assert [tuple(m.chain.introns) for m in cl.members] == [self.C]
+
+
+class TestCigarExonicallyCovers:
+    """Unit rules of the CIGAR read-through test on intron [3000,4000), W=[2990,4010)."""
+    D, A = 3000, 4000
+
+    def _ok(self, aln):
+        return _cigar_exonically_covers(aln, self.D, self.A)
+
+    def test_continuous_match_keeps(self):
+        assert self._ok(_aln(2500, [(0, 2000)]))
+
+    def test_small_deletions_keep(self):
+        for dlen in (1, 2, 3):
+            assert self._ok(_aln(2500, [(0, 800), (2, dlen), (0, 1200)])), dlen
+
+    def test_deletion_of_four_folds(self):
+        assert not self._ok(_aln(2500, [(0, 800), (2, 4), (0, 1200)]))
+
+    def test_many_small_deletions_over_total_fold(self):
+        # 3 x 3 bp = 9 bp > 6 bp total
+        assert not self._ok(_aln(2500, [(0, 700), (2, 3), (0, 200), (2, 3), (0, 200),
+                                        (2, 3), (0, 700)]))
+        # 2 x 3 bp = 6 bp is still allowed
+        assert self._ok(_aln(2500, [(0, 700), (2, 3), (0, 300), (2, 3), (0, 800)]))
+
+    def test_skip_across_intron_folds(self):
+        assert not self._ok(_aln(2500, [(0, 500), (3, 1000), (0, 500)]))
+        # an N that only clips the window edge also disqualifies
+        assert not self._ok(_aln(2500, [(0, 495), (3, 10), (0, 1500)]))
+
+    def test_large_deletion_with_bracketing_span_folds(self):
+        assert not self._ok(_aln(2500, [(0, 400), (2, 1200), (0, 400)]))
+
+    def test_soft_clip_leaving_upstream_flank_unaligned_folds(self):
+        # reference_start 2995 -> only 5 bp of the 10 bp upstream flank are matched
+        assert not self._ok(_aln(2995, [(4, 300), (0, 1500)]))
+        # the footprint must cover ALL of W: starting 2 bp inside the flank still folds
+        assert not self._ok(_aln(2992, [(0, 1500)]))
+        # ...but a 2 bp deletion INSIDE the flank (footprint intact, 8 matched) keeps
+        assert self._ok(_aln(2990, [(0, 4), (2, 2), (0, 1500)]))
+
+    def test_one_sided_flank_folds(self):
+        assert not self._ok(_aln(2500, [(0, 1505)]))      # ends at 4005: downstream flank short
+        assert not self._ok(_aln(3005, [(0, 1500)]))      # starts inside the intron
+
+    def test_multiple_extra_introns_any_read_through_keeps(self):
+        fam = ChainFamily(
+            variants=[(I1, I2, I3), (I3,)], read_pool={"c", "r"},
+            variant_reads={(I1, I2, I3): {"c"}, (I3,): {"r"}})
+        # r splices I1 like the container but reads through I2 -> genuinely distinct
+        alns = {"r": _aln(900, [(0, 100), (3, 1000), (0, 3000), (3, 1000), (0, 100)])}
+        cl = collapse(fam, span_guard=True, read_alignments=alns)
+        assert {tuple(m.chain.introns) for m in cl.members} == {(I1, I2, I3), (I3,)}
+        assert next(m for m in cl.members if tuple(m.chain.introns) == (I3,)).read_ids == {"r"}

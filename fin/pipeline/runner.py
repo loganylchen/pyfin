@@ -186,6 +186,55 @@ class PipelineRunner:
         Thin orchestrator wiring three independent layers: the pre-filter diagnostic and the
         output writers live in fin.pipeline.finalize; the GLOBAL selection cascade lives in
         fin.pipeline.selection. Kept as a method so tests can call this seam directly."""
+        # P2 containment finalization: merge worker shards, apply the
+        # grouped-FDR pass to hazard rows, execute the CORRECTED require-mode
+        # hazard actions (drop demoted/contradicted shorts, mark supported
+        # ones for the soft-mass exemption), and write the deterministic
+        # containment_evidence.tsv. Runs BEFORE the global cascade so the
+        # cascade sees final verdicts. audit mode only writes the artifact.
+        if getattr(self.config, "containment_evidence_mode", "off") != "off":
+            from fin.analysis.containment_evidence import (
+                finalize_containment,
+            )
+
+            aggregated, c_dropped, c_path = finalize_containment(
+                self.config.work_dir, aggregated,
+                getattr(self.config, "containment_evidence_mode", "off"),
+            )
+            if c_dropped:
+                logger.info(
+                    "Containment evidence (FDR-corrected) dropped %d "
+                    "contained model(s): %s",
+                    len(c_dropped), ",".join(c_dropped[:8]),
+                )
+            logger.info("Containment evidence written: %s", c_path)
+        if getattr(self.config, "junction_election_mode", "off") != "off":
+            from fin.analysis.junction_election import merge_election_shards
+
+            je_path = merge_election_shards(self.config.work_dir)
+            logger.info("Junction election written: %s", je_path)
+        from fin.analysis.junction_support import merge_support_shards
+
+        js_path = merge_support_shards(self.config.work_dir)
+        if js_path:
+            logger.info("Junction support written: %s", js_path)
+        if getattr(self.config, "candidate_existence_mode", "off") != "off":
+            from fin.analysis.candidate_existence import merge_existence_shards
+
+            ce_path = merge_existence_shards(self.config.work_dir)
+            if ce_path:
+                logger.info("Candidate existence audit written: %s", ce_path)
+        if getattr(self.config, "folded_tss_recovery_mode", "off") != "off":
+            from fin.analysis.tss_shadow_recovery import merge_recovery_shards
+
+            tr_path = merge_recovery_shards(self.config.work_dir)
+            if tr_path:
+                logger.info("Folded-TSS shadow recovery written: %s", tr_path)
+        if getattr(self.config, "junction_correction_mode", "off") != "off":
+            from fin.analysis.junction_correction import merge_correction_shards
+
+            jc_path = merge_correction_shards(self.config.work_dir)
+            logger.info("Junction correction written: %s", jc_path)
         write_unfiltered_diagnostic(
             self.config, aggregated, output_tsv, self._gtf_reader
         )
@@ -559,9 +608,8 @@ class PipelineRunner:
             chain_cluster_fold_span_guard=getattr(
                 self.config, "chain_cluster_fold_span_guard", False),
             clustering=getattr(self.config, "clustering", "read_chains"),
-            collect_chain_evidence=bool(
-                int(getattr(self.config, "complete_chain_rescue_reads", 0)) > 0
-            ),
+            junction_correction=self._make_junction_correction(interval, chrom_seq),
+            junction_correction_apply=self._junction_correction_apply(),
             canonical_search_bp=self.config.canonical_search_bp,
             max_chains_per_read=self.config.max_chains_per_read,
             canonical_motifs=self.config.canonical_motifs,
@@ -580,6 +628,13 @@ class PipelineRunner:
             denovo_graph_tss_frac=getattr(
                 self.config, "denovo_graph_tss_frac", 0.4),
         )
+
+        # Always-on record of the interval junction registry (raw / indel-clean
+        # support per junction). Evidence only; no gate reads this file.
+        if getattr(candidate_set, "junction_support", None):
+            from fin.analysis.junction_support import write_support_shard
+
+            write_support_shard(self.config.work_dir, interval, candidate_set.junction_support)
 
         # --- Phase 1.5: Fusion candidate augmentation (optional) ---
         if self.config.fusion_enabled:
@@ -1492,7 +1547,13 @@ class PipelineRunner:
                 ambig_threshold=self.config.tiebreak_ambig_threshold,
                 use_gpu=self.config.use_gpu,
             )
-            hard_assignments = R.argmax(axis=1)
+        # Same explicit tie-break policy as the production m2_em path, applied
+        # UNCONDITIONALLY: leaving it inside the krill branch would mean the
+        # default (krill off) still resolved exact ties by column index, i.e. by
+        # emission order, which is the behaviour this rule exists to remove.
+        from fin.pipeline.assignment import hard_assign
+
+        hard_assignments, _, _ = hard_assign(R, cand_list)
 
         quant_results = quantify_transcripts(
             R, hard_assignments, cand_list, kept_read_ids
@@ -1559,6 +1620,72 @@ class PipelineRunner:
         )
         if qo is None:
             return [], None
+        # Post-EM folded-TSS recovery (opt-in). A `supported` shadow is added
+        # as a candidate and the WHOLE assignment/EM is rerun once, so the
+        # second pass alone decides read ownership and abundance; the ledger
+        # below is built only from that final pass. Never recursive.
+        recovery_mode = getattr(self.config, "folded_tss_recovery_mode", "off")
+        if recovery_mode != "off" and getattr(candidate_set, "shadows", None):
+            from fin.analysis.tss_shadow_recovery import (
+                recover_folded_tss_candidates, write_recovery_shard,
+            )
+
+            genome_seq = (
+                self._genome_fasta[interval.chrom]
+                if self._genome_fasta and interval.chrom in self._genome_fasta
+                else ""
+            )
+            rec = recover_folded_tss_candidates(
+                candidate_set, qo, interval, genome_seq,
+                indels_by_read=getattr(candidate_set, "indels_by_read", None),
+            )
+            write_recovery_shard(self.config.work_dir, interval, rec.rows)
+            if recovery_mode == "require" and rec.support_merges:
+                for cid, reads in rec.support_merges.items():
+                    ex = candidate_set.get_candidate(cid)
+                    if ex is not None:
+                        ex.supporting_read_ids.update(reads)
+                        ex.raw_supporting_read_ids.update(reads)
+            if rec.candidates and recovery_mode == "require":
+                candidate_set.candidates.extend(rec.candidates)
+                if candidate_set.clusters is not None:
+                    for cand in rec.candidates:
+                        parent_id = rec.parent_of.get(cand.candidate_id)
+                        for ids in candidate_set.clusters:
+                            if parent_id in ids:
+                                ids.append(cand.candidate_id)
+                                break
+                        else:
+                            candidate_set.clusters.append([cand.candidate_id])
+                logger.info(
+                    "m2_em interval %s: recovered %d folded 5'-TSS shadow(s); "
+                    "rerunning assignment",
+                    interval.region_string, len(rec.candidates),
+                )
+                qo2 = self._assigner.assign(
+                    candidate_set, read_ids,
+                    tie_nll_fn=self._tie_nll, eff_lengths_fn=self._eff_lengths,
+                    start_likelihood_context=rec.start_models,
+                )
+                if qo2 is not None:
+                    qo = qo2
+        # Unified existence audit: interval rows only (the FDR family is the
+        # whole SAMPLE, so it is applied at finalization, never here).
+        if getattr(self.config, "candidate_existence_mode", "off") != "off":
+            from fin.analysis.candidate_existence import (
+                build_conflict_components, evaluate_candidate_existence,
+                write_existence_shard,
+            )
+
+            comps = build_conflict_components(qo, candidate_set)
+            if comps:
+                write_existence_shard(
+                    self.config.work_dir, interval,
+                    evaluate_candidate_existence(
+                        qo, candidate_set, comps, interval,
+                        sample_id=str(getattr(self.config, "bam_path", "")),
+                    ),
+                )
         ledger = None
         if getattr(self.config, "post_selection_refit_effective", False):
             ledger = build_responsibility_ledger(
@@ -1593,6 +1720,90 @@ class PipelineRunner:
             qo.n_ties, qo.n_refined,
         )
         return quant_results, ledger
+
+    def _junction_correction_context(self):
+        """Lazily build the per-WORKER krill aligner + blow5 reader for step 5a.
+
+        Each parallel worker constructs exactly one PipelineRunner, so this is
+        created once per worker and reused across intervals -- never per contest.
+        Returns (aligner, krill_module, signal_reader) or None when unavailable.
+        """
+        if getattr(self, "_jc_ctx", "unset") != "unset":
+            return self._jc_ctx
+        self._jc_ctx = None
+        try:
+            import krill
+            import pyslow5
+
+            from fin.scoring.krill_aligner import make_krill_aligner
+        except Exception as exc:  # noqa: BLE001 - optional signal stack
+            logger.warning("junction correction: signal stack unavailable: %s", exc)
+            return None
+        aligner, _eff_gpu = make_krill_aligner(
+            krill, self.config.krill_pore, self.config.use_gpu,
+            hmm_confidence=False, num_thread=0,
+        )
+        if aligner is None:
+            logger.warning("junction correction: krill aligner init failed")
+            return None
+        s5 = pyslow5.Open(self.config.signal_path, "r")
+        cache: dict = {}
+
+        def reader(read_id):
+            if read_id in cache:
+                return cache[read_id]
+            try:
+                rec = s5.get_read(read_id, pA=False)
+            except Exception:  # noqa: BLE001 - a missing read must abstain
+                rec = None
+            out = None if rec is None else dict(
+                signal=rec["signal"].astype("float32"),
+                digitisation=float(rec["digitisation"]), offset=float(rec["offset"]),
+                range=float(rec["range"]), sample_rate=float(rec["sampling_rate"]))
+            if len(cache) < 4096:
+                cache[read_id] = out
+            return out
+
+        self._jc_ctx = (aligner, krill, reader)
+        return self._jc_ctx
+
+    def _make_junction_correction(self, interval, chrom_seq):
+        """Callback handed to discover_candidates; None unless the mode is on."""
+        if getattr(self.config, "junction_correction_mode", "off") == "off":
+            return None
+        ctx = self._junction_correction_context()
+        if ctx is None:
+            return None
+        aligner, krill_mod, reader = ctx
+
+        def _ballot(read_chains, indels_by_read):
+            from fin.analysis.junction_correction import (
+                correct_read_chains, write_correction_tsv,
+            )
+
+            res = correct_read_chains(
+                read_chains, indels_by_read, config=self.config, interval=interval,
+                genome_seq=chrom_seq, signal_reader=reader, aligner=aligner,
+                krill_mod=krill_mod,
+            )
+            if res.rows:
+                shard = (Path(self.config.work_dir) / "_jcorrection_shards"
+                         / f"{interval.chrom}_{interval.start}_{interval.end}_"
+                           f"{interval.strand or 'u'}.tsv")
+                write_correction_tsv(shard, res.rows)
+            return res
+
+        return _ballot
+
+    def _junction_correction_apply(self):
+        """Instantiation policy object for discovery; None in audit mode (record only)."""
+        if getattr(self.config, "junction_correction_mode", "off") != "require":
+            return None
+
+        class _Apply:
+            min_reads = int(getattr(self.config, "junction_correction_new_chain_min_reads", 2))
+
+        return _Apply()
 
     def _get_fusion_genome_aligner(self):
         """Lazily build and cache the genome-wide mappy aligner for fusion arms."""

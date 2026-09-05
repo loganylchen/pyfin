@@ -530,6 +530,158 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
     return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
 
 
+def hard_assign(R, cand_list, *, posterior_tie_atol: float = 1e-12,
+                allowed_by_read=None):
+    """Hard read->candidate assignment with an EXPLICIT, source-aware tie-break.
+
+    ``R.argmax(axis=1)`` breaks an exact posterior tie by lowest COLUMN INDEX, so
+    for years the decision was silently carried by the order discovery happened to
+    append candidates in (annotation was appended first). That is assignment policy
+    hidden in a list order: reordering emission changed which model won ties, hence
+    ``num_assigned_reads``, hence which models survived the soft/hard-ratio gate
+    (measured: Pr -0.93 on the 156-cell SIRV4 grid from emission order alone).
+
+    The rule is made explicit here (Codex gpt-5.6-sol, 2026-09-04):
+
+      1. take each read's maximum posterior;
+      2. the tie set is every column within ``atol`` of it;
+      3. one winner -> that column;
+      4. otherwise prefer an ANNOTATED candidate: when the molecular evidence is
+         numerically identical, the hypothesis the user supplied is the MAP choice
+         under a weak prior. This is a decision rule for EXACT ties only -- it never
+         overrides positive read evidence, and it cannot fire de novo (no GTF);
+      5. remaining ties break on ``candidate_id``, never on column index, so the
+         result is invariant to emission order.
+
+    The tolerance is ABSOLUTE on purpose: ties are judged inside one read's
+    normalised posterior row (rows sum to 1), not across transcript abundances,
+    and a relative tolerance would swallow small but real posterior differences.
+    At float32 precision 1e-12 captures exact equality only -- which is the
+    stated policy.
+
+    ``allowed_by_read`` (optional, the per-read raw-AS tie sets) restricts the tie
+    set to columns the read could compete on at all. On the current M2 path a
+    posterior outside that set cannot arise (cells outside the tie stay MISSING),
+    so this is a defended invariant rather than a behaviour change: an empty
+    intersection is a bug, and raises rather than silently falling back.
+
+    Returns (hard_assignments, n_ties, n_annotation_ties).
+    """
+    import numpy as _np
+
+    if posterior_tie_atol < 0:
+        raise ValueError(f"posterior_tie_atol must be >= 0, got {posterior_tie_atol}")
+    n_r, n_c = R.shape
+    if n_r == 0 or n_c == 0:
+        return _np.zeros(n_r, dtype=_np.int64), 0, 0
+    if not _np.isfinite(R).all():
+        raise ValueError("hard_assign: R contains non-finite values")
+    # rank key per column: annotated first, then candidate_id -- both independent
+    # of position in cand_list.
+    order = sorted(range(n_c), key=lambda j: (
+        getattr(cand_list[j], "source", "") != "gtf",
+        getattr(cand_list[j], "candidate_id", str(j)),
+    ))
+    rank = _np.empty(n_c, dtype=_np.int64)
+    for pos, j in enumerate(order):
+        rank[j] = pos
+    best = R.max(axis=1)
+    tied = (best[:, None] - R) <= posterior_tie_atol
+    if allowed_by_read:
+        allowed = _np.zeros_like(tied)
+        for i in range(n_r):
+            cols = allowed_by_read.get(i)
+            if not cols:
+                allowed[i, :] = True          # no recorded tie set -> unrestricted
+            else:
+                allowed[i, list(cols)] = True
+        restricted = tied & allowed
+        if not restricted.any(axis=1).all():
+            raise ValueError(
+                "hard_assign: a read's posterior winner lies outside its raw-AS "
+                "tie set (assignment invariant violated)")
+        tied = restricted
+    n_tied = tied.sum(axis=1)
+    # pick the tied column with the smallest explicit rank
+    # argmin over the RANK of tied columns, then map that rank back to a column.
+    masked = _np.where(tied, rank[None, :], n_c + 1)
+    hard = _np.argmin(masked, axis=1).astype(_np.int64)
+    n_ties = int((n_tied > 1).sum())
+    n_anno = int(sum(
+        1 for i in range(n_r)
+        if n_tied[i] > 1 and getattr(cand_list[hard[i]], "source", "") == "gtf"
+    ))
+    return hard, n_ties, n_anno
+
+
+def apply_start_likelihood(d_tx, ties_by_read, kept_read_ids, cand_list, models,
+                           nlls_by_read=None) -> int:
+    """Add the frozen read-5'-end positional NLL of folded-TSS recovery to ``d_tx``.
+
+    Design (Codex gpt-5.6-sol, 2026-09-03): the recovery verdict only decides that a
+    second model (the recovered short isoform S of parent P) exists; which model each
+    read resembles is a per-read LIKELIHOOD, and EM then decides mass. For a read whose
+    raw best-AS tie set is EXACTLY ``{P, S}``, with 5' offset bin ``b_i`` in P's
+    transcript frame and the supported TSS bin ``b0``:
+
+      - ``b_i == b0``: L(P) = h_P(b0) (P's frozen degradation hazard of terminating in
+        that bin), L(S) = 1  ->  d[P] += -log h_P, d[S] += 0.
+      - ``b_i <  b0``: a read starting 5' of S's TSS cannot come from S -> d[S] = MISSING.
+      - ``b_i >  b0``: abstain (no validated short-degradation kernel yet) -> no change.
+
+    Ties with a third candidate, reads without an offset, and every other cell are left
+    untouched, so the term can never leak outside the (P, S) contrast. Mutates ``d_tx``
+    in place; returns the number of rows touched.
+
+    ``nlls_by_read`` (the per-read graded contrast the M2/M1 support gate reads) is
+    updated with the SAME contrast so the gate judges "best model for this read" on
+    the full evidence: a read with no scored junction contrast gets {P: pen, S: 0}
+    (peak bin) or {P: 0} (upstream); a read with a scored contrast has the penalty
+    added to its parent cell. The positional evidence is per-read evidence, not an
+    exemption: a recovered model still has to be some read's best.
+    """
+    from fin.analysis.tss_evidence import read_five_prime_offset
+
+    col = {c.candidate_id: j for j, c in enumerate(cand_list)}
+    n_touched = 0
+    for m in models:
+        jp, js = col.get(m["parent_id"]), col.get(m["recovered_id"])
+        if jp is None or js is None:
+            continue
+        pair = {jp, js}
+        pen = -math.log(max(float(m["hazard"]), 1e-12))
+        for i, rid in enumerate(kept_read_ids):
+            tie = ties_by_read.get(i)
+            if not tie or set(tie) != pair:
+                continue
+            span = m["read_spans"].get(rid)
+            if span is None:
+                continue
+            off = read_five_prime_offset(span, m["exons"], m["strand"])
+            if off is None:
+                continue
+            b_i = int(off) // int(m["bin_bp"])
+            nl = None if nlls_by_read is None else nlls_by_read.get(i)
+            if b_i == int(m["tss_bin"]):
+                d_tx[i, jp] += pen
+                if nlls_by_read is not None:
+                    if not nl:
+                        nlls_by_read[i] = {jp: pen, js: 0.0}
+                    elif jp in nl:
+                        nl[jp] = nl[jp] + pen
+            elif b_i < int(m["tss_bin"]):
+                d_tx[i, js] = MISSING
+                if nlls_by_read is not None:
+                    if not nl:
+                        nlls_by_read[i] = {jp: 0.0}
+                    else:
+                        nl.pop(js, None)
+            else:
+                continue
+            n_touched += 1
+    return n_touched
+
+
 @dataclass
 class QuantOutput:
     """Immutable result of the m2_em assignment pipeline (pre-selection).
@@ -553,6 +705,16 @@ class QuantOutput:
     read_seqs: Dict[str, str]
     n_ties: int
     n_refined: int
+    # The UNNORMALISED per-cell distances that produced ``R`` (0 / graded / MISSING),
+    # kept because ``R`` is row-normalised and cannot be inverted. NOTE this is the
+    # DECISION matrix the EM consumes: with the diff-coverage gate on (the default)
+    # a distinguishing read is collapsed to one-hot and a fuzzy read carries the
+    # component-wide covered_vote ratio. Read-only for consumers.
+    d_tx: object = None
+    # Per-read junction-NLL contrasts over the raw best-AS tie set, built BEFORE
+    # the gate turned them into decisions. This is the EVIDENCE matrix the
+    # candidate-existence test reads; see fin/analysis/candidate_existence.py.
+    structural_d_tx_raw: object = None
 
 
 class Assigner:
@@ -573,8 +735,16 @@ class Assigner:
         *,
         tie_nll_fn: Callable,
         eff_lengths_fn: Callable,
+        start_likelihood_context=None,
     ) -> Optional[QuantOutput]:
-        """Run the m2_em assignment pipeline; return a QuantOutput or None (empty interval)."""
+        """Run the m2_em assignment pipeline; return a QuantOutput or None (empty interval).
+
+        ``start_likelihood_context`` (default None = no new branch, byte-identical) is the
+        frozen read-5'-end model list produced by folded-TSS shadow recovery
+        (:func:`fin.analysis.tss_shadow_recovery.recover_folded_tss_candidates`) and is
+        passed ONLY on the second assignment of an interval that re-emitted a shadow. It
+        adds a positional NLL term to ``d_tx`` (see :func:`apply_start_likelihood`).
+        """
         import mappy
 
         from fin.scoring.mappy_preset import get_m1_preset
@@ -646,6 +816,25 @@ class Assigner:
         #     decision matrix with proportional redistribution of ambiguous reads
         #     (no read is ever dropped -> recall-safe). ---
         gate = bool(getattr(self.config, "m2_diff_cover_gate", False))
+        # RAW structural kernel, built BEFORE any gate transform: for each read,
+        # the per-candidate junction NLL over its raw best-AS tie set (MISSING
+        # elsewhere). The gated `d_tx` below is a DECISION matrix -- a
+        # distinguishing read becomes one-hot and a fuzzy read carries the
+        # component-wide covered_vote ratio rather than its own likelihood -- so
+        # it cannot be used as evidence about whether a candidate exists. The
+        # existence test consumes this matrix instead. Read-only for consumers.
+        structural_d_tx_raw = np.full((n_r, n_c), MISSING, dtype=np.float64)
+        for i in range(n_r):
+            tie = ties_by_read.get(i)
+            if not tie:
+                continue
+            scored = nlls_by_read.get(i) or {}
+            if len(scored) >= 2:
+                lo = min(scored.values())
+                for j, v in scored.items():
+                    structural_d_tx_raw[i, j] = v - lo
+            elif len(tie) == 1:
+                structural_d_tx_raw[i, tie[0]] = 0.0
         d_tx = np.full((n_r, n_c), MISSING, dtype=np.float64)
         if not gate:
             for i in range(n_r):
@@ -744,6 +933,12 @@ class Assigner:
                         d_tx[i, j] = 0.0  # flat 1/K (recall-safe fallback)
             # ON-path d_tx values are already calibrated (0 / -log(p) / MISSING) for
             # sigma=1; no sigma2 normalization (that is the OFF skeleton's step).
+        if start_likelihood_context:
+            # Positional (read 5' end) NLL is calibrated -log p already: it is added
+            # AFTER the junction sigma2 normalisation, never divided by it.
+            apply_start_likelihood(
+                d_tx, ties_by_read, kept_read_ids, cand_list, start_likelihood_context,
+                nlls_by_read=nlls_by_read)
         d_tx = d_tx.astype(np.float32)
 
         # Production M1/M2 assignment has no read-by-read coherence term.
@@ -772,7 +967,14 @@ class Assigner:
                 ambig_threshold=self.config.tiebreak_ambig_threshold,
                 use_gpu=self.config.use_gpu,
             )
-            hard_assignments = R.argmax(axis=1)
+
+        # Hard assignment is recomputed here UNCONDITIONALLY, after every
+        # transform of R, by the explicit rule (never by column order).
+        hard_assignments, n_hard_ties, n_anno_ties = hard_assign(
+            R, cand_list, allowed_by_read=ties_by_read)
+        if n_hard_ties:
+            logger.debug("hard assignment: %d exact ties (%d resolved to annotation)",
+                         n_hard_ties, n_anno_ties)
 
         quant_results = quantify_transcripts(
             R, hard_assignments, cand_list, kept_read_ids
@@ -783,6 +985,8 @@ class Assigner:
             qr.max_R = float(R[:, j].max()) if R.shape[0] > 0 else 0.0
 
         return QuantOutput(
+            d_tx=d_tx,
+            structural_d_tx_raw=structural_d_tx_raw,
             R=R,
             hard_assignments=hard_assignments,
             quant_results=quant_results,
