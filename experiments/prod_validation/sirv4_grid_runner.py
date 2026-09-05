@@ -55,6 +55,17 @@ DATASETS = {
         # SIRV4 does not: it is the held-out quantification axis.
         concentration=_ROOT / "refs" / "concentration" / "RNAsequins_MixA_v1.tsv",
     ),
+    # Dual spike-in (SIRV Set1 + Sequin) in HEYA8: 234 transcripts over chrIS and
+    # SIRV1-7, 5 samples. Third design, so a rule must now hold on three grids.
+    "heya8": dict(
+        bench=_ROOT / "results" / "heya8_dual_full_sweep_ratio_grid_v2",
+        work=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/_heya8grid"),
+        truth_src=(_ROOT / "results" / "heya8_dual_full_sweep_ratio_grid_v2"
+                   / "_ref" / "_source" / "annotation.gtf"),
+        genome_src=_ROOT / "refs" / "spikein_sequin_sirv1.fa",
+        truth_name="heya8_dual_truth.gtf", genome_name="spikein_sequin_sirv1.fa",
+        concentration=None,
+    ),
 }
 DATASET = os.environ.get("PYFIN_GRID_DATASET", "sirv4")
 _D = DATASETS[DATASET]

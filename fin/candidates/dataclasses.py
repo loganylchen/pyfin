@@ -143,6 +143,12 @@ class CandidateSet:
     # behind complete-chain depths. Lets post-EM consumers (folded-TSS
     # recovery) attest a re-emitted chain from CIGARs, never from EM weights.
     indels_by_read: Optional[Dict[str, tuple]] = None
+    # read_id -> the read's OWN primary-CIGAR intron chain ((donor, acceptor), ...)
+    # and read_id -> mapped strand. Together with read_spans/indels_by_read these
+    # are the C_r / S_r / E_r observations of the per-molecule evidence row
+    # (fin/analysis/molecule_evidence.py). Empty chain = single-exon read.
+    read_junctions: Optional[Dict[str, Tuple[Tuple[int, int], ...]]] = None
+    read_strands: Optional[Dict[str, str]] = None
 
     @property
     def num_candidates(self) -> int:

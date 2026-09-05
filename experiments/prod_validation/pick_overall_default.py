@@ -23,7 +23,8 @@ import statistics as st
 from pathlib import Path
 
 WORK = {"sirv4": Path("experiments/prod_validation/_sirv4grid"),
-        "sequin": Path("experiments/prod_validation/_sequingrid")}
+        "sequin": Path("experiments/prod_validation/_sequingrid"),
+        "heya8": Path("experiments/prod_validation/_heya8grid")}
 
 
 def load(dataset):

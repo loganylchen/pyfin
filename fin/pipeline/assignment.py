@@ -715,6 +715,9 @@ class QuantOutput:
     # the gate turned them into decisions. This is the EVIDENCE matrix the
     # candidate-existence test reads; see fin/analysis/candidate_existence.py.
     structural_d_tx_raw: object = None
+    # Raw mappy AS matrix over kept reads x candidates (-inf = no hit): the A_r
+    # channel of the molecule evidence row. Read-only.
+    raw: object = None
 
 
 class Assigner:
@@ -987,6 +990,7 @@ class Assigner:
         return QuantOutput(
             d_tx=d_tx,
             structural_d_tx_raw=structural_d_tx_raw,
+            raw=raw,
             R=R,
             hard_assignments=hard_assignments,
             quant_results=quant_results,

@@ -82,6 +82,14 @@ TSV_FIELDS = (
     "fdr_family_size", "fdr_method", "status", "decision",
     "h1_converged", "h0_converged", "software_version", "fold_salt",
     "bootstrap_seed",
+    # 3'/polyA channel audit (E3): per-candidate counts over held-out reads
+    "polya_available", "n_polya_pass", "n_tes_near", "n_tes_readthrough",
+    "endpoint_kernel_version", "negative_channel",
+    # directional bootstrap + hierarchical control (E4)
+    "p_minus", "component_p_plus", "component_p_minus",
+    "component_q_plus", "component_q_minus", "holm_p_plus", "holm_p_minus",
+    "component_fdr_method", "within_component_method", "directional_alpha",
+    "n_component_reads",
 )
 
 # `d_tx` uses this sentinel for "this read cannot come from this candidate".
@@ -151,6 +159,23 @@ class CandidateExistenceRow:
     software_version: str = SCHEMA_VERSION
     fold_salt: str = FOLD_SALT
     bootstrap_seed: int = 0
+    polya_available: bool = False
+    n_polya_pass: int = 0
+    n_tes_near: int = 0
+    n_tes_readthrough: int = 0
+    endpoint_kernel_version: str = ""
+    negative_channel: str = ""
+    p_minus: Optional[float] = None
+    component_p_plus: Optional[float] = None
+    component_p_minus: Optional[float] = None
+    component_q_plus: Optional[float] = None
+    component_q_minus: Optional[float] = None
+    holm_p_plus: Optional[float] = None
+    holm_p_minus: Optional[float] = None
+    component_fdr_method: str = ""
+    within_component_method: str = ""
+    directional_alpha: float = 0.025
+    n_component_reads: int = 0
 
     def as_tsv(self) -> str:
         out = []
@@ -335,6 +360,41 @@ def _fit_theta(rows, d_tx, cols, *, max_iter: int = 200, tol: float = 1e-9):
     return theta, converged
 
 
+def _fit_theta_w(rows, weights_of, cols, *, max_iter: int = 200, tol: float = 1e-9):
+    """As :func:`_fit_theta`, but over an arbitrary per-read log-weight function
+    (so channels can be composed before the mixture is fitted)."""
+    theta = {j: 1.0 / len(cols) for j in cols}
+    if not rows:
+        return theta, True
+    cached = [weights_of(i) for i in rows]
+    cached = [w for w in cached if w]
+    if not cached:
+        return theta, True
+    converged = False
+    for _ in range(max_iter):
+        acc = {j: 0.0 for j in cols}
+        n_used = 0
+        for w in cached:
+            m = max(w.values())
+            terms = {j: theta[j] * math.exp(lw - m)
+                     for j, lw in w.items() if theta.get(j, 0.0) > 0.0}
+            z = sum(terms.values())
+            if z <= 0.0:
+                continue
+            n_used += 1
+            for j, t in terms.items():
+                acc[j] += t / z
+        if n_used == 0:
+            return theta, True
+        new = {j: acc[j] / n_used for j in cols}
+        delta = max(abs(new[j] - theta[j]) for j in cols)
+        theta = new
+        if delta < tol:
+            converged = True
+            break
+    return theta, converged
+
+
 def evaluate_candidate_existence(
     quant_output,
     candidate_set,
@@ -347,8 +407,20 @@ def evaluate_candidate_existence(
     fold_salt: str = FOLD_SALT,
     bootstrap_replicates: int = 4095,
     bootstrap_seed: int = 0,
+    molecules=None,
+    nuisance=None,
 ) -> List[CandidateExistenceRow]:
     """Cross-fitted held-out log-likelihood contrast for every testable candidate.
+
+    Channels. The structural kernel (raw junction NLL over the raw AS tie) is
+    always on. When ``molecules`` (per-read :class:`MoleculeEvidence`) and a
+    ``nuisance`` model with an available endpoint fit are supplied, the 3'/polyA
+    term of Part A is ADDED to each polyA-PASS read's per-candidate log weight:
+    ``l_rc = l_struct + l_3'``. Reads without a PASS call contribute nothing on
+    that channel (abstention). The statistic is computed twice, structural-only
+    and full, so the artifact reports the channel's own contribution
+    (``tes_polya_llr = T_full - T_structural``) and a calibration failure can be
+    attributed to one channel.
 
     For each candidate C in each component: fit the mixture WITH and WITHOUT C on
     the reads of the other folds, then score only this fold's reads. Summing over
@@ -369,6 +441,62 @@ def evaluate_candidate_existence(
     ivl = (f"{interval.chrom}:{interval.start}-{interval.end}:{interval.strand}"
            if interval is not None else "")
     cover = getattr(quant_output, "cover_by_read", {}) or {}
+
+    endpoint = getattr(nuisance, "endpoint", None) if nuisance is not None else None
+    tes_on = bool(molecules) and endpoint is not None and endpoint.available
+    if tes_on:
+        from fin.analysis.sample_nuisance import tes_distance, tes_polya_loglik
+
+    def weights_for(i: int, cols_, with_tes: bool) -> Dict[int, float]:
+        """Per-read log weight over ``cols_`` = structural kernel (+ 3' term)."""
+        w = _log_weights(kernel[i], cols_)
+        if not with_tes or not w:
+            return w
+        mol = molecules.get(kept[i]) if i < len(kept) else None
+        if mol is None or not mol.polya_available:
+            return w                                   # abstain on this channel
+        out = {}
+        for j, lw in w.items():
+            t = tes_polya_loglik(mol, cand_list[j], endpoint)
+            out[j] = lw + (t if t is not None else 0.0)
+        return out
+
+    def crossfit(comp, cols_, j, others, folds, k_folds, with_tes):
+        """Returns (per_fold_deltas, n_tested, n_disc, n_covered, ok1, ok0)."""
+        per_fold, n_tested, n_disc, covered = [], 0, 0, 0
+        ok1_all = ok0_all = True
+        for f in range(k_folds):
+            test_rows = [i for i in comp.read_rows if folds.get(i) == f]
+            train_rows = [i for i in comp.read_rows if folds.get(i) not in (f, None)]
+            if not test_rows or not train_rows:
+                continue
+            theta1, ok1 = _fit_theta_w(train_rows, lambda i: weights_for(i, cols_, with_tes), cols_)
+            theta0, ok0 = _fit_theta_w(train_rows, lambda i: weights_for(i, others, with_tes), others)
+            ok1_all = ok1_all and ok1
+            ok0_all = ok0_all and ok0
+            delta, used = 0.0, 0
+            for i in test_rows:
+                w_all = weights_for(i, cols_, with_tes)
+                if j not in w_all or len(w_all) < 2:
+                    continue          # cannot tell C from the alternatives
+                # Coverage is a SCORING condition for the structural channel;
+                # a polyA read can still contribute its 3' term uncovered.
+                mol = molecules.get(kept[i]) if (with_tes and i < len(kept)) else None
+                polya_read = bool(mol is not None and mol.polya_available)
+                if cover and cover.get(i) is not True and not polya_read:
+                    continue
+                covered += 1
+                l1 = _predictive_ll(w_all, theta1)
+                l0 = _predictive_ll({k: v for k, v in w_all.items() if k != j}, theta0)
+                if l1 is None or l0 is None:
+                    continue
+                delta += (l1 - l0)
+                used += 1
+            if used:
+                per_fold.append(delta)
+                n_tested += 1
+                n_disc += used
+        return per_fold, n_tested, n_disc, covered, ok1_all, ok0_all
 
     for comp in components:
         cols = list(comp.columns)
@@ -391,6 +519,8 @@ def evaluate_candidate_existence(
                 component_size=len(cols), n_candidate_folds=k_folds,
                 bootstrap_replicates=0, bootstrap_seed=bootstrap_seed,
                 null_method="none_v1_audit", fold_salt=fold_salt,
+                polya_available=tes_on,
+                endpoint_kernel_version=(endpoint.version if tes_on else ""),
             )
             rows_out.append(row)
 
@@ -409,37 +539,33 @@ def evaluate_candidate_existence(
                 row.identifiability_reason = "no_honest_split"
                 continue
 
-            per_fold, n_tested, n_disc, covered = [], 0, 0, 0
-            for f in range(k_folds):
-                test_rows = [i for i in comp.read_rows if folds.get(i) == f]
-                train_rows = [i for i in comp.read_rows if folds.get(i) not in (f, None)]
-                if not test_rows or not train_rows:
-                    continue
-                theta1, ok1 = _fit_theta(train_rows, kernel, cols)
-                theta0, ok0 = _fit_theta(train_rows, kernel, others)
-                row.h1_converged = row.h1_converged and ok1
-                row.h0_converged = row.h0_converged and ok0
-                delta, used = 0.0, 0
-                for i in test_rows:
-                    w_all = _log_weights(kernel[i], cols)
-                    if j not in w_all or len(w_all) < 2:
-                        continue          # cannot tell C from the alternatives
-                    # Coverage is a SCORING condition: only a read that spans the
-                    # discrimination region may contribute structural evidence.
-                    if cover and cover.get(i) is not True:
+            # structural-only statistic (the v1 baseline, kept for attribution)
+            pf_s, nt_s, nd_s, cov_s, ok1, ok0 = crossfit(comp, cols, j, others, folds, k_folds, False)
+            row.h1_converged, row.h0_converged = ok1, ok0
+            t_struct = 2.0 * sum(pf_s) if pf_s else None
+            if tes_on:
+                pf_f, nt_f, nd_f, cov_f, ok1f, ok0f = crossfit(comp, cols, j, others, folds, k_folds, True)
+                row.h1_converged = row.h1_converged and ok1f
+                row.h0_converged = row.h0_converged and ok0f
+                per_fold, n_tested, n_disc, covered = pf_f, nt_f, nd_f, cov_f
+                # per-candidate 3' audit counts over the component's reads
+                for i in comp.read_rows:
+                    mol = molecules.get(kept[i]) if i < len(kept) else None
+                    if mol is None or not mol.polya_available:
                         continue
-                    covered += 1
-                    l1 = _predictive_ll(w_all, theta1)
-                    l0 = _predictive_ll({k: v for k, v in w_all.items() if k != j},
-                                        theta0)
-                    if l1 is None or l0 is None:
+                    if j not in _log_weights(kernel[i], cols):
                         continue
-                    delta += (l1 - l0)
-                    used += 1
-                if used:
-                    per_fold.append(delta)
-                    n_tested += 1
-                    n_disc += used
+                    row.n_polya_pass += 1
+                    d = tes_distance(mol, cand)
+                    post = endpoint.narrow_posterior(d)
+                    if post >= 0.5:
+                        row.n_tes_near += 1
+                    elif d > 0:
+                        row.n_tes_readthrough += 1
+                if row.n_tes_readthrough:
+                    row.negative_channel = "tes_readthrough_polya"
+            else:
+                per_fold, n_tested, n_disc, covered = pf_s, nt_s, nd_s, cov_s
             row.n_tested_folds = n_tested
             row.n_discriminating_reads = n_disc
             row.n_covered_reads = covered
@@ -450,18 +576,83 @@ def evaluate_candidate_existence(
             row.identifiable = True
             row.identifiability_reason = "ok"
             row.delta_predictive_ll = 2.0 * sum(per_fold)
-            row.structural_llr = row.delta_predictive_ll
+            row.structural_llr = t_struct
+            if tes_on:
+                row.tes_polya_llr = (row.delta_predictive_ll - (t_struct or 0.0))
             row.fold_delta_ll = ";".join(f"{2.0 * v:.6g}" for v in per_fold)
-            # No calibrated null is fitted in v1, so there is deliberately NO
+            # No calibrated null is fitted yet, so there is deliberately NO
             # p-value: reporting one would be the exact overreach this module
             # exists to prevent.
             row.p_valid = False
             row.status = STATUS_UNRESOLVED
-            theta_all, _ = _fit_theta(list(comp.read_rows), kernel, cols)
+            theta_all, _ = _fit_theta_w(list(comp.read_rows),
+                                        lambda i: weights_for(i, cols, tes_on), cols)
             alt = max(others, key=lambda k: (theta_all.get(k, 0.0),
                                              getattr(cand_list[k], "candidate_id", "")))
             row.dominant_alternative = getattr(cand_list[alt], "candidate_id", str(alt))
+
+        # --- calibrated null: centred molecule-level bootstrap over the component
+        if bootstrap_replicates > 0:
+            _attach_bootstrap(comp, cols, rows_out, kept, cover, molecules, tes_on,
+                              weights_for, n_folds, bootstrap_replicates,
+                              bootstrap_seed, cand_list)
     return rows_out
+
+
+def _attach_bootstrap(comp, cols, rows_out, kept, cover, molecules, tes_on,
+                      weights_for, n_folds, replicates, seed, cand_list) -> None:
+    """Build the component's (n x k) log-weight matrix and eligibility mask from
+    the SAME per-read channel composition the observed statistic used, run the
+    bootstrap for every testable column, and write p+/p- onto the rows.
+
+    A row is testable iff it is identifiable (the audit has already decided
+    that on the observed data). Rows that are not testable never enter the
+    null -- they are not part of any family."""
+    import numpy as np
+
+    from fin.analysis.existence_bootstrap import NULL_METHOD, bootstrap_component
+
+    rows_by_cid = {r.candidate_id: r for r in rows_out
+                   if r.component_id == comp.component_id}
+    testable = [j for j in cols
+                if rows_by_cid.get(getattr(cand_list[j], "candidate_id", str(j)))
+                and rows_by_cid[getattr(cand_list[j], "candidate_id", str(j))].identifiable]
+    n = len(comp.read_rows)
+    for r in rows_by_cid.values():
+        r.n_component_reads = n
+    if not testable or n < 2:
+        return
+    W = np.full((n, len(cols)), -np.inf)
+    elig = np.zeros(n, dtype=bool)
+    col_pos = {j: p for p, j in enumerate(cols)}
+    for a, i in enumerate(comp.read_rows):
+        w = weights_for(i, cols, tes_on)
+        for j, lw in w.items():
+            W[a, col_pos[j]] = lw
+        mol = molecules.get(kept[i]) if (tes_on and molecules and i < len(kept)) else None
+        polya_read = bool(mol is not None and mol.polya_available)
+        elig[a] = (not cover) or cover.get(i) is True or polya_read
+    res = bootstrap_component(
+        W, elig, [col_pos[j] for j in testable], max_folds=n_folds,
+        replicates=replicates, seed=seed, component_tag=comp.component_id)
+    for j in testable:
+        r = rows_by_cid[getattr(cand_list[j], "candidate_id", str(j))]
+        pj = col_pos[j]
+        r.null_method = NULL_METHOD
+        r.bootstrap_replicates = res.replicates
+        r.bootstrap_exceedances = res.exceed_plus.get(pj, 0)
+        # the bootstrap re-derives T on its own (random balanced) folds; keep the
+        # deterministic hash-fold value as the reported statistic and record the
+        # bootstrap's own observed value for auditability via fold_delta_ll
+        if res.degenerate or not res.replicates:
+            r.p_valid = False
+            r.identifiability_reason = "bootstrap_degenerate"
+            continue
+        r.p_value = res.p_plus[pj]
+        r.p_minus = res.p_minus[pj]
+        r.component_p_plus = res.component_p_plus
+        r.component_p_minus = res.component_p_minus
+        r.p_valid = True
 
 
 def apply_sample_fdr(
@@ -470,39 +661,66 @@ def apply_sample_fdr(
     alpha: float = 0.05,
     method: str = "by",
 ) -> List[CandidateExistenceRow]:
-    """Sample-level Benjamini-Yekutieli over the rows that carry a VALID p-value.
+    """Sample-level, directional, hierarchical error control (spec B6).
 
-    Excluded from the family (and left ``unresolved``): not identifiable, not
-    selection-honest, no valid p, degenerate bootstrap, inactive channel,
-    insufficient p resolution. ``fdr_family_size`` records the number of tests
-    actually corrected, never the row count. Runs at sample level, never per
-    chromosome: a per-chromosome family would silently change the
-    multiple-testing burden when moving from chrIS to a real genome.
+    Family = rows with a VALID directional p (identifiable, selection-honest,
+    bootstrap not degenerate). ``alpha`` is split over the two directions
+    (0.025 each). Per direction:
+
+      layer 1  component omnibus p (max statistic, same replicates) ->
+               Benjamini-Yekutieli across the sample's components;
+      layer 2  within a component whose q passes, Holm over its candidates.
+
+    supported     : component q+ <= a_d AND Holm p+ <= a_d AND T > 0
+    contradicted  : component q- <= a_d AND Holm p- <= a_d AND T < 0
+                    AND a pre-registered negative channel is active
+    unresolved    : everything else -- and it is RETAINED.
+
+    ``fdr_family_size`` is the number of components actually corrected.
+    Never per chromosome: chrIS alone would silently change the burden.
     """
-    family = [r for r in rows
-              if r.p_valid and r.identifiable and r.selection_honest
-              and r.p_value is not None]
-    m = len(family)
+    from fin.analysis.existence_bootstrap import by_adjust, holm_adjust
+
+    a_d = alpha / 2.0
+    valid = [r for r in rows if r.p_valid and r.identifiable and r.selection_honest
+             and r.p_value is not None and r.p_minus is not None]
+    comps: Dict[str, List[CandidateExistenceRow]] = {}
+    for r in valid:
+        comps.setdefault(r.component_id, []).append(r)
     for r in rows:
         r.fdr_method = method
-        r.fdr_family_size = m
-    if m == 0:
+        r.component_fdr_method = "BY"
+        r.within_component_method = "Holm"
+        r.directional_alpha = a_d
+        r.fdr_family_size = len(comps)
+        r.status = STATUS_UNRESOLVED
+    if not comps:
         return list(rows)
-    c_m = sum(1.0 / k for k in range(1, m + 1)) if method == "by" else 1.0
-    ordered = sorted(family, key=lambda r: (r.p_value, r.candidate_id))
-    q_prev = 1.0
-    for rank in range(m, 0, -1):
-        r = ordered[rank - 1]
-        q = min(q_prev, r.p_value * m * c_m / rank)
-        r.q_value = q
-        q_prev = q
-    for r in ordered:
-        if r.q_value is not None and r.q_value <= alpha and (
-            r.delta_predictive_ll or 0.0
-        ) > 0.0:
+    cids = sorted(comps)
+    for direction in ("plus", "minus"):
+        comp_p = [min((getattr(r, f"component_p_{direction}") or 1.0) for r in comps[c])
+                  for c in cids]
+        comp_q = by_adjust(comp_p)
+        for c, q in zip(cids, comp_q):
+            members = comps[c]
+            pk = "p_value" if direction == "plus" else "p_minus"
+            holm = holm_adjust([getattr(r, pk) for r in members])
+            for r, hp in zip(members, holm):
+                setattr(r, f"component_q_{direction}", q)
+                setattr(r, f"holm_p_{direction}", hp)
+    for r in valid:
+        t = r.delta_predictive_ll or 0.0
+        if (r.component_q_plus is not None and r.component_q_plus <= a_d
+                and r.holm_p_plus is not None and r.holm_p_plus <= a_d and t > 0):
             r.status = STATUS_SUPPORTED
+            r.q_value = r.component_q_plus
+        elif (r.component_q_minus is not None and r.component_q_minus <= a_d
+                and r.holm_p_minus is not None and r.holm_p_minus <= a_d and t < 0
+                and r.negative_channel):
+            r.status = STATUS_CONTRADICTED
+            r.q_value = r.component_q_minus
         else:
-            r.status = STATUS_UNRESOLVED
+            r.q_value = r.component_q_plus
     return list(rows)
 
 
@@ -544,8 +762,13 @@ def merge_existence_shards(work_dir, *, alpha: float = 0.05) -> Optional[str]:
             elif isinstance(cur, int) and not isinstance(cur, bool):
                 setattr(row, key, int(val) if val else 0)
             elif key in ("delta_predictive_ll", "structural_llr", "tss_llr",
-                         "tes_polya_llr", "p_value", "q_value"):
+                         "tes_polya_llr", "p_value", "q_value", "p_minus",
+                         "component_p_plus", "component_p_minus",
+                         "component_q_plus", "component_q_minus",
+                         "holm_p_plus", "holm_p_minus"):
                 setattr(row, key, float(val) if val else None)
+            elif key == "directional_alpha":
+                setattr(row, key, float(val) if val else 0.025)
             else:
                 setattr(row, key, val)
         rows.append(row)

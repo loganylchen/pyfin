@@ -275,6 +275,11 @@ class PipelineConfig:
     # gates, but nothing may be wired to it until the audit proves calibration,
     # determinism and selection honesty (CANDIDATE_EXISTENCE_DESIGN.md section 6).
     candidate_existence_mode: Literal["off", "audit"] = "off"
+    # Bootstrap replicates for the existence null. 4095 is the smallest B whose
+    # p-resolution reaches the directional BY threshold for a small family
+    # (spec B4.3); finalize marks any p that cannot reach its threshold as
+    # untestable rather than rounding it. 0 disables the null (statistics only).
+    candidate_existence_bootstrap: int = 4095
     # Catalog completion. PyFIN's default contract is an EXPRESSED assembly:
     # an annotated transcript with no EM mass is dropped on purpose. Some
     # benchmarks instead score against a complete catalog regardless of

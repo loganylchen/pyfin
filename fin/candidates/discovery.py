@@ -334,17 +334,22 @@ def _chain_cluster_candidates(
     indels_by_read: dict = {}
     junction_counts: dict = {}     # (donor, acceptor) -> [raw, indel_clean]
     alignments: dict = {}          # query_name -> ReadAlignment (collapse span_guard)
+    read_junctions: dict = {}      # query_name -> own CIGAR intron chain (evidence row)
+    read_strands: dict = {}        # query_name -> mapped strand (evidence row)
     _FLANK = 10
     for rd in non_fusion_reads:
         cigar = rd.get("cigartuples")
         ref_start = rd.get("reference_start")
         if cigar is None or ref_start is None:
             continue
-        read_chains.append((rd, extract_intron_chain(cigar, ref_start)))
+        chain = extract_intron_chain(cigar, ref_start)
+        read_chains.append((rd, chain))
         q = rd.get("query_name")
         if q is not None:
             spans[q] = (ref_start, rd.get("reference_end", ref_start))
             alignments[q] = read_alignment_from_cigar(cigar, ref_start)
+            read_junctions[q] = tuple(chain.introns)
+            read_strands[q] = "+" if rd.get("is_forward", True) else "-"
             if int(rd.get("mapping_quality") or 0) >= 1:
                 pos = ref_start
                 ind = []
@@ -631,6 +636,7 @@ def _chain_cluster_candidates(
         interval=interval, candidates=candidates, read_ids=all_read_ids,
         read_sequences=read_sequences, clusters=cluster_id_lists,
         shadows=shadow_map, read_spans=spans, indels_by_read=indels_by_read,
+        read_junctions=read_junctions, read_strands=read_strands,
         junction_support={j: (v[0], v[1]) for j, v in junction_counts.items()})
 
 

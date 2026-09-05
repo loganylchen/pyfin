@@ -130,6 +130,12 @@ class PipelineRunner:
         intervals = result["intervals"]
         logger.info("Generated %d intervals", len(intervals))
 
+        # Sample-level evidence prepass for the existence audit: one krill polyA
+        # pass over the sample and the strand-aware 3' ends, cached to the work
+        # dir so every worker judges intervals against the SAME versioned model.
+        if getattr(self.config, "candidate_existence_mode", "off") != "off":
+            self._prepare_sample_evidence()
+
         # Process each interval (serial by default; opt-in process parallelism).
         interval_outputs: List[IntervalOutput] = []
         if self.config.threads <= 1:
@@ -1377,6 +1383,87 @@ class PipelineRunner:
                 qr, read_ends, window, min_reads
             )
 
+    # ---- sample-level evidence for the existence test -----------------------
+    _SAMPLE_EVIDENCE_NAME = "_sample_evidence.json"
+
+    def _prepare_sample_evidence(self) -> None:
+        """Krill polyA calls + strand-aware 3' ends for every primary read,
+        written once to ``<work_dir>/_sample_evidence.json``. Idempotent."""
+        import json
+
+        out = Path(self.config.work_dir) / self._SAMPLE_EVIDENCE_NAME
+        if out.exists():
+            return
+        Path(self.config.work_dir).mkdir(parents=True, exist_ok=True)
+        polya: Dict[str, list] = {}
+        ends: Dict[str, list] = {}
+        if self.config.signal_path:
+            from fin.scoring.polya import compute_polya
+
+            read_seqs: Dict[str, str] = {}
+            with pysam.AlignmentFile(self.config.bam_path, "rb") as bam:
+                for r in bam.fetch():
+                    if r.is_unmapped or r.is_secondary or r.is_supplementary:
+                        continue
+                    rid = r.query_name
+                    if rid is None or rid in ends:
+                        continue
+                    if r.reference_start is None or r.reference_end is None:
+                        continue
+                    strand = "-" if r.is_reverse else "+"
+                    three = int(r.reference_end) if strand == "+" else int(r.reference_start)
+                    ends[rid] = [r.reference_name, strand, three]
+                    if r.query_sequence:
+                        read_seqs[rid] = r.query_sequence
+            pm = compute_polya(read_seqs, self.config.signal_path,
+                               pore=self.config.krill_pore, use_gpu=self.config.use_gpu)
+            polya = {rid: [v[0], v[1]] for rid, v in pm.items()}
+        tmp = out.with_suffix(".json.tmp")
+        with tmp.open("w") as fh:
+            json.dump({"polya": polya, "ends": ends, "version": "sample-evidence-v1"}, fh)
+        tmp.replace(out)
+        logger.info("Sample evidence written: %s (%d polyA calls, %d ends)",
+                    out, len(polya), len(ends))
+
+    def _annotated_tes(self):
+        """(chrom, strand) -> TES positions of the INPUT annotation (None without one)."""
+        cached = getattr(self, "_annotated_tes_cache", "unset")
+        if cached != "unset":
+            return cached
+        self._annotated_tes_cache = None
+        reader = getattr(self, "_gtf_reader", None)
+        if reader is None:
+            return None
+        out: Dict[Tuple[str, str], list] = {}
+        try:
+            txs = reader.transcripts.values() if hasattr(reader, "transcripts") else []
+            for tx in txs:
+                strand = getattr(tx, "strand", "+")
+                tes = tx.end if strand == "+" else tx.start
+                out.setdefault((tx.chrom, strand), []).append(int(tes))
+        except Exception:  # noqa: BLE001 - nuisance must degrade, never abort
+            return None
+        self._annotated_tes_cache = out or None
+        return self._annotated_tes_cache
+
+    def _sample_evidence(self):
+        """Load the cached sample evidence (None when the prepass did not run)."""
+        cached = getattr(self, "_sample_evidence_cache", "unset")
+        if cached != "unset":
+            return cached
+        import json
+
+        path = Path(self.config.work_dir) / self._SAMPLE_EVIDENCE_NAME
+        self._sample_evidence_cache = None
+        if path.exists():
+            with path.open() as fh:
+                d = json.load(fh)
+            self._sample_evidence_cache = (
+                {rid: (v[0], v[1]) for rid, v in d.get("polya", {}).items()},
+                {rid: (v[0], v[1], int(v[2])) for rid, v in d.get("ends", {}).items()},
+            )
+        return self._sample_evidence_cache
+
     def _fetch_read_seqs_and_ends(
         self,
     ) -> Tuple[Dict[str, str], Dict[str, Tuple[int, int]]]:
@@ -1679,11 +1766,27 @@ class PipelineRunner:
 
             comps = build_conflict_components(qo, candidate_set)
             if comps:
+                molecules, nuisance = None, None
+                ev = self._sample_evidence()
+                if ev is not None:
+                    from fin.analysis.molecule_evidence import build_molecule_evidence
+                    from fin.analysis.sample_nuisance import fit_sample_nuisance
+
+                    polya_map, read_ends = ev
+                    molecules = build_molecule_evidence(qo, candidate_set, polya_map=polya_map)
+                    # Leave-one-interval-out: the interval under test contributes
+                    # nothing to the nuisance it is judged against.
+                    nuisance = fit_sample_nuisance(
+                        polya_map, read_ends, exclude_reads=set(qo.kept_read_ids),
+                        claimed_tes=self._annotated_tes())
                 write_existence_shard(
                     self.config.work_dir, interval,
                     evaluate_candidate_existence(
                         qo, candidate_set, comps, interval,
                         sample_id=str(getattr(self.config, "bam_path", "")),
+                        molecules=molecules, nuisance=nuisance,
+                        bootstrap_replicates=int(getattr(
+                            self.config, "candidate_existence_bootstrap", 4095)),
                     ),
                 )
         ledger = None

@@ -32,6 +32,9 @@ GRIDS = {
     "sequin": dict(bench=ROOT / "sequin_v1_full_sweep_ratio_grid_v2",
                    work=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/_sequingrid"),
                    truth_name="sequin_chrIS_truth.gtf"),
+    "heya8": dict(bench=ROOT / "heya8_dual_full_sweep_ratio_grid_v2",
+                  work=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/_heya8grid"),
+                  truth_name="heya8_dual_truth.gtf"),
 }
 IMAGE = "quay.io/biocontainers/gffcompare:0.12.6--h9f5acd7_0"
 COLS = ["sample", "cond", "tool", "family", "status", "truth_transcripts",
