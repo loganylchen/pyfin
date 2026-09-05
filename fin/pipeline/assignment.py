@@ -950,7 +950,27 @@ class Assigner:
                 margin_thr = float(
                     getattr(self.config, "m2_diff_cover_margin", 0.0)
                 )
-            covered_vote = np.zeros(n_c, dtype=np.float64)
+            # The junction channel compares STRUCTURES. Candidates that share an
+            # intron chain (an annotated model and its read-extent sibling) are
+            # one structural hypothesis here: they score identically, so the
+            # margin, the hard assignment and the covered-vote prior are all
+            # taken over unique chains, and every member of the winning chain
+            # receives the decision (the endpoint channel and the mixture
+            # weights then split the read within the group). Without this the
+            # twin would always be the "runner-up" at margin 0, the read would
+            # be declared indistinguishable, and -- the twins never earning a
+            # vote -- its mass would flow to wobble variants that did.
+            # Single-exon candidates have no junctions to compare and keep
+            # their own identity. Singleton groups == legacy behaviour.
+            def _structure_key(c):
+                if getattr(c, "source", "") == "fusion":
+                    # a fusion's intron_chain holds arm A only; its structure is
+                    # its own (both arms), never shared with a linear transcript
+                    return ("fusion", c.candidate_id)
+                introns = tuple(getattr(c.intron_chain, "introns", ()) or ())
+                return introns if introns else ("mono", c.candidate_id)
+            group_of = [_structure_key(c) for c in cand_list]
+            covered_vote: Dict[object, float] = {}
             fuzzy: List[int] = []
             for i in range(n_r):
                 tie = ties_by_read.get(i)
@@ -963,8 +983,15 @@ class Assigner:
                 if not nlls or len(nlls) < 2:
                     fuzzy.append(i)  # no valid contrast -> abstain to prior/flat
                     continue
-                ordered = sorted(nlls.items(), key=lambda kv: kv[1])
-                best_j = ordered[0][0]
+                by_group: Dict[object, float] = {}
+                for j, v in nlls.items():
+                    k = group_of[j]
+                    by_group[k] = v if k not in by_group else min(by_group[k], v)
+                if len(by_group) < 2:
+                    fuzzy.append(i)  # one structure scored -> no contrast
+                    continue
+                ordered = sorted(by_group.items(), key=lambda kv: kv[1])
+                best_k = ordered[0][0]
                 margin = ordered[1][1] - ordered[0][1]
                 # The redistribution PRIOR (covered_vote) must be fed only by reads
                 # with EXPLICIT coverage: the per-read _tie_nll fallback leaves
@@ -973,11 +1000,13 @@ class Assigner:
                 # reads off unverified coverage).
                 covered_for_vote = cover_by_read.get(i) is True
                 if margin >= margin_thr:
-                    # M2 distinguishes -> hard assign to the lowest-NLL candidate.
-                    d_tx[i, best_j] = 0.0  # every other tie cell stays MISSING
+                    # M2 distinguishes -> hard assign to the lowest-NLL structure.
+                    for j in tie:
+                        if group_of[j] == best_k:
+                            d_tx[i, j] = 0.0  # every other tie cell stays MISSING
                     if covered_for_vote:
                         # Only covered+distinguishing reads define the locus ratio.
-                        covered_vote[best_j] += 1.0
+                        covered_vote[best_k] = covered_vote.get(best_k, 0.0) + 1.0
                 else:
                     # Indistinguishable (margin < thr), whether or not covered:
                     # defer to Pass B and redistribute by the covered-read ratio
@@ -985,22 +1014,31 @@ class Assigner:
                     # is thus the SOLE decider of hard-assign vs ratio-follow.
                     fuzzy.append(i)
 
-            # Pass B: redistribute each ambiguous read across its tie in proportion
-            # to the covered_vote ratio of those candidates (one-shot prior, not an
-            # EM feedback loop). d_tx = -log(p) so softmax(-d_tx) reproduces p at
-            # sigma=1; a zero-prior candidate stays MISSING. If NONE of the tie
-            # candidates earned covered votes, fall back to the flat 1/K split
-            # (== legacy behavior -> signal-dead loci are never starved).
+            # Pass B: redistribute each ambiguous read across the STRUCTURES in
+            # its tie in proportion to their covered_vote ratio (one-shot prior,
+            # not an EM feedback loop). d_tx = -log(p) so softmax(-d_tx)
+            # reproduces p at sigma=1; a zero-prior structure stays MISSING. If
+            # NONE of the tie's structures earned covered votes, fall back to the
+            # flat 1/K split (== legacy behavior -> signal-dead loci are never
+            # starved).
             for i in fuzzy:
                 tie = ties_by_read[i]
-                masses = np.array([covered_vote[j] for j in tie], dtype=np.float64)
+                groups = []
+                for j in tie:
+                    if group_of[j] not in groups:
+                        groups.append(group_of[j])
+                masses = np.array([covered_vote.get(k, 0.0) for k in groups], dtype=np.float64)
                 s = masses.sum()
                 if s > 0:
-                    p = masses / s
-                    for idx, j in enumerate(tie):
-                        if p[idx] > 0:
-                            d_tx[i, j] = -float(np.log(p[idx]))
-                        # p==0 -> leave MISSING (no covered support for this cand)
+                    p = {k: m / s for k, m in zip(groups, masses)}
+                    size = {k: sum(1 for j in tie if group_of[j] == k) for k in groups}
+                    for j in tie:
+                        k = group_of[j]
+                        if p[k] > 0:
+                            # the STRUCTURE's share p_k is split evenly over its
+                            # members so softmax(-d) conserves p_k per structure
+                            d_tx[i, j] = -float(np.log(p[k] / size[k]))
+                        # p==0 -> leave MISSING (no covered support for this structure)
                 else:
                     for j in tie:
                         d_tx[i, j] = 0.0  # flat 1/K (recall-safe fallback)

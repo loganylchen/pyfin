@@ -419,3 +419,76 @@ class TestM2PartialScoringAbstains:
         assert d_tx[0, 0] == pytest.approx(0.0)
         assert d_tx[0, 1] == pytest.approx(0.0)
         assert d_tx[0, 2] == pytest.approx(MISSING)
+
+
+# --- Structure-level gate: chain-identical twins (annotation + read-extent
+# sibling) in one tie. The junction channel compares STRUCTURES, so the twin
+# must not be the "runner-up at margin 0", both twins receive the decision, and
+# the covered-vote prior is per structure.
+TWIN_READS = ["r0", "r1", "r2", "r3", "r4"]
+TWIN_TIES = {i: [0, 1, 2] for i in range(5)}
+# r0-r2: the annotated chain wins by 5 (twins tie at 10); r3: wobble wins by 5;
+# r4: margin 0.2 between structures -> fuzzy -> follows the structure votes.
+TWIN_NLLS = {0: {0: 10.0, 1: 10.0, 2: 15.0}, 1: {0: 10.0, 1: 10.0, 2: 15.0},
+             2: {0: 10.0, 1: 10.0, 2: 15.0}, 3: {0: 15.0, 1: 15.0, 2: 10.0},
+             4: {0: 10.0, 1: 10.0, 2: 10.2}}
+TWIN_COVER = {i: True for i in range(5)}
+
+
+def _twin_cands():
+    def mk(cid, introns, start, end, source, extent_of=None):
+        return TranscriptCandidate(
+            candidate_id=cid, intron_chain=IntronChain(introns=introns), three_prime_pos=end,
+            sequence="ACGT" * 25, source=source, supporting_read_ids=set(), chrom="chr1",
+            strand="+", start=start, end=end, extent_of=extent_of)
+    return [mk("anno", ((1200, 1500),), 1000, 1900, "gtf"),
+            mk("anno.ext", ((1200, 1500),), 1000, 2000, "gtf", extent_of="anno"),
+            mk("novel_w", ((1202, 1500),), 1000, 2000, "novel")]
+
+
+def _fake_tie_nll_twin(self, kept_read_ids, read_seqs, cand_list, aligners, raw):
+    return dict(TWIN_NLLS), dict(TWIN_TIES), 5, 5, dict(TWIN_COVER)
+
+
+class TestStructureLevelGateWithTwins:
+    def setup_method(self):
+        self.captured = {}
+        cfg = PipelineConfig(
+            bam_path="/tmp/x.bam", quant_mode="m2_em", use_gpu=False,
+            m2_diff_cover_gate=True, m2_diff_cover_margin=0.5,
+        )
+        cands = _twin_cands()
+        read_seqs = {rid: "ACGT" * 25 for rid in TWIN_READS}
+        cs = CandidateSet(interval=GenomicInterval(chrom="chr1", start=0, end=3000, strand="+"),
+                          candidates=cands, read_ids=set(read_seqs), read_sequences=read_seqs)
+
+        def _fake_em(**kwargs):
+            self.captured.update(kwargs)
+            n_r, n_c = kwargs["dist_read_to_tx"].shape
+            return np.zeros((n_r, n_c)), np.zeros(n_r, dtype=np.int64), None
+
+        runner = PipelineRunner(cfg)
+        with patch("mappy.Aligner", _FakeAligner), patch(
+            "fin.scoring.mappy_score.score_hit", return_value=1.0,
+        ), patch.object(PipelineRunner, "_tie_nll", _fake_tie_nll_twin), patch.object(
+            PipelineRunner, "_eff_lengths", return_value=None
+        ), patch("fin.pipeline.assignment.em_with_coherence", side_effect=_fake_em), patch(
+            "fin.pipeline.assignment.quantify_transcripts", return_value=[]
+        ):
+            runner._quant_m2_em(cs, list(TWIN_READS), GenomicInterval(chrom="chr1", start=0, end=3000, strand="+"))
+        self.d_tx = np.asarray(self.captured["dist_read_to_tx"])
+
+    def test_twin_is_not_the_runner_up(self):
+        for i in range(3):
+            assert self.d_tx[i, 0] == pytest.approx(0.0) and self.d_tx[i, 1] == pytest.approx(0.0)
+            assert self.d_tx[i, 2] == pytest.approx(MISSING)
+        assert self.d_tx[3, 2] == pytest.approx(0.0) and self.d_tx[3, 0] == pytest.approx(MISSING)
+
+    def test_fuzzy_read_follows_structure_votes(self):
+        # votes: annotated chain 3, wobble 1 -> p = 0.75 / 0.25 per STRUCTURE;
+        # the twins share 0.75 so that softmax(-d) conserves it per structure.
+        assert self.d_tx[4, 0] == pytest.approx(-np.log(0.375))
+        assert self.d_tx[4, 1] == pytest.approx(-np.log(0.375))
+        assert self.d_tx[4, 2] == pytest.approx(-np.log(0.25))
+        p = np.exp(-self.d_tx[4, :3]); p = p / p.sum()
+        assert p[0] + p[1] == pytest.approx(0.75) and p[2] == pytest.approx(0.25)
