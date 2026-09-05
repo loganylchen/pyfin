@@ -205,15 +205,15 @@ class TestApaCoexistence:
 
 class TestSampleNuisance:
     def test_fit_from_calls_and_ends_with_interval_leave_out(self):
-        pm = {f"r{i}": (30.0, "PASS") for i in range(40)}
-        pm.update({f"f{i}": (5.0, "FAIL") for i in range(10)})
-        ends = {f"r{i}": ("c", "+", 1000 + (i % 3) - 1) for i in range(20)}
-        ends.update({f"r{i}": ("c", "+", 5000 + (i % 3) - 1) for i in range(20, 40)})
+        pm = {f"r{i}": (30.0, "PASS") for i in range(120)}
+        pm.update({f"f{i}": (5.0, "FAIL") for i in range(30)})
+        ends = {f"r{i}": ("c", "+", 1000 + (i % 3) - 1) for i in range(60)}
+        ends.update({f"r{i}": ("c", "+", 5000 + (i % 3) - 1) for i in range(60, 120)})
         m = fit_sample_nuisance(pm, ends)
         assert m.polya_available and m.polya_call_rate == pytest.approx(0.8)
-        assert m.endpoint.n_fit == 40
-        m2 = fit_sample_nuisance(pm, ends, exclude_reads=[f"r{i}" for i in range(20)])
-        assert m2.endpoint.n_fit == 20                 # the left-out interval is absent
+        assert m.endpoint.n_fit == 120
+        m2 = fit_sample_nuisance(pm, ends, exclude_reads=[f"r{i}" for i in range(60)])
+        assert m2.endpoint.n_fit == 60                 # the left-out interval is absent
 
     def test_no_calls_means_channel_unavailable(self):
         m = fit_sample_nuisance({}, {})

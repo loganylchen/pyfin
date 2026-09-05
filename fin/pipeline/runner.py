@@ -38,6 +38,7 @@ from fin.pipeline.selection import (
     junction_dominance_select,
     select_global,
     select_m2_interval,
+    unify_extent_pairs,
 )
 from fin.scoring.em_inputs import build_em_matrices
 from fin.scoring.krill_tiebreak import krill_tiebreak
@@ -133,7 +134,8 @@ class PipelineRunner:
         # Sample-level evidence prepass for the existence audit: one krill polyA
         # pass over the sample and the strand-aware 3' ends, cached to the work
         # dir so every worker judges intervals against the SAME versioned model.
-        if getattr(self.config, "candidate_existence_mode", "off") != "off":
+        if (getattr(self.config, "candidate_existence_mode", "off") != "off"
+                or getattr(self.config, "assignment_channels", "none") != "none"):
             self._prepare_sample_evidence()
 
         # Process each interval (serial by default; opt-in process parallelism).
@@ -170,6 +172,13 @@ class PipelineRunner:
             if ledger is not None:
                 responsibility_ledgers.append(ledger)
 
+        # An annotated model's extent pair (annotation vs read-extent sibling)
+        # that split across intervals is unified BEFORE aggregation, so its
+        # reads and soft mass are deduplicated under one identity.
+        extent_redirects, extent_outcomes = unify_extent_pairs(all_quant_results)
+        if extent_redirects:
+            logger.info("Unified %d annotated extent pair(s) across intervals",
+                        len(extent_redirects))
         # Aggregate across intervals. Responsibility ledgers remain separate so
         # the historical aggregation/selection evidence is not changed by refit.
         aggregated = aggregate_across_intervals(all_quant_results)
@@ -178,6 +187,7 @@ class PipelineRunner:
             output_gtf=self.config.output_gtf,
             output_tsv=self.config.output_tsv,
             responsibility_ledgers=responsibility_ledgers,
+            extent_redirects=extent_redirects,
         )
 
     def _finalize_and_write(
@@ -186,6 +196,7 @@ class PipelineRunner:
         output_gtf: Optional[str],
         output_tsv: Optional[str],
         responsibility_ledgers: Optional[List[ResponsibilityLedger]] = None,
+        extent_redirects: Optional[Dict[str, str]] = None,
     ) -> Dict[str, QuantResult]:
         """Finalize: diagnostic dump -> GLOBAL selection -> gene-id resolution + writers.
 
@@ -369,6 +380,11 @@ class PipelineRunner:
                     "post-selection refit is enabled but no responsibility "
                     "ledgers reached global finalization"
                 )
+            # Cross-interval extent-pair folds (unify_extent_pairs) are id -> id
+            # redirects exactly like junction-snap merges: a read whose interval
+            # ledger still names the folded loser is re-quantified on the winner.
+            if extent_redirects:
+                snap_redirects = {**extent_redirects, **dict(snap_redirects or {})}
             aggregated, diagnostics = refit_survivor_abundance(
                 aggregated, ledgers, snap_redirects=snap_redirects,
                 split_routes=endpoint_routes, split_primary=endpoint_primary,
@@ -616,6 +632,7 @@ class PipelineRunner:
             clustering=getattr(self.config, "clustering", "read_chains"),
             junction_correction=self._make_junction_correction(interval, chrom_seq),
             junction_correction_apply=self._junction_correction_apply(),
+            read_extent_contradicted=self._read_extent_contradicted(),
             canonical_search_bp=self.config.canonical_search_bp,
             max_chains_per_read=self.config.max_chains_per_read,
             canonical_motifs=self.config.canonical_motifs,
@@ -1389,12 +1406,45 @@ class PipelineRunner:
     def _prepare_sample_evidence(self) -> None:
         """Krill polyA calls + strand-aware 3' ends for every primary read,
         written once to ``<work_dir>/_sample_evidence.json``. Idempotent."""
+        import hashlib
         import json
+        import os
+        import shutil
 
         out = Path(self.config.work_dir) / self._SAMPLE_EVIDENCE_NAME
+        identity = {
+            "bam": str(Path(self.config.bam_path).resolve()),
+            "signal": (str(Path(self.config.signal_path).resolve())
+                       if self.config.signal_path else ""),
+            "pore": str(self.config.krill_pore),
+        }
         if out.exists():
-            return
+            try:
+                with out.open() as fh:
+                    head = json.load(fh)
+                if (head.get("version") == "sample-evidence-v2"
+                        and head.get("identity") == identity):
+                    return
+            except (OSError, ValueError):
+                pass
+            logger.info("Sample evidence in work dir is stale (version/inputs); rebuilding")
         Path(self.config.work_dir).mkdir(parents=True, exist_ok=True)
+        # The evidence depends only on the sample (BAM + signal + pore), not on
+        # the annotation or any flag, so a shared cache (PYFIN_SAMPLE_EVIDENCE_CACHE)
+        # lets every run of the same sample reuse one krill pass.
+        shared_dir = os.environ.get("PYFIN_SAMPLE_EVIDENCE_CACHE")
+        shared = None
+        if shared_dir:
+            key = hashlib.blake2b("|".join([
+                str(Path(self.config.bam_path).resolve()),
+                str(Path(self.config.signal_path).resolve()) if self.config.signal_path else "",
+                str(self.config.krill_pore), "sample-evidence-v2",
+            ]).encode("utf-8"), digest_size=8).hexdigest()
+            shared = Path(shared_dir) / f"sample_evidence_{key}.json"
+            if shared.exists():
+                shutil.copyfile(shared, out)
+                logger.info("Sample evidence reused from cache: %s", shared)
+                return
         polya: Dict[str, list] = {}
         ends: Dict[str, list] = {}
         if self.config.signal_path:
@@ -1412,7 +1462,8 @@ class PipelineRunner:
                         continue
                     strand = "-" if r.is_reverse else "+"
                     three = int(r.reference_end) if strand == "+" else int(r.reference_start)
-                    ends[rid] = [r.reference_name, strand, three]
+                    five = int(r.reference_start) if strand == "+" else int(r.reference_end)
+                    ends[rid] = [r.reference_name, strand, three, five]
                     if r.query_sequence:
                         read_seqs[rid] = r.query_sequence
             pm = compute_polya(read_seqs, self.config.signal_path,
@@ -1420,10 +1471,137 @@ class PipelineRunner:
             polya = {rid: [v[0], v[1]] for rid, v in pm.items()}
         tmp = out.with_suffix(".json.tmp")
         with tmp.open("w") as fh:
-            json.dump({"polya": polya, "ends": ends, "version": "sample-evidence-v1"}, fh)
+            json.dump({"polya": polya, "ends": ends, "version": "sample-evidence-v2",
+                       "identity": identity}, fh)
         tmp.replace(out)
+        if shared is not None:
+            try:
+                shared.parent.mkdir(parents=True, exist_ok=True)
+                # Writer-unique temp name + atomic rename: two runs of the same
+                # sample that both miss the cache must never publish a file
+                # the other is still writing.
+                import tempfile
+                fd, stmp = tempfile.mkstemp(prefix=shared.name + ".", suffix=".tmp",
+                                            dir=str(shared.parent))
+                os.close(fd)
+                shutil.copyfile(out, stmp)
+                os.replace(stmp, shared)
+            except OSError as exc:  # noqa: BLE001 - the cache is an optimisation
+                logger.warning("sample evidence cache write failed: %s", exc)
         logger.info("Sample evidence written: %s (%d polyA calls, %d ends)",
                     out, len(polya), len(ends))
+
+    def _read_extent_contradicted(self):
+        """Callable(gtf_candidate, read_ids, alternatives) -> {"tes"/"tss":
+        [contradicting read ids]} under the sample's endpoint kernels (empty =
+        consistent); only those reads define the re-estimated end. Applied to single-exon annotation
+        matched by overlap and to multi-exon annotated keys (their wobble-
+        equivalent reads). None when the endpoint channels are off."""
+        if getattr(self.config, "assignment_channels", "none") == "none":
+            return None
+        ev = self._sample_evidence()
+        if ev is None:
+            return None
+        from fin.analysis.molecule_evidence import POLYA_PASS, polya_state
+        from fin.analysis.sample_nuisance import fit_sample_nuisance
+
+        polya_map, read_ends, read_starts = ev
+        want_tss = getattr(self.config, "assignment_channels", "none") == "ends"
+        nuisance = fit_sample_nuisance(
+            polya_map, read_ends, claimed_tes=self._annotated_tes(),
+            read_starts=read_starts if want_tss else None,
+            claimed_tss=self._annotated_tss() if want_tss else None)
+        endpoint = nuisance.endpoint if nuisance.polya_available else None
+        start = nuisance.start if want_tss else None
+
+        def _tes(c):
+            return c.end if getattr(c, "strand", "+") == "+" else c.start
+
+        def _tss(c):
+            return c.start if getattr(c, "strand", "+") == "+" else c.end
+
+        def contradicted(gc, read_ids, alternatives=()) -> Dict[str, List[str]]:
+            """{"tes": [read ids], "tss": [read ids]} -- per annotated end of
+            ``gc``, the reads that contradict it and that no alternative
+            annotated model explains (a read landing within the narrow kernel
+            of another annotated TES/TSS came from that model). Only those
+            reads may define the re-estimated end. Empty (falsy) = consistent."""
+            strand = getattr(gc, "strand", "+")
+            t_c, s_c = _tes(gc), _tss(gc)
+            alt_tes = [_tes(a) for a in alternatives]
+            alt_tss = [_tss(a) for a in alternatives]
+            out: Dict[str, List[str]] = {}
+            for rid in sorted(read_ids):
+                if endpoint is not None:
+                    qc, _ = polya_state(polya_map.get(rid))
+                    loc = read_ends.get(rid)
+                    if qc == POLYA_PASS and loc is not None:
+                        e_r = loc[2]
+                        d = (e_r - t_c) if strand == "+" else (t_c - e_r)
+                        if (d > 0 and endpoint.narrow_posterior(d) < 0.5
+                                and not any(endpoint.narrow_posterior(abs(e_r - t)) >= 0.5
+                                            for t in alt_tes)):
+                            out.setdefault("tes", []).append(rid)   # polyA read past the claimed end
+                if start is not None and getattr(start, "available", False):
+                    loc5 = read_starts.get(rid)
+                    if loc5 is not None:
+                        s_r = loc5[2]
+                        u = (s_c - s_r) if strand == "+" else (s_r - s_c)
+                        if (u > 0 and start.narrow_posterior(u) < 0.5
+                                and not any(start.narrow_posterior(abs(s_r - t)) >= 0.5
+                                            for t in alt_tss)):
+                            out.setdefault("tss", []).append(rid)   # read begins upstream
+            return out
+
+        return contradicted
+
+    def _endpoint_context(self, candidate_set):
+        """(polya states by read, endpoint model, read 3' ends) for the assignment's
+        3'/polyA channel, or None when the channel is off / unavailable. The
+        endpoint model is fitted leave-one-interval-out against the input
+        annotation's claimed TES coordinates (see sample_nuisance)."""
+        if getattr(self.config, "assignment_channels", "none") == "none":
+            return None
+        ev = self._sample_evidence()
+        if ev is None:
+            return None
+        from fin.analysis.sample_nuisance import fit_sample_nuisance
+
+        polya_map, read_ends, read_starts = ev
+        interval_reads = set(getattr(candidate_set, "read_ids", set()) or ())
+        channels = getattr(self.config, "assignment_channels", "none")
+        tss = self._annotated_tss() if channels == "ends" else None
+        nuisance = fit_sample_nuisance(
+            polya_map, read_ends, exclude_reads=interval_reads,
+            claimed_tes=self._annotated_tes(),
+            read_starts=read_starts if channels == "ends" else None, claimed_tss=tss)
+        ctx = {"polya": polya_map, "ends": read_ends,
+               "endpoint": nuisance.endpoint if nuisance.polya_available else None,
+               "starts": read_starts if channels == "ends" else None,
+               "start": nuisance.start if channels == "ends" else None}
+        if ctx["endpoint"] is None and ctx["start"] is None:
+            return None
+        return ctx
+
+    def _annotated_tss(self):
+        """(chrom, strand) -> TSS positions of the INPUT annotation (None without one)."""
+        cached = getattr(self, "_annotated_tss_cache", "unset")
+        if cached != "unset":
+            return cached
+        self._annotated_tss_cache = None
+        reader = getattr(self, "_gtf_reader", None)
+        if reader is None:
+            return None
+        out: Dict[Tuple[str, str], list] = {}
+        try:
+            for tx in (reader.transcripts.values() if hasattr(reader, "transcripts") else []):
+                strand = getattr(tx, "strand", "+")
+                tss = tx.start if strand == "+" else tx.end
+                out.setdefault((tx.chrom, strand), []).append(int(tss))
+        except Exception:  # noqa: BLE001
+            return None
+        self._annotated_tss_cache = out or None
+        return self._annotated_tss_cache
 
     def _annotated_tes(self):
         """(chrom, strand) -> TES positions of the INPUT annotation (None without one)."""
@@ -1458,9 +1636,11 @@ class PipelineRunner:
         if path.exists():
             with path.open() as fh:
                 d = json.load(fh)
+            ends = d.get("ends", {})
             self._sample_evidence_cache = (
                 {rid: (v[0], v[1]) for rid, v in d.get("polya", {}).items()},
-                {rid: (v[0], v[1], int(v[2])) for rid, v in d.get("ends", {}).items()},
+                {rid: (v[0], v[1], int(v[2])) for rid, v in ends.items()},
+                {rid: (v[0], v[1], int(v[3])) for rid, v in ends.items() if len(v) > 3},
             )
         return self._sample_evidence_cache
 
@@ -1701,9 +1881,11 @@ class PipelineRunner:
         coherence term. All signal scoring is in-memory krill; there is no f5c
         CLI path.
         """
+        endpoint_ctx = self._endpoint_context(candidate_set)
         qo = self._assigner.assign(
             candidate_set, read_ids,
             tie_nll_fn=self._tie_nll, eff_lengths_fn=self._eff_lengths,
+            endpoint_context=endpoint_ctx,
         )
         if qo is None:
             return [], None
@@ -1753,6 +1935,7 @@ class PipelineRunner:
                     candidate_set, read_ids,
                     tie_nll_fn=self._tie_nll, eff_lengths_fn=self._eff_lengths,
                     start_likelihood_context=rec.start_models,
+                    endpoint_context=endpoint_ctx,
                 )
                 if qo2 is not None:
                     qo = qo2
@@ -1772,7 +1955,7 @@ class PipelineRunner:
                     from fin.analysis.molecule_evidence import build_molecule_evidence
                     from fin.analysis.sample_nuisance import fit_sample_nuisance
 
-                    polya_map, read_ends = ev
+                    polya_map, read_ends, _read_starts = ev
                     molecules = build_molecule_evidence(qo, candidate_set, polya_map=polya_map)
                     # Leave-one-interval-out: the interval under test contributes
                     # nothing to the nuisance it is judged against.

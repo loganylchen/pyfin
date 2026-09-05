@@ -54,6 +54,13 @@ class TranscriptCandidate:
     # Stable discovery splice-family identity. None for mono, fusion, and
     # legacy discovery paths that do not construct structural families.
     family_id: Optional[str] = None
+    # Set on a READ-EXTENT sibling of an annotated model: the annotation's
+    # transcript_id. The sibling carries the annotation's intron chain (and its
+    # junction trust: source == "gtf") with the reads' span instead of the
+    # annotated one; it exists only when the reads contradict the annotated
+    # ends. The pair is ONE model with two extent estimates -- selection keeps
+    # the better-supported one and folds the other into it.
+    extent_of: Optional[str] = None
 
     # Complete-splice-chain evidence (families discovery only; ALWAYS
     # collected - one CIGAR walk per read - and recorded on the candidate;

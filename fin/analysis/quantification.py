@@ -37,6 +37,8 @@ class QuantResult:
     exons: Tuple[Tuple[int, int], ...] = ()  # 0-based
     gene_id: str = ""
     family_id: Optional[str] = None
+    # Read-extent sibling of an annotated model (see TranscriptCandidate.extent_of).
+    extent_of: Optional[str] = None
     # Composite signal scores. Vestigial: no code path populates these anymore
     # (the composite scorer was removed with the quantify subcommand), so in
     # every assembly quant_mode (argmax/m1_em/m2_em) they stay at their 0.0
@@ -138,6 +140,7 @@ def quantify_transcripts(
                 end=cand.end,
                 exons=_exons_from_candidate(cand),
                 family_id=cand.family_id,
+                extent_of=getattr(cand, "extent_of", None),
                 complete_chain_weakest_indel_clean_depth=getattr(
                     cand, "complete_chain_weakest_indel_clean_depth", 0),
                 assigned_read_ids=assigned_ids,
@@ -561,6 +564,7 @@ def aggregate_across_intervals(
                     "exons": qr.exons,
                     "gene_id": qr.gene_id,
                     "family_ids": set(),
+                    "extent_of": getattr(qr, "extent_of", None),
                     "coherence_sum": 0.0,
                     "discrimination_sum": 0.0,
                     "combined_sum": 0.0,
@@ -576,6 +580,16 @@ def aggregate_across_intervals(
             a = agg[qr.candidate_id]
             if qr.family_id is not None:
                 a["family_ids"].add(qr.family_id)
+            if a["extent_of"] and (qr.start, qr.end) != (a["start"], a["end"]):
+                # A read-extent sibling keeps one intron chain but may have been
+                # extended differently in different intervals: take the union
+                # extent (order-independent) and stretch the terminal exons.
+                a["start"], a["end"] = min(a["start"], qr.start), max(a["end"], qr.end)
+                ex = [tuple(e) for e in a["exons"]]
+                if ex:
+                    ex[0] = (a["start"], ex[0][1])
+                    ex[-1] = (ex[-1][0], a["end"])
+                    a["exons"] = tuple(ex)
             # Preserve max EM responsibility across intervals (a candidate's
             # max_R is the highest single-read responsibility it ever sees).
             if qr.max_R > a["max_R"]:
@@ -669,6 +683,7 @@ def aggregate_across_intervals(
             exons=a["exons"],
             gene_id=a["gene_id"],
             family_id=min(a["family_ids"]) if a["family_ids"] else None,
+            extent_of=a["extent_of"],
             coherence_score=coherence,
             discrimination_score=discrimination,
             combined_score=combined,

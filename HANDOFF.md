@@ -355,6 +355,36 @@ Final validation of the exact committed tree: 1370 tests pass; determinism
 | Sequin (held out, 100 paired cells) | 71.42/91.44/79.62 | **73.98/90.52/80.78** |
 | SIRV4 (development, 150 paired cells) | 89.29/85.96/87.44 | 89.21/85.84/87.33 |
 
+## 4f. Endpoint channels + read-extent hypothesis (2026-09-05, branch `existence-algorithm`, UNCOMMITTED)
+
+What: `--assignment-channels tes|ends` (requires `--signal` and m2_em). Per-sample nuisance
+kernels (3' EndpointModel on polyA-PASS ends, one-sided 5' StartModel) enter the m2_em
+posterior as 3'/5' terms, and an annotated model whose ends the reads contradict (a
+polyA-PASS read past the claimed TES / a read starting upstream of the claimed TSS, not
+explained by any other annotated model on the same or a wobble chain) gets a READ-EXTENT
+SIBLING `<gtf_id>.ext` (same intron chain, `source="gtf"`, `extent_of=gtf_id`, only the
+contradicted end re-estimated from the contradicting reads, outward). Selection keeps one of
+the pair by posterior mass (ties -> annotation), folding the other; a pair split across
+intervals is unified before aggregation (`unify_extent_pairs`) and its fold is a refit
+redirect. A kernel is usable only when calibrated (n_fit >= 50, narrow scale <= 25 bp);
+otherwise every endpoint term abstains. Design + measured story: CANDIDATE_EXISTENCE_DESIGN.md
+SS9. Root cause it fixes: trunc-condition wobble FPs (HEYA8 SIRV107 reproduction in
+`experiments/prod_validation/_heya8grid/_dbg_sirv107/`).
+
+Measured (expression contract, paired vs the maximin default, snapshot `_snap/endsarm5`):
+Sequin F1 +0.64 (CI [+0.27,+1.12], Sn +0.66, Pr +0.64, 17 up / 0 down); SIRV F1 +1.49
+(CI [+0.98,+2.05], Sn +1.12, Pr +1.76, 95/26/35); HEYA8 pending. `folded_tss_recovery_mode=
+require`: SIRV +0.05, Sequin 0, HEYA8 +0.03 (CI [+0.01,+0.07]).
+
+Codex (gpt-6-astra, effort max) review rounds 1-9: every finding fixed except one it could
+not clear on a scope argument: the aggregator's cross-interval dedup ratio (unique hard
+reads / hard observations) is an approximation ONLY for reads that reach two intervals'
+assignment axes, which in this pipeline are exactly the fusion-classified primaries
+(>= 250 bp soft clip) excluded from interval construction but not from the read axis --
+the PRE-EXISTING "fusion quant-axis leak" (discovery.py ~856/866; deferred in memory since
+the SIRV4 era). This batch neither introduces nor worsens it; it is tracked as its own
+default-path change requiring its own grid validation.
+
 ## 5. Validation protocol for ANY future change (frozen invariants)
 
 1. Opt-in flag, default off, no profile enables it; explicit misuse fails

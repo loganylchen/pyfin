@@ -179,6 +179,17 @@ def test_mono_exon_catalog_entry_is_added_when_span_differs():
     assert audit["added"] == 1 and "m" in out
 
 
+def test_read_extent_sibling_covers_its_mono_parent():
+    """A surviving ``X.ext`` (mono, span re-estimated from the reads) IS the
+    annotated model X: completion must not add X's rejected span back."""
+    sib = _qr("m1.ext", [(100, 260)], source="gtf")
+    sib.extent_of = "m1"
+    out, audit = complete_from_catalog(
+        {"m1.ext": sib}, _Reader([_Tx("m1", "g", "chr1", "+", [(100, 200)])]), mode="complete")
+    assert set(out) == {"m1.ext"}
+    assert audit["already_assembled"] == 1 and audit["catalog_models_for_fraction"] == 1
+
+
 def test_transcript_without_exons_is_skipped_not_crashed():
     agg = {"asm": _qr("asm", [(100, 200), (300, 400)])}
     reader = _Reader([_Tx("empty", "g", "chr1", "+", [])])

@@ -44,7 +44,7 @@ def write_unfiltered_diagnostic(
     # consumers don't see empty gene_id columns.
     for cid, qr in aggregated.items():
         if qr.source == "gtf" and gtf_reader:
-            tx = gtf_reader.get_transcript(cid)
+            tx = gtf_reader.get_transcript(getattr(qr, "extent_of", None) or cid)
             if tx and not qr.gene_id:
                 qr.gene_id = tx.gene_id
         if not qr.gene_id:
@@ -94,7 +94,7 @@ def finalize_outputs(
     # Resolve gene_ids from GTF annotation
     for cid, qr in aggregated.items():
         if qr.source == "gtf" and gtf_reader:
-            tx = gtf_reader.get_transcript(cid)
+            tx = gtf_reader.get_transcript(getattr(qr, "extent_of", None) or cid)
             if tx:
                 qr.gene_id = tx.gene_id
         if not qr.gene_id:

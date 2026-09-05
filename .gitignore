@@ -217,3 +217,5 @@ fin/_eventalign/tmp
 # OMC orchestration state
 .omc/
 progress.txt
+# Added by code-review-graph
+.code-review-graph/

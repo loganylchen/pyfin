@@ -321,7 +321,8 @@ def evaluate_containment(
             # offset (one eligible bin). A discovered (novel) start was
             # chosen from the data, so the honest search space is every bin
             # of the parent frame.
-            n_bins = 1 if short.source == "gtf" else max(1, tx_len // 25)
+            n_bins = (1 if short.source == "gtf" and not getattr(short, "extent_of", None)
+                      else max(1, tx_len // 25))
             ev = evaluate_internal_tss(
                 candidate_id=short.candidate_id,
                 parent_id=long.candidate_id,

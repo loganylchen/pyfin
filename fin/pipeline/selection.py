@@ -22,6 +22,7 @@ owned here.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -77,11 +78,37 @@ def select_m2_interval(
     outcomes: List[SelectionOutcome] = []
     drop_cols: set = set()
 
+    recorded: set = set()
+
     def _record_drops(cols, reason: str) -> None:
-        for j in cols:
+        # One decisive outcome per candidate: a column already folded/dropped
+        # by an earlier step is not re-recorded by a later gate.
+        for j in sorted(cols):
+            if j in recorded:
+                continue
+            recorded.add(j)
             outcomes.append(SelectionOutcome(
                 cand_list[j].candidate_id, "drop", reason,
             ))
+
+    # --- Extent-pair resolution. An annotated model whose ends the reads
+    #     contradicted was emitted twice: with the annotated span and with the
+    #     reads' span (TranscriptCandidate.extent_of). Those are two estimates
+    #     of ONE model's extent parameter, never two transcripts, so exactly one
+    #     survives: the one the posterior gave more mass, with the other's reads
+    #     and mass pooled into it. Resolved FIRST so every later gate sees the
+    #     model once, with all its evidence, as it would have without the
+    #     hypothesis. No siblings (the default path) -> nothing happens;
+    #     otherwise R / ties / nlls are REPLACED by pooled copies so every
+    #     mass- or support-based gate below reads the merged column. ---
+    folded, R, ties_by_read, nlls_by_read = resolve_extent_pairs(
+        cand_list, R, ties_by_read, nlls_by_read, quant_results, drop_cols, outcomes)
+    if folded:
+        recorded.update(drop_cols)
+        logger.info(
+            "m2_em interval %s: resolved %d annotated extent pair(s)",
+            interval.region_string, folded,
+        )
 
     # --- P2 containment decision layer (opt-in). Evaluate every contained
     #     short-in-long candidate pair with the degradation-aware TES/TSS
@@ -92,6 +119,10 @@ def select_m2_interval(
     #     from the competition gates below; abstention never acts. ---
     containment_exempt_ids: set = set()
     _cmode = getattr(config, "containment_evidence_mode", "off")
+    # Hypotheses already folded away (an extent alternative) are not evidence
+    # for the opt-in decision layers below: they compare live models only.
+    live_cands = [c for j, c in enumerate(cand_list) if j not in drop_cols]
+    live_qrs = [q for j, q in enumerate(quant_results) if j not in drop_cols]
     if _cmode != "off":
         from fin.analysis.containment_evidence import (
             containment_interval_actions,
@@ -100,7 +131,7 @@ def select_m2_interval(
         )
 
         c_rows = evaluate_containment(
-            cand_list, quant_results,
+            live_cands, live_qrs,
             getattr(candidate_set, "read_spans", None) or {},
             interval_name=interval.region_string,
         )
@@ -143,7 +174,7 @@ def select_m2_interval(
         )
 
         je_drop_ids, je_rows = run_junction_election(
-            config, cand_list, quant_results, candidate_set,
+            config, live_cands, live_qrs, candidate_set,
             interval_name=interval.region_string,
         )
         if je_rows:
@@ -457,6 +488,75 @@ def select_m2_interval(
 COMPLETE_CHAIN_RESCUE_NOVEL_MONO_JUNC_MIN = 10
 
 
+def resolve_extent_pairs(cand_list, R, ties_by_read, nlls_by_read, quant_results,
+                         drop_cols: set, outcomes: List[SelectionOutcome]):
+    """Keep one of {annotated span, read span} per annotated model; fold the other.
+
+    The winner is the column with more EM mass (ties -> the annotated span, so
+    an uninformative posterior leaves the annotation exactly as it was). The
+    loser's hard reads and soft mass move to the winner, its column mass, tie
+    membership and junction NLLs are re-pointed at the winner (so every later
+    gate that reads ``R`` / ``ties_by_read`` / ``nlls_by_read`` sees ONE model
+    with all its evidence), and the loser joins ``drop_cols`` with a ``fold``
+    outcome. Returns ``(n_pairs, R, ties_by_read, nlls_by_read)``; the inputs
+    are returned untouched when there is no pair.
+    """
+    col = {c.candidate_id: j for j, c in enumerate(cand_list)}
+    pairs = []
+    for j, c in enumerate(cand_list):
+        parent = getattr(c, "extent_of", None)
+        if parent and parent in col and col[parent] not in drop_cols and j not in drop_cols:
+            pairs.append((col[parent], j))
+    if not pairs:
+        return 0, R, ties_by_read, nlls_by_read
+    R = np.array(R, dtype=float, copy=True)
+    mass = R.sum(axis=0)
+    qr_by_id = {q.candidate_id: q for q in quant_results}
+    remap: Dict[int, int] = {}
+    n = 0
+    for i, j in pairs:
+        win, lose = (j, i) if mass[j] > mass[i] else (i, j)
+        wq = qr_by_id.get(cand_list[win].candidate_id)
+        lq = qr_by_id.get(cand_list[lose].candidate_id)
+        if wq is None or lq is None:
+            continue
+        union = set(wq.assigned_read_ids) | set(lq.assigned_read_ids)
+        n_w, n_l = wq.num_assigned_reads, lq.num_assigned_reads
+        if n_w + n_l > 0:                       # read-weighted mean assignment probability
+            wq.confidence = (wq.confidence * n_w + lq.confidence * n_l) / (n_w + n_l)
+        wq.assigned_read_ids = tuple(sorted(union))
+        wq.num_assigned_reads = len(union)
+        wq.abundance += lq.abundance
+        wq.max_R = max(wq.max_R, lq.max_R)
+        R[:, win] += R[:, lose]
+        R[:, lose] = 0.0
+        remap[lose] = win
+        drop_cols.add(lose)
+        outcomes.append(SelectionOutcome(
+            cand_list[lose].candidate_id, "fold", "extent_alternative",
+            fold_into=cand_list[win].candidate_id,
+        ))
+        n += 1
+    if remap:
+        new_ties: Dict[int, List[int]] = {}
+        for r, cols in (ties_by_read or {}).items():
+            seen: List[int] = []
+            for c in cols:
+                c = remap.get(c, c)
+                if c not in seen:
+                    seen.append(c)
+            new_ties[r] = seen
+        new_nlls: Dict[int, Dict[int, float]] = {}
+        for r, d in (nlls_by_read or {}).items():
+            m: Dict[int, float] = {}
+            for c, v in d.items():
+                c = remap.get(c, c)
+                m[c] = v if c not in m else min(m[c], v)
+            new_nlls[r] = m
+        ties_by_read, nlls_by_read = new_ties, new_nlls
+    return n, R, ties_by_read, nlls_by_read
+
+
 def complete_chain_rescue_ok(
     source: str, n_junctions: int, weakest_depth: int, min_reads: int
 ) -> bool:
@@ -507,6 +607,55 @@ def apply_complete_chain_rescue(
         )
     }
     return kept, len(drop_cols) - len(kept)
+
+
+def unify_extent_pairs(
+    interval_results: List[List["object"]],
+) -> Tuple[Dict[str, str], List[SelectionOutcome]]:
+    """The "one model, one extent" invariant ACROSS intervals, decided before
+    aggregation. An annotation that spans two intervals can keep its annotated
+    span in one and elect its read-extent sibling in the other. The pair is
+    resolved once on total abundance (ties -> the annotation) and the loser's
+    per-interval results are RELABELLED to the winner's id in place, so
+    :func:`aggregate_across_intervals` deduplicates their reads and soft mass
+    under one identity with its ordinary per-read policy (no mass is invented
+    or approximated here). Returns ``({loser_id: winner_id}, fold outcomes)``;
+    the redirects also route the interval ledgers in the survivor refit.
+    """
+    mass: Dict[str, float] = defaultdict(float)
+    parent_of: Dict[str, str] = {}
+    geometry: Dict[str, tuple] = {}
+    for results in interval_results:
+        for qr in results:
+            mass[qr.candidate_id] += float(qr.abundance)
+            ext = getattr(qr, "extent_of", None)
+            if ext:
+                parent_of[qr.candidate_id] = ext
+            elif qr.candidate_id not in geometry:
+                geometry[qr.candidate_id] = (qr.start, qr.end, tuple(qr.exons))
+    redirects: Dict[str, str] = {}
+    outcomes: List[SelectionOutcome] = []
+    for sib, parent in sorted(parent_of.items()):
+        if parent not in mass:
+            continue                                   # the pair never split across intervals
+        sib_wins = mass[sib] > mass[parent]
+        loser, winner = (parent, sib) if sib_wins else (sib, parent)
+        if not sib_wins and parent not in geometry:
+            continue
+        for results in interval_results:
+            for qr in results:
+                if qr.candidate_id != loser:
+                    continue
+                qr.candidate_id = winner
+                if sib_wins:
+                    qr.extent_of = parent            # aggregate takes the union extent
+                else:
+                    qr.extent_of = None
+                    qr.start, qr.end, qr.exons = geometry[parent]
+        redirects[loser] = winner
+        outcomes.append(SelectionOutcome(
+            loser, "fold", "extent_alternative", scope="global", fold_into=winner))
+    return redirects, outcomes
 
 
 def strip_zero_mass_gtf_survivors(

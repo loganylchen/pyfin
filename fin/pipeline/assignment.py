@@ -614,6 +614,75 @@ def hard_assign(R, cand_list, *, posterior_tie_atol: float = 1e-12,
     return hard, n_ties, n_anno
 
 
+def apply_endpoint_likelihood(d_tx, ties_by_read, kept_read_ids, cand_list, ctx) -> int:
+    """Add the endpoint channels (3'/polyA, and optionally the one-sided 5' start
+    term) to every finite cell of a read's raw tie set.
+
+    For read r with a PASS call and candidate c in its raw tie set,
+    ``d[r,c] += -log[(1-eta) g(d_rc) + eta b(d_rc)]`` with ``d_rc`` the
+    strand-aware signed distance from c's claimed TES to r's 3' end (positive =
+    the read runs past the end). Then the row is re-anchored so its best cell
+    stays at 0 (the EM is shift-invariant per row; this keeps the MISSING
+    sentinel meaningful). Reads without a PASS call are untouched: absence of
+    a call is abstention, never evidence. Returns the number of rows touched.
+    """
+    from fin.analysis.molecule_evidence import POLYA_PASS, polya_state
+
+    endpoint = ctx.get("endpoint")
+    start = ctx.get("start")
+    polya = ctx.get("polya") or {}
+    ends = ctx.get("ends") or {}
+    starts = ctx.get("starts") or {}
+    tes_on = endpoint is not None and getattr(endpoint, "available", False)
+    tss_on = start is not None and getattr(start, "available", False)
+    if not tes_on and not tss_on:
+        return 0
+    n_touched = 0
+    for i, rid in enumerate(kept_read_ids):
+        tie = ties_by_read.get(i)
+        if not tie or len(tie) < 2:
+            continue
+        vals = {j: 0.0 for j in tie if d_tx[i, j] < 1e5}
+        if len(vals) < 2:
+            continue
+        touched = False
+        # 3' / polyA: only a PASS read carries endpoint evidence
+        if tes_on:
+            qc, _ = polya_state(polya.get(rid))
+            loc = ends.get(rid)
+            if qc == POLYA_PASS and loc is not None:
+                _c, _s, e_r = loc
+                for j in vals:
+                    c = cand_list[j]
+                    strand = getattr(c, "strand", "+")
+                    t_c = c.end if strand == "+" else c.start
+                    d = (e_r - t_c) if strand == "+" else (t_c - e_r)
+                    vals[j] += -endpoint.loglik(d)
+                touched = True
+        # 5' start: a read that begins UPSTREAM of a model's claimed TSS is
+        # explained by that model only through the error kernel; reads at or
+        # downstream of the TSS abstain (degradation is a separate channel).
+        if tss_on:
+            loc5 = starts.get(rid)
+            if loc5 is not None:
+                _c, _s, s_r = loc5
+                for j in vals:
+                    c = cand_list[j]
+                    strand = getattr(c, "strand", "+")
+                    t_c = c.start if strand == "+" else c.end
+                    u = (t_c - s_r) if strand == "+" else (s_r - t_c)   # > 0 = upstream
+                    if u > 0:
+                        vals[j] += -start.loglik_upstream(u) - (-start.loglik_upstream(0))
+                touched = True
+        if not touched:
+            continue
+        lo = min(vals.values())
+        for j, v in vals.items():
+            d_tx[i, j] += (v - lo)
+        n_touched += 1
+    return n_touched
+
+
 def apply_start_likelihood(d_tx, ties_by_read, kept_read_ids, cand_list, models,
                            nlls_by_read=None) -> int:
     """Add the frozen read-5'-end positional NLL of folded-TSS recovery to ``d_tx``.
@@ -739,6 +808,7 @@ class Assigner:
         tie_nll_fn: Callable,
         eff_lengths_fn: Callable,
         start_likelihood_context=None,
+        endpoint_context=None,
     ) -> Optional[QuantOutput]:
         """Run the m2_em assignment pipeline; return a QuantOutput or None (empty interval).
 
@@ -936,6 +1006,11 @@ class Assigner:
                         d_tx[i, j] = 0.0  # flat 1/K (recall-safe fallback)
             # ON-path d_tx values are already calibrated (0 / -log(p) / MISSING) for
             # sigma=1; no sigma2 normalization (that is the OFF skeleton's step).
+        if endpoint_context:
+            # 3'/polyA channel (Part A8): calibrated -log p, added AFTER the junction
+            # sigma2 normalisation. A read without a PASS call abstains.
+            apply_endpoint_likelihood(d_tx, ties_by_read, kept_read_ids, cand_list,
+                                      endpoint_context)
         if start_likelihood_context:
             # Positional (read 5' end) NLL is calibrated -log p already: it is added
             # AFTER the junction sigma2 normalisation, never divided by it.

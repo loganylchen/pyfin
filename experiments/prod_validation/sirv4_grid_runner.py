@@ -160,7 +160,9 @@ def run_cell(args) -> dict:
     cell.mkdir(parents=True, exist_ok=True)
 
     cmd = ["singularity", "exec", "-B", "/autofs,/SSD", str(SIF),
-           "env", f"PYTHONPATH={PYPATH_PREFIX + ':' if PYPATH_PREFIX else ''}{REPO}", "/usr/bin/python3.10", "-m", "fin.cli",
+           "env", f"PYTHONPATH={PYPATH_PREFIX + ':' if PYPATH_PREFIX else ''}{REPO}",
+           f"PYFIN_SAMPLE_EVIDENCE_CACHE={WORK / '_sample_evidence_cache'}",
+           "/usr/bin/python3.10", "-m", "fin.cli",
            "--bam", str(bam), "--genome", str(GENOME),
            "--fastq", str(fq), "--signal", str(sig),
            "--output-dir", str(cell / "out"),

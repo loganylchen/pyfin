@@ -305,10 +305,20 @@ def complete_from_catalog(
     # mutating or constructing the completion entries twice: existing GTF
     # models plus catalog structures that would need adding, divided by those
     # catalog-derived models plus read-derived NOVEL models.
-    emitted_before = {
-        structure_key(qr.chrom, qr.strand, tuple(qr.exons))
-        for qr in aggregated.values()
-    }
+    def _emitted_structures(models):
+        keys = {structure_key(qr.chrom, qr.strand, tuple(qr.exons)) for qr in models}
+        # A read-extent sibling (QuantResult.extent_of) IS its annotated model
+        # with re-estimated ends: the annotation's own structure counts as
+        # emitted, so completion never re-adds the extent the data rejected.
+        for qr in models:
+            parent = transcripts.get(getattr(qr, "extent_of", None) or "")
+            if parent is not None:
+                pex = tuple(sorted(tuple(e) for e in (parent.exons or ())))
+                if pex:
+                    keys.add(structure_key(parent.chrom, parent.strand, pex))
+        return keys
+
+    emitted_before = _emitted_structures(aggregated.values())
     missing_catalog = 0
     seen_catalog = set()
     for tx in transcripts.values():
@@ -353,10 +363,7 @@ def complete_from_catalog(
         audit["novel_suppressed"] = sup["suppressed"]
         audit["assembled_models"] = len(aggregated)
 
-    emitted = {
-        structure_key(qr.chrom, qr.strand, tuple(qr.exons))
-        for qr in aggregated.values()
-    }
+    emitted = _emitted_structures(aggregated.values())
 
     added: Dict[str, "object"] = {}
     # Deterministic order: sorted by transcript id, so repeat runs are

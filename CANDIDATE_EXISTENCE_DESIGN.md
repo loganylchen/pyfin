@@ -265,3 +265,63 @@ abundance floor、isoform fraction、soft/hard ratio、fulllen fraction。
 - "改动可迁移"的量化定义：在两套数据上**方向一致**，且在留出集（Sequin）上
   Sn 与 Pr 均不显著变差（paired bootstrap 95% CI 下界 > −0.5），
   同时 complete Spearman 不下降。
+
+
+---
+
+## 8. 实测结论（2026-09-05，E1–E4 完成后的审计）
+
+**null 的校准**（`existence_null_calibration.py`，三种 H0 构造，B=255–511）：
+within-read label-permutation bootstrap 的 `p+`、`p−` 在 0.025/0.05/0.10 三个水平上均 ≤ 名义值
+（例：dense k3 `p+≤.05` 0.017、`p−≤.05` 0.042），H1 power 在 n=6/effect 0.5 时 0.80、
+n=30/effect 0.2 时 0.87，重复列（duplicate）退化为 unresolved。曾经试过的两种 null 被数据否决：
+centred pairs bootstrap（`p−` 在 0.05 水平上 0.15，因为冗余候选的 cross-fitted T 期望为负），
+duplicate-column null（零方差）。
+
+**真实数据上的行为**（SIRV4 8 条件 × 6 样本，B=1023）：识别出的注释候选 465 条中 83% 有 T>0，
+但 **`p+ ≤ 0.025` 为 0%**。原因是结构性的：几乎每个注释候选在 component 里都有一个 wobble 孪生
+（junction 相差 ≤6 bp 的 read 派生变体），与近乎相同的伙伴交换标签不改变统计量，null 复现观测值。
+对"这个候选 id 是否存在"而言这是**正确**的判决——它无法与孪生区分。
+
+**推论**：候选级存在性认证不能成为生产决策（否则"unresolved 一律保留"会退化成保留全部）。
+Part A 实际蕴含的分解是：**存在性在 component（locus）级别由 omnibus 认证；哪个结构变体承载质量
+是 identifiability / 后验问题，由 assignment 的混合权重决定。** 因此本判据保持 audit-only；
+面向生产的工作转到把各证据通道放进 assignment 后验（Part A8）——`--assignment-channels tes`
+已实现（3' polyA 项进入 d_tx；单外显子位点保留 read 自身的 extent 作为独立假设），
+5' 项同理。这也解释了三套数据上一致的短板（trunc3p/trunc5p/merge 的 precision）：
+它们是端点问题，决定权在 assignment 而不在门。
+
+## 9. 端点通道落地：注释模型的 read-extent 假设（2026-09-05 下午）
+
+**为什么 trunc 条件的 precision 会掉**（HEYA8 `c_trunc3p50`，SIRV107，可复现：
+`experiments/prod_validation/_heya8grid/_dbg_sirv107/`）：注释被截短 100 bp；reads 的主导
+junction 链是注释（非经典位点）的 2–3 bp minimap2 位移，被 canonical gate 删掉；mappy 比对随即
+偏向**带完整 span 的 wobble novel**（每条 read 都比截短注释多出 100 bp 可比对序列），注释饿死
+（0 read），三个 wobble `j` 假阳性拿走 678 reads。也就是说，fold 把 read 支持的**extent**
+抹掉了，只保留了注释的 extent——这是一个 extent 参数被错误固定的问题，不是 junction 问题。
+
+**设计**（Part A：extent 是模型参数，注释只是先验值）：当 sample nuisance 模型判定 reads
+与注释端点矛盾（polyA-PASS read 越过所声称的 TES 且 narrow_posterior<0.5，或 read 起点在
+所声称 TSS 上游且 start.narrow_posterior<0.5；**排除**能被同链/wobble 链上其它注释模型的端点
+解释的 read——注释 APA / 可选 TSS 不是矛盾），discovery 额外发出一个 **read-extent 兄弟**：
+同一 intron 链，reads 的 span，`candidate_id = <gtf_id>.ext`，`source="gtf"`（继承 junction
+信任：canonical gate、gtf 丰度下限、mono gate 豁免），`extent_of = gtf_id`。兄弟与注释是
+**同一模型的两个 extent 估计**，不是两条转录本：selection 的第一步 `resolve_extent_pairs`
+保留后验质量更大的那个（平局归注释），把另一个的 reads / 软质量 / tie 成员 / NLL 并入赢家
+（后续所有门看到的是合并后的一列）。多外显子键的矛盾证据集 = family 中与该链 wobble 等价的
+全部 read（它们就是该注释链声称要解释的 read，无论其变体是否活过后面的门）。
+
+**为什么不是 novel 兄弟**：第一版把兄弟作为 novel 发出，Sequin 上 1–3 read 的截短注释（gffcompare
+仍记 `=`）的 reads 被兄弟拿走后，兄弟死于 novel 专属下限（`novel > 1`、mono `min_reads=5`），
+注释饿死，位点整体消失：trunc 条件 Sn −2.7…−5.8。`source="gtf"` + pair resolution 使幸存者
+面对的门与注释本来会面对的完全一致。
+
+**Codex 审查（gpt-5.6-sol xhigh）后修正**：同链 APA 的候选特异性矛盾判据；合并后的 R/ties/nlls
+对后续门可见；catalog completion 把 `.ext` 视为覆盖其父结构；existence audit 的
+selection_honest 与 containment n_bins 排除 `.ext`（其端点是从数据里选的）；重复匹配的兄弟
+合并 span/reads 而非丢弃；outcome ledger 每候选一条决定性结果；work dir 的 sample evidence
+校验版本与输入身份。默认路径（`assignment_channels=none`）逐字节不变（SIRV1 复现：54/54 行相同）。
+
+**TSS require**（`folded_tss_recovery_mode=require`，三套网格）：SIRV +0.05（13↑/0↓），
+Sequin ±0，HEYA8 +0.03（CI [+0.01,+0.07]，6↑/1↓）——三套非负，符合 maximin 默认准入。
+`ends` 通道（含 read-extent 假设）的三网格结果见 endsarm4（冻结快照 `_snap/endsarm4` 运行）。

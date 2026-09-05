@@ -45,6 +45,15 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 # resolution at which two distinct polyA sites are distinguishable at all --
 # below the measured jitter MAD there is no information -- not a tuning value.
 MODE_MERGE_BP = 2
+# A kernel is USABLE evidence only when it is a calibrated model of end
+# jitter: enough ends to estimate three mixture parameters, and a narrow
+# component that IS narrow. The narrow scale models the technical precision of
+# a polyA-anchored 3' end / an at-TSS 5' end -- measured 0.8-2.5 bp on three
+# datasets -- so a fit whose "narrow" component absorbs tens of bp has
+# collapsed onto a bimodal or sparse sample (e.g. half the ends 100 bp off) and
+# must abstain rather than call every 100-bp discrepancy jitter.
+MIN_KERNEL_FIT = 50
+NARROW_SCALE_MAX_BP = 25.0
 BROAD_SCALE_MAX_BP = 500.0
 
 
@@ -77,7 +86,7 @@ class EndpointModel:
 
     @property
     def available(self) -> bool:
-        return self.n_fit >= 2
+        return self.n_fit >= MIN_KERNEL_FIT and self.b_narrow <= NARROW_SCALE_MAX_BP
 
 
 def _end_modes(ends: Sequence[int]) -> List[Tuple[int, int]]:
@@ -173,10 +182,53 @@ def fit_endpoint_model(distances: Sequence[int], *, max_iter: int = 200,
 
 
 @dataclass(frozen=True)
+class StartModel:
+    """One-sided 5'-start model (spec A6, the part that needs no hazard).
+
+    A read cannot begin UPSTREAM of the transcript it came from: 5' degradation
+    only shortens. So for a read whose 5' end lies ``u > 0`` bp upstream of a
+    candidate's claimed TSS, the candidate explains it only through the error
+    kernel (mapping overhang, TSS mis-annotation, chimera). Reads starting at or
+    downstream of the claimed TSS abstain here (their hazard term is the
+    degradation channel proper, integrated separately). The upstream distances
+    are modelled as a jitter/error Laplace mixture fitted within the sample
+    against the input annotation's claimed TSS positions.
+    """
+
+    b_narrow: float
+    b_broad: float
+    eta: float
+    n_fit: int
+    version: str = "start-upstream-mixture-v1"
+
+    def loglik_upstream(self, u: float) -> float:
+        """log P(read starts u bp UPSTREAM of the claimed TSS | candidate), u > 0."""
+        p = ((1.0 - self.eta) * EndpointModel._laplace(u, self.b_narrow)
+             + self.eta * EndpointModel._laplace(u, self.b_broad))
+        return math.log(max(p, 1e-300))
+
+    def narrow_posterior(self, u: float) -> float:
+        """P(jitter | u): how much of an upstream distance the at-TSS kernel explains."""
+        n = (1.0 - self.eta) * EndpointModel._laplace(u, self.b_narrow)
+        b = self.eta * EndpointModel._laplace(u, self.b_broad)
+        return n / max(n + b, 1e-300)
+
+    @property
+    def available(self) -> bool:
+        return self.n_fit >= MIN_KERNEL_FIT and self.b_narrow <= NARROW_SCALE_MAX_BP
+
+
+def fit_start_model(upstream_distances: Sequence[int]) -> StartModel:
+    m = fit_endpoint_model(upstream_distances)
+    return StartModel(b_narrow=m.b_narrow, b_broad=m.b_broad, eta=m.eta, n_fit=m.n_fit)
+
+
+@dataclass(frozen=True)
 class SampleNuisanceModel:
     endpoint: EndpointModel
     polya_call_rate: float          # rho_s: PASS among scorable reads
     n_scorable: int
+    start: Optional[StartModel] = None
     version: str = "sample-nuisance-v1"
 
     @property
@@ -190,6 +242,8 @@ def fit_sample_nuisance(
     *,
     exclude_reads: Iterable[str] = (),
     claimed_tes: Optional[Mapping[Tuple[str, str], Sequence[int]]] = None,
+    read_starts: Optional[Mapping[str, Tuple[str, str, int]]] = None,
+    claimed_tss: Optional[Mapping[Tuple[str, str], Sequence[int]]] = None,
 ) -> SampleNuisanceModel:
     """Fit the sample model from krill polyA calls and strand-aware 3' ends.
 
@@ -241,10 +295,34 @@ def fit_sample_nuisance(
             endpoint_distances(by_locus, ids_by_locus))
     else:
         model = fit_endpoint_model(endpoint_distances(by_locus, ids_by_locus))
+    start_model = None
+    if read_starts and claimed_tss:
+        # signed 5' distance: u > 0 = the read starts UPSTREAM of the nearest
+        # claimed TSS (transcript orientation). Fitted on ALL primary reads (no
+        # polyA needed): the 5' end is what the read has, degraded or not.
+        ups: List[int] = []
+        for rid, (chrom, strand, s5) in read_starts.items():
+            if rid in excl:
+                continue
+            tss = claimed_tss.get((chrom, strand))
+            if not tss:
+                continue
+            tss = sorted(tss)
+            k = bisect.bisect_left(tss, s5)
+            cands = [tss[j] for j in (k - 1, k) if 0 <= j < len(tss)]
+            d = min((s5 - t for t in cands), key=abs)
+            u = -d if strand == "+" else d          # upstream is negative genomic on +
+            # One-sided: a degraded read (downstream start) is not an upstream
+            # observation; it contributes 0 (at/inside the model), so the narrow
+            # component is the at-TSS mass and the broad one the upstream errors.
+            ups.append(max(u, 0))
+        if len(ups) >= 2:
+            start_model = fit_start_model(ups)
     return SampleNuisanceModel(
         endpoint=model,
         polya_call_rate=(n_pass / n_scorable) if n_scorable else 0.0,
         n_scorable=n_scorable,
+        start=start_model,
     )
 
 

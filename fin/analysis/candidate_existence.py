@@ -524,7 +524,10 @@ def evaluate_candidate_existence(
             )
             rows_out.append(row)
 
-            row.selection_honest = getattr(cand, "source", "") == "gtf"
+            # A read-extent sibling (extent_of) is gtf-source for junction
+            # trust, but its ends were chosen from these reads: not honest.
+            row.selection_honest = (getattr(cand, "source", "") == "gtf"
+                                    and not getattr(cand, "extent_of", None))
             if not row.selection_honest:
                 row.identifiability_reason = "not_selection_honest_v1"
                 continue

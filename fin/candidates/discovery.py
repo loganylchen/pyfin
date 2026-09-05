@@ -296,11 +296,50 @@ def _graph_groups(non_fusion_reads, strand, tol, min_edge_reads,
     return groups
 
 
+def _read_extent(gc, contradicted, spans):
+    """The read-extent sibling's span. ONLY a contradicted end is re-estimated,
+    from the CONTRADICTING reads alone (``contradicted`` maps "tes"/"tss" to
+    those read ids) and only outward (min/max with the annotated coordinate),
+    so the span always contains the annotation's intron chain and a read that
+    another annotated model explains never defines this model's end. The other
+    end keeps the annotated value. On '+' the TES is ``end`` and the TSS
+    ``start``; on '-' the reverse."""
+    start, end = gc.start, gc.end
+    tes_is_end = getattr(gc, "strand", "+") == "+"
+    for which, rids in contradicted.items():
+        sp = [spans[r] for r in rids if r in spans]
+        if not sp:
+            continue
+        extend_end = (which == "tes") == tes_is_end
+        if extend_end:
+            end = max(end, max(e[1] for e in sp))
+        else:
+            start = min(start, min(e[0] for e in sp))
+    return start, end
+
+
+def _wobble_equivalent_reads(family_result, cluster_index, chain, wobble_bp, *, default):
+    """Reads of every variant in the cluster's family that is a wobble of ``chain``
+    (the chain itself included). ``default`` when the cluster is not a family
+    (legacy clustering / the trailing mono bucket)."""
+    if family_result is None or cluster_index >= len(family_result.families):
+        return set(default)
+    from fin.candidates.chain_cluster import _wobble
+
+    fam = family_result.families[cluster_index]
+    out: Set[str] = set()
+    for v in fam.variants:
+        if _wobble(v, chain, wobble_bp):
+            out.update(fam.variant_reads.get(v, ()))
+    return out or set(default)
+
+
 def _chain_cluster_candidates(
     interval, non_fusion_reads, all_read_ids, read_sequences, gtf_reader,
     genome_fasta, strand, min_novel_reads, *, wobble_bp, cassette_max_exon_bp,
     fold_monoexon_contained=False, fold_span_guard=False, clustering="read_chains",
     collect_chain_evidence=True, junction_correction=None, junction_correction_apply=None,
+    read_extent_contradicted=None,
 ) -> CandidateSet:
     """NEW generation: build candidates via intron-chain clustering.
 
@@ -476,10 +515,14 @@ def _chain_cluster_candidates(
     # Each shadow: (intron_chain_tuple, sorted_read_id_tuple). GTF ids can recur
     # across clusters (same annotation matched twice) -> merge the shadow lists.
     shadow_map: Dict[str, List[Tuple[Tuple[Tuple[int, int], ...], Tuple[str, ...]]]] = {}
+    extent_siblings: Dict[str, TranscriptCandidate] = {}
+    annotation_ids = set(getattr(gtf_reader, "transcripts", None) or {}) if gtf_reader else set()
     def _emit(chain, member_reads, start, end, gc, family_id=None,
-              junction_depths=()):
+              junction_depths=(), extent_of=None):
         """Emit the annotation model(s) owning ``chain`` (annotated geometry, key
-        reads as support) or a novel with its discovery family. Returns ids."""
+        reads as support) or a novel with its discovery family. Returns ids.
+        ``extent_of``: emit instead the READ-EXTENT sibling of that annotated
+        model -- its chain and junction trust (source "gtf"), the reads' span."""
         weakest = min(junction_depths) if junction_depths else 0
         if gc is not None:                        # annotated key -> its model(s)
             models = gc if isinstance(gc, list) else [gc]
@@ -500,20 +543,41 @@ def _chain_cluster_candidates(
         seq = _build_spliced_sequence(genome_fasta, start, end, chain, strand)
         if not seq:
             return None
-        cid = _generate_novel_id(
-            interval.chrom, strand, start, end, chain
-        )
+        if extent_of is not None:
+            cid, source = f"{extent_of}.ext", "gtf"
+            while cid in annotation_ids:          # never shadow a real annotation id
+                cid += "_"
+            prev = extent_siblings.get(cid)
+            if prev is not None:
+                # The annotation matched again (another read group / cluster):
+                # ONE sibling, whose extent and support are the union of every
+                # group that contradicted the annotated ends.
+                prev.supporting_read_ids.update(member_reads)
+                prev.raw_supporting_read_ids.update(member_reads)
+                lo, hi = min(prev.start, start), max(prev.end, end)
+                if (lo, hi) != (prev.start, prev.end):
+                    seq2 = _build_spliced_sequence(genome_fasta, lo, hi, chain, strand)
+                    if seq2:
+                        prev.start, prev.end, prev.sequence = lo, hi, seq2
+                        prev.three_prime_pos = hi if strand == "+" else lo
+                return [cid]
+        else:
+            cid, source = _generate_novel_id(
+                interval.chrom, strand, start, end, chain), "novel"
         candidates.append(TranscriptCandidate(
             candidate_id=cid, intron_chain=chain,
             three_prime_pos=(end if strand == "+" else start), sequence=seq,
-            source="novel", supporting_read_ids=set(member_reads),
+            source=source, supporting_read_ids=set(member_reads),
             raw_supporting_read_ids=set(member_reads),
             chrom=interval.chrom, strand=strand, start=start, end=end,
-            family_id=family_id,
+            family_id=family_id, extent_of=extent_of,
             complete_chain_junction_depths=tuple(junction_depths),
             complete_chain_weakest_indel_clean_depth=(
                 min(junction_depths) if junction_depths else 0
             )))
+        if extent_of is not None:
+            extent_siblings[cid] = candidates[-1]
+            emitted_gtf.add(cid)
         return [cid]
 
     for cluster_index, cl in enumerate(clusters):
@@ -539,6 +603,48 @@ def _chain_cluster_candidates(
                 if not out_ids:
                     continue
                 ids.extend(out_ids)
+                if models and read_extent_contradicted is not None:
+                    # An annotated key is emitted with the ANNOTATED geometry; the
+                    # reads that ride on it (its own and its folded wobble shadows)
+                    # may contradict that extent -- a polyA read past the claimed
+                    # TES, a read starting upstream of the claimed TSS. Then the
+                    # reads' extent is a separate hypothesis: the same intron chain
+                    # with the reads' span, competing in the assignment posterior.
+                    # Without it a truncated annotation keeps the chain's reads
+                    # only until alignment prefers a wobble sibling that happens
+                    # to carry the full extent (the c_trunc failure mode). The
+                    # evidence is every read of the family whose exact chain is a
+                    # WOBBLE of the key (same introns within wobble_bp): those are
+                    # the reads the annotated chain claims to explain, whether or
+                    # not their own variant survives a later gate.
+                    key_reads = _wobble_equivalent_reads(
+                        family_result, cluster_index, tuple(m.chain.introns), wobble_bp,
+                        default=set(m.read_ids) | folded_reads)
+                    ext = [spans[r] for r in key_reads if r in spans]
+                    # Every OTHER annotated model on this chain or a wobble of
+                    # it can legitimately explain a read's ends (annotated
+                    # APA / alternative TSS): such a read contradicts nothing.
+                    from fin.candidates.chain_cluster import _wobble
+                    alternatives = [
+                        a for ch, ms in gtf_models.items()
+                        if _wobble(ch, tuple(m.chain.introns), wobble_bp)
+                        for a in ms
+                    ]
+                    for g in models:
+                        which = ext and read_extent_contradicted(
+                            g, key_reads, [a for a in alternatives if a is not g])
+                        if not which:
+                            continue
+                        sib_start, sib_end = _read_extent(g, which, spans)
+                        sib_ids = _emit(
+                            m.chain, key_reads, sib_start, sib_end,
+                            None, family_id,
+                            junction_depths=junction_clean_depths(
+                                m.chain, m.read_ids, folded_reads, indels_by_read),
+                            extent_of=g.candidate_id,
+                        )
+                        if sib_ids:
+                            ids.extend(sib_ids)
                 # folded exact-sub-chain shadows keyed by the candidate(s) it became
                 # (5'-TSS recovery). Mono members carry none.
                 member_shadows = [
@@ -556,10 +662,36 @@ def _chain_cluster_candidates(
                     gs = [spans[r][0] for r in group]
                     ge = [spans[r][1] for r in group]
                     lo, hi = min(gs), max(ge)
-                    out_ids = _emit(m.chain, set(group), lo, hi,
-                                    _best_overlap_gtf(mono_gtf, lo, hi))
+                    g_mono = _best_overlap_gtf(mono_gtf, lo, hi)
+                    out_ids = _emit(m.chain, set(group), lo, hi, g_mono)
                     if out_ids:
                         ids.extend(out_ids)
+                    if g_mono is None or read_extent_contradicted is None:
+                        continue
+                    # The reads' own extent is a SEPARATE hypothesis from an
+                    # annotated single-exon model they overlap, emitted only
+                    # when the reads CONTRADICT that model's ends under the
+                    # sample's endpoint kernels (a polyA read past the claimed
+                    # TES, or a read starting upstream of the claimed TSS) and
+                    # no OTHER overlapping single-exon annotation explains them.
+                    # EVERY overlapping annotation is examined -- not only the
+                    # best-overlap one the group's reads were attached to --
+                    # because the pooled span may pick the long model while the
+                    # short one is the contradicted (and repairable) hypothesis.
+                    # Otherwise the annotation IS the hypothesis: a duplicate
+                    # would merely split its reads. The assignment's endpoint
+                    # likelihood then decides between the two.
+                    overlapping = [gc for gc, gs_, ge_ in mono_gtf if gs_ < hi and ge_ > lo]
+                    for gc in overlapping:
+                        which = read_extent_contradicted(
+                            gc, group, [a for a in overlapping if a is not gc])
+                        if not which:
+                            continue
+                        sib_start, sib_end = _read_extent(gc, which, spans)
+                        sib_ids = _emit(m.chain, set(group), sib_start, sib_end, None,
+                                        extent_of=gc.candidate_id)
+                        if sib_ids:
+                            ids.extend(sib_ids)
         cluster_id_lists.append(ids)
 
     # Drop low-support novels; prune cluster lists to surviving candidate ids.
@@ -668,6 +800,7 @@ def discover_candidates(
     collect_chain_evidence: bool = True,   # retained for API compatibility; evidence is always collected
     junction_correction=None,
     junction_correction_apply=None,
+    read_extent_contradicted=None,
 ) -> CandidateSet:
     """Discover transcript candidates for a genomic interval.
 
@@ -761,6 +894,7 @@ def discover_candidates(
             collect_chain_evidence=collect_chain_evidence,
             junction_correction=junction_correction,
             junction_correction_apply=junction_correction_apply,
+            read_extent_contradicted=read_extent_contradicted,
         )
 
     # 2. Group reads by 3' + intron chain → novel candidate groups.

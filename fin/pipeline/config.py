@@ -280,6 +280,16 @@ class PipelineConfig:
     # (spec B4.3); finalize marks any p that cannot reach its threshold as
     # untestable rather than rounding it. 0 disables the null (statistics only).
     candidate_existence_bootstrap: int = 4095
+    # Evidence channels composed into the ASSIGNMENT posterior (Part A8 of the
+    # specification): "tes" adds the 3'/polyA endpoint log-likelihood of each
+    # polyA-PASS read to its per-candidate distance, so a read whose polyA end
+    # lies past a model's claimed TES prefers a model that ends where it does.
+    # Requires --signal (krill polyA calls); fitted within the sample. Also
+    # makes discovery keep the read-derived extent of a single-exon locus as its
+    # own hypothesis next to an overlapping annotated one. "ends" adds the
+    # one-sided 5' start term as well (a read cannot begin upstream of the model
+    # it came from). "none" = current.
+    assignment_channels: str = "none"
     # Catalog completion. PyFIN's default contract is an EXPRESSED assembly:
     # an annotated transcript with no EM mass is dropped on purpose. Some
     # benchmarks instead score against a complete catalog regardless of
@@ -925,6 +935,17 @@ class PipelineConfig:
                 "positive gate scores GTF-source models and without an "
                 "annotation there are none to gate"
             )
+        if getattr(self, "assignment_channels", "none") not in ("none", "tes", "ends"):
+            raise ValueError(f"unknown assignment_channels: {self.assignment_channels!r}")
+        if (getattr(self, "assignment_channels", "none") != "none"
+                and not getattr(self, "signal_path", None)):
+            raise ValueError("assignment_channels requires --signal (krill polyA calls)")
+        if (getattr(self, "assignment_channels", "none") != "none"
+                and getattr(self, "quant_mode", "m2_em") != "m2_em"):
+            # The endpoint terms enter the m2_em posterior and the extent pair
+            # is resolved by m2_em selection; other quantifiers would emit the
+            # read-extent sibling and never resolve it.
+            raise ValueError("assignment_channels requires --quant-mode m2_em")
         if getattr(self, "candidate_existence_mode", "off") not in ("off", "audit"):
             raise ValueError(
                 f"unknown candidate_existence_mode: {self.candidate_existence_mode!r}"
