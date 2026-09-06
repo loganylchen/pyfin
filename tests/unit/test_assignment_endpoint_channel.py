@@ -347,6 +347,22 @@ class TestExtentPairResolution:
         assert resolve_extent_pairs(cands, R, {}, {}, qrs, drop, out)[0] == 0 and not drop and not out
 
 
+def _tiny_bam(path, reads=((1000, False), (1200, True))):
+    """Two primary alignments on contig "c" (+ and -), indexed."""
+    import pysam
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 10000, "SN": "c"}]}
+    with pysam.AlignmentFile(str(path), "wb", header=header) as fh:
+        for i, (start, rev) in enumerate(reads):
+            a = pysam.AlignedSegment()
+            a.query_name = f"r{i}"; a.flag = 16 if rev else 0
+            a.reference_id = 0; a.reference_start = start; a.mapping_quality = 60
+            a.cigarstring = "500M"; a.query_sequence = "A" * 500
+            a.query_qualities = pysam.qualitystring_to_array("I" * 500)
+            fh.write(a)
+    pysam.index(str(path))
+    return path
+
+
 class TestContradictionAlternatives:
     """runner._read_extent_contradicted: a read explained by another annotated
     model's end (annotated APA / alternative TSS) contradicts nothing."""
@@ -355,13 +371,16 @@ class TestContradictionAlternatives:
         import json
         from fin.pipeline.config import PipelineConfig
         from fin.pipeline.runner import PipelineRunner
-        cfg = PipelineConfig(bam_path="/fake.bam", work_dir=str(tmp_path),
+        cfg = PipelineConfig(bam_path=str(_tiny_bam(tmp_path / "r.bam")),
+                             work_dir=str(tmp_path),
                              assignment_channels="ends", signal_path="/fake.blow5")
         r = PipelineRunner(cfg)
         polya = {f"r{i}": [40.0, "PASS"] for i in range(120)}
         ends = {f"r{i}": ["c", "+", 2000 + (i % 3) - 1, 1000 + (i % 3) - 1] for i in range(120)}
-        (tmp_path / r._SAMPLE_EVIDENCE_NAME).write_text(json.dumps(
-            {"polya": polya, "ends": ends, "version": "sample-evidence-v2"}))
+        (r._evidence_path()).write_text(json.dumps(
+            {"polya": polya, "ends": ends, "version": "sample-evidence-v3",
+             "identity": r._evidence_identity(), "polya_status": "ok",
+             "n_ends": len(ends), "n_polya": len(polya)}))
         r._annotated_tes = lambda: {("c", "+"): [2000]}
         r._annotated_tss = lambda: {("c", "+"): [1000]}
         return r
@@ -379,12 +398,213 @@ class TestContradictionAlternatives:
     def test_stale_work_dir_evidence_is_rebuilt_not_trusted(self, tmp_path):
         import json
         r = self._runner(tmp_path)
-        path = tmp_path / r._SAMPLE_EVIDENCE_NAME
-        assert json.loads(path.read_text()).get("identity") is None
-        # a file without the input identity is not accepted as-is: it is rebuilt
+        path = r._evidence_path()
+        stale = json.loads(path.read_text())
+        stale["identity"]["bam"] = "/some/other.bam:1:2:3:edge:0000000000000000"
+        path.write_text(json.dumps(stale))
+        # the evidence no longer belongs to this run's inputs: this run must not
+        # consume it, and must produce its own
         r.config.signal_path = None
+        r.config.sample_evidence_path = ""
+        r._invalidate_sample_caches()
+        if hasattr(r, "_evidence_identity_cache"):
+            del r._evidence_identity_cache
         r._prepare_sample_evidence()
-        assert json.loads(path.read_text())["identity"]["bam"].endswith("fake.bam")
+        d = json.loads(r._evidence_path().read_text())
+        assert "r.bam:" in d["identity"]["bam"]
+        assert d["version"] == "sample-evidence-v3" and d["polya_status"] == "no_signal"
+        assert set(d["ends"]) == {"r0", "r1"}          # built from the real BAM
+
+    def test_regenerated_bam_at_the_same_path_is_a_cache_miss(self, tmp_path):
+        import json
+        import time
+        from fin.pipeline.config import PipelineConfig
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        cfg = PipelineConfig(bam_path=str(bam), work_dir=str(tmp_path / "w"),
+                             assignment_channels="ends", quant_mode="m2_em")
+        r = PipelineRunner(cfg)
+        r._prepare_sample_evidence()
+        first = json.loads(r._evidence_path().read_text())
+        time.sleep(0.01)
+        _tiny_bam(tmp_path / "r.bam", reads=((4000, False),))     # same path, new content
+        PipelineRunner(cfg)._prepare_sample_evidence()
+        second = json.loads(PipelineRunner(cfg)._evidence_path().read_text())
+        assert second["identity"] != first["identity"]
+        assert set(second["ends"]) == {"r0"} and second["ends"]["r0"][2] == 4500
+
+    def test_failed_polya_is_not_published_as_final(self, tmp_path, monkeypatch):
+        import json
+        from fin.pipeline.config import PipelineConfig
+        from fin.pipeline.runner import PipelineRunner
+        import fin.scoring.polya as polya_mod
+        sig = tmp_path / "s.blow5"; sig.write_bytes(b"x")
+        bam = _tiny_bam(tmp_path / "r.bam")
+        cache = tmp_path / "cache"; cache.mkdir()
+        monkeypatch.setenv("PYFIN_SAMPLE_EVIDENCE_CACHE", str(cache))
+        monkeypatch.setattr(polya_mod, "compute_polya", lambda *a, **k: {})
+        cfg = PipelineConfig(bam_path=str(bam), signal_path=str(sig),
+                             work_dir=str(tmp_path / "w"),
+                             assignment_channels="ends", quant_mode="m2_em")
+        PipelineRunner(cfg)._prepare_sample_evidence()
+        d = json.loads(PipelineRunner(cfg)._evidence_path().read_text())
+        assert d["polya_status"] == "unavailable" and d["ends"]        # ends still usable
+        assert not list(cache.glob("sample_evidence_*.json"))          # never cached as final
+        # ... and a later run retries instead of inheriting the abstention
+        calls = []
+        monkeypatch.setattr(polya_mod, "compute_polya",
+                            lambda seqs, *a, **k: calls.append(1) or {r: (40.0, "PASS") for r in seqs})
+        PipelineRunner(cfg)._prepare_sample_evidence()
+        d2 = json.loads(PipelineRunner(cfg)._evidence_path().read_text())
+        assert calls and d2["polya_status"] == "ok" and d2["polya"]
+
+    def test_malformed_records_are_rejected_with_matching_headers(self, tmp_path):
+        """Record-level validation, exercised PAST the header checks: a payload
+        with the right version, identity and status must still be rejected when
+        a record has the wrong shape -- otherwise it silently disables a channel
+        or fabricates a coordinate."""
+        import json
+        from fin.pipeline.config import PipelineConfig
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        work = tmp_path / "w"; work.mkdir()
+        cfg = PipelineConfig(bam_path=str(bam), work_dir=str(work),
+                             assignment_channels="ends", quant_mode="m2_em")
+        r = PipelineRunner(cfg)
+        ident = r._evidence_identity()
+        path = r._evidence_path()
+
+        def payload(ends, polya=None):
+            polya = {} if polya is None else polya
+            return json.dumps({"version": "sample-evidence-v3", "identity": ident,
+                               "polya_status": "no_signal", "ends": ends,
+                               "polya": polya,
+                               "n_ends": len(ends), "n_polya": len(polya)})
+
+        good = {"r0": ["c", "+", 1500, 1000]}
+        path.write_text(payload(good))
+        assert PipelineRunner._read_sample_evidence(path, ident, "no_signal") is not None
+        for ends, polya in [
+            ({"r0": ["c", "+", 1500]}, None),                 # no 5' field
+            ({"r0": "c+12"}, None),                           # string, not a record
+            ({"r0": [["c"], "+", 1500, 1000]}, None),         # chrom not a string
+            ({"r0": ["c", "?", 1500, 1000]}, None),           # bad strand
+            ({"r0": ["c", "+", 1500, float("inf")]}, None),   # non-finite coordinate
+            ({"r0": ["c", "+", 1500, 1000.5]}, None),         # fractional coordinate
+            ({"r0": ["c", "+", 1500, 10 ** 400]}, None),      # outside the double range
+            (good, {"r0": ["bad", "PASS"]}),                  # polyA length not a number
+            (good, {"r0": ["PASS"]}),                         # polyA record too short
+            (good, {"r0": [10 ** 400, "PASS"]}),              # length outside the double range
+        ]:
+            path.write_text(payload(ends, polya))
+            assert PipelineRunner._read_sample_evidence(path, ident, "no_signal") is None, (ends, polya)
+
+    def test_evidence_from_another_sample_is_not_consumed(self, tmp_path):
+        import json
+        from fin.pipeline.config import PipelineConfig
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        other = _tiny_bam(tmp_path / "other.bam", reads=((9000, False),))
+        work = tmp_path / "w"; work.mkdir()
+        cfg = PipelineConfig(bam_path=str(bam), work_dir=str(work),
+                             assignment_channels="ends", quant_mode="m2_em")
+        foreign = PipelineRunner(PipelineConfig(
+            bam_path=str(other), work_dir=str(work),
+            assignment_channels="ends", quant_mode="m2_em"))
+        foreign._prepare_sample_evidence()                    # writes OTHER sample's evidence
+        d = json.loads(foreign._evidence_path().read_text())
+        assert set(d["ends"]) == {"r0"} and d["ends"]["r0"][2] == 9500
+        # the evidence is addressed by input identity, so the two runs cannot
+        # collide in a shared work dir, and this consumer sees no evidence at
+        # all rather than the other sample's
+        mine = PipelineRunner(cfg)
+        assert mine._evidence_path() != foreign._evidence_path()
+        assert mine._sample_evidence() is None
+        mine._prepare_sample_evidence()                       # both files coexist
+        assert foreign._evidence_path().exists() and mine._evidence_path().exists()
+        assert set(mine._sample_evidence()[1]) == {"r0", "r1"}
+        assert set(json.loads(foreign._evidence_path().read_text())["ends"]) == {"r0"}
+
+    def test_malformed_evidence_is_rebuilt_not_trusted(self, tmp_path):
+        import dataclasses
+        from fin.pipeline.config import PipelineConfig
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        work = tmp_path / "w"; work.mkdir()
+        cfg = PipelineConfig(bam_path=str(bam), work_dir=str(work),
+                             assignment_channels="ends", quant_mode="m2_em")
+        path = PipelineRunner(cfg)._evidence_path()
+        for payload in ("[]", "{}", '{"version": "sample-evidence-v3", "ends": {"r0": []}}',
+                        '{"version": "sample-evidence-v3", "ends": {}}', "not json"):
+            path.write_text(payload)
+            assert PipelineRunner._read_sample_evidence(path) is None, payload
+            r = PipelineRunner(dataclasses.replace(cfg))
+            r._prepare_sample_evidence()                       # never crashes
+            # the corrupt file is NOT overwritten (another run may be reading
+            # it); this run works from its own copy
+            assert path.read_text() == payload
+            assert "_run" in r._evidence_path().name
+            assert r._sample_evidence()[1]["r0"][2] == 1500
+            r.cleanup()
+
+    def test_fingerprint_sees_an_equal_metadata_replacement(self, tmp_path):
+        # size and mtime alone cannot distinguish a file replaced in place; the
+        # head/tail digest can, which is what keeps derived evidence honest.
+        import os
+        from fin.pipeline.runner import input_fingerprint
+        a = tmp_path / "in.bin"
+        a.write_bytes(b"A" * 4096)
+        st = os.stat(a)
+        first = input_fingerprint(a)
+        a.write_bytes(b"B" * 4096)                      # same size, different content
+        os.utime(a, ns=(st.st_atime_ns, st.st_mtime_ns))   # same mtime
+        second = input_fingerprint(a)
+        assert os.stat(a).st_size == st.st_size
+        assert os.stat(a).st_mtime_ns == st.st_mtime_ns
+        assert second != first
+        assert input_fingerprint(a) == second and input_fingerprint("") == ""
+
+    def test_interior_edit_needs_the_strict_hash(self, monkeypatch, tmp_path):
+        """The documented bound: the fast fingerprint samples the edges, so a
+        same-length interior edit with restored timestamps can hide from it;
+        PYFIN_EVIDENCE_STRICT_HASH=1 hashes the whole file and cannot."""
+        import os
+        from fin.pipeline.runner import input_fingerprint
+        a = tmp_path / "big.bin"
+        a.write_bytes(b"A" * 196608)
+        st = os.stat(a)
+        fast_before = input_fingerprint(a)
+        monkeypatch.setenv("PYFIN_EVIDENCE_STRICT_HASH", "1")
+        strict_before = input_fingerprint(a)
+        monkeypatch.delenv("PYFIN_EVIDENCE_STRICT_HASH")
+        with a.open("r+b") as fh:                       # same length, interior byte
+            fh.seek(80000); fh.write(b"B")
+        os.utime(a, ns=(st.st_atime_ns, st.st_mtime_ns))
+        assert os.stat(a).st_size == st.st_size and os.stat(a).st_mtime_ns == st.st_mtime_ns
+        monkeypatch.setenv("PYFIN_EVIDENCE_STRICT_HASH", "1")
+        assert input_fingerprint(a) != strict_before     # strict mode always sees it
+        monkeypatch.delenv("PYFIN_EVIDENCE_STRICT_HASH")
+        assert strict_before != fast_before              # the two modes never collide
+
+    def test_regenerated_bam_is_a_cache_miss(self, tmp_path):
+        import json
+        from fin.pipeline.config import PipelineConfig
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        cfg = PipelineConfig(bam_path=str(bam), work_dir=str(tmp_path / "w"),
+                             assignment_channels="ends", quant_mode="m2_em")
+        PipelineRunner(cfg)._prepare_sample_evidence()
+        old_path = PipelineRunner(cfg)._evidence_path()
+        first = json.loads(old_path.read_text())
+        _tiny_bam(tmp_path / "r.bam", reads=((7000, False), (7200, True)))
+        r = PipelineRunner(cfg)
+        r._reset_input_snapshot()                    # what run() does at its boundary
+        r._prepare_sample_evidence()
+        assert r._evidence_path() != old_path        # different input -> different file
+        second = json.loads(r._evidence_path().read_text())
+        assert second["identity"] != first["identity"]
+        assert second["ends"]["r0"][2] == 7500
+        assert r._sample_evidence()[1]["r0"][2] == 7500   # never the stale endpoints
 
 
 class TestPooledMassVisibleToLaterGates:
@@ -545,3 +765,333 @@ class TestKernelAvailability:
         d += [int(round(rng.expovariate(1 / 80.0))) * rng.choice([-1, 1]) for _ in range(16)]
         assert fit_endpoint_model(d).available
         assert not fit_endpoint_model(d[:MIN_KERNEL_FIT - 1]).available
+
+
+class TestProductionDefaults:
+    def test_real_drna_profile_enables_ends_and_tss_require(self):
+        from fin.pipeline.config import PIPELINE_PROFILES
+        for name in ("real-drna", "real-drna-precision"):
+            assert PIPELINE_PROFILES[name]["assignment_channels"] == "ends"
+            assert PIPELINE_PROFILES[name]["folded_tss_recovery_mode"] == "require"
+        assert "assignment_channels" not in PIPELINE_PROFILES["sirv"]   # benchmark working point unchanged
+
+    def test_channels_without_signal_abstain_instead_of_failing(self, tmp_path, caplog):
+        from fin.pipeline.config import PipelineConfig
+        bam = tmp_path / "r.bam"; bam.write_bytes(b"")
+        gtf = tmp_path / "a.gtf"; gtf.write_text("")
+        # ends + annotation: the 3' term abstains, the 5' term still applies
+        PipelineConfig(bam_path=str(bam), gtf_path=str(gtf),
+                       assignment_channels="ends", quant_mode="m2_em").validate()
+        assert any("the 5' start channel still applies" in r.getMessage()
+                   for r in caplog.records)
+        caplog.clear()
+        # no annotation (or tes-only): there is no endpoint evidence at all
+        PipelineConfig(bam_path=str(bam), assignment_channels="ends",
+                       quant_mode="m2_em").validate()
+        assert any("no endpoint evidence" in r.getMessage() for r in caplog.records)
+
+    def test_profile_implied_settings_degrade_under_another_quantifier(self, tmp_path, caplog):
+        from fin.pipeline.config import PipelineConfig
+        bam = tmp_path / "x.bam"; bam.touch()
+        c = PipelineConfig.from_profile("real-drna", bam_path=str(bam), quant_mode="argmax")
+        c.validate()
+        assert c.assignment_channels == "none" and c.folded_tss_recovery_mode == "off"
+        assert "assignment_channels=ends disabled" in caplog.text
+        with pytest.raises(ValueError, match="m2_em"):     # explicit choice still errors
+            PipelineConfig.from_profile("real-drna", bam_path=str(bam), quant_mode="argmax",
+                                        assignment_channels="ends").validate()
+
+    def test_ends_are_collected_without_signal(self, tmp_path):
+        """The 5' channel needs only BAM read starts: the prepass must collect
+        the strand-aware ends even when no signal file is configured, so the
+        promoted default degrades to "3' abstains", not "both channels dead"."""
+        import json
+        from fin.pipeline.config import PipelineConfig
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        cfg = PipelineConfig(bam_path=str(bam), work_dir=str(tmp_path / "w"),
+                             assignment_channels="ends", quant_mode="m2_em")
+        r = PipelineRunner(cfg)
+        r._prepare_sample_evidence()
+        d = json.loads(r._evidence_path().read_text())
+        assert d["polya"] == {}                                  # no signal -> every call MISSING
+        assert d["ends"]["r0"] == ["c", "+", 1500, 1000]          # 3' = end, 5' = start on +
+        assert d["ends"]["r1"] == ["c", "-", 1200, 1700]          # mirrored on -
+        polya_map, read_ends, read_starts = r._sample_evidence()
+        assert read_starts["r0"] == ("c", "+", 1000) and read_starts["r1"] == ("c", "-", 1700)
+
+
+class TestEvidenceLifecycle:
+    """The evidence file is an artifact of ONE run over ONE input set."""
+
+    def _cfg(self, tmp_path, bam, **kw):
+        from fin.pipeline.config import PipelineConfig
+        return PipelineConfig(bam_path=str(bam), work_dir=str(tmp_path / "w"),
+                              assignment_channels="ends", quant_mode="m2_em", **kw)
+
+    def test_failed_polya_never_occupies_the_shared_name(self, tmp_path, monkeypatch):
+        """Two runs over the SAME inputs, one whose polyA pass fails: the failed
+        one must not own the identity-addressed file, or the successful run's
+        workers would read an abstaining payload."""
+        import json
+        import fin.scoring.polya as polya_mod
+        from fin.pipeline.runner import PipelineRunner
+        sig = tmp_path / "s.blow5"; sig.write_bytes(b"x")
+        bam = _tiny_bam(tmp_path / "r.bam")
+        monkeypatch.setattr(polya_mod, "compute_polya", lambda *a, **k: {})
+        bad = PipelineRunner(self._cfg(tmp_path, bam, signal_path=str(sig)))
+        bad._prepare_sample_evidence()
+        bad_path = bad._evidence_path()
+        assert json.loads(bad_path.read_text())["polya_status"] == "unavailable"
+        assert f"_run" in bad_path.name                          # run-local, not shared
+        assert bad._sample_evidence()[1]                         # its own ends are usable
+
+        monkeypatch.setattr(polya_mod, "compute_polya",
+                            lambda seqs, *a, **k: {r: (40.0, "PASS") for r in seqs})
+        cfg_ok = self._cfg(tmp_path, bam, signal_path=str(sig))
+        good = PipelineRunner(cfg_ok)
+        good._prepare_sample_evidence()               # the failed run did not satisfy it
+        good_path = good._evidence_path()
+        assert good_path != bad_path and "_run" not in good_path.name
+        assert json.loads(good_path.read_text())["polya"]
+        assert json.loads(bad_path.read_text())["polya"] == {}   # untouched
+        assert PipelineRunner(cfg_ok)._sample_evidence()[0]      # consumers see the calls
+
+    def test_late_failure_leaves_published_evidence_intact(self, tmp_path, monkeypatch):
+        """Success first, failure second: the failed writer must not touch the
+        artifact the successful run's workers are already reading."""
+        import json
+        import fin.scoring.polya as polya_mod
+        from fin.pipeline.runner import PipelineRunner
+        sig = tmp_path / "s.blow5"; sig.write_bytes(b"x")
+        bam = _tiny_bam(tmp_path / "r.bam")
+        cfg_ok = self._cfg(tmp_path, bam, signal_path=str(sig))
+        monkeypatch.setattr(polya_mod, "compute_polya",
+                            lambda seqs, *a, **k: {r: (40.0, "PASS") for r in seqs})
+        good = PipelineRunner(cfg_ok); good._prepare_sample_evidence()
+        shared_path = good._evidence_path()
+        before = shared_path.read_text()
+        # a concurrent run over the same inputs that cannot call polyA; it must
+        # not find the published artifact acceptable for itself NOR replace it
+        monkeypatch.setattr(polya_mod, "compute_polya", lambda *a, **k: {})
+        late = PipelineRunner(self._cfg(tmp_path, bam, signal_path=str(sig)))
+        late.config.sample_evidence_path = ""
+        late._prepare_sample_evidence()
+        assert shared_path.read_text() == before                 # byte-identical
+        assert json.loads(shared_path.read_text())["polya"]
+
+    def test_broken_calls_are_dropped_before_publication(self, tmp_path, monkeypatch):
+        """A NaN length is not a failed call, it is a broken one: dropping it at
+        the source keeps the artifact parseable, so the read ends survive."""
+        import json
+        import fin.scoring.polya as polya_mod
+        from fin.pipeline.runner import PipelineRunner
+        sig = tmp_path / "s.blow5"; sig.write_bytes(b"x")
+        bam = _tiny_bam(tmp_path / "r.bam")
+        monkeypatch.setattr(polya_mod, "compute_polya", lambda seqs, *a, **k: {
+            "r0": (float("nan"), "FAIL"), "r1": (40.0, "PASS")})
+        cfg = self._cfg(tmp_path, bam, signal_path=str(sig))
+        r = PipelineRunner(cfg); r._prepare_sample_evidence()
+        d = json.loads(r._evidence_path().read_text())
+        assert set(d["polya"]) == {"r1"}
+        # an incomplete producer result is this run's evidence, never the
+        # artifact another run inherits for these inputs
+        assert d["polya_status"] == "partial" and "_run" in r._evidence_path().name
+        polya_map, read_ends, _ = r._sample_evidence()            # artifact stays usable
+        assert set(read_ends) == {"r0", "r1"} and set(polya_map) == {"r1"}
+        r.cleanup()
+
+    def test_reset_drops_signal_and_annotation_state(self, tmp_path):
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        r = PipelineRunner(self._cfg(tmp_path, bam))
+        closed = []
+
+        class _Reader:
+            def close(self):
+                closed.append(True)
+
+        r._annotated_tss_cache = {("c", "+"): [1]}
+        r._annotated_tes_cache = {("c", "+"): [2]}
+        r._jc_ctx = ("aligner", "krill", lambda rid: None)   # the real shape: a closure
+        r._jc_slow5 = _Reader()                              # the handle it closes over
+        r._reset_input_snapshot()
+        assert not hasattr(r, "_annotated_tss_cache") and not hasattr(r, "_annotated_tes_cache")
+        assert not hasattr(r, "_jc_ctx") and closed == [True]
+
+    def test_run_resets_the_snapshot(self, tmp_path, monkeypatch):
+        # the reset must be wired into run(), not only available as a method
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        r = PipelineRunner(self._cfg(tmp_path, bam))
+        called = []
+        monkeypatch.setattr(PipelineRunner, "_reset_input_snapshot",
+                            lambda self: called.append(True))
+        monkeypatch.setattr("fin.pipeline.runner.generate_isolated_intervals",
+                            lambda *a, **k: {"intervals": [], "fusion_reads": []})
+        r.run()
+        assert called == [True]
+
+    def test_reused_runner_refingerprints_its_inputs(self, tmp_path, monkeypatch):
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        r = PipelineRunner(self._cfg(tmp_path, bam))
+        r._prepare_sample_evidence()
+        first = r._evidence_path()
+        _tiny_bam(tmp_path / "r.bam", reads=((7000, False),))     # same path, new content
+        r._reset_input_snapshot()                                 # what run() does
+        r._prepare_sample_evidence()
+        assert r._evidence_path() != first
+        assert r._sample_evidence()[1]["r0"][2] == 7500
+
+    def test_workers_read_the_recorded_path_not_their_own_guess(self, tmp_path):
+        """A worker must consume the file its RUN prepared. Pointing the
+        recorded path at a different (valid) artifact proves it is honoured
+        rather than re-derived from the worker's own fingerprint."""
+        import dataclasses
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        other = _tiny_bam(tmp_path / "other.bam", reads=((9000, False),))
+        parent = PipelineRunner(self._cfg(tmp_path, bam))
+        parent._prepare_sample_evidence()
+        assert parent.config.sample_evidence_path                 # recorded for workers
+        elsewhere = PipelineRunner(self._cfg(tmp_path, other))
+        elsewhere._prepare_sample_evidence()
+        worker_cfg = dataclasses.replace(
+            parent.config, sample_evidence_path=str(elsewhere._evidence_path()))
+        worker = PipelineRunner(worker_cfg)
+        assert worker._evidence_path() == elsewhere._evidence_path()
+        assert set(worker._sample_evidence()[1]) == {"r0"}        # the recorded artifact
+        # and the ordinary case: same config -> the parent's own file
+        plain = PipelineRunner(dataclasses.replace(parent.config))
+        assert plain._evidence_path() == parent._evidence_path()
+        assert set(plain._sample_evidence()[1]) == {"r0", "r1"}
+
+    def test_run_local_artifact_is_removed_on_cleanup(self, tmp_path, monkeypatch):
+        import fin.scoring.polya as polya_mod
+        from fin.pipeline.runner import PipelineRunner
+        sig = tmp_path / "s.blow5"; sig.write_bytes(b"x")
+        bam = _tiny_bam(tmp_path / "r.bam")
+        monkeypatch.setattr(polya_mod, "compute_polya", lambda *a, **k: {})
+        r = PipelineRunner(self._cfg(tmp_path, bam, signal_path=str(sig)))
+        r._prepare_sample_evidence()
+        path = r._evidence_path()
+        assert "_run" in path.name and path.exists()
+        r.cleanup()
+        assert not path.exists()                                  # disposable, not left behind
+
+    def test_missing_prepared_evidence_is_reported(self, tmp_path, caplog):
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        r = PipelineRunner(self._cfg(tmp_path, bam))
+        r._prepare_sample_evidence()
+        r._evidence_path().unlink()
+        r._invalidate_sample_caches()
+        assert r._sample_evidence() is None
+        assert any("is missing" in rec.getMessage() for rec in caplog.records)
+
+    def test_retry_on_one_runner_uses_the_new_evidence(self, tmp_path, monkeypatch):
+        """A retry must not adopt the artifact of its own earlier failed
+        attempt: each run-local publication takes a fresh token."""
+        import json
+        import fin.scoring.polya as polya_mod
+        from fin.pipeline.runner import PipelineRunner
+        sig = tmp_path / "s.blow5"; sig.write_bytes(b"x")
+        bam = _tiny_bam(tmp_path / "r.bam")
+        r = PipelineRunner(self._cfg(tmp_path, bam, signal_path=str(sig)))
+        monkeypatch.setattr(polya_mod, "compute_polya", lambda *a, **k: {})
+        r._prepare_sample_evidence()                       # attempt 1: unavailable
+        first = r._evidence_path()
+        assert json.loads(first.read_text())["polya"] == {}
+        # attempt 2 on the SAME runner: one good call, one broken -> partial
+        monkeypatch.setattr(polya_mod, "compute_polya", lambda seqs, *a, **k: {
+            "r0": (float("nan"), "FAIL"), "r1": (40.0, "PASS")})
+        r.config.sample_evidence_path = ""
+        r._invalidate_sample_caches()
+        r._prepare_sample_evidence()
+        second = r._evidence_path()
+        assert second != first
+        assert set(json.loads(second.read_text())["polya"]) == {"r1"}
+        assert set(r._sample_evidence()[0]) == {"r1"}      # the NEW calls, not the old
+        r.cleanup()
+        assert not first.exists() and not second.exists()  # both attempts cleaned up
+
+    def test_annotation_replaced_during_parse_is_refused(self, tmp_path, monkeypatch):
+        import pytest
+        from fin.pipeline.runner import PipelineRunner
+        gtf = tmp_path / "a.gtf"; gtf.write_text("chr1\tx\ttranscript\t1\t2\t.\t+\t.\t\n")
+        bam = _tiny_bam(tmp_path / "r.bam")
+        cfg = self._cfg(tmp_path, bam)
+        cfg.gtf_path = str(gtf)
+        r = PipelineRunner(cfg)
+        import fin.io.io_gtf as io_gtf
+
+        real_parse = io_gtf.GTFReader.parse
+
+        def parse_then_swap(self_):
+            out = real_parse(self_)
+            gtf.write_text("chr1\tx\ttranscript\t9\t9\t.\t+\t.\t\n")   # replaced under us
+            return out
+
+        monkeypatch.setattr(io_gtf.GTFReader, "parse", parse_then_swap)
+        with pytest.raises(RuntimeError, match="changed while it was being parsed"):
+            r._open_gtf_reader()
+
+    def test_parseable_subset_is_rejected(self, tmp_path):
+        """A file whose records were removed but whose header still matches is
+        a damaged artifact, not a sample with fewer reads."""
+        import json
+        from fin.pipeline.config import PipelineConfig
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        r = PipelineRunner(self._cfg(tmp_path, bam))
+        r._prepare_sample_evidence()
+        path = r._evidence_path()
+        full = json.loads(path.read_text())
+        assert full["n_ends"] == 2
+        for damaged in ({}, {"r0": full["ends"]["r0"]}):
+            d = dict(full, ends=damaged)                  # n_ends still says 2
+            path.write_text(json.dumps(d))
+            assert PipelineRunner._read_sample_evidence(path) is None
+        path.write_text(json.dumps(full))
+        assert PipelineRunner._read_sample_evidence(path) is not None
+
+    def test_input_replaced_mid_scan_is_refused(self, tmp_path, monkeypatch):
+        """The identity is taken before the scan; if the BAM is swapped while it
+        is being read, the evidence would mix two files under one name."""
+        import pytest
+        import fin.pipeline.runner as R
+        from fin.pipeline.runner import PipelineRunner
+        bam = _tiny_bam(tmp_path / "r.bam")
+        r = PipelineRunner(self._cfg(tmp_path, bam))
+        r._evidence_identity()                            # fingerprint taken
+        _tiny_bam(tmp_path / "r.bam", reads=((5000, False),))   # replaced underneath
+        with pytest.raises(RuntimeError, match="changed while"):
+            r._prepare_sample_evidence()
+
+    def test_failed_annotation_reopen_is_retried(self, tmp_path, monkeypatch):
+        from fin.pipeline.runner import PipelineRunner
+        gtf = tmp_path / "a.gtf"; gtf.write_text("")
+        bam = _tiny_bam(tmp_path / "r.bam")
+        cfg = self._cfg(tmp_path, bam)
+        cfg.gtf_path = str(gtf)
+        r = PipelineRunner(cfg)
+        calls = []
+
+        def flaky(self_):
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError("transient")
+            self_._gtf_fingerprint = R_fp(self_.config.gtf_path)
+            return "reader"
+
+        import fin.pipeline.runner as R
+        R_fp = R.input_fingerprint
+        monkeypatch.setattr(PipelineRunner, "_open_gtf_reader", flaky)
+        try:
+            r._reset_input_snapshot()
+        except OSError:
+            pass
+        assert r._gtf_reader is None and r._gtf_fingerprint is None
+        r._reset_input_snapshot()                          # unchanged bytes -> retried
+        assert r._gtf_reader == "reader" and len(calls) == 2

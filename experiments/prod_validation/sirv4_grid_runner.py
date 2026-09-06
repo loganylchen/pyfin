@@ -159,7 +159,11 @@ def run_cell(args) -> dict:
         shutil.rmtree(cell)
     cell.mkdir(parents=True, exist_ok=True)
 
-    cmd = ["singularity", "exec", "-B", "/autofs,/SSD", str(SIF),
+    # --pwd: `python3 -m fin.cli` puts the CWD FIRST on sys.path, which would
+    # shadow PYFIN_REPO with whatever tree the job was launched from. Running
+    # from a neutral directory makes PYTHONPATH decide, so a frozen snapshot is
+    # actually what executes (verified through run_manifest.source_root).
+    cmd = ["singularity", "exec", "--pwd", "/tmp", "-B", "/autofs,/SSD", str(SIF),
            "env", f"PYTHONPATH={PYPATH_PREFIX + ':' if PYPATH_PREFIX else ''}{REPO}",
            f"PYFIN_SAMPLE_EVIDENCE_CACHE={WORK / '_sample_evidence_cache'}",
            "/usr/bin/python3.10", "-m", "fin.cli",

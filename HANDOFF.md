@@ -385,6 +385,53 @@ the PRE-EXISTING "fusion quant-axis leak" (discovery.py ~856/866; deferred in me
 the SIRV4 era). This batch neither introduces nor worsens it; it is tracked as its own
 default-path change requiring its own grid validation.
 
+## 4g. The production DEFAULT now carries the endpoint channels (2026-09-06)
+
+`PIPELINE_PROFILES["real-drna"]` (the CLI default; `real-drna-precision` inherits)
+resolves `assignment_channels="ends"` and `folded_tss_recovery_mode="require"`.
+The `sirv` benchmark profile and the raw dataclass defaults are unchanged, and an
+explicit `--assignment-channels none` / `--folded-tss-recovery-mode off` still wins
+(recorded in `profile_overrides`). Without `--signal` the 3'/polyA term abstains;
+the 5' term still applies when a `--gtf` is supplied (it scores read starts against
+the annotated TSS), so an unguided run without signal has no endpoint evidence and
+says so. Under another quantifier a PROFILE-IMPLIED setting is disabled with a
+warning (the `post_selection_refit` precedent); an explicit one is an error.
+
+Measured (expression contract, paired vs the previous default, seed 20260831,
+each arm one `source_sha256`, snapshot verified through `run_manifest.source_root`):
+
+| grid | previous default | new default | dF1 (95% CI) | up/down |
+| --- | --- | --- | --- | --- |
+| Sequin (104) | 73.98/90.52/80.78 | 74.67/91.19/**81.44** | +0.64 [+0.27,+1.12] | 17/0 |
+| SIRV4 (156) | 89.21/85.84/87.33 | 90.47/87.80/**88.99** | +1.59 [+1.09,+2.15] | 94/19 |
+| HEYA8 (130) | 77.39/85.18/80.76 | 78.75/87.08/**82.43** | +1.63 [+1.04,+2.29] | 69/4 |
+
+Sn AND Pr both rise on every grid; best competitor is isoquant 69.83 (Sequin),
+espresso 80.74 (SIRV4), espresso 73.78 (HEYA8). The promoted profile reproduces
+the separately measured `--assignment-channels ends` arm (Sequin 104/104 cells
+identical; SIRV4 +0.05 and HEYA8 +0.04, the folded-TSS recovery the ends arm did
+not carry), and the sample-evidence rework that followed the Codex rounds is
+result-neutral (Sequin rerun on the final code: 104/104 identical).
+
+**Sample-evidence artifact (the endpoint channels' input).** One krill polyA pass
+plus the strand-aware read ends per sample, in the work dir. Contract, after 11
+Codex rounds: the file is ADDRESSED BY ITS INPUT IDENTITY (path/size/mtime/ctime +
+head-tail digest of BAM and signal, pore, requested GPU) and is IMMUTABLE -- every
+write is a create (`os.link`), never a replace, so no run can change an artifact
+another run is reading. A result that is incomplete (`partial`, some calls
+unusable) or absent (`unavailable`, the caller failed) is written to an
+attempt-unique run-local name, never shared, and removed at `cleanup()`. Payloads
+carry a completeness manifest (`n_ends`/`n_polya`) so a truncated-but-parseable
+file is rejected rather than read as a sample with fewer reads, and every record is
+type/range validated on the way in. Inputs are re-fingerprinted after collection
+(and the annotation after parsing) so a file replaced mid-run raises instead of
+publishing a mixed snapshot.
+
+**Known bound (class b, accepted):** the fast fingerprint samples the file's edges,
+so an interior edit that also preserves size, both timestamps and the sampled bytes
+is invisible. `PYFIN_EVIDENCE_STRICT_HASH=1` digests the whole file for setups where
+inputs may be rewritten in place behind the pipeline.
+
 ## 5. Validation protocol for ANY future change (frozen invariants)
 
 1. Opt-in flag, default off, no profile enables it; explicit misuse fails

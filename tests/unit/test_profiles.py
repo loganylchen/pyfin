@@ -58,6 +58,10 @@ def _invoke(monkeypatch, tmp_path, *extra):
 def test_default_cli_profile_is_real_drna(monkeypatch, tmp_path):
     cfg, output = _invoke(monkeypatch, tmp_path)
     assert cfg.profile == "real-drna"
+    # the endpoint channels and folded-TSS recovery are part of the default
+    # operating point: the CLI must APPLY them, not just resolve them
+    assert cfg.assignment_channels == "ends"
+    assert cfg.folded_tss_recovery_mode == "require"
     assert cfg.min_abundance == 1.0
     assert cfg.strict_novel_abundance_floor is True
     assert cfg.max_soft_mass_ratio == 0.0
@@ -204,3 +208,16 @@ def test_boolean_no_flag_overrides_profile(monkeypatch, tmp_path):
     )
     assert cfg.floor_gtf_abundance is False
     assert cfg.profile_overrides == ("floor_gtf_abundance",)
+
+
+def test_cli_explicit_flags_override_the_promoted_defaults(monkeypatch, tmp_path):
+    cfg, _ = _invoke(monkeypatch, tmp_path,
+                     "--assignment-channels", "none",
+                     "--folded-tss-recovery-mode", "off")
+    assert cfg.assignment_channels == "none" and cfg.folded_tss_recovery_mode == "off"
+    assert {"assignment_channels", "folded_tss_recovery_mode"} <= set(cfg.profile_overrides)
+
+
+def test_sirv_profile_keeps_the_channels_off(monkeypatch, tmp_path):
+    cfg, _ = _invoke(monkeypatch, tmp_path, "--profile", "sirv")
+    assert cfg.assignment_channels == "none" and cfg.folded_tss_recovery_mode == "off"

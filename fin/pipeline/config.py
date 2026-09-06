@@ -59,6 +59,16 @@ PIPELINE_PROFILES: dict[str, dict[str, object]] = {
         "m2_diff_cover_margin": 0.5,
         "m2_summed_llr_margin": 1.0,
         "m2_summed_llr_flank": 8,
+        # Endpoint evidence in the assignment posterior + read-extent hypothesis
+        # for annotated models whose ends the reads contradict, and re-emission
+        # of supported folded-TSS shadows. Both chosen by cross-dataset maximin
+        # (SIRV4 / Sequin / HEYA8 expression contract, paired vs the previous
+        # default): ends +1.54 / +0.64 / +1.59 F1 with Sn AND Pr up on every
+        # grid; tss require +0.05 / 0 / +0.03 (never negative). Without --signal
+        # the 3'/polyA term abstains; the 5' term still applies when a GTF is
+        # supplied (it scores read starts against the annotated TSS).
+        "assignment_channels": "ends",
+        "folded_tss_recovery_mode": "require",
     },
     "custom": {},
 }
@@ -134,6 +144,11 @@ class PipelineConfig:
 
     # Working directory
     work_dir: str = "./pyfin_work"
+    # Runtime field (not a user option): the sample-evidence file the PARENT
+    # prepass selected. Workers inherit it with the config instead of
+    # re-deriving an input fingerprint of their own, so every process of one
+    # run reads exactly the evidence that run prepared.
+    sample_evidence_path: str = ""
 
     # Candidate discovery
     three_prime_threshold: int = 24
@@ -802,6 +817,23 @@ class PipelineConfig:
         config.profile_overrides = tuple(sorted(explicit))
         return config
 
+    def _profile_implied(self, field: str) -> bool:
+        """True iff ``field``'s value came from the resolved profile rather than
+        from the caller. A profile-implied m2_em-only setting is disabled with a
+        warning under another quantifier (the post_selection_refit precedent);
+        an explicit choice is an error instead of a silent no-op.
+
+        ``from_profile`` (and the CLI) record explicit fields in
+        ``profile_overrides``; a direct ``PipelineConfig(...)`` has none, so a
+        value that DIFFERS from the profile's is recognised as caller-set. A
+        direct constructor that passes exactly the profile's own value is
+        indistinguishable from inheriting it -- and gets the profile behaviour,
+        which is the same value either way."""
+        profile_values = PIPELINE_PROFILES.get(self.profile, {})
+        return (field in profile_values
+                and field not in self.profile_overrides
+                and getattr(self, field, None) == profile_values[field])
+
     def validate(self):
         """Validate required paths, profiles, metrics, and parallelism knobs."""
         for attr in (
@@ -939,13 +971,37 @@ class PipelineConfig:
             raise ValueError(f"unknown assignment_channels: {self.assignment_channels!r}")
         if (getattr(self, "assignment_channels", "none") != "none"
                 and not getattr(self, "signal_path", None)):
-            raise ValueError("assignment_channels requires --signal (krill polyA calls)")
+            # The 3'/polyA term needs krill polyA calls (--signal); without them
+            # it abstains (no call = no evidence) while the 5' start term, which
+            # only needs the BAM's read starts, still applies. A production
+            # default must degrade to abstention, not to an error.
+            if self.assignment_channels == "ends" and getattr(self, "gtf_path", ""):
+                logger.warning(
+                    "assignment_channels=ends without --signal: the 3'/polyA "
+                    "channel abstains (no polyA calls); the 5' start channel "
+                    "still applies (read starts vs the annotated TSS)")
+            else:
+                logger.warning(
+                    "assignment_channels=%s without --signal: no endpoint "
+                    "evidence is available (the 3'/polyA channel needs polyA "
+                    "calls, and the 5' start channel needs --assignment-channels "
+                    "ends together with a --gtf to score starts against)",
+                    self.assignment_channels,
+                )
         if (getattr(self, "assignment_channels", "none") != "none"
                 and getattr(self, "quant_mode", "m2_em") != "m2_em"):
             # The endpoint terms enter the m2_em posterior and the extent pair
             # is resolved by m2_em selection; other quantifiers would emit the
-            # read-extent sibling and never resolve it.
-            raise ValueError("assignment_channels requires --quant-mode m2_em")
+            # read-extent sibling and never resolve it. A PROFILE-implied
+            # setting is disabled with a warning (as post_selection_refit is);
+            # an explicit user choice is an error.
+            if self._profile_implied("assignment_channels"):
+                logger.warning(
+                    "assignment_channels=%s disabled: unsupported quant_mode=%s; requires m2_em",
+                    self.assignment_channels, self.quant_mode)
+                self.assignment_channels = "none"
+            else:
+                raise ValueError("assignment_channels requires --quant-mode m2_em")
         if getattr(self, "candidate_existence_mode", "off") not in ("off", "audit"):
             raise ValueError(
                 f"unknown candidate_existence_mode: {self.candidate_existence_mode!r}"
@@ -960,10 +1016,16 @@ class PipelineConfig:
             )
         if (getattr(self, "folded_tss_recovery_mode", "off") != "off"
                 and getattr(self, "quant_mode", "m2_em") != "m2_em"):
-            raise ValueError(
-                "folded_tss_recovery_mode requires --quant-mode m2_em "
-                f"(got {self.quant_mode!r})"
-            )
+            if self._profile_implied("folded_tss_recovery_mode"):
+                logger.warning(
+                    "folded_tss_recovery_mode=%s disabled: unsupported quant_mode=%s; requires m2_em",
+                    self.folded_tss_recovery_mode, self.quant_mode)
+                self.folded_tss_recovery_mode = "off"
+            else:
+                raise ValueError(
+                    "folded_tss_recovery_mode requires --quant-mode m2_em "
+                    f"(got {self.quant_mode!r})"
+                )
         if getattr(self, "folded_tss_recovery_mode", "off") not in (
             "off", "audit", "require",
         ):

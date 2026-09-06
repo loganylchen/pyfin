@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import math
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -57,6 +59,73 @@ _M2_EM_PAD = 1.0
 IntervalOutput = Tuple[List[QuantResult], Optional[ResponsibilityLedger]]
 
 
+def _usable_polya_call(value):
+    """``[length, qc]`` when ``value`` is a usable polyA call, else None.
+
+    A call is a pair whose length is absent or a finite number and whose qc is
+    absent or a string. Anything else (a NaN length, a wrong shape) is not a
+    failed call but a broken one: it is dropped at the source so it can never be
+    written into the sample evidence, where it would invalidate the whole
+    artifact -- read ends included -- for every later consumer."""
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        return None
+    length, qc = value
+    if not (qc is None or isinstance(qc, str)):
+        return None
+    if length is None:
+        return [None, qc]
+    if isinstance(length, bool) or not isinstance(length, (int, float)):
+        return None
+    if isinstance(length, float) and not math.isfinite(length):
+        return None
+    if not -2.0 ** 63 <= length <= 2.0 ** 63:
+        return None
+    return [length, qc]
+
+
+def input_fingerprint(path) -> str:
+    """Fingerprint of an INPUT file, used to decide whether derived evidence
+    (read endpoints, polyA calls) may be reused for it.
+
+    Default (fast): ``path:size:mtime:ctime:digest(head 64KiB + tail 64KiB)``.
+    This DETECTS a file regenerated or rewritten at the same path -- the normal
+    way an input changes -- because such a write moves the timestamps and almost
+    always the size or the header/EOF bytes. It does NOT PROVE content identity:
+    a same-length in-place edit of the interior that also restores the
+    timestamps is indistinguishable, and on filesystems where ctime tracks mtime
+    the restored-timestamp case is invisible too. Only a full hash proves
+    identity, and that costs the scan this check exists to skip.
+
+    Set ``PYFIN_EVIDENCE_STRICT_HASH=1`` to digest the whole file instead, for
+    setups where inputs may be edited in place behind the pipeline. The cost is
+    one sequential read of the input per run (still well under the per-record
+    decode it guards)."""
+    import hashlib
+    import os
+
+    if not path:
+        return ""
+    p = Path(path)
+    strict = os.environ.get("PYFIN_EVIDENCE_STRICT_HASH", "") not in ("", "0")
+    try:
+        st = p.stat()
+        h = hashlib.blake2b(digest_size=8)
+        with p.open("rb") as fh:
+            if strict:
+                for chunk in iter(lambda: fh.read(8 << 20), b""):
+                    h.update(chunk)
+            else:
+                edge = 64 * 1024
+                h.update(fh.read(edge))
+                if st.st_size > edge:
+                    fh.seek(max(st.st_size - edge, edge))
+                    h.update(fh.read(edge))
+        return (f"{p.resolve()}:{st.st_size}:{int(st.st_mtime_ns)}"
+                f":{int(st.st_ctime_ns)}:{'full' if strict else 'edge'}:{h.hexdigest()}")
+    except OSError:
+        return str(p)
+
+
 def _order_interval_outputs(
     outputs: List[IntervalOutput], refit_effective: bool
 ) -> List[IntervalOutput]:
@@ -96,11 +165,7 @@ class PipelineRunner:
         """
         # Load GTF
         if self.config.gtf_path:
-            from fin.io.io_gtf import GTFReader
-
-            self._gtf_reader = GTFReader(self.config.gtf_path)
-            self._gtf_reader.open()
-            self._gtf_reader.parse()
+            self._gtf_reader = self._open_gtf_reader()
 
         # Load genome FASTA (full sequence per chrom)
         if self.config.genome_fasta_path:
@@ -121,6 +186,9 @@ class PipelineRunner:
         Returns:
             Aggregated quantification results.
         """
+        # A runner may be reused after its inputs changed: re-fingerprint them
+        # before anything derived from the old ones is consulted.
+        self._reset_input_snapshot()
         # Generate intervals
         result = generate_isolated_intervals(
             self.config.bam_path,
@@ -1401,33 +1469,173 @@ class PipelineRunner:
             )
 
     # ---- sample-level evidence for the existence test -----------------------
-    _SAMPLE_EVIDENCE_NAME = "_sample_evidence.json"
+    _SAMPLE_EVIDENCE_NAME = "_sample_evidence.json"      # legacy basename only
+
+    def _invalidate_sample_caches(self) -> None:
+        """Drop every in-memory view of the sample evidence. Called whenever the
+        file on disk is (re)written, so a retry after a failed polyA pass does
+        not keep serving the abstaining maps to the intervals."""
+        for attr in ("_sample_evidence_cache", "_nuisance_evidence_cache",
+                     "_read_extent_hook_cache"):
+            if hasattr(self, attr):
+                delattr(self, attr)
+
+    def _open_gtf_reader(self):
+        """Parse the configured annotation and remember its fingerprint, so a
+        later run of this runner can tell that the annotation changed."""
+        from fin.io.io_gtf import GTFReader
+
+        before = input_fingerprint(self.config.gtf_path)
+        reader = GTFReader(self.config.gtf_path)
+        reader.open()
+        reader.parse()
+        if input_fingerprint(self.config.gtf_path) != before:
+            reader.close()
+            raise RuntimeError(
+                "the annotation changed while it was being parsed "
+                f"({self.config.gtf_path}); rerun on a stable input")
+        # the fingerprint describes exactly the bytes this reader holds
+        self._gtf_fingerprint = before
+        return reader
+
+    def _close_jc_context(self) -> None:
+        """Drop the junction-correction context and close the slow5 handle it
+        opened (its ``reader`` is a closure over that handle, not a file object)."""
+        s5 = getattr(self, "_jc_slow5", None)
+        if s5 is not None and hasattr(s5, "close"):
+            try:
+                s5.close()
+            except Exception:  # noqa: BLE001 - closing a stale handle is best effort
+                logger.debug("junction-correction slow5 close failed", exc_info=True)
+        self._jc_slow5 = None
+        if hasattr(self, "_jc_ctx"):
+            del self._jc_ctx
+
+    def _reset_input_snapshot(self) -> None:
+        """Re-fingerprint the inputs at a run boundary. A runner may be reused
+        after its BAM / signal / annotation changed; the identity must then be
+        recomputed and EVERY view derived from the old inputs dropped -- the
+        endpoint evidence, the annotation TSS/TES lists, and the junction
+        correction context (which holds an aligner and an open signal reader)."""
+        if hasattr(self, "_evidence_identity_cache"):
+            del self._evidence_identity_cache
+        self.config.sample_evidence_path = ""
+        self._invalidate_sample_caches()
+        for attr in ("_annotated_tss_cache", "_annotated_tes_cache"):
+            if hasattr(self, attr):
+                delattr(self, attr)
+        self._close_jc_context()
+        # An annotation can change between runs of one runner (a new --gtf, or
+        # the same path rewritten). The endpoint channels score reads against
+        # its TSS/TES, so a stale reader would silently apply the old
+        # coordinates: reopen when the file's fingerprint moved.
+        gtf_fp = input_fingerprint(getattr(self.config, "gtf_path", ""))
+        if gtf_fp != getattr(self, "_gtf_fingerprint", None):
+            if self._gtf_reader is not None:
+                try:
+                    self._gtf_reader.close()
+                except Exception:  # noqa: BLE001 - closing a stale reader is best effort
+                    logger.debug("stale GTF reader close failed", exc_info=True)
+                self._gtf_reader = None
+            self._gtf_fingerprint = None
+            if getattr(self.config, "gtf_path", ""):
+                # _open_gtf_reader records the fingerprint only after a
+                # successful parse, so a failed reopen is retried next time
+                # instead of being remembered as current
+                self._gtf_reader = self._open_gtf_reader()
+            else:
+                self._gtf_fingerprint = gtf_fp
+        elif getattr(self.config, "gtf_path", "") and self._gtf_reader is None:
+            self._gtf_reader = self._open_gtf_reader()      # a previous open failed
+
+    def _input_fingerprints(self) -> dict:
+        """Fresh fingerprints of the files the evidence is derived from."""
+        return {
+            "bam": input_fingerprint(self.config.bam_path),
+            "signal": input_fingerprint(self.config.signal_path),
+        }
+
+    def _evidence_identity(self):
+        """The input fingerprint the evidence for THIS run must carry."""
+        cached = getattr(self, "_evidence_identity_cache", None)
+        if cached is None:
+            cached = self._evidence_identity_cache = {
+                "bam": input_fingerprint(self.config.bam_path),
+                "signal": input_fingerprint(self.config.signal_path),
+                "pore": str(self.config.krill_pore),
+                # the polyA caller runs on GPU or CPU; the calls are the
+                # evidence, so the backend belongs to their identity. This is
+                # the REQUESTED backend: krill may fall back to CPU when a GPU
+                # is unavailable, which this cannot see.
+                "gpu": str(bool(self.config.use_gpu)),
+            }
+        return cached
+
+    def _run_token(self, new_attempt: bool = False) -> str:
+        """Token naming this runner's disposable files. A pid alone is not
+        exclusive: one process can hold two runners, and a RETRY within one
+        runner must not adopt the artifact of its own earlier failed attempt --
+        so each publication attempt takes a fresh token."""
+        token = getattr(self, "_run_token_value", None)
+        if token is None or new_attempt:
+            import uuid
+
+            token = self._run_token_value = f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        return token
+
+    def _evidence_path(self, identity=None, run_local=False, new_attempt=False):
+        """Work-dir evidence file, ADDRESSED BY ITS INPUT IDENTITY.
+
+        Two runs may share a work directory (the benchmark harness does). With
+        one fixed filename they overwrite each other, and a consumer either
+        reads endpoints derived from another sample or -- once that is detected
+        -- silently loses its own. Deriving the name from the identity makes the
+        file immutable for a given input set: a different input is a different
+        file, so there is nothing to race over.
+
+        ``run_local=True`` adds this process's id: evidence whose polyA pass
+        FAILED is valid only for the run that produced it, and must never
+        replace another run's successful evidence for the same inputs.
+
+        Once the parent prepass has chosen a file it is recorded in
+        ``config.sample_evidence_path``; workers (which receive the config) then
+        read that exact file instead of fingerprinting the inputs again."""
+        import hashlib
+        import os
+
+        recorded = getattr(self.config, "sample_evidence_path", "")
+        if recorded and identity is None and not run_local:
+            return Path(recorded)
+        ident = identity if identity is not None else self._evidence_identity()
+        key = hashlib.blake2b(
+            "|".join(f"{k}={ident[k]}" for k in sorted(ident)).encode("utf-8"),
+            digest_size=8).hexdigest()
+        suffix = f"_run{self._run_token(new_attempt)}" if run_local else ""
+        return Path(self.config.work_dir) / f"_sample_evidence_{key}{suffix}.json"
 
     def _prepare_sample_evidence(self) -> None:
-        """Krill polyA calls + strand-aware 3' ends for every primary read,
-        written once to ``<work_dir>/_sample_evidence.json``. Idempotent."""
+        """Strand-aware 3'/5' ends for every primary read (always) plus krill
+        polyA calls (only with ``--signal``), written once to
+        ``<work_dir>/_sample_evidence.json``. Idempotent."""
         import hashlib
         import json
         import os
         import shutil
+        import tempfile
 
-        out = Path(self.config.work_dir) / self._SAMPLE_EVIDENCE_NAME
-        identity = {
-            "bam": str(Path(self.config.bam_path).resolve()),
-            "signal": (str(Path(self.config.signal_path).resolve())
-                       if self.config.signal_path else ""),
-            "pore": str(self.config.krill_pore),
-        }
+        identity = self._evidence_identity()
+        out = self._evidence_path(identity)
+        self.config.sample_evidence_path = str(out)
+        # A run WITH --signal whose krill pass failed must not leave a file that
+        # looks like a valid "no polyA in this sample" answer: it is recorded as
+        # unavailable, which is a cache MISS for a later run that can retry.
+        _wanted_polya_status = "ok" if self.config.signal_path else "no_signal"
+        # "partial"/"unavailable" artifacts are run-local by construction, so a
+        # prepass only ever accepts a complete one.
         if out.exists():
-            try:
-                with out.open() as fh:
-                    head = json.load(fh)
-                if (head.get("version") == "sample-evidence-v2"
-                        and head.get("identity") == identity):
-                    return
-            except (OSError, ValueError):
-                pass
-            logger.info("Sample evidence in work dir is stale (version/inputs); rebuilding")
+            if self._read_sample_evidence(out, identity, _wanted_polya_status) is not None:
+                return
+            logger.info("Sample evidence in work dir is unusable (version/inputs/shape); rebuilding")
         Path(self.config.work_dir).mkdir(parents=True, exist_ok=True)
         # The evidence depends only on the sample (BAM + signal + pore), not on
         # the annotation or any flag, so a shared cache (PYFIN_SAMPLE_EVIDENCE_CACHE)
@@ -1435,61 +1643,239 @@ class PipelineRunner:
         shared_dir = os.environ.get("PYFIN_SAMPLE_EVIDENCE_CACHE")
         shared = None
         if shared_dir:
-            key = hashlib.blake2b("|".join([
-                str(Path(self.config.bam_path).resolve()),
-                str(Path(self.config.signal_path).resolve()) if self.config.signal_path else "",
-                str(self.config.krill_pore), "sample-evidence-v2",
-            ]).encode("utf-8"), digest_size=8).hexdigest()
+            key = hashlib.blake2b("|".join(
+                [f"{k}={identity[k]}" for k in sorted(identity)]
+                + ["sample-evidence-v3"],
+            ).encode("utf-8"), digest_size=8).hexdigest()
             shared = Path(shared_dir) / f"sample_evidence_{key}.json"
             if shared.exists():
-                shutil.copyfile(shared, out)
-                logger.info("Sample evidence reused from cache: %s", shared)
-                return
+                # Copy FIRST, then validate the copy: validating the shared path
+                # and re-reading it afterwards would accept one payload and
+                # install another if a concurrent writer replaced it between the
+                # two opens.
+                fd, ctmp = tempfile.mkstemp(prefix=out.name + ".", suffix=".tmp",
+                                            dir=str(out.parent))
+                os.close(fd)
+                try:
+                    # The entry can be evicted or become unreadable between the
+                    # existence check and the copy: a cache miss, not a failure.
+                    shutil.copyfile(shared, ctmp)
+                    ok = self._read_sample_evidence(
+                        ctmp, identity, _wanted_polya_status) is not None
+                except OSError as exc:  # noqa: BLE001 - the cache is an optimisation
+                    logger.info("Sample evidence cache unreadable (%s); rebuilding", exc)
+                    ok = False
+                try:
+                    if ok:
+                        # create-only, exactly like publication: importing must
+                        # not replace an artifact another run may be reading
+                        try:
+                            os.link(ctmp, out)
+                            imported = True
+                        except FileExistsError:
+                            imported = self._read_sample_evidence(
+                                out, identity, _wanted_polya_status) is not None
+                            if not imported:
+                                logger.warning(
+                                    "Sample evidence at %s is unusable and is not "
+                                    "replaced; using a run-local copy", out)
+                                out = self._evidence_path(
+                                    identity, run_local=True, new_attempt=True)
+                                self.config.sample_evidence_path = str(out)
+                                os.link(ctmp, out)      # attempt-unique: cannot exist
+                                self._run_local_evidence = getattr(
+                                    self, "_run_local_evidence", set())
+                                self._run_local_evidence.add(str(out))
+                                imported = True
+                        if imported:
+                            logger.info("Sample evidence reused from cache: %s", shared)
+                            self._invalidate_sample_caches()
+                            return
+                    logger.info("Sample evidence cache entry unusable; rebuilding: %s", shared)
+                finally:
+                    try:
+                        if os.path.exists(ctmp):
+                            os.unlink(ctmp)
+                    except OSError:
+                        logger.debug("could not remove evidence temp %s", ctmp, exc_info=True)
         polya: Dict[str, list] = {}
         ends: Dict[str, list] = {}
-        if self.config.signal_path:
+        # The strand-aware ends are BAM evidence and are ALWAYS collected: the
+        # 5' start channel needs nothing else, so it must keep working without
+        # a signal file. Read sequences are gathered only when krill can use
+        # them; without --signal every polyA call is MISSING (abstention).
+        want_polya = bool(self.config.signal_path)
+        read_seqs: Dict[str, str] = {}
+        with pysam.AlignmentFile(self.config.bam_path, "rb") as bam:
+            for r in bam.fetch():
+                if r.is_unmapped or r.is_secondary or r.is_supplementary:
+                    continue
+                rid = r.query_name
+                if rid is None or rid in ends:
+                    continue
+                if r.reference_start is None or r.reference_end is None:
+                    continue
+                strand = "-" if r.is_reverse else "+"
+                three = int(r.reference_end) if strand == "+" else int(r.reference_start)
+                five = int(r.reference_start) if strand == "+" else int(r.reference_end)
+                ends[rid] = [r.reference_name, strand, three, five]
+                if want_polya and r.query_sequence:
+                    read_seqs[rid] = r.query_sequence
+        polya_status = _wanted_polya_status
+        if want_polya:  # noqa: SIM102 - status decided inside
             from fin.scoring.polya import compute_polya
 
-            read_seqs: Dict[str, str] = {}
-            with pysam.AlignmentFile(self.config.bam_path, "rb") as bam:
-                for r in bam.fetch():
-                    if r.is_unmapped or r.is_secondary or r.is_supplementary:
-                        continue
-                    rid = r.query_name
-                    if rid is None or rid in ends:
-                        continue
-                    if r.reference_start is None or r.reference_end is None:
-                        continue
-                    strand = "-" if r.is_reverse else "+"
-                    three = int(r.reference_end) if strand == "+" else int(r.reference_start)
-                    five = int(r.reference_start) if strand == "+" else int(r.reference_end)
-                    ends[rid] = [r.reference_name, strand, three, five]
-                    if r.query_sequence:
-                        read_seqs[rid] = r.query_sequence
             pm = compute_polya(read_seqs, self.config.signal_path,
                                pore=self.config.krill_pore, use_gpu=self.config.use_gpu)
-            polya = {rid: [v[0], v[1]] for rid, v in pm.items()}
-        tmp = out.with_suffix(".json.tmp")
-        with tmp.open("w") as fh:
-            json.dump({"polya": polya, "ends": ends, "version": "sample-evidence-v2",
-                       "identity": identity}, fh)
-        tmp.replace(out)
-        if shared is not None:
-            try:
-                shared.parent.mkdir(parents=True, exist_ok=True)
-                # Writer-unique temp name + atomic rename: two runs of the same
-                # sample that both miss the cache must never publish a file
-                # the other is still writing.
-                import tempfile
-                fd, stmp = tempfile.mkstemp(prefix=shared.name + ".", suffix=".tmp",
-                                            dir=str(shared.parent))
-                os.close(fd)
-                shutil.copyfile(out, stmp)
-                os.replace(stmp, shared)
-            except OSError as exc:  # noqa: BLE001 - the cache is an optimisation
-                logger.warning("sample evidence cache write failed: %s", exc)
+            # Validate at the SOURCE: a call is (length, qc) with a finite
+            # length. A record that is neither (NaN, a wrong shape) is not a
+            # failed call, it is not a call -- it is dropped here so it can
+            # never be published and later invalidate the whole artifact,
+            # read ends included. Dropping a call is abstention, the same as
+            # a read the caller never scored.
+            polya, n_bad = {}, 0
+            for rid, v in pm.items():
+                call = _usable_polya_call(v)
+                if call is None:
+                    n_bad += 1
+                    continue
+                polya[rid] = call
+            if n_bad:
+                # a partial result is this run's evidence, never the answer
+                # another run will inherit for these inputs
+                polya_status = "partial"
+                logger.warning(
+                    "polyA caller returned %d unusable call(s); those reads "
+                    "abstain on the 3' channel and this evidence stays local", n_bad)
+            if read_seqs and not polya:
+                # compute_polya returns {} when the krill backend or the batch
+                # failed. That is a broken run, not "this sample has no polyA":
+                # record it so the next run retries instead of inheriting a
+                # permanently abstaining 3' channel.
+                polya_status = "unavailable"
+                logger.warning(
+                    "polyA calling produced no calls for %d reads; the 3' channel "
+                    "will abstain and this evidence is not cached as final",
+                    len(read_seqs))
+        # The identity was taken before collection. If an input was replaced
+        # while this run was reading it, the evidence would describe a mixture
+        # of two files under one name: refuse to publish it. Checked AFTER the
+        # polyA pass so the signal file is bracketed too.
+        after = self._input_fingerprints()
+        if after != {k: identity[k] for k in after}:
+            raise RuntimeError(
+                "input files changed while the sample evidence was being "
+                "collected (BAM/signal replaced mid-run); rerun on stable inputs")
+        # Serialise ONCE and publish the same bytes everywhere: re-reading the
+        # work file to fill the shared cache would publish whatever another run
+        # sharing this work dir had replaced it with.
+        payload = json.dumps({
+            "polya": polya, "ends": ends, "version": "sample-evidence-v3",
+            "identity": identity, "polya_status": polya_status,
+            # completeness manifest: a truncated-but-parseable artifact (records
+            # dropped, or both maps emptied) is otherwise indistinguishable from
+            # a sample that genuinely has no ends and no calls
+            "n_ends": len(ends), "n_polya": len(polya)})
+        if polya_status in ("unavailable", "partial"):
+            # This run could not produce a complete polyA result. Its evidence
+            # is still usable (the read ends are there, and the calls it did
+            # get) but it is NOT the answer for these inputs, so it lives under
+            # a name of its own and is never shared.
+            out = self._evidence_path(identity, run_local=True, new_attempt=True)
+            self.config.sample_evidence_path = str(out)
+            self._publish_evidence(out, payload, run_local=True)
+        else:
+            # The identity-addressed artifact is IMMUTABLE: it is created once
+            # and never replaced. Whoever writes it first wins; a later run that
+            # finds it there uses it (its inputs are the same by construction)
+            # instead of overwriting a file other processes may be reading.
+            existing = self._publish_evidence(out, payload)
+            if existing is not None:
+                # Another run published first. Its payload describes the same
+                # inputs, so it is the artifact -- unless it does not parse, in
+                # which case this run uses its own copy rather than replacing a
+                # file other processes may be reading right now.
+                if self._read_sample_evidence(existing, identity, polya_status) is not None:
+                    logger.info("Sample evidence already published by another run: %s", out)
+                else:
+                    logger.warning(
+                        "Sample evidence at %s is unusable and is not replaced "
+                        "(another run may be reading it); using a run-local copy. "
+                        "Delete it to let a later run republish.", existing)
+                    out = self._evidence_path(identity, run_local=True, new_attempt=True)
+                    self.config.sample_evidence_path = str(out)
+                    self._publish_evidence(out, payload, run_local=True)
+            if shared is not None:
+                try:
+                    shared.parent.mkdir(parents=True, exist_ok=True)
+                    self._publish_evidence(shared, payload)
+                except OSError as exc:  # noqa: BLE001 - the cache is an optimisation
+                    logger.warning("sample evidence cache write failed: %s", exc)
+        self._invalidate_sample_caches()
         logger.info("Sample evidence written: %s (%d polyA calls, %d ends)",
                     out, len(polya), len(ends))
+
+    def _publish_evidence(self, dest, payload: str, run_local: bool = False):
+        """Create ``dest`` with ``payload``, WITHOUT replacing an existing file.
+
+        The evidence of one input set is immutable: several runs may derive it
+        concurrently and their consumers may be reading it, so publication is a
+        create (link from a writer-unique temp), never a replace. Losing that
+        race is the normal case, not an error -- the winner's payload describes
+        the same inputs. Returns the existing file's path when the race was lost,
+        else None. ``run_local`` files belong to this run alone and are
+        registered for removal at cleanup."""
+        import tempfile
+
+        dest = Path(dest)
+        fd, tmp = tempfile.mkstemp(prefix=dest.name + ".", suffix=".tmp",
+                                   dir=str(dest.parent))
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(payload)
+            try:
+                os.link(tmp, dest)
+            except FileExistsError:
+                if run_local:
+                    # the name carries this attempt's token, so it cannot
+                    # legitimately exist: refuse rather than adopt it
+                    raise RuntimeError(
+                        f"run-local sample evidence {dest} already exists") from None
+                return dest
+            if run_local:
+                # register BEFORE the fallible temp cleanup: the file exists
+                # now, and cleanup must know about it even if unlinking the
+                # temp raises
+                self._run_local_evidence = getattr(self, "_run_local_evidence", set())
+                self._run_local_evidence.add(str(dest))
+        finally:
+            # the temp is ours either way: a failed write must not leave it
+            try:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            except OSError:
+                logger.debug("could not remove evidence temp %s", tmp, exc_info=True)
+        return None
+
+    def _nuisance_evidence(self):
+        """The sample's per-read endpoint distances, derived once per process.
+        Both fit sites (the discovery contradiction hook and the per-interval
+        assignment context) consume this; only the EM fit is per interval."""
+        cached = getattr(self, "_nuisance_evidence_cache", "unset")
+        if cached != "unset":
+            return cached
+        self._nuisance_evidence_cache = None
+        ev = self._sample_evidence()
+        if ev is not None:
+            from fin.analysis.sample_nuisance import sample_nuisance_evidence
+
+            polya_map, read_ends, read_starts = ev
+            want_tss = getattr(self.config, "assignment_channels", "none") == "ends"
+            self._nuisance_evidence_cache = sample_nuisance_evidence(
+                polya_map, read_ends, claimed_tes=self._annotated_tes(),
+                read_starts=read_starts if want_tss else None,
+                claimed_tss=self._annotated_tss() if want_tss else None)
+        return self._nuisance_evidence_cache
 
     def _read_extent_contradicted(self):
         """Callable(gtf_candidate, read_ids, alternatives) -> {"tes"/"tss":
@@ -1497,20 +1883,22 @@ class PipelineRunner:
         consistent); only those reads define the re-estimated end. Applied to single-exon annotation
         matched by overlap and to multi-exon annotated keys (their wobble-
         equivalent reads). None when the endpoint channels are off."""
+        cached = getattr(self, "_read_extent_hook_cache", "unset")
+        if cached != "unset":
+            return cached                       # sample-level: identical per interval
+        self._read_extent_hook_cache = None
         if getattr(self.config, "assignment_channels", "none") == "none":
             return None
         ev = self._sample_evidence()
-        if ev is None:
+        evidence = self._nuisance_evidence()
+        if ev is None or evidence is None:
             return None
         from fin.analysis.molecule_evidence import POLYA_PASS, polya_state
-        from fin.analysis.sample_nuisance import fit_sample_nuisance
+        from fin.analysis.sample_nuisance import fit_from_evidence
 
         polya_map, read_ends, read_starts = ev
         want_tss = getattr(self.config, "assignment_channels", "none") == "ends"
-        nuisance = fit_sample_nuisance(
-            polya_map, read_ends, claimed_tes=self._annotated_tes(),
-            read_starts=read_starts if want_tss else None,
-            claimed_tss=self._annotated_tss() if want_tss else None)
+        nuisance = fit_from_evidence(evidence)
         endpoint = nuisance.endpoint if nuisance.polya_available else None
         start = nuisance.start if want_tss else None
 
@@ -1553,6 +1941,7 @@ class PipelineRunner:
                             out.setdefault("tss", []).append(rid)   # read begins upstream
             return out
 
+        self._read_extent_hook_cache = contradicted
         return contradicted
 
     def _endpoint_context(self, candidate_set):
@@ -1563,18 +1952,15 @@ class PipelineRunner:
         if getattr(self.config, "assignment_channels", "none") == "none":
             return None
         ev = self._sample_evidence()
-        if ev is None:
+        evidence = self._nuisance_evidence()
+        if ev is None or evidence is None:
             return None
-        from fin.analysis.sample_nuisance import fit_sample_nuisance
+        from fin.analysis.sample_nuisance import fit_from_evidence
 
         polya_map, read_ends, read_starts = ev
         interval_reads = set(getattr(candidate_set, "read_ids", set()) or ())
         channels = getattr(self.config, "assignment_channels", "none")
-        tss = self._annotated_tss() if channels == "ends" else None
-        nuisance = fit_sample_nuisance(
-            polya_map, read_ends, exclude_reads=interval_reads,
-            claimed_tes=self._annotated_tes(),
-            read_starts=read_starts if channels == "ends" else None, claimed_tss=tss)
+        nuisance = fit_from_evidence(evidence, exclude_reads=interval_reads)
         ctx = {"polya": polya_map, "ends": read_ends,
                "endpoint": nuisance.endpoint if nuisance.polya_available else None,
                "starts": read_starts if channels == "ends" else None,
@@ -1624,24 +2010,112 @@ class PipelineRunner:
         self._annotated_tes_cache = out or None
         return self._annotated_tes_cache
 
+    @staticmethod
+    def _read_sample_evidence(path, identity=None, polya_status=None):
+        """Parse an evidence file, or None when it is unusable.
+
+        Derived evidence read back from disk is INPUT, not a promise: a
+        truncated write, a payload from another sample, or a record of the
+        wrong shape must rebuild rather than crash or silently disable a
+        channel. ``identity`` / ``polya_status``, when given, must match."""
+        import json
+
+        try:
+            with Path(path).open() as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(d, dict):
+            return None
+        if d.get("version") != "sample-evidence-v3":
+            return None
+        if identity is not None and d.get("identity") != identity:
+            return None
+        if polya_status is not None and d.get("polya_status") != polya_status:
+            return None
+        ends, polya = d.get("ends"), d.get("polya")
+        if not isinstance(ends, dict) or not isinstance(polya, dict):
+            return None
+        # the writer recorded how many records it wrote; anything else is a
+        # damaged file, not a sample with fewer reads
+        if (d.get("n_ends") != len(ends)) or (d.get("n_polya") != len(polya)):
+            return None
+
+        # Every consumer eventually converts these to float (polya_state, the
+        # endpoint kernels); a value outside the double range would raise there,
+        # far from the file that caused it. Reject it here as an unusable
+        # payload -- genomic coordinates and polyA lengths are far below this.
+        _NUMBER_MAX = 2.0 ** 63
+
+        def _finite_number(x) -> bool:
+            """A JSON number usable as a coordinate/length. ``math.isnan`` on a
+            huge int raises OverflowError, so ints are checked as ints."""
+            if isinstance(x, bool):
+                return False                     # bool is an int subclass
+            if isinstance(x, int):
+                return -_NUMBER_MAX <= x <= _NUMBER_MAX
+            return (isinstance(x, float) and not (math.isnan(x) or math.isinf(x))
+                    and -_NUMBER_MAX <= x <= _NUMBER_MAX)
+
+        def _coord(x):
+            if not _finite_number(x):
+                return None
+            if isinstance(x, float) and x != int(x):
+                return None                      # a coordinate is a whole number
+            return int(x)
+
+        read_ends, read_starts, polya_map = {}, {}, {}
+        for rid, v in ends.items():
+            # [chrom, strand, three_prime, five_prime]: a record of any other
+            # shape is a corrupt file, not a read without a 5' end -- accepting
+            # it would silently disable a channel or fabricate a coordinate.
+            if (not isinstance(rid, str) or not isinstance(v, list) or len(v) != 4
+                    or not isinstance(v[0], str) or v[1] not in ("+", "-")):
+                return None
+            three, five = _coord(v[2]), _coord(v[3])
+            if three is None or five is None:
+                return None
+            read_ends[rid] = (v[0], v[1], three)
+            read_starts[rid] = (v[0], v[1], five)
+        for rid, v in polya.items():
+            # [length, qc]: length None or a finite number, qc None or a string
+            if (not isinstance(rid, str) or not isinstance(v, list) or len(v) != 2
+                    or not (v[1] is None or isinstance(v[1], str))):
+                return None
+            if v[0] is not None and not _finite_number(v[0]):
+                return None
+            polya_map[rid] = (v[0], v[1])
+        return polya_map, read_ends, read_starts
+
     def _sample_evidence(self):
-        """Load the cached sample evidence (None when the prepass did not run)."""
+        """Load this run's sample evidence (None when the prepass did not run or
+        the file on disk does not belong to this run's inputs).
+
+        The identity is re-checked HERE, not only at write time: a work
+        directory can be shared, and a consumer must never score reads against
+        endpoints derived from another sample."""
         cached = getattr(self, "_sample_evidence_cache", "unset")
         if cached != "unset":
             return cached
-        import json
-
-        path = Path(self.config.work_dir) / self._SAMPLE_EVIDENCE_NAME
-        self._sample_evidence_cache = None
-        if path.exists():
-            with path.open() as fh:
-                d = json.load(fh)
-            ends = d.get("ends", {})
-            self._sample_evidence_cache = (
-                {rid: (v[0], v[1]) for rid, v in d.get("polya", {}).items()},
-                {rid: (v[0], v[1], int(v[2])) for rid, v in ends.items()},
-                {rid: (v[0], v[1], int(v[3])) for rid, v in ends.items() if len(v) > 3},
-            )
+        recorded = getattr(self.config, "sample_evidence_path", "")
+        path = Path(recorded) if recorded else self._evidence_path()
+        identity = None if recorded else self._evidence_identity()
+        parsed = self._read_sample_evidence(path, identity) if path.exists() else None
+        if parsed is None:
+            if path.exists():
+                # Addressed by identity, so this is corruption, not a foreign
+                # payload. Say so: abstaining in silence would look like a
+                # sample with no polyA calls and no read ends.
+                logger.warning(
+                    "Sample evidence at %s is unusable; the endpoint channels "
+                    "will abstain for this run (delete it and rerun)", path)
+            elif recorded:
+                # The prepass prepared this file and it is gone: a worker must
+                # not silently score its intervals without endpoint evidence.
+                logger.warning(
+                    "Prepared sample evidence %s is missing; the endpoint "
+                    "channels will abstain for this run", path)
+        self._sample_evidence_cache = parsed
         return self._sample_evidence_cache
 
     def _fetch_read_seqs_and_ends(
@@ -2033,6 +2507,7 @@ class PipelineRunner:
             logger.warning("junction correction: krill aligner init failed")
             return None
         s5 = pyslow5.Open(self.config.signal_path, "r")
+        self._jc_slow5 = s5          # owned here; closed by reset/cleanup
         cache: dict = {}
 
         def reader(read_id):
@@ -2161,7 +2636,17 @@ class PipelineRunner:
         )
 
     def cleanup(self):
-        """Close file handles."""
+        """Close file handles and drop this run's disposable artifacts."""
+        # evidence from a failed polyA pass: valid only for this run (a retry
+        # may have moved on to the shared artifact, so every file this run
+        # created is tracked, not just the current one)
+        for local in sorted(getattr(self, "_run_local_evidence", ())):  # this runner's own
+            try:
+                Path(local).unlink()
+            except OSError:
+                pass
+        self._run_local_evidence = set()
+        self._close_jc_context()
         if self._gtf_reader:
             self._gtf_reader.close()
         if self._signal_reader:

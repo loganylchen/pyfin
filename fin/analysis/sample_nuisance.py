@@ -236,6 +236,129 @@ class SampleNuisanceModel:
         return self.n_scorable > 0 and self.endpoint.available
 
 
+@dataclass(frozen=True)
+class NuisanceEvidence:
+    """Per-read endpoint distances of ONE sample, derived once.
+
+    Deriving the distances (nearest claimed TES / TSS per read) is sample work
+    that does not depend on which interval is being judged; only the MIXTURE FIT
+    does, through leave-one-interval-out exclusion. Separating the two keeps the
+    per-interval cost at "filter a list and run the EM" instead of re-deriving
+    every read's distance (and re-sorting the annotation) for every interval.
+    """
+
+    tes: Tuple[Tuple[str, int], ...]                 # (read_id, signed distance to claimed TES)
+    tss: Tuple[Tuple[str, int], ...]                 # (read_id, upstream distance, >= 0)
+    ends_by_locus: Mapping[Tuple[str, str], Tuple[int, ...]]     # PASS 3' ends (fallback)
+    ids_by_locus: Mapping[Tuple[str, str], Tuple[str, ...]]
+    n_scorable: int
+    n_pass: int
+    has_claimed_tes: bool
+
+
+def _nearest_signed(sorted_pos: Sequence[int], x: int) -> int:
+    """Signed genomic distance from the nearest position in ``sorted_pos``."""
+    k = bisect.bisect_left(sorted_pos, x)
+    cands = [sorted_pos[j] for j in (k - 1, k) if 0 <= j < len(sorted_pos)]
+    return min((x - t for t in cands), key=abs)
+
+
+def sample_nuisance_evidence(
+    polya_map: Mapping[str, Tuple[Optional[float], Optional[str]]],
+    read_ends: Mapping[str, Tuple[str, str, int]],
+    *,
+    claimed_tes: Optional[Mapping[Tuple[str, str], Sequence[int]]] = None,
+    read_starts: Optional[Mapping[str, Tuple[str, str, int]]] = None,
+    claimed_tss: Optional[Mapping[Tuple[str, str], Sequence[int]]] = None,
+) -> NuisanceEvidence:
+    """Derive every read's endpoint distances once (annotation sorted once per locus)."""
+    from fin.analysis.molecule_evidence import POLYA_PASS, polya_state
+
+    by_locus: Dict[Tuple[str, str], List[int]] = {}
+    ids_by_locus: Dict[Tuple[str, str], List[str]] = {}
+    n_scorable = n_pass = 0
+    for rid in sorted(polya_map):
+        n_scorable += 1
+        qc, _ = polya_state(polya_map[rid])
+        if qc != POLYA_PASS:
+            continue
+        n_pass += 1
+        loc = read_ends.get(rid)
+        if loc is None:
+            continue
+        chrom, strand, e = loc
+        by_locus.setdefault((chrom, strand), []).append(int(e))
+        ids_by_locus.setdefault((chrom, strand), []).append(rid)
+
+    tes_pairs: List[Tuple[str, int]] = []
+    if claimed_tes:
+        sorted_tes = {k: sorted(v) for k, v in claimed_tes.items()}
+        for key, ends in by_locus.items():
+            pos = sorted_tes.get(key)
+            if not pos:
+                continue
+            strand = key[1]
+            for rid, e in zip(ids_by_locus[key], ends):
+                d = _nearest_signed(pos, e)
+                tes_pairs.append((rid, d if strand == "+" else -d))
+
+    tss_pairs: List[Tuple[str, int]] = []
+    if read_starts and claimed_tss:
+        # signed 5' distance: u > 0 = the read starts UPSTREAM of the nearest
+        # claimed TSS (transcript orientation). Fitted on ALL primary reads (no
+        # polyA needed): the 5' end is what the read has, degraded or not.
+        sorted_tss = {k: sorted(v) for k, v in claimed_tss.items()}
+        for rid in sorted(read_starts):
+            chrom, strand, s5 = read_starts[rid]
+            pos = sorted_tss.get((chrom, strand))
+            if not pos:
+                continue
+            d = _nearest_signed(pos, s5)
+            u = -d if strand == "+" else d          # upstream is negative genomic on +
+            # One-sided: a degraded read (downstream start) is not an upstream
+            # observation; it contributes 0 (at/inside the model), so the narrow
+            # component is the at-TSS mass and the broad one the upstream errors.
+            tss_pairs.append((rid, max(u, 0)))
+
+    return NuisanceEvidence(
+        tes=tuple(tes_pairs), tss=tuple(tss_pairs),
+        ends_by_locus={k: tuple(v) for k, v in by_locus.items()},
+        ids_by_locus={k: tuple(v) for k, v in ids_by_locus.items()},
+        n_scorable=n_scorable, n_pass=n_pass, has_claimed_tes=bool(claimed_tes),
+    )
+
+
+def fit_from_evidence(
+    evidence: NuisanceEvidence, *, exclude_reads: Iterable[str] = (),
+) -> SampleNuisanceModel:
+    """Fit the mixtures on the evidence minus ``exclude_reads`` (leave-one-interval-out:
+    the interval under test contributes nothing to the nuisance it is judged against)."""
+    excl = set(exclude_reads)
+    dists = [d for rid, d in evidence.tes if rid not in excl]
+    if evidence.has_claimed_tes and len(dists) >= 2:
+        model = fit_endpoint_model(dists)
+    else:
+        # Without an annotation (or with no read near one) the split-half
+        # read-mode distances are the only reference; they depend on the
+        # surviving read set, so they are recomputed per fit.
+        ends, ids = {}, {}
+        for key, locus_ids in evidence.ids_by_locus.items():
+            keep = [(rid, e) for rid, e in zip(locus_ids, evidence.ends_by_locus[key])
+                    if rid not in excl]
+            if keep:
+                ids[key] = [rid for rid, _ in keep]
+                ends[key] = [e for _, e in keep]
+        model = fit_endpoint_model(endpoint_distances(ends, ids))
+    ups = [u for rid, u in evidence.tss if rid not in excl]
+    start_model = fit_start_model(ups) if len(ups) >= 2 else None
+    return SampleNuisanceModel(
+        endpoint=model,
+        polya_call_rate=(evidence.n_pass / evidence.n_scorable) if evidence.n_scorable else 0.0,
+        n_scorable=evidence.n_scorable,
+        start=start_model,
+    )
+
+
 def fit_sample_nuisance(
     polya_map: Mapping[str, Tuple[Optional[float], Optional[str]]],
     read_ends: Mapping[str, Tuple[str, str, int]],
@@ -245,11 +368,9 @@ def fit_sample_nuisance(
     read_starts: Optional[Mapping[str, Tuple[str, str, int]]] = None,
     claimed_tss: Optional[Mapping[Tuple[str, str], Sequence[int]]] = None,
 ) -> SampleNuisanceModel:
-    """Fit the sample model from krill polyA calls and strand-aware 3' ends.
+    """Derive the sample's endpoint distances and fit the mixtures in one call.
 
-    ``read_ends``: read_id -> (chrom, strand, three_prime_genomic). ``exclude_reads``
-    implements leave-one-interval-out: the interval under test contributes
-    nothing to the nuisance it is judged against.
+    ``read_ends``: read_id -> (chrom, strand, three_prime_genomic).
 
     ``claimed_tes`` (chrom, strand) -> annotated TES positions of the INPUT
     annotation. The kernel scores read ends against CLAIMED TES coordinates, so
@@ -258,71 +379,16 @@ def fit_sample_nuisance(
     (0.7 bp) would penalise every annotated model for that convention offset.
     Corrupted entries in the input annotation land in the broad component.
     Without an annotation the split-half read-mode distances are used.
-    """
-    from fin.analysis.molecule_evidence import POLYA_PASS, polya_state
 
-    excl = set(exclude_reads)
-    by_locus: Dict[Tuple[str, str], List[int]] = {}
-    ids_by_locus: Dict[Tuple[str, str], List[str]] = {}
-    n_scorable = n_pass = 0
-    for rid, call in polya_map.items():
-        n_scorable += 1
-        qc, _ = polya_state(call)
-        if qc != POLYA_PASS:
-            continue
-        n_pass += 1
-        if rid in excl:
-            continue
-        loc = read_ends.get(rid)
-        if loc is None:
-            continue
-        chrom, strand, e = loc
-        by_locus.setdefault((chrom, strand), []).append(int(e))
-        ids_by_locus.setdefault((chrom, strand), []).append(rid)
-    if claimed_tes:
-        dists: List[int] = []
-        for key, ends in by_locus.items():
-            tes = sorted(claimed_tes.get(key, ()))
-            if not tes:
-                continue
-            strand = key[1]
-            for e in ends:
-                k = bisect.bisect_left(tes, e)
-                cands = [tes[j] for j in (k - 1, k) if 0 <= j < len(tes)]
-                d = min((e - t for t in cands), key=abs)
-                dists.append(d if strand == "+" else -d)
-        model = fit_endpoint_model(dists) if len(dists) >= 2 else fit_endpoint_model(
-            endpoint_distances(by_locus, ids_by_locus))
-    else:
-        model = fit_endpoint_model(endpoint_distances(by_locus, ids_by_locus))
-    start_model = None
-    if read_starts and claimed_tss:
-        # signed 5' distance: u > 0 = the read starts UPSTREAM of the nearest
-        # claimed TSS (transcript orientation). Fitted on ALL primary reads (no
-        # polyA needed): the 5' end is what the read has, degraded or not.
-        ups: List[int] = []
-        for rid, (chrom, strand, s5) in read_starts.items():
-            if rid in excl:
-                continue
-            tss = claimed_tss.get((chrom, strand))
-            if not tss:
-                continue
-            tss = sorted(tss)
-            k = bisect.bisect_left(tss, s5)
-            cands = [tss[j] for j in (k - 1, k) if 0 <= j < len(tss)]
-            d = min((s5 - t for t in cands), key=abs)
-            u = -d if strand == "+" else d          # upstream is negative genomic on +
-            # One-sided: a degraded read (downstream start) is not an upstream
-            # observation; it contributes 0 (at/inside the model), so the narrow
-            # component is the at-TSS mass and the broad one the upstream errors.
-            ups.append(max(u, 0))
-        if len(ups) >= 2:
-            start_model = fit_start_model(ups)
-    return SampleNuisanceModel(
-        endpoint=model,
-        polya_call_rate=(n_pass / n_scorable) if n_scorable else 0.0,
-        n_scorable=n_scorable,
-        start=start_model,
+    Callers that fit repeatedly over the same sample (once per interval, with
+    different exclusions) should derive :func:`sample_nuisance_evidence` ONCE and
+    call :func:`fit_from_evidence` instead.
+    """
+    return fit_from_evidence(
+        sample_nuisance_evidence(
+            polya_map, read_ends, claimed_tes=claimed_tes,
+            read_starts=read_starts, claimed_tss=claimed_tss),
+        exclude_reads=exclude_reads,
     )
 
 
