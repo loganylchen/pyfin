@@ -540,7 +540,31 @@ Human, expression contract, 7 conditions (pre-promotion default -> full stack):
 | p00 | 24.59 | 24.58 | 24.58 | -0.01 |
 | **overall** | 25.10/60.13/35.26 | 25.17/60.16/35.34 | **27.33/60.37/37.38** | **+2.13** |
 
-Spike-in validation of the exemption is the gate for defaulting it.
+**The exemption stays DEFAULT-OFF: it fails the cross-dataset rule.** Three
+forms were measured against the cluster-gated default, each stricter than the
+last (paired, expression contract):
+
+| form | human | Sequin | SIRV4 | HEYA8 |
+| --- | --- | --- | --- | --- |
+| any uncontradicted annotation | +2.04 | -0.27 | -0.23 | - |
+| + containment-only (no wobble twin) | +1.48 | -0.27 | -0.07 | - |
+| + EM soft mass >= 2 | **+0.49** (6 up / 0 down) | -0.02 (ns) | +0.03 (ns) | **-0.20** |
+
+The mass requirement is what restored the corruption protection -- with it, the
+human jitter condition turns POSITIVE (+0.09) where the unrestricted exemption
+cost 0.06 -- and it removes the Sequin/SIRV4 cost entirely. HEYA8 still loses
+0.20 F1 (CI [-0.32,-0.09], 20 cells down), so `--m2-support-gate-gtf-exempt` is
+an option, not a default: worth +0.49 F1 on a real human transcriptome and
+0.20 on the dual spike-in.
+
+What the difference between the domains actually is, since it is not a defect to
+be fixed by a better predicate: the exemption admits annotated isoforms that no
+read can single out, so its value is the PRIOR that such an isoform is really
+expressed. In a human locus with reads that prior is high; in a spike-in mix,
+whose annotation is a defined catalog of which only a subset is present, it is
+low. No junction- or signal-level test separates those cases, because the
+evidence genuinely does not exist -- which is the same conclusion the existence
+design reached for wobble twins (CANDIDATE_EXISTENCE_DESIGN section 8).
 
 ## 4j. Where the DRS signal is NOT being used, and one REJECTED attempt to extend it (2026-09-07)
 
