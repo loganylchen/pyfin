@@ -432,6 +432,70 @@ so an interior edit that also preserves size, both timestamps and the sampled by
 is invisible. `PYFIN_EVIDENCE_STRICT_HASH=1` digests the whole file for setups where
 inputs may be rewritten in place behind the pipeline.
 
+## 4h. Human GENCODE evaluation of the promoted default (2026-09-06, IN PROGRESS)
+
+The fourth grid, `results/gencode_full_sweep_ratio_grid_v2`, is the real human
+transcriptome: GENCODE v44 on GRCh38, 15 samples x 26 conditions (the same
+corruption ladder), NanoCount truth per sample (47667 of 252894 transcripts
+expressed). Its competitor runs DO NOT EXIST -- the workflow could not resolve
+its container engine (`missing-containers.md`: `apptainer` not found), so only
+4 assembler GTFs exist across 390 cells. A PRIOR human run on a different grid
+(rates 20, 6 tools, `analysis/gencode_full_sweep/scoring/`) is scored on the
+CATALOG contract and shows what that contract rewards: bambu 99.7 F1 and talon
+85.4 with **91.6% of their matched transcripts carrying zero reads**, and F1
+collapsing to 5.6 / 9.3 without an annotation. PyFIN was excluded from it.
+
+Only 3 of the 15 samples have a genome alignment; one (H9 rep2 run2) is fully
+staged locally. Runs use a chr1+chr19+chr21 slice (49195 of 296508 reads, 40163
+of 252894 annotated transcripts, 7398 expressed): both arms see identical
+intervals, so the comparison is paired; only the absolute scale differs.
+
+**Cost of the promoted default on real data:** the krill polyA prepass is ~51
+min for 296508 reads (CPU, 6 threads), once per sample and then cached.
+
+**Expression contract, 7 conditions, paired:**
+
+| arm | Sn | Pr | F1 |
+| --- | --- | --- | --- |
+| pre-promotion default | 25.10 | 60.13 | 35.26 |
+| `tes` (3' only) | 25.10 | 59.54 | 35.15 |
+| promoted default (`ends`) | 25.11 | 59.97 | 35.25 |
+| ECHO (emit the input annotation) | 60.89 | 12.50 | 20.53 |
+
+The endpoint channels are **structurally neutral on human data** (mean dF1
+-0.01, 3 up / 4 down) -- and they must be, because gffcompare matches INTRON
+CHAINS: two models with the same chain and 500 bp different ends are both `=`.
+The structural F1 used everywhere in this benchmark is blind to the extent,
+which is the only thing these channels change. The echo baseline is the honest
+reference for the human grid: emitting the annotation gets 60.9 recall at 12.5
+precision.
+
+**The axis the channels actually target** (`endpoint_accuracy.py`: for every
+gffcompare `=` match, the strand-aware distance from the emitted ends to the
+truth's ends):
+
+| arm | TES within 20 bp | TSS within 20 bp | TES within 20 bp on c_trunc3p50 |
+| --- | --- | --- | --- |
+| pre-promotion default | 86.8% | 77.6% | 61.7% |
+| `tes` (3' only) | 85.6% | 77.8% | **70.8%** |
+| promoted default (`ends`) | 85.7% | **68.6%** | 70.9% |
+
+The 3' repair does exactly what it claims: where the annotation's 3' ends were
+truncated it recovers +9 points of TES agreement, on real human data. The 5'
+start term is a REGRESSION: -9 points of TSS agreement overall (96.4% -> 79.1%
+on the uncorrupted annotation), because on real data reads starting upstream of
+a CORRECT annotated TSS are common (unannotated upstream starts, first-intron
+retention, run-through) and the 5' contradiction test has no analogue of the
+polyA-PASS requirement that makes the 3' test specific.
+
+**Open decision (measurement running):** `--assignment-channels tes` on all
+three spike-in grids. If the +1.54 / +0.64 / +1.63 F1 survives without the 5'
+term, `tes` is the better production default than `ends`; if the gain came from
+the 5'-truncation conditions, the 5' contradiction test needs the strictness of
+its 3' counterpart (a read CLUSTER at an upstream start, not one read) rather
+than removal. Do not treat the promoted `ends` default as settled until that
+table exists.
+
 ## 5. Validation protocol for ANY future change (frozen invariants)
 
 1. Opt-in flag, default off, no profile enables it; explicit misuse fails

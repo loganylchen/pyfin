@@ -66,6 +66,39 @@ DATASETS = {
         truth_name="heya8_dual_truth.gtf", genome_name="spikein_sequin_sirv1.fa",
         concentration=None,
     ),
+    # REAL human transcriptome (GENCODE v44 on GRCh38), same 27-condition
+    # corruption ladder and the same NanoCount expression truth as the spike-in
+    # grids. This is the generalisation test the spike-ins cannot give: 252894
+    # annotated transcripts of which ~40k are expressed, real degradation, real
+    # alternative ends. Reads are staged per sample under `stage_root` because
+    # the grid itself ships no genome alignment.
+    # chr1+chr19+chr21 slice of the human grid: the same paired comparison at
+    # ~1/6 the cost (49195 of 296508 reads, 40163 of 252894 annotated
+    # transcripts). Both arms see exactly the same intervals, so a flag's
+    # effect is measured on identical evidence; only the absolute scale differs
+    # from a whole-genome run.
+    "gencode_sub": dict(
+        bench=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/_gencodegrid/_sub"),
+        work=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/_gencodegrid"),
+        truth_src=_ROOT / "refs" / "host" / "gencode.v44.primary_assembly.annotation.gtf",
+        genome_src=_ROOT / "refs" / "host" / "GRCh38.primary_assembly.genome.fa",
+        truth_name="gencode.v44.gtf", genome_name="GRCh38.primary_assembly.genome.fa",
+        concentration=None,
+        stage_root=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/_gencodegrid"),
+        stage={"SGNex_H9_directRNA_replicate2_run2": "_sub"},
+    ),
+    "gencode": dict(
+        bench=_ROOT / "results" / "gencode_full_sweep_ratio_grid_v2",
+        work=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/_gencodegrid"),
+        truth_src=_ROOT / "refs" / "host" / "gencode.v44.primary_assembly.annotation.gtf",
+        genome_src=_ROOT / "refs" / "host" / "GRCh38.primary_assembly.genome.fa",
+        truth_name="gencode.v44.gtf", genome_name="GRCh38.primary_assembly.genome.fa",
+        concentration=None,
+        stage_root=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/gencode"),
+        # 3 of the 15 samples have a genome alignment; H9 rep2 run2 additionally
+        # has its reads+signal staged locally. `stage` lists what can be RUN.
+        stage={"SGNex_H9_directRNA_replicate2_run2": "_p00val/stage"},
+    ),
 }
 DATASET = os.environ.get("PYFIN_GRID_DATASET", "sirv4")
 _D = DATASETS[DATASET]
@@ -78,8 +111,20 @@ GENOME = WORK / "_ref" / _D["genome_name"]
 
 
 def stage_refs() -> None:
-    """Copy this dataset's truth GTF + genome FASTA onto /SSD (docker-visible)."""
+    """Copy this dataset's truth GTF + genome FASTA onto /SSD (docker-visible).
+
+    gffcompare runs in Docker and cannot read the /autofs automount, so the
+    TRUTH is always staged; the genome is only read by pyfin (inside the SIF,
+    which binds /autofs), so a multi-GB host genome is linked, not copied."""
     (WORK / "_ref").mkdir(parents=True, exist_ok=True)
+    if _D.get("stage_root") is not None:
+        for src, dst in ((_D["genome_src"], GENOME),
+                         (Path(str(_D["genome_src"]) + ".fai"), Path(str(GENOME) + ".fai"))):
+            if src.exists() and not dst.exists():
+                dst.symlink_to(src)
+        if not TRUTH.exists() or TRUTH.stat().st_size != Path(_D["truth_src"]).stat().st_size:
+            shutil.copyfile(_D["truth_src"], TRUTH)
+        return
     for src, dst in ((_D["truth_src"], TRUTH), (_D["genome_src"], GENOME)):
         if not dst.exists() or dst.stat().st_size != Path(src).stat().st_size:
             shutil.copyfile(src, dst)
@@ -98,15 +143,46 @@ PYPATH_PREFIX = os.environ.get("PYFIN_PYPATH_PREFIX", "")
 
 
 def samples() -> list[str]:
+    staged = _D.get("stage")
+    if staged is not None:
+        # only samples whose reads are staged can be run
+        return sorted(staged)
     return sorted(p.name for p in BENCH.glob("SGNex_*") if p.is_dir())
 
 
 def conditions() -> list[str]:
     gc = BENCH / "benchmark" / "gffcompare"
     first = next(iter(sorted(gc.glob("SGNex_*"))), None)
+    if first is not None:
+        return sorted(p.name for p in first.glob("*") if p.is_dir())
+    # no competitor runs on this grid: take the conditions from the annotations
+    first = next(iter(sorted((BENCH / "_ref").glob("SGNex_*"))), None)
     if first is None:
         return []
-    return sorted(p.name for p in first.glob("*") if p.is_dir())
+    return sorted(p.name for p in first.glob("*")
+                  if p.is_dir() and (p / "annotation.gtf").exists())
+
+
+def sample_inputs(sample: str):
+    """(bam, fastq, signal) for one sample: from the grid, or from the staging
+    directory when the grid ships no alignment (gencode)."""
+    staged = _D.get("stage")
+    if staged is not None and sample in staged:
+        st = _D["stage_root"] / staged[sample]
+        bam = st / "input.bam"
+        # reads/signal are per SAMPLE, not per slice: a chromosome subset reuses
+        # the sample's fastq/blow5 (only the BAM restricts what is processed)
+        full = Path("/SSD/logan/dev/pyfin/experiments/prod_validation/gencode/_p00val/stage")
+        fq = st / "reads.fq.gz"
+        sig = st / "signal.blow5"
+        if not fq.exists():
+            fq = full / "reads.fq.gz"
+        if not sig.exists():
+            sig = full / "signal.blow5"
+        return bam, fq, sig
+    return (BENCH / sample / "align" / f"{sample}.sorted.bam",
+            BENCH / sample / "subset" / "mapped.fq.gz",
+            BENCH / sample / "subset" / "mapped.blow5")
 
 
 def n_annotation_tx(gtf: Path) -> int:
@@ -143,9 +219,7 @@ def parse_stats(path: Path) -> dict:
 def run_cell(args) -> dict:
     sample, cond, outroot, extra, tag, extra_gtf, profile = args
     t0 = time.time()
-    bam = BENCH / sample / "align" / f"{sample}.sorted.bam"
-    fq = BENCH / sample / "subset" / "mapped.fq.gz"
-    sig = BENCH / sample / "subset" / "mapped.blow5"
+    bam, fq, sig = sample_inputs(sample)
     anno = BENCH / "_ref" / sample / cond / "annotation.gtf"
     cell = Path(outroot) / sample / cond
     row = {"sample": sample, "cond": cond, "tool": f"pyfin{tag}", "status": "?"}

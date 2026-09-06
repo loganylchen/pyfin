@@ -35,14 +35,25 @@ GRIDS = {
     "heya8": dict(bench=ROOT / "heya8_dual_full_sweep_ratio_grid_v2",
                   work=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/_heya8grid"),
                   truth_name="heya8_dual_truth.gtf"),
+    # real human transcriptome; the master is the full GENCODE v44 annotation
+    # and the expressed subset is ~40k of its 252894 transcripts
+    "gencode_sub": dict(
+        bench=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/_gencodegrid/_sub"),
+        work=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/_gencodegrid"),
+        truth_name="gencode.v44.chr1_19_21.gtf",
+        nanocount=ROOT / "gencode_full_sweep_ratio_grid_v2"),
+    "gencode": dict(bench=ROOT / "gencode_full_sweep_ratio_grid_v2",
+                    work=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/_gencodegrid"),
+                    truth_name="gencode.v44.gtf"),
 }
 IMAGE = "quay.io/biocontainers/gffcompare:0.12.6--h9f5acd7_0"
 COLS = ["sample", "cond", "tool", "family", "status", "truth_transcripts",
         "n_query", "n_match", "tx_sn", "tx_pr", "tx_f1"]
 
 
-def expressed_ids(bench: Path, sample: str) -> set:
-    path = bench / "_ref" / sample / "expression" / "nanocount.tsv"
+def expressed_ids(bench: Path, sample: str, nanocount_root: Path = None) -> set:
+    base = nanocount_root if nanocount_root is not None else bench
+    path = base / "_ref" / sample / "expression" / "nanocount.tsv"
     out = set()
     with open(path) as fh:
         for row in csv.DictReader(fh, delimiter="\t"):
@@ -141,10 +152,18 @@ def main():
     truth_dir.mkdir(exist_ok=True)
 
     samples = sorted(p.name for p in bench.glob("SGNex_*") if p.is_dir())
+    if not samples:
+        # a slice bench holds only annotations, no per-sample competitor dirs
+        samples = sorted(p.name for p in (bench / "_ref").glob("SGNex_*") if p.is_dir())
+    if a.pyfin:
+        have = {q.parents[2].name for spec in a.pyfin
+                for q in Path(spec.partition("=")[2]).glob("SGNex_*/*/out/assembly.gtf")}
+        if have:
+            samples = [s for s in samples if s in have]
     truths = {}
     for s in samples:
         dest = truth_dir / f"{s}.gtf"
-        n = build_truth(master, expressed_ids(bench, s), dest)
+        n = build_truth(master, expressed_ids(bench, s, g.get("nanocount")), dest)
         truths[s] = (dest, n)
     print("expressed truth per sample:",
           {s: truths[s][1] for s in samples}, flush=True)
