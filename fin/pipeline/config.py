@@ -305,6 +305,21 @@ class PipelineConfig:
     # one-sided 5' start term as well (a read cannot begin upstream of the model
     # it came from). "none" = current.
     assignment_channels: str = "none"
+    # Minimum number of reads that must share a 5' start (within
+    # sample_nuisance.TSS_CLUSTER_TOL_BP) before that start is allowed to
+    # contradict an annotated TSS. One read starting upstream of an annotated
+    # start is not evidence of an alternative TSS on real data -- see the
+    # constant's rationale in fin/analysis/sample_nuisance.py. 1 disables the
+    # requirement (every upstream read counts, the pre-measurement behaviour).
+    tss_contradiction_min_reads: int = 3
+    # Exempt an ANNOTATED multi-exon candidate from the M2/M1 support gate when
+    # the reads do not CONTRADICT any of its junctions (the predicate clustering
+    # already uses for bridging). The gate exists to drop corrupted annotation
+    # junctions, which the reads contradict; it should not drop a genuine
+    # transcript whose only reads are 5'-degraded fragments shared with its
+    # siblings, which is what it does on a real transcriptome. See
+    # m2_junction_nll.uncontradicted_gtf_columns for the measurement.
+    m2_support_gate_gtf_exempt: bool = False
     # Catalog completion. PyFIN's default contract is an EXPRESSED assembly:
     # an annotated transcript with no EM mass is dropped on purpose. Some
     # benchmarks instead score against a complete catalog regardless of

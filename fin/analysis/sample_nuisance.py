@@ -45,6 +45,19 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 # resolution at which two distinct polyA sites are distinguishable at all --
 # below the measured jitter MAD there is no information -- not a tuning value.
 MODE_MERGE_BP = 2
+# A read's 5' start is evidence about a TRANSCRIPT's start only when other
+# molecules end there too. The 3' channel gets its specificity from the polyA
+# call -- a PASS says this molecule was polyadenylated at this position -- and
+# the 5' side has no such per-read statement: a single read starting upstream of
+# an annotated TSS is as likely to be read-through transcription, an unspliced
+# precursor or a molecule from an upstream gene as it is to be a real
+# alternative start. Measured on human dRNA (H9, chr1/19/21, GENCODE v44):
+# 12.9% of reads start >50 bp upstream of the nearest annotated TSS, at a MEDIAN
+# distance of 1232 bp, and 60% of those are alone at their start position while
+# only 26.8% are shared by >= 3 reads. Requiring a start CLUSTER is the 5'
+# analogue of requiring a polyA PASS.
+TSS_CLUSTER_TOL_BP = 10
+
 # A kernel is USABLE evidence only when it is a calibrated model of end
 # jitter: enough ends to estimate three mixture parameters, and a narrow
 # component that IS narrow. The narrow scale models the technical precision of
@@ -254,6 +267,18 @@ class NuisanceEvidence:
     n_scorable: int
     n_pass: int
     has_claimed_tes: bool
+    # sorted 5' starts per (chrom, strand) of every primary read, so a candidate
+    # upstream start can be asked how many molecules share it
+    starts_by_locus: Mapping[Tuple[str, str], Tuple[int, ...]] = ()
+
+    def start_support(self, chrom: str, strand: str, pos: int,
+                      tol: int = TSS_CLUSTER_TOL_BP) -> int:
+        """How many reads start within ``tol`` bp of ``pos`` on this locus."""
+        arr = (self.starts_by_locus or {}).get((chrom, strand))
+        if not arr:
+            return 0
+        return (bisect.bisect_right(arr, pos + tol)
+                - bisect.bisect_left(arr, pos - tol))
 
 
 def _nearest_signed(sorted_pos: Sequence[int], x: int) -> int:
@@ -320,11 +345,16 @@ def sample_nuisance_evidence(
             # component is the at-TSS mass and the broad one the upstream errors.
             tss_pairs.append((rid, max(u, 0)))
 
+    starts_by_locus: Dict[Tuple[str, str], List[int]] = {}
+    for rid in sorted(read_starts or {}):
+        chrom, strand, s5 = read_starts[rid]
+        starts_by_locus.setdefault((chrom, strand), []).append(int(s5))
     return NuisanceEvidence(
         tes=tuple(tes_pairs), tss=tuple(tss_pairs),
         ends_by_locus={k: tuple(v) for k, v in by_locus.items()},
         ids_by_locus={k: tuple(v) for k, v in ids_by_locus.items()},
         n_scorable=n_scorable, n_pass=n_pass, has_claimed_tes=bool(claimed_tes),
+        starts_by_locus={k: tuple(sorted(v)) for k, v in starts_by_locus.items()},
     )
 
 

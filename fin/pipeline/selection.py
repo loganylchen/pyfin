@@ -325,6 +325,19 @@ def select_m2_interval(
         # carry the indel signature at their spurious junction (measured
         # weakest depth 0-1 for all 17 junk chains vs >=2 for 12/13 genuine
         # chains).
+        if getattr(config, "m2_support_gate_gtf_exempt", False) and _d:
+            from fin.scoring.m2_junction_nll import uncontradicted_gtf_columns
+            if observed_jct is None:
+                observed_jct = observed_junctions_fn(interval)
+            exempt = uncontradicted_gtf_columns(
+                cand_list, observed_jct,
+                wobble_bp=int(getattr(config, "chain_cluster_wobble_bp", 6)))
+            if exempt & _d:
+                logger.info(
+                    "m2_em interval %s: %d annotated candidate(s) exempt from the "
+                    "support gate (no junction contradicted by the reads)",
+                    interval.region_string, len(exempt & _d))
+                _d = _d - exempt
         _d, n_rescued = apply_complete_chain_rescue(
             _d, cand_list,
             int(getattr(config, "complete_chain_rescue_reads", 0)),

@@ -363,6 +363,56 @@ def event_genomic_positions(res: dict, cand: TranscriptCandidate) -> List[int]:
     return gen[gen >= 0].tolist()
 
 
+def uncontradicted_gtf_columns(cands, observed_jct, wobble_bp: int = 6):
+    """Columns whose ANNOTATED junctions the reads do not contradict.
+
+    The support gate asks a read to DISCRIMINATE a candidate: to hold its sole
+    best alignment score, or to win the junction-signal contest. A 5'-degraded
+    dRNA fragment shared by several annotated isoforms of one gene can do
+    neither -- it is compatible with all of them -- so on a real transcriptome
+    the gate drops genuine annotated transcripts whose only reads are fragments.
+    Measured on human GENCODE (H9, chr1/19/21): disabling the gate is +7.7 F1 on
+    the uncorrupted annotation with BOTH recall and precision up (Sn 31.2->39.5,
+    Pr 67.8->69.6), while it buys ~1 F1 on a jitter-corrupted annotation.
+
+    What the gate is actually FOR is a corrupted junction, and the data says so
+    directly: a jittered or merged annotation puts a junction right beside the
+    one the reads produced, whereas a real but lowly-covered transcript has
+    junctions the reads are merely SILENT about. That is the same predicate
+    clustering already uses to decide whether an annotation may bridge families
+    (fin/candidates/chain_cluster.cluster_families._uncontradicted), applied
+    here: a junction is contradicted when a DIFFERENT observed junction shares
+    one of its splice sites within the alignment tolerance.
+
+    Returns the set of columns that are exempt (annotated, multi-exon, and
+    uncontradicted). Without a junction registry nothing is exempt.
+    """
+    if not observed_jct:
+        return set()
+    out = set()
+    for j, c in enumerate(cands):
+        if getattr(c, "source", "") != "gtf":
+            continue
+        introns = tuple(c.intron_chain.introns)
+        if not introns:
+            continue
+        obs = observed_jct.get(getattr(c, "strand", "+")) or {}
+        ok = True
+        for don, acc in introns:
+            if (don, acc) in obs:
+                continue
+            for od, oa in obs:
+                if (od, oa) != (don, acc) and (abs(od - don) <= wobble_bp
+                                               or abs(oa - acc) <= wobble_bp):
+                    ok = False
+                    break
+            if not ok:
+                break
+        if ok:
+            out.add(j)
+    return out
+
+
 def support_gate_drops(cands, ties_by_read, nlls_by_read, tie_ok: bool = True):
     """Columns to drop by the M2/M1 read-support gate.
 

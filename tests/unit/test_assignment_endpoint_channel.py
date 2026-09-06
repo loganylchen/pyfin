@@ -1095,3 +1095,113 @@ class TestEvidenceLifecycle:
         assert r._gtf_reader is None and r._gtf_fingerprint is None
         r._reset_input_snapshot()                          # unchanged bytes -> retried
         assert r._gtf_reader == "reader" and len(calls) == 2
+
+
+class TestFivePrimeClusterRequirement:
+    """A read starting upstream of an annotated TSS is evidence about that
+    transcript's start only when other molecules end there too -- the 5'
+    analogue of the polyA-PASS requirement on the 3' side. Measured on human
+    dRNA: 60% of upstream-starting reads are alone at their position."""
+
+    def _hook(self, tmp_path, n_upstream, min_reads=3):
+        import json
+        from fin.pipeline.config import PipelineConfig
+        from fin.pipeline.runner import PipelineRunner
+        cfg = PipelineConfig(bam_path=str(_tiny_bam(tmp_path / "r.bam")),
+                             work_dir=str(tmp_path / "w"), signal_path="/fake.blow5",
+                             assignment_channels="ends", quant_mode="m2_em",
+                             tss_contradiction_min_reads=min_reads)
+        r = PipelineRunner(cfg)
+        polya = {f"b{i}": [40.0, "PASS"] for i in range(120)}
+        # 120 background reads at the annotated TSS/TES, plus n_upstream reads
+        # that start 500 bp upstream of it (all at the same position)
+        ends = {f"b{i}": ["c", "+", 3000 + (i % 3) - 1, 2000 + (i % 3) - 1]
+                for i in range(120)}
+        for j in range(n_upstream):
+            ends[f"u{j}"] = ["c", "+", 3000, 1500]
+            polya[f"u{j}"] = [40.0, "PASS"]
+        (tmp_path / "w").mkdir(parents=True, exist_ok=True)
+        path = r._evidence_path()
+        path.write_text(json.dumps(
+            {"polya": polya, "ends": ends, "version": "sample-evidence-v3",
+             "identity": r._evidence_identity(), "polya_status": "ok",
+             "n_ends": len(ends), "n_polya": len(polya)}))
+        r._annotated_tes = lambda: {("c", "+"): [3000]}
+        r._annotated_tss = lambda: {("c", "+"): [2000]}
+        return r._read_extent_contradicted()
+
+    def test_a_lone_upstream_read_does_not_contradict(self, tmp_path):
+        hook = self._hook(tmp_path, n_upstream=1)
+        model = _cand("anno", 2000, 3000, source="gtf")
+        assert "tss" not in hook(model, ["u0"] + [f"b{i}" for i in range(120)])
+
+    def test_a_cluster_of_upstream_reads_does(self, tmp_path):
+        hook = self._hook(tmp_path, n_upstream=4)
+        model = _cand("anno", 2000, 3000, source="gtf")
+        which = hook(model, [f"u{j}" for j in range(4)] + [f"b{i}" for i in range(120)])
+        assert sorted(which.get("tss", [])) == ["u0", "u1", "u2", "u3"]
+
+    def test_threshold_one_restores_the_old_behaviour(self, tmp_path):
+        hook = self._hook(tmp_path, n_upstream=1, min_reads=1)
+        model = _cand("anno", 2000, 3000, source="gtf")
+        assert hook(model, ["u0"] + [f"b{i}" for i in range(120)]).get("tss") == ["u0"]
+
+    def test_start_support_counts_within_tolerance(self):
+        from fin.analysis.sample_nuisance import (
+            TSS_CLUSTER_TOL_BP, sample_nuisance_evidence)
+        starts = {f"r{i}": ("c", "+", 1000 + i) for i in range(5)}
+        starts["far"] = ("c", "+", 5000)
+        starts["other"] = ("c", "-", 1000)
+        ev = sample_nuisance_evidence({}, {}, read_starts=starts,
+                                      claimed_tss={("c", "+"): [900]})
+        assert ev.start_support("c", "+", 1002) == 5          # 1000..1004 within 10
+        assert ev.start_support("c", "+", 5000) == 1
+        assert ev.start_support("c", "-", 1000) == 1          # strand-separated
+        assert ev.start_support("c", "+", 1002, tol=1) == 3
+        assert ev.start_support("zz", "+", 1) == 0
+        assert TSS_CLUSTER_TOL_BP == 10
+
+
+class TestUncontradictedAnnotationExemption:
+    """The support gate asks a read to DISCRIMINATE a candidate. A 5'-degraded
+    fragment shared by several annotated isoforms cannot, so on a real
+    transcriptome the gate drops genuine transcripts. The exemption keeps its
+    anti-corruption purpose by asking whether the reads CONTRADICT the
+    annotation's junctions -- a jittered junction sits beside an observed one,
+    a merely unobserved junction does not."""
+
+    def _cands(self):
+        from fin.candidates.dataclasses import IntronChain
+        def mk(cid, introns, source):
+            c = _cand(cid, 1000, 5000, source=source)
+            c.intron_chain = IntronChain(introns=introns)
+            return c
+        return [
+            mk("real_anno", ((1200, 1500), (2000, 2400)), "gtf"),   # unobserved but not contradicted
+            mk("jittered_anno", ((1203, 1500), (2000, 2400)), "gtf"),  # 3 bp off an observed junction
+            mk("novel_x", ((1200, 1500),), "novel"),                 # novel: never exempt
+            mk("mono_anno", (), "gtf"),                              # mono: no junctions
+        ]
+
+    def test_only_uncontradicted_annotated_chains_are_exempt(self):
+        from fin.scoring.m2_junction_nll import uncontradicted_gtf_columns
+        observed = {"+": {(1200, 1500): 7}}          # the real junction was seen
+        ex = uncontradicted_gtf_columns(self._cands(), observed, wobble_bp=6)
+        assert ex == {0}                              # jittered is contradicted; novel/mono excluded
+
+    def test_silence_is_not_contradiction(self):
+        from fin.scoring.m2_junction_nll import uncontradicted_gtf_columns
+        # the reads produced a junction far away: says nothing about either model
+        ex = uncontradicted_gtf_columns(self._cands(), {"+": {(9000, 9500): 3}})
+        assert ex == {0, 1}
+
+    def test_no_registry_exempts_nothing(self):
+        from fin.scoring.m2_junction_nll import uncontradicted_gtf_columns
+        assert uncontradicted_gtf_columns(self._cands(), None) == set()
+        assert uncontradicted_gtf_columns(self._cands(), {}) == set()
+
+    def test_exemption_is_off_by_default(self):
+        from fin.pipeline.config import PIPELINE_PROFILES, PipelineConfig
+        assert PipelineConfig(bam_path="/x.bam").m2_support_gate_gtf_exempt is False
+        for name in PIPELINE_PROFILES:
+            assert "m2_support_gate_gtf_exempt" not in PIPELINE_PROFILES[name]

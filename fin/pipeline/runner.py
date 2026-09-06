@@ -1901,6 +1901,7 @@ class PipelineRunner:
         nuisance = fit_from_evidence(evidence)
         endpoint = nuisance.endpoint if nuisance.polya_available else None
         start = nuisance.start if want_tss else None
+        min_start_reads = int(getattr(self.config, "tss_contradiction_min_reads", 3))
 
         def _tes(c):
             return c.end if getattr(c, "strand", "+") == "+" else c.start
@@ -1937,7 +1938,11 @@ class PipelineRunner:
                         u = (s_c - s_r) if strand == "+" else (s_r - s_c)
                         if (u > 0 and start.narrow_posterior(u) < 0.5
                                 and not any(start.narrow_posterior(abs(s_r - t)) >= 0.5
-                                            for t in alt_tss)):
+                                            for t in alt_tss)
+                                # a start is evidence about a TRANSCRIPT's start
+                                # only when other molecules end there too
+                                and evidence.start_support(loc5[0], loc5[1], s_r)
+                                >= min_start_reads):
                             out.setdefault("tss", []).append(rid)   # read begins upstream
             return out
 
