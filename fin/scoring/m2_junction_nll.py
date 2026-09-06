@@ -363,7 +363,8 @@ def event_genomic_positions(res: dict, cand: TranscriptCandidate) -> List[int]:
     return gen[gen >= 0].tolist()
 
 
-def uncontradicted_gtf_columns(cands, observed_jct, wobble_bp: int = 6):
+def uncontradicted_gtf_columns(cands, observed_jct, wobble_bp: int = 6,
+                               containment_only: bool = False):
     """Columns whose ANNOTATED junctions the reads do not contradict.
 
     The support gate asks a read to DISCRIMINATE a candidate: to hold its sole
@@ -383,6 +384,17 @@ def uncontradicted_gtf_columns(cands, observed_jct, wobble_bp: int = 6):
     (fin/candidates/chain_cluster.cluster_families._uncontradicted), applied
     here: a junction is contradicted when a DIFFERENT observed junction shares
     one of its splice sites within the alignment tolerance.
+
+    Not every undiscriminated annotation deserves the exemption, though, and the
+    structure says which: a candidate that failed the gate because every rival
+    CONTAINS it (or is contained by it) could not have won -- a 3' fragment is
+    compatible with the whole nested family, so no read can single it out. A
+    candidate whose rival is a same-intron-count WOBBLE twin is a different
+    story: there the contest is decidable (that is exactly what the junction
+    signal does), and losing it is evidence. ``containment_only`` therefore
+    exempts a candidate only when it has no wobble twin among the candidates,
+    which keeps the gate's grip on jittered and merged annotation while
+    releasing the nested-isoform case that dominates a real transcriptome.
 
     Returns the set of columns that are exempt (annotated, multi-exon, and
     uncontradicted). Without a junction registry nothing is exempt.
@@ -410,7 +422,29 @@ def uncontradicted_gtf_columns(cands, observed_jct, wobble_bp: int = 6):
                 break
         if ok:
             out.add(j)
+    if containment_only and out:
+        chains = [tuple(x.intron_chain.introns) for x in cands]
+        strands = [getattr(x, "strand", "+") for x in cands]
+        keep = set()
+        for j in out:
+            twin = any(
+                k != j and strands[k] == strands[j] and chains[k]
+                and len(chains[k]) == len(chains[j])
+                and _wobble_chain(chains[j], chains[k], wobble_bp)
+                for k in range(len(cands))
+            )
+            if not twin:
+                keep.add(j)
+        out = keep
     return out
+
+
+def _wobble_chain(a, b, bp: int) -> bool:
+    """Same intron count, every boundary within ``bp`` (the decidable contest)."""
+    if len(a) != len(b) or not a:
+        return False
+    return all(abs(s1 - s2) <= bp and abs(e1 - e2) <= bp
+               for (s1, e1), (s2, e2) in zip(a, b))
 
 
 def support_gate_drops(cands, ties_by_read, nlls_by_read, tie_ok: bool = True):
@@ -1283,6 +1317,41 @@ def _zrecords(res: dict) -> Tuple[np.ndarray, np.ndarray]:
         z[i] = (lev[i] - m) / s
         sd[i] = s
     return z, sd
+
+
+def apply_miss_penalty(nlls: Dict[int, float], evs: Dict[int, int]) -> Dict[int, float]:
+    """Charge a candidate for the signal it cannot explain.
+
+    The summed-LLR contrast adds up the NLL of the events a candidate DOES
+    explain, so a candidate with no events in a discriminating window scores 0 --
+    structurally unbeatable. That is why the metric was restricted to
+    same-intron-count wobble pairs, where every candidate covers the same
+    windows. It is also why the signal decides only 2.6% of the ambiguity on a
+    real human transcriptome: 40.8% of contested reads have candidates of
+    DIFFERENT intron counts (a 3' fragment compatible with a 3-intron and a
+    5-intron isoform of one gene), and those abstain for want of a shared
+    window.
+
+    A nested contrast is scorable once "explains nothing here" costs something.
+    Each candidate is charged, per event it is missing relative to the best-
+    covered candidate, the going rate of an event in this contest -- the mean
+    per-event NLL over the candidates that did explain it. The charge is in the
+    same units as the score it joins and needs no constant: a candidate that
+    covers the window is unaffected, and one that cannot account for the
+    observed signal pays for exactly the events it leaves unexplained.
+    """
+    if not nlls or not evs:
+        return nlls
+    n_max = max(evs.get(j, 0) for j in nlls)
+    if n_max <= 0:
+        return nlls
+    scored = [(nlls[j], evs.get(j, 0)) for j in nlls if evs.get(j, 0) > 0]
+    if not scored:
+        return nlls
+    rate = sum(v for v, _ in scored) / max(sum(n for _, n in scored), 1)
+    if not math.isfinite(rate) or rate <= 0:
+        return nlls
+    return {j: v + rate * (n_max - evs.get(j, 0)) for j, v in nlls.items()}
 
 
 def _mean_nll_in_window(

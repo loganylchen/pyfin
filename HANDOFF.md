@@ -488,13 +488,84 @@ a CORRECT annotated TSS are common (unannotated upstream starts, first-intron
 retention, run-through) and the 5' contradiction test has no analogue of the
 polyA-PASS requirement that makes the 3' test specific.
 
-**Open decision (measurement running):** `--assignment-channels tes` on all
-three spike-in grids. If the +1.54 / +0.64 / +1.63 F1 survives without the 5'
-term, `tes` is the better production default than `ends`; if the gain came from
-the 5'-truncation conditions, the 5' contradiction test needs the strictness of
-its 3' counterpart (a read CLUSTER at an upstream start, not one read) rather
-than removal. Do not treat the promoted `ends` default as settled until that
-table exists.
+**Resolved.** `tes` (3' only) is worse than `ends` on every spike-in grid
+(+0.36 / +1.04 / +1.01 vs +0.64 / +1.59 / +1.63 over the pre-promotion
+default), so the 5' term earns about half the gain and must not be removed. Its
+specificity comes from a START CLUSTER instead: a 5' start may contradict an
+annotated TSS only when >= `tss_contradiction_min_reads` (3) molecules end
+within 10 bp of it (`sample_nuisance.TSS_CLUSTER_TOL_BP`). Human: TSS-within-20bp
+68.6% -> 75.8% overall, 79.1% -> 90.8% on the uncorrupted annotation, the 3'
+repair intact (trunc3p TES 70.9%) and the genuine 5' repair IMPROVED (trunc5p
+TSS 60.0% -> 62.5%). Spike-ins: SIRV cell-identical to plain `ends` (156/156,
++1.59 kept), Sequin +0.59 vs +0.64. Landed as the default.
+
+**The raw signal cannot substitute for it.** krill's polyA sample boundary plus
+`read_rate` give a molecule length independent of the alignment; the reads that
+trigger falsely have a MEDIAN of 1 base of signal beyond their basecall (probe:
+`signal_completeness_probe.py`). Those molecules really do end where the read
+ends -- 5' truncation is chemical and happens before sequencing, so unlike the
+3' end (where a polyA PASS is a positive per-molecule statement) there is no
+signal-level statement to be had about a 5' end.
+
+## 4i. What actually costs human recall: the support gate (2026-09-07)
+
+Human recall decomposition (`human_recall_decomposition.py`, H9 chr1/19/21,
+7398 expressed): 63.8% of expressed transcripts have NO read carrying their
+full intron chain, and 25.4% are supported only by 3' SUFFIX fragments. We emit
+30.7%, ABOVE the 29.2% full-chain ceiling, and only 3.4% is "attested by >= 2
+full-chain reads but not emitted". Of the fragment-supported 1881, only 14.6%
+ever become a candidate -- but 92% of those survive, so the bottleneck was the
+interval gates, not selection.
+
+The gate responsible is `m2_support_gate`: it asks a read to DISCRIMINATE a
+candidate (its sole best-AS, or the M2 winner), which a 5'-degraded fragment
+shared by several annotated isoforms of one gene cannot do. Turning it off on
+human data is +7.7 F1 on the uncorrupted annotation with BOTH axes up (Sn
+31.2 -> 39.5, Pr 67.8 -> 69.6) and costs ~1 F1 under jitter -- the corruption it
+was built for. `--m2-support-gate-gtf-exempt` keeps both: an ANNOTATED
+multi-exon candidate is exempt when the reads CONTRADICT none of its junctions,
+reusing clustering's own predicate (a jittered/merged junction sits beside an
+observed one; an unobserved junction is silence, not disagreement).
+
+Human, expression contract, 7 conditions (pre-promotion default -> full stack):
+
+| cond | old default | + cluster gate | + gtf exemption | dF1 |
+| --- | --- | --- | --- | --- |
+| full | 43.06 | 42.73 | **46.24** | +3.18 |
+| p50 | 34.73 | 35.05 | **37.07** | +2.33 |
+| c_trunc3p50 | 41.48 | 42.17 | **44.86** | +3.38 |
+| c_trunc5p50 | 41.10 | 41.83 | **45.39** | +4.29 |
+| c_merge50 | 38.02 | 37.56 | **40.17** | +2.15 |
+| c_jitter50_10bp | 23.77 | 23.40 | 23.34 | -0.42 |
+| p00 | 24.59 | 24.58 | 24.58 | -0.01 |
+| **overall** | 25.10/60.13/35.26 | 25.17/60.16/35.34 | **27.33/60.37/37.38** | **+2.13** |
+
+Spike-in validation of the exemption is the gate for defaulting it.
+
+## 4j. Where the DRS signal is NOT being used (2026-09-07)
+
+On the human `full` cell the junction-signal layer attempts 25686 contrasts and
+DECIDES 664 of them -- **2.6%**; only 2% of the interval ties are refined by M2.
+The abstentions are structural, not technical:
+
+* **51.7% `unequal_intron_count`** -- the tied candidates are NESTED (a
+  5'-degraded fragment is compatible with both a 3-intron and a 5-intron
+  isoform of one gene). `_m2_score_region` restricted the summed-LLR metric to
+  the same-intron-count wobble niche, because a candidate with no events in a
+  window scores a free 0 and wins by not competing.
+* **40.8% `no_window`** -- same intron count and no differing junction: the tie
+  is not about a junction at all, so the junction signal is correctly silent
+  (those are extent disagreements, which the endpoint channels decide).
+
+`--m2-containment-contrast` addresses the first: it scores the nested contrast
+and charges each candidate, per event it is missing relative to the best-covered
+candidate, the mean per-event NLL of the candidates that DID explain it
+(`m2_junction_nll.apply_miss_penalty`), so "explains nothing here" costs
+something. Self-calibrating -- no tuned constant -- with one honest property:
+when only ONE candidate reaches the window the charge exactly cancels its score
+and the contest ties, because a lone explainer is a statement about EXTENT, not
+about a junction. Measured on human `full`: the signal's decision rate doubles
+(2.6% -> 5.5%) and `unequal_intron_count` goes to zero.
 
 ## 5. Validation protocol for ANY future change (frozen invariants)
 

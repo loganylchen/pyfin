@@ -205,6 +205,7 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
 @click.option("--m2-cluster-recheck-gtf-min-jct-reads", default=1, show_default=True, type=int, help="(--m2-cluster-recheck) A clustered low-abundance GTF sibling is dropped only if its distinguishing junction has FEWER than this many reads splicing exactly there. 1 = drop only zero-exact-support (jittered/phantom) GTFs; a real annotated isoform keeps its own reads and survives.")
 @click.option("--m2-cluster-recheck-jct-tol", default=0, show_default=True, type=int, help="(--m2-cluster-recheck) bp tolerance matching a GTF candidate's junction to an observed read junction for the read-support guard. Default 0 (strict exact match): validated on heya8 c_jitter10bp — a loose tol lets 1-2bp jitters borrow read support from the true neighbouring junction.")
 @click.option("--m2-support-gate/--no-m2-support-gate", "m2_support_gate", default=True, show_default=True, help="(--quant-mode m2_em only) Keep a multi-exon candidate (GTF or novel; fusion/mono exempt) only if it earns >=1 read's support: it is some read's M1 SOLE best-AS, OR some read's M2-best (lowest junction-NLL in its tie). Drops corrupted-annotation junctions that win neither. Default ON (tie-accept): lifts c_jitter F1@3 with zero recall loss; --no-m2-support-gate disables.")
+@click.option("--m2-containment-contrast/--no-m2-containment-contrast", "m2_containment_contrast", default=False, show_default=True, help="(--m2-metric summed_llr) Score a NESTED junction contrast -- tied candidates with DIFFERENT intron counts, e.g. a 5'-degraded fragment compatible with both a short and a long isoform of one gene -- instead of abstaining for want of a shared window. Each candidate is charged, per event it is missing relative to the best-covered candidate, the mean per-event NLL of the candidates that did explain it, so 'explains nothing here' costs something instead of scoring a free 0. Measured motivation: on human GENCODE the junction signal decides only 2.6% of contested reads and 40.8% abstain because no shared window exists.")
 @click.option("--m2-support-gate-gtf-exempt/--no-m2-support-gate-gtf-exempt", "m2_support_gate_gtf_exempt", default=False, show_default=True, help="(--m2-support-gate) Exempt an ANNOTATED multi-exon candidate from the support gate when the reads CONTRADICT none of its junctions (a different observed junction sharing one of its splice sites within the wobble tolerance). The gate asks a read to DISCRIMINATE a candidate, which a 5'-degraded fragment shared by several annotated isoforms cannot do, so on a real transcriptome the gate drops genuine transcripts; the contradiction test keeps its anti-corruption purpose (a jittered/merged junction IS contradicted). Human GENCODE: the gate costs 7.7 F1 on an uncorrupted annotation and buys ~1 F1 under jitter.")
 @click.option("--m2-support-gate-tie/--no-m2-support-gate-tie", "m2_support_gate_tie", default=True, show_default=True, help="(--m2-support-gate) Count a candidate tied for the lowest M2 NLL as M2-best (recall-safer). --no-... requires a strict unique M2 win.")
 @click.option("--containment-collapse/--no-containment-collapse", "containment_collapse", default=False, show_default=True, help="(--quant-mode m2_em only) Lever 1: after EM, fold a NOVEL candidate whose intron chain is a pure 3' SUFFIX of a longer candidate (a 5'-truncation shadow: same downstream junctions, 3' terminus within --containment-3p-tol-bp, 5' end interior, EM abundance <= parent * --containment-min-abundance-ratio) into that longer parent (reads + soft mass reassigned, shadow dropped). gtf candidates are never folded away. STRICT suffix match -> exon-skip/alt-3'-end isoforms never folded. WARNING: cannot distinguish 5'-truncation from a genuine low-abundance alt-TSS isoform -> NOT recall-safe; default OFF, enable only after real-data validation.")
@@ -351,6 +352,7 @@ def main(
     m2_cluster_recheck_gtf_min_jct_reads,
     m2_cluster_recheck_jct_tol,
     m2_support_gate,
+    m2_containment_contrast,
     m2_support_gate_gtf_exempt,
     m2_support_gate_tie,
     containment_collapse,
@@ -595,6 +597,7 @@ def main(
         m2_cluster_recheck_gtf_min_jct_reads=m2_cluster_recheck_gtf_min_jct_reads,
         m2_cluster_recheck_jct_tol=m2_cluster_recheck_jct_tol,
         m2_support_gate=m2_support_gate,
+        m2_containment_contrast=m2_containment_contrast,
         m2_support_gate_gtf_exempt=m2_support_gate_gtf_exempt,
         m2_support_gate_tie=m2_support_gate_tie,
         containment_collapse=containment_collapse,

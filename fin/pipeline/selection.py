@@ -331,7 +331,9 @@ def select_m2_interval(
                 observed_jct = observed_junctions_fn(interval)
             exempt = uncontradicted_gtf_columns(
                 cand_list, observed_jct,
-                wobble_bp=int(getattr(config, "chain_cluster_wobble_bp", 6)))
+                wobble_bp=int(getattr(config, "chain_cluster_wobble_bp", 6)),
+                containment_only=bool(getattr(
+                    config, "m2_support_gate_gtf_exempt_containment_only", True)))
             if exempt & _d:
                 logger.info(
                     "m2_em interval %s: %d annotated candidate(s) exempt from the "

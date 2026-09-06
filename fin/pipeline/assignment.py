@@ -84,7 +84,8 @@ def _m2_score_region(config, tied_cands) -> Tuple[Optional[set], List[Tuple[int,
         # event count, so unequal per-candidate coverage cannot masquerade as
         # signal strength.
         intron_counts = {len(c.intron_chain.introns) for c in tied_cands}
-        if len(intron_counts) != 1:
+        if len(intron_counts) != 1 and not getattr(
+                config, "m2_containment_contrast", False):
             return None, []
         flank = int(getattr(config, "m2_summed_llr_flank", 6))
         return None, diff_junction_windows(tied_cands, flank=flank)
@@ -472,6 +473,9 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
                             if not span_cov[s_idx] and read_straddles(egp, lo, hi):
                                 span_cov[s_idx] = True
             if len(nlls) >= 2:
+                if getattr(config, "m2_containment_contrast", False):
+                    from fin.scoring.m2_junction_nll import apply_miss_penalty
+                    nlls = apply_miss_penalty(nlls, evs)
                 cover_val = (all(span_cov) if span_cov else True) if gate else None
                 nlls = _finalize_contrast(
                     metric, nlls, evs, stats, read_id=rid,
@@ -512,6 +516,9 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
                 nlls[j] = float(nll)
                 evs[j] = int(n_ev)
         if len(nlls) >= 2:
+            if getattr(config, "m2_containment_contrast", False):
+                from fin.scoring.m2_junction_nll import apply_miss_penalty
+                nlls = apply_miss_penalty(nlls, evs)
             nlls = _finalize_contrast(
                 metric, nlls, evs, stats, read_id=rid,
                 cand_ids={j: cand_list[j].candidate_id for j in nlls},
