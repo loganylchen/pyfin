@@ -542,30 +542,60 @@ Human, expression contract, 7 conditions (pre-promotion default -> full stack):
 
 Spike-in validation of the exemption is the gate for defaulting it.
 
-## 4j. Where the DRS signal is NOT being used (2026-09-07)
+## 4j. Where the DRS signal is NOT being used, and one REJECTED attempt to extend it (2026-09-07)
 
-On the human `full` cell the junction-signal layer attempts 25686 contrasts and
-DECIDES 664 of them -- **2.6%**; only 2% of the interval ties are refined by M2.
-The abstentions are structural, not technical:
+**The measurement (stands).** On the human `full` cell the junction-signal layer
+attempts 25686 contrasts and DECIDES 664 of them -- **2.6%**; only 2% of the
+interval ties are refined by M2. The abstentions are structural:
 
 * **51.7% `unequal_intron_count`** -- the tied candidates are NESTED (a
-  5'-degraded fragment is compatible with both a 3-intron and a 5-intron
-  isoform of one gene). `_m2_score_region` restricted the summed-LLR metric to
-  the same-intron-count wobble niche, because a candidate with no events in a
-  window scores a free 0 and wins by not competing.
+  5'-degraded fragment is compatible with both a 3-intron and a 5-intron isoform
+  of one gene). `_m2_score_region` restricts the summed-LLR metric to the
+  same-intron-count wobble niche.
 * **40.8% `no_window`** -- same intron count and no differing junction: the tie
-  is not about a junction at all, so the junction signal is correctly silent
-  (those are extent disagreements, which the endpoint channels decide).
+  is not about a junction at all. Those are EXTENT disagreements, which the
+  endpoint channels decide, and the signal is correctly silent.
 
-`--m2-containment-contrast` addresses the first: it scores the nested contrast
-and charges each candidate, per event it is missing relative to the best-covered
-candidate, the mean per-event NLL of the candidates that DID explain it
-(`m2_junction_nll.apply_miss_penalty`), so "explains nothing here" costs
-something. Self-calibrating -- no tuned constant -- with one honest property:
-when only ONE candidate reaches the window the charge exactly cancels its score
-and the contest ties, because a lone explainer is a statement about EXTENT, not
-about a junction. Measured on human `full`: the signal's decision rate doubles
-(2.6% -> 5.5%) and `unequal_intron_count` goes to zero.
+**The attempt, and why it was REMOVED.** `--m2-containment-contrast` scored the
+nested contrast and charged each candidate, per event it was missing relative to
+the best-covered candidate, the mean per-event NLL of the candidates that did
+explain the window. It measured +1.25 F1 on the human uncorrupted annotation and
+-0.16 / -0.06 on SIRV4 / Sequin, so it failed the cross-dataset rule -- and the
+Codex review (gpt-6-astra) then showed the rationale was wrong, which is the
+reason it is gone rather than merely default-off:
+
+* the case it was written for is UNREACHABLE. `_mean_nll_in_window` returns
+  `(nan, 0)` for a candidate with no events in the window, and both scoring
+  paths keep only candidates with `n_ev > 0` and a finite NLL. A zero-event
+  candidate never reaches the correction, so "a candidate that explains nothing
+  scores a free 0 and wins" was never what the code did;
+* what it actually computed, for two covered candidates, is
+  `S'_A - S'_B = [2 n_A n_B / (n_A + n_B)] (mean_A - mean_B)` -- a ranking of
+  candidate-specific MEAN NLLs with a count-dependent margin, over event sets
+  that need not correspond to the same raw samples;
+* so the human gain is not attributable to better signal discrimination. A
+  plausible mechanism is that forcing decisions concentrates EM mass and lets
+  more candidates clear the abundance floor, which pays where the admitted
+  candidates are usually real (human) and costs where they are not (spike-ins) --
+  but that mechanism is NOT established either, and `tie_ok=True` rescuing both
+  candidates is an equally live explanation.
+
+**What a defensible extension would look like** (Codex, and I agree): compare
+likelihoods over a COMMON set of raw signal samples, marginalising over each
+candidate's alignment paths, and treat a missing eventalign record as TECHNICAL
+missingness -- these candidates are M1-tied, i.e. the read aligns about equally
+well to both, so absent events are an anchoring artefact, not evidence of an
+inability to generate the sequence. That inability belongs to the
+sequence/alignment model. Abstain when comparable signal cannot be recovered for
+both hypotheses. Do not re-attempt the shortcut above.
+
+**What the signal DOES buy, and it is the DRS-specific part of this pipeline:**
+the 3'/polyA channel, where a PASS is a genuine per-molecule statement (this
+molecule was polyadenylated here). That is what the promoted default rests on
+(+1.5 F1 on three grids) and what repairs a truncated annotation's 3' end on
+real human data (+9 points of TES agreement). The 5' end has no such statement
+-- measured, not assumed (section 4h) -- which is why its specificity comes from
+a read CLUSTER instead.
 
 ## 5. Validation protocol for ANY future change (frozen invariants)
 

@@ -1227,74 +1227,64 @@ class TestUncontradictedAnnotationExemption:
             assert "m2_support_gate_gtf_exempt" not in PIPELINE_PROFILES[name]
 
 
-class TestContainmentContrastMissPenalty:
-    """A nested contrast is unscorable while 'explains nothing' scores 0: the
-    summed-LLR total only adds the events a candidate DOES explain, so a
-    candidate absent from the discriminating window always wins. Charging it
-    for the events it cannot account for makes the contrast decidable, which is
-    what 40.8% of human contested reads need."""
-
-    def test_missing_events_are_charged_the_going_rate(self):
-        from fin.scoring.m2_junction_nll import apply_miss_penalty
-        # A explains 10 events at total NLL 20 (rate 2.0/event); B explains none
-        out = apply_miss_penalty({0: 20.0, 1: 0.0}, {0: 10, 1: 0})
-        assert out[0] == 20.0                       # the covered candidate is untouched
-        assert out[1] == pytest.approx(20.0)        # 10 missing events x rate 2.0
-        # With a SINGLE explainer the rate is that explainer's own, so the
-        # charge exactly cancels its score and the contest ties. That is the
-        # honest outcome: when only one candidate reaches the window, the
-        # junction signal has no second opinion to offer -- the candidates
-        # disagree about EXTENT, which the endpoint channel decides, not about
-        # where a junction sits. The penalty exists for the case below.
-        out2 = apply_miss_penalty({0: 12.0, 1: 0.0}, {0: 10, 1: 0})
-        assert out2[0] == pytest.approx(out2[1])
-
-    def test_partial_coverage_is_where_it_decides(self):
-        """Both candidates explain part of the window: the one that explains
-        MORE of the observed signal, and explains it well, now wins."""
-        from fin.scoring.m2_junction_nll import apply_miss_penalty
-        out = apply_miss_penalty({0: 20.0, 1: 6.0}, {0: 10, 1: 4})
-        rate = (20.0 + 6.0) / 14
-        assert out[1] == pytest.approx(6.0 + rate * 6)
-        assert out[0] == 20.0
-        # the partial explainer no longer wins for free: its 14-nat advantage
-        # (20 vs 6) shrinks to under 3 once it pays a neutral rate for the
-        # events it leaves unexplained. It still wins if it fits its own events
-        # better -- charging the POOLED rate is an even-handed prior on the
-        # unexplained ones, not a thumb on the scale for coverage.
-        assert (out[0] - out[1]) < 0.25 * (20.0 - 6.0)
-
-    def test_equal_coverage_is_unchanged(self):
-        from fin.scoring.m2_junction_nll import apply_miss_penalty
-        nlls = {0: 5.0, 1: 9.0}
-        assert apply_miss_penalty(nlls, {0: 7, 1: 7}) == nlls
-
-    def test_degenerate_inputs_pass_through(self):
-        from fin.scoring.m2_junction_nll import apply_miss_penalty
-        assert apply_miss_penalty({}, {}) == {}
-        assert apply_miss_penalty({0: 1.0}, {0: 0}) == {0: 1.0}      # nothing scored
-        assert apply_miss_penalty({0: 0.0, 1: 0.0}, {0: 3, 1: 0}) == {0: 0.0, 1: 0.0}
-
-    def test_nested_ties_are_scored_only_when_enabled(self):
+class TestExemptionNeedsMass:
+    def test_exempt_candidate_must_still_carry_reads(self):
+        """The exemption says no read COULD have singled the candidate out, not
+        that no read supports it: an EM-massless annotation stays gated."""
         from types import SimpleNamespace
+        import numpy as np
+        from fin.analysis.quantification import QuantResult
         from fin.candidates.dataclasses import IntronChain
-        from fin.pipeline.assignment import _m2_score_region
-        def mk(introns):
-            c = _cand("c", 1000, 5000)
+        from fin.pipeline import selection as S
+
+        def mk(cid, introns):
+            c = _cand(cid, 1000, 5000, source="gtf")
             c.intron_chain = IntronChain(introns=introns)
             return c
-        tied = [mk(((1200, 1500),)), mk(((1200, 1500), (2000, 2400)))]
-        off = SimpleNamespace(m2_metric="summed_llr", m2_summed_llr_flank=6,
-                              m2_containment_contrast=False)
-        on = SimpleNamespace(m2_metric="summed_llr", m2_summed_llr_flank=6,
-                             m2_containment_contrast=True)
-        assert _m2_score_region(off, tied) == (None, [])          # abstains today
-        gset, windows = _m2_score_region(on, tied)
-        assert gset is None and windows                            # the extra junction
-        assert any(w[0] <= 2000 < w[1] for w in windows)
+        # two annotated isoforms of different intron counts (a nested contest),
+        # neither contradicted; one carries 3 reads of mass, the other 0.5
+        cands = [mk("rich", ((1200, 1500), (2000, 2400))), mk("poor", ((1200, 1500),))]
+        R = np.zeros((4, 2)); R[:3, 0] = 1.0; R[3, 1] = 0.5
+        qrs = [QuantResult("rich", 3.0, 1.0, 3, "gtf"), QuantResult("poor", 0.5, 1.0, 1, "gtf")]
+        qo = SimpleNamespace(cand_list=cands, R=R, ties_by_read={0: [0, 1]},
+                             nlls_by_read={}, quant_results=qrs,
+                             kept_read_ids=[f"r{i}" for i in range(4)])
+        cfg = SimpleNamespace(
+            m2_support_gate=True, m2_support_gate_tie=True,
+            m2_support_gate_gtf_exempt=True,
+            m2_support_gate_gtf_exempt_containment_only=True,
+            m2_support_gate_gtf_exempt_min_mass=2.0,
+            chain_cluster_wobble_bp=6, containment_evidence_mode="off",
+            junction_election_mode="off", m2_cluster_recheck=False,
+            novel_junction_min_reads=0, guided_junction_min_reads=0,
+            containment_cluster=False, containment_collapse=False,
+            mono_resolve_post_em=False, complete_chain_rescue_reads=0,
+            work_dir="/tmp")
+        cs = SimpleNamespace(read_spans={})
+        iv = GenomicInterval(chrom="c", start=0, end=9000, strand="+")
+        res, _ = S.select_m2_interval(cfg, qo, cs, iv, lambda i: {"+": {(9500, 9600): 4}})
+        kept = {q.candidate_id for q in res}
+        assert "rich" in kept and "poor" not in kept
 
-    def test_default_is_off(self):
-        from fin.pipeline.config import PIPELINE_PROFILES, PipelineConfig
-        assert PipelineConfig(bam_path="/x.bam").m2_containment_contrast is False
-        for name in PIPELINE_PROFILES:
-            assert "m2_containment_contrast" not in PIPELINE_PROFILES[name]
+
+class TestExemptionIgnoresDroppedColumns:
+    """A column another gate already folded away is not a rival that could have
+    discriminated anything: it must neither earn an exemption nor block one."""
+
+    def test_masked_columns_neither_earn_nor_block(self):
+        from fin.candidates.dataclasses import IntronChain
+        from fin.scoring.m2_junction_nll import uncontradicted_gtf_columns
+        def mk(cid, introns):
+            c = _cand(cid, 1000, 5000, source="gtf")
+            c.intron_chain = IntronChain(introns=introns)
+            return c
+        survivor = mk("anno", ((1200, 1500), (2000, 2400)))
+        sibling = mk("anno.ext", ((1200, 1500), (2000, 2400)))   # identical chain
+        obs = {"+": {(9000, 9500): 3}}                            # silence nearby
+        # with the sibling present it is a twin and blocks the exemption
+        assert uncontradicted_gtf_columns([survivor, sibling], obs,
+                                          containment_only=True) == set()
+        # masked (already folded): the survivor is exempt, the mask earns nothing
+        assert uncontradicted_gtf_columns([survivor, None], obs,
+                                          containment_only=True) == {0}
+        assert uncontradicted_gtf_columns([None, None], obs) == set()

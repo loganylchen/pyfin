@@ -329,11 +329,23 @@ def select_m2_interval(
             from fin.scoring.m2_junction_nll import uncontradicted_gtf_columns
             if observed_jct is None:
                 observed_jct = observed_junctions_fn(interval)
+            # Judge the LIVE candidates: a column already folded away (an
+            # extent sibling pooled into its survivor) is not a rival that
+            # could have discriminated, so it must not count as the wobble twin
+            # that blocks its own survivor's exemption. Column indices are
+            # preserved by masking rather than filtering.
+            live = [c if j not in drop_cols else None
+                    for j, c in enumerate(cand_list)]
             exempt = uncontradicted_gtf_columns(
-                cand_list, observed_jct,
+                live, observed_jct,
                 wobble_bp=int(getattr(config, "chain_cluster_wobble_bp", 6)),
                 containment_only=bool(getattr(
                     config, "m2_support_gate_gtf_exempt_containment_only", True)))
+            min_mass = float(getattr(
+                config, "m2_support_gate_gtf_exempt_min_mass", 2.0))
+            if min_mass > 0 and exempt:
+                em_ab_x = np.asarray(R).sum(axis=0)
+                exempt = {j for j in exempt if em_ab_x[j] >= min_mass}
             if exempt & _d:
                 logger.info(
                     "m2_em interval %s: %d annotated candidate(s) exempt from the "

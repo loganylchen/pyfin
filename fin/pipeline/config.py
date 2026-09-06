@@ -319,18 +319,18 @@ class PipelineConfig:
     # transcript whose only reads are 5'-degraded fragments shared with its
     # siblings, which is what it does on a real transcriptome. See
     # m2_junction_nll.uncontradicted_gtf_columns for the measurement.
-    # Score a NESTED junction contrast (candidates of different intron counts)
-    # with the summed-LLR metric instead of abstaining, charging each candidate
-    # for the events it cannot explain (m2_junction_nll.apply_miss_penalty).
-    # Measured motivation: on human GENCODE the signal layer decides 2.6% of
-    # contested reads, and 40.8% abstain because no shared window exists.
-    m2_containment_contrast: bool = False
     m2_support_gate_gtf_exempt: bool = False
     # Restrict that exemption to candidates whose failure to discriminate is
     # STRUCTURAL: no same-intron-count wobble twin exists, so no read could have
     # singled them out. A jittered or merged annotation always has such a twin
     # (the true chain the reads produced), so it stays gated.
     m2_support_gate_gtf_exempt_containment_only: bool = True
+    # ... and it must still be carrying reads. The exemption says "no read
+    # COULD have singled this candidate out", not "no read supports it": a
+    # candidate the EM left with less than this much mass is not a transcript
+    # the data is asking for. A configurable heuristic (two read-equivalents of
+    # soft mass), NOT a calibrated threshold; 0 disables the requirement.
+    m2_support_gate_gtf_exempt_min_mass: float = 2.0
     # Catalog completion. PyFIN's default contract is an EXPRESSED assembly:
     # an annotated transcript with no EM mass is dropped on purpose. Some
     # benchmarks instead score against a complete catalog regardless of
