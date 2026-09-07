@@ -621,7 +621,7 @@ real human data (+9 points of TES agreement). The 5' end has no such statement
 -- measured, not assumed (section 4h) -- which is why its specificity comes from
 a read CLUSTER instead.
 
-## 4k. Widening the DRS channel: the polyA QC classes (2026-09-07, RUNNING)
+## 4k. Widening the DRS channel: the polyA QC classes (2026-09-07, MEASURED -- both stay OFF)
 
 Section 4j ended with the conclusion that the 3'/polyA channel is where the raw
 signal actually pays. The measurement that follows from it: **the channel
@@ -687,9 +687,48 @@ widening to discovery needs a contradiction rule that does not read eta, and tha
 is a separate change with its own validation.
 
 `--polya-end-accept-adapter` is the simpler ablation: admit PASS+ADAPTER by name
-(43% -> 63% of human reads), one pooled kernel. Both default OFF, both running
-against the promoted default (`clust` / `gcclust`) on all four grids.
+(43% -> 63% of human reads), one pooled kernel, reaching BOTH consumers.
 
+**THE RESULT: neither variant is a default. The 3' channel is SATURATED at PASS
+coverage.** Paired against the promoted default (`clust` / `gcclust`), expression
+contract, bootstrap seed 20260831:
+
+| arm | human (7 cells) | Sequin (104) | SIRV4 (156) | HEYA8 (130) |
+| --- | --- | --- | --- | --- |
+| `--polya-end-accept-adapter` | +0.07 (6 up/1 dn) | +0.01 [+0.00,+0.04] | **-0.11 [-0.20,-0.03]** | -0.01 [-0.08,+0.07] |
+| `--endpoint-qc-conditional` | +0.02 (3/2/2 tie) | 0.00 (0 cells moved) | **-0.08 [-0.15,-0.01]** | **-0.14 [-0.21,-0.08]** |
+
+Human Sn/Pr: 25.17/60.16 -> 25.26/60.09 (adapter), -> 25.20/60.11 (conditional).
+Reading 2.2x as many molecules moves human F1 by two hundredths of a point: in a
+tie between two candidates what matters is whether ANY read separates them, and
+22k PASS reads on three chromosomes already decide the decidable ties. The extra
+molecules are mostly redundant.
+
+The spike-in losses are NOT noise and NOT the discovery hook (the conditional arm
+never touches it): both are dPr with dSn flat-to-positive -- SIRV4 dSn +0.11 /
+dPr -0.25, HEYA8 dSn +0.08 / dPr -0.43. On SIRV4 the per-condition split is
+clean:
+
+* the corruption conditions the endpoint channel exists for GAIN --
+  c_jitter10/50 +0.24/+0.31, c_merge50 +0.48, c_flip50 +0.60;
+* the clean or near-clean annotations LOSE, all of it precision at flat recall --
+  full -0.39 (dPr -0.72), p99 -0.40, c_trunc5p10 -0.41, c_ir10 -0.40,
+  c_skip10 -0.40.
+
+So the extra 3' evidence redistributes EM mass and lets more candidates clear the
+abundance floor: it buys nothing in recall there and costs output. HEYA8 does not
+reproduce the split (its jitter/merge conditions lose too, -0.48 to -0.52, with
+dPr as large as -1.50 and p00 -0.68), so "help under corruption, hurt when clean"
+is a SIRV4 pattern, not a general one -- do not build the targeting rule on it
+without measuring HEYA8 first. The general statement the two grids DO agree on is
+that the extra molecules cost precision at flat recall.
+
+The lever is mis-targeted rather than broken: it belongs where the annotation's
+ends are untrustworthy, which is measurable without a condition name (the channel
+already counts how often reads contradict an annotated TES). That is a concrete
+next experiment, not something to enable now.
+
+Both flags are therefore committed DEFAULT-OFF as options (commit c29275e).
 Default inertness is verified twice: the pooled `EndpointModel` is bit-identical
 to the pre-change `_snap/clust` code on the human sample on BOTH fit paths
 (annotated: b_narrow 1.8686806129384694, eta 0.20867754234594615; annotation-free
