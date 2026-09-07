@@ -262,6 +262,23 @@ class PipelineConfig:
     # (TSS, TES) pairs; interior-TSS (degradation-direction) modes need
     # 2x support, and every read is re-routed through the refit so mass
     # conservation is enforced by the existing invariants.
+    # Reconcile models that junction snapping gave the SAME CORRECTED INTRON
+    # CHAIN but not the same exon tuple. The snap's merge key is the full exon tuple, so two
+    # candidates that differed only by a junction wobble -- one the snap has just
+    # corrected onto the other -- stay separate whenever their terminal
+    # coordinates differ at all, and the chain-based scorer then credits one and
+    # charges the other. Deliberately narrow: same post-snap chain AND the
+    # collision was created by the snap (the members' pre-snap chain sets are
+    # non-empty and pairwise DISJOINT, and one was actually corrected) AND
+    # one non-null discovery family across every original member AND
+    # identical strand-aware 3' ends AND a 5' spread no wider than the window,
+    # because "same intron chain" is NOT "same transcript" (APA and alternative
+    # TSS isoforms share one). These are operational equivalence criteria, not
+    # proof that two models are the same molecule species. Requires the
+    # post-selection abundance refit (enforced in validate()); mutually
+    # exclusive with endpoint_refine, whose splits this could silently undo.
+    snap_merge_chain: bool = False
+    snap_merge_chain_window_bp: int = 25
     endpoint_refine: bool = False
     endpoint_window_bp: int = 25
     endpoint_min_reads: int = 3
@@ -1090,6 +1107,30 @@ class PipelineConfig:
                 "tss_evidence_mode requires --endpoint-refine: the TSS test "
                 "scores the alternative starts that EndpointRefine proposes"
             )
+        if getattr(self, "snap_merge_chain", False):
+            if int(getattr(self, "snap_merge_chain_window_bp", 25)) < 0:
+                raise ValueError(
+                    "snap_merge_chain_window_bp must be >= 0, got "
+                    f"{self.snap_merge_chain_window_bp}")
+            if not getattr(self, "junction_snap", False):
+                raise ValueError(
+                    "snap_merge_chain requires junction_snap: it reconciles the "
+                    "models the snap itself gives one corrected intron chain")
+            if getattr(self, "endpoint_refine", False):
+                raise ValueError(
+                    "snap_merge_chain and endpoint_refine are mutually exclusive: "
+                    "EndpointRefine splits a survivor into distinct endpoint "
+                    "states immediately before snapping, and this merge would "
+                    "silently undo that split")
+            if not (self.post_selection_refit and self.quant_mode == "m2_em"
+                    and not self.abundance_feedback):
+                raise ValueError(
+                    "snap_merge_chain requires the post-selection abundance "
+                    "refit (quant_mode=m2_em, post_selection_refit on, no "
+                    "abundance_feedback): merging two models changes every "
+                    "read's responsibility for the merged identity, and "
+                    "confidence, max_R and the hard assignments are only made "
+                    "correct by the refit")
         if getattr(self, "endpoint_refine", False) and not (
             self.post_selection_refit and self.quant_mode == "m2_em"
             and not self.abundance_feedback
