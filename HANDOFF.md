@@ -220,6 +220,63 @@ pyfin+defense 91.84/94.58 (94/138 top), pyfin_off 84.25/88.39, espresso
 59.83/89.58, flair 57.51/80.74, bambu 78.51/46.52, talon 96.69/19.40,
 isotools 81.27/18.95.
 
+### 4b3. Refreshed against the promoted default (2026-09-07)
+
+Same contract and scorer, PyFIN = the current production default (`CLUST` /
+`GCCLUST`), cells where all 9 tools scored:
+
+| tool | SIRV4 (150) Sn/Pr/F1 | Sequin (100) | HEYA8 (125) |
+|---|---|---|---|
+| **pyfin** | **90.5 / 87.8 / 89.0** | **74.6 / 91.2 / 81.4** | **78.7 / 87.1 / 82.4** |
+| espresso | 75.0 / 94.6 / 80.7 | 58.0 / 89.3 / 69.1 | 64.1 / 93.6 / 73.8 |
+| stringtie3 | 75.5 / 86.7 / 80.0 | 64.7 / 77.1 / 69.7 | 60.2 / 77.7 / 67.1 |
+| isoquant | 55.7 / 89.6 / 66.4 | 61.1 / 85.6 / 69.8 | 57.0 / 85.4 / 66.1 |
+| lafite | 61.5 / 73.1 / 65.7 | 53.7 / 83.1 / 63.3 | 56.2 / 91.4 / 66.9 |
+| flair | 53.7 / 79.8 / 62.1 | 36.3 / 66.2 / 46.4 | 42.5 / 63.3 / 49.5 |
+| bambu | 74.8 / 48.5 / 55.6 | 74.8 / 23.3 / 31.9 | 72.9 / 39.2 / 48.0 |
+| talon | 95.6 / 19.6 / 32.4 | 88.5 / 16.9 / 27.7 | 90.6 / 9.0 / 16.3 |
+| isotools | 81.2 / 18.9 / 30.4 | 71.1 / 24.0 / 35.8 | 76.3 / 7.7 / 13.9 |
+
+**The whole margin is RECALL, and it is bought where the annotation is poor.**
+espresso holds 95-99% precision nearly everywhere against PyFIN's 80-92%, and
+loses because its recall collapses exactly where a discovery tool is needed
+(SIRV4 p01: Sn 5.1 vs 70.8; c_spurious50: 60.3 vs 96.5; c_flip50: 41.6 vs 81.9).
+Read by family (mean F1):
+
+| family | SIRV4 pyfin/espresso | Sequin | HEYA8 |
+|---|---|---|---|
+| ratio p00..p99 | 84.7 / 65.2 | 73.4 / 57.4 | 77.0 / 61.5 |
+| corrupted c_* | 90.8 / 87.4 | 84.6 / 73.7 | 84.5 / 78.8 |
+| full | 94.9 / **98.4** | 93.5 / 88.2 | 92.6 / 91.1 |
+
+espresso still wins 68 of 150 SIRV4 cells (2/100 Sequin, 19/125 HEYA8) -- it takes
+the clean and near-clean ones narrowly (full -3.5, p99 -3.4, c_merge50 -6.5,
+c_merge10 -5.1) while PyFIN takes the degraded ones by 20-60 points. **So the
+remaining gap to the best rival is PyFIN's PRECISION at high annotation
+completeness (~91 vs ~98 on SIRV4 full/p99)**, which is the wobble/extent-shadow
+FP population already characterised, not a recall problem.
+
+**Real human (GENCODE, H9 rep2 run2): the sweep left almost no competitor cells.**
+Only two overlap conditions we ran, and the competitor assembled genome-wide, so
+its GTF is restricted to chr1/19/21 before scoring (same truth, same scorer; the
+restriction is post-hoc, so treat these two cells as indicative, not as a
+benchmark):
+
+| cell | tool | Sn | Pr | F1 |
+|---|---|---|---|---|
+| c_trunc3p50 | isoquant | 15.40 | 74.20 | 25.51 |
+| | **pyfin** | **30.90** | 66.40 | **42.17** |
+| | pyfin +gtf-exempt | 31.50 | 66.50 | 42.75 |
+| c_trunc5p50 | espresso | 29.40 | **74.20** | 42.11 |
+| | pyfin | 30.50 | 66.60 | 41.84 |
+| | pyfin +gtf-exempt | **31.30** | 67.00 | **42.67** |
+
+On a real transcriptome espresso is a PEER, not 8 points behind: it trades 1.1
+points of recall for 7.6 of precision and ties on F1. The spike-in dominance does
+not transfer, and the same precision gap is what decides it. (Harness:
+`/tmp/human_headtohead.py` pattern -- filter to the run's chromosomes, then reuse
+`expression_rescore.score`; run it on the HOST, the scorer shells out to docker.)
+
 ## 4c. The main line now: a unified candidate EXISTENCE test
 
 `CANDIDATE_EXISTENCE_DESIGN.md` is the frozen pre-registration;
