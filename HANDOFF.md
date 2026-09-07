@@ -813,6 +813,93 @@ priming signature, but the measured tail length does NOT separate them (median
 91-123 nt in every A-run bucket), so the discriminator is genomic sequence, not
 signal, and whether those sites are artifacts or unannotated APA is unsettled.)*
 
+## 4l. The redundant-model finding, and the first change that is a PURE precision win (2026-09-08, PROMOTED)
+
+**The measurement.** gffcompare's transcript precision has DISTINCT reference
+matches in the numerator and ALL query models in the denominator, so a query
+model that duplicates another's reference match is a precision loss at zero
+recall cost. Verified with the production scorer and flags on a three-reference
+fixture: a query carrying one duplicate scores Sn 100.0 / Pr 75.0, the same query
+without it Sn 100.0 / Pr 100.0. (`_scorer_fixture/`.)
+
+The production arm carries 4-6.5% such models per grid -- an oracle deletion
+estimate of +6.03 Pr on SIRV4, +3.79 on HEYA8, +2.78 on human, +0.00 on Sequin.
+
+**The cause, reproduced end to end.** Human p00, interval chr1:1020099-1056116,
+two emitted models with 36 identical exons: `novel_9df5871e6811ef52` (start
+1020104, 2 reads) and `novel_72388b83671ff792` (start 1020129, 12 reads). Rerunning
+`discover_candidates` on that interval with the run's parameters reproduces both
+ids, and at discovery their chains DIFFER by a 3 bp donor wobble --
+(1043454,1043537) against (1043457,1043537). `junction_snap` then corrects the
+minority junction onto the consensus, at which point they are the same
+transcript; but `snap_quant_results` keys its merge on the FULL EXON TUPLE, which
+still differs at the first exon. That cell logs "snapped 249 junctions and merged
+1 duplicate models" while carrying 141 redundant matches.
+
+*Two things I got wrong on the way here, both caught by Codex and both worth not
+repeating: the 24 bp `three_prime_threshold` merge gates (`_collapse_novel`,
+`_exact_collapse_novel`, `_three_prime_within_threshold`) are NOT on the
+production path -- `discover_candidates` returns from `_chain_cluster_candidates`
+before them; and `max(subset) <= max(all)`, so asking whether a gated maximum
+moves an end further DOWNSTREAM is a question that can only answer "never".*
+
+**The rule (`--snap-merge-chain`, now DEFAULT ON in `real-drna`).** A second merge
+pass over the first pass's survivors. It is deliberately narrow, because one
+corrected intron chain is NOT one transcript -- APA and alternative-TSS isoforms
+share a chain, and the chain-based scorer cannot see the difference, so a
+permissive same-chain collapse would improve the number by destroying the
+distinction. A merge requires ALL of: every member novel and multi-exon, one
+chromosome, a known strand; the same post-snap chain; the collision CREATED by
+the snap (the members' PER-SURVIVOR pre-snap chain sets non-empty and pairwise
+DISJOINT, at least one corrected -- pooling them lets a wobble model license the
+collapse of two models that already shared a chain); ONE non-null discovery
+family across every ORIGINAL member (`_merge_group` relabels a mixed group with
+its lexicographically first family, so the merged survivor's own `family_id`
+cannot be trusted here); identical strand-aware 3' ends; and a 5' spread within
+25 bp as a group DIAMETER, not connected components. The survivor keeps its own
+geometry -- no endpoint is re-estimated. `fulllen_frac` is marked unavailable
+(the refit does not recompute it). The mode requires `junction_snap` and the
+post-selection refit, and is mutually exclusive with `endpoint_refine`.
+
+**The result -- the cleanest in the project so far.** Paired bootstrap, seed
+20260831, expression contract, against the previous default:
+
+| grid | dSn | dPr | dF1 | CI95 | up / down / tie |
+| --- | --- | --- | --- | --- | --- |
+| SIRV4 (156) | **+0.00** | +1.45 | +0.70 | [+0.59,+0.83] | 98 / **0** / 58 |
+| HEYA8 (130) | **+0.00** | +0.82 | +0.32 | [+0.25,+0.39] | 62 / **0** / 68 |
+| human (7) | **+0.00** | +0.30 | +0.043 | - | 7 / **0** / 0 |
+| Sequin (104) | +0.00 | +0.00 | +0.00 | [0,0] | 0 / 0 / 104 |
+
+**Recall is unchanged to two decimals on every condition of every grid** (human
+matched references 1849.29 -> 1849.29) and **no cell degrades anywhere**. Largest
+gains where duplicates are commonest: SIRV4 p05 +1.65, p00 +1.62; HEYA8 p01 +0.79.
+
+Promotion verified BOTH ways: with `snap_merge_chain` in the profile, three human
+conditions under `--profile real-drna` with no extra flag reproduce the
+benchmarked arm byte-for-byte (6/6 SAME) AND differ from the pre-promotion
+default (3/3 CHANGED) -- the check that once caught a promoted profile value
+being resolved and then never applied. Before promotion the flag-off path was
+byte-identical to the baseline (6/6). The provenance guard, the family guard and
+the CLI application step are each pinned by mutation testing: reverting any one
+makes exactly its own tests fail.
+
+**What the benchmark cannot see** (Codex, and it is the honest caveat): the
+scorer is blind to terminal coordinates, so "no cell degrades" is necessary and
+not sufficient. A genuine nearby alternative start whose models satisfy the
+snap-collision rule does disappear; the surviving id and reported 5' coordinate
+depend on read support and can move between samples; and the redirect+refit
+changes quantification, which structural F1 does not validate. The rule's
+narrowness -- exact 3' agreement, bounded 5' diameter, one family, snap-created
+provenance -- is what makes that risk acceptable, not the F1 table.
+
+**What is still on the table.** The narrow rule takes 42% / 47% / 16% of the
+redundant groups on SIRV4 / HEYA8 / human; the rest are pairs whose 3' ends
+genuinely differ (human especially: only 29% have identical 3' ends) or that
+involve an annotated model, which is exempt by design. Those need endpoint
+reconciliation, not identity reconciliation -- see 4k for why widening the polyA
+channel is NOT the way to get it.
+
 ## 5. Validation protocol for ANY future change (frozen invariants)
 
 1. Opt-in flag, default off, no profile enables it; explicit misuse fails

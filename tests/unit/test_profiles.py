@@ -221,3 +221,39 @@ def test_cli_explicit_flags_override_the_promoted_defaults(monkeypatch, tmp_path
 def test_sirv_profile_keeps_the_channels_off(monkeypatch, tmp_path):
     cfg, _ = _invoke(monkeypatch, tmp_path, "--profile", "sirv")
     assert cfg.assignment_channels == "none" and cfg.folded_tss_recovery_mode == "off"
+
+
+def test_real_profile_enables_the_snap_chain_merge(monkeypatch, tmp_path):
+    """The promoted value has to be APPLIED, not merely resolved: this repo has
+    shipped a promoted profile setting that the CLI read and then dropped."""
+    cfg, output = _invoke(monkeypatch, tmp_path)
+    assert cfg.snap_merge_chain is True
+    assert cfg.snap_merge_chain_window_bp == 25
+    manifest = json.loads((output / "run_manifest.json").read_text())
+    assert manifest["config"]["snap_merge_chain"] is True
+
+
+def test_real_profile_snap_chain_merge_can_be_explicitly_disabled(
+    monkeypatch, tmp_path
+):
+    cfg, _ = _invoke(monkeypatch, tmp_path, "--no-snap-merge-chain")
+    assert cfg.snap_merge_chain is False
+    assert "snap_merge_chain" in cfg.profile_overrides
+
+
+def test_the_snap_chain_merge_window_is_not_a_profile_field(monkeypatch, tmp_path):
+    """The window is a knob, not part of the promoted operating point, and
+    supplying it must not make the mode itself an explicit request."""
+    cfg, _ = _invoke(monkeypatch, tmp_path, "--snap-merge-chain-window-bp", "40")
+    assert cfg.snap_merge_chain_window_bp == 40
+    assert cfg.snap_merge_chain is True
+    assert "snap_merge_chain" not in cfg.profile_overrides
+
+
+def test_the_precision_profile_inherits_the_snap_chain_merge(monkeypatch, tmp_path):
+    """`real-drna-precision` is `real-drna` plus a higher novel-read threshold,
+    so it inherits this too. The four-grid evidence was collected under
+    `real-drna`; the inheritance is by construction, not by measurement."""
+    cfg, _ = _invoke(monkeypatch, tmp_path, "--profile", "real-drna-precision")
+    assert cfg.snap_merge_chain is True
+    assert cfg.min_novel_reads == 2

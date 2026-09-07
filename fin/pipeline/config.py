@@ -69,6 +69,16 @@ PIPELINE_PROFILES: dict[str, dict[str, object]] = {
         # supplied (it scores read starts against the annotated TSS).
         "assignment_channels": "ends",
         "folded_tss_recovery_mode": "require",
+        # Reconcile the models junction snapping gives one corrected intron
+        # chain but not one exon tuple. Chosen by cross-dataset maximin
+        # (expression contract, paired vs the previous default, seed 20260831):
+        # SIRV4 +1.45 Pr / +0.70 F1 [+0.59,+0.83] over 98 up / 0 down; HEYA8
+        # +0.82 / +0.32 [+0.25,+0.39] over 62 up / 0 down; human GENCODE +0.30 /
+        # +0.043 over 7 up / 0 down; Sequin exactly inert (0 cells moved).
+        # RECALL IS UNCHANGED TO TWO DECIMALS ON EVERY CONDITION OF EVERY GRID
+        # and no cell degrades anywhere: the pass only removes models that
+        # duplicate another model's structural match.
+        "snap_merge_chain": True,
     },
     "custom": {},
 }
@@ -1112,25 +1122,33 @@ class PipelineConfig:
                 raise ValueError(
                     "snap_merge_chain_window_bp must be >= 0, got "
                     f"{self.snap_merge_chain_window_bp}")
+            reason = None
             if not getattr(self, "junction_snap", False):
-                raise ValueError(
-                    "snap_merge_chain requires junction_snap: it reconciles the "
-                    "models the snap itself gives one corrected intron chain")
-            if getattr(self, "endpoint_refine", False):
-                raise ValueError(
-                    "snap_merge_chain and endpoint_refine are mutually exclusive: "
-                    "EndpointRefine splits a survivor into distinct endpoint "
-                    "states immediately before snapping, and this merge would "
-                    "silently undo that split")
-            if not (self.post_selection_refit and self.quant_mode == "m2_em"
-                    and not self.abundance_feedback):
-                raise ValueError(
-                    "snap_merge_chain requires the post-selection abundance "
-                    "refit (quant_mode=m2_em, post_selection_refit on, no "
-                    "abundance_feedback): merging two models changes every "
-                    "read's responsibility for the merged identity, and "
-                    "confidence, max_R and the hard assignments are only made "
-                    "correct by the refit")
+                reason = ("junction_snap is off; the mode reconciles the models "
+                          "the snap itself gives one corrected intron chain")
+            elif getattr(self, "endpoint_refine", False):
+                reason = ("endpoint_refine is on; it splits a survivor into "
+                          "distinct endpoint states immediately before snapping "
+                          "and this merge would silently undo that split")
+            elif not (self.post_selection_refit and self.quant_mode == "m2_em"
+                      and not self.abundance_feedback):
+                reason = ("the post-selection abundance refit is not in effect "
+                          f"(quant_mode={self.quant_mode}, post_selection_refit="
+                          f"{self.post_selection_refit}, abundance_feedback="
+                          f"{self.abundance_feedback}); merging two models "
+                          "changes every read's responsibility for the merged "
+                          "identity, and confidence, max_R and the hard "
+                          "assignments are only made correct by the refit")
+            if reason is not None:
+                # Same contract as folded_tss_recovery_mode: a setting the
+                # PROFILE supplied steps aside with a warning when the rest of
+                # the operating point cannot support it, while one the caller
+                # asked for explicitly is an error rather than a silent no-op.
+                if self._profile_implied("snap_merge_chain"):
+                    logger.warning("snap_merge_chain disabled: %s", reason)
+                    self.snap_merge_chain = False
+                else:
+                    raise ValueError(f"snap_merge_chain requires: {reason}")
         if getattr(self, "endpoint_refine", False) and not (
             self.post_selection_refit and self.quant_mode == "m2_em"
             and not self.abundance_feedback

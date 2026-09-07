@@ -505,6 +505,7 @@ def main(
     m2_summed_llr_flank = resolved["m2_summed_llr_flank"]
     assignment_channels = resolved["assignment_channels"]
     folded_tss_recovery_mode = resolved["folded_tss_recovery_mode"]
+    snap_merge_chain = resolved["snap_merge_chain"]
 
     os.makedirs(output_dir, exist_ok=True)
 

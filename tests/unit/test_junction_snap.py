@@ -341,12 +341,12 @@ class TestSnapMergeChainConfigGuards:
 
     def test_it_requires_junction_snap(self, tmp_path):
         import pytest
-        with pytest.raises(ValueError, match="requires junction_snap"):
+        with pytest.raises(ValueError, match="junction_snap is off"):
             self._cfg(tmp_path, junction_snap=False)
 
     def test_it_refuses_to_run_beside_endpoint_refine(self, tmp_path):
         import pytest
-        with pytest.raises(ValueError, match="mutually exclusive"):
+        with pytest.raises(ValueError, match="endpoint_refine is on"):
             self._cfg(tmp_path, endpoint_refine=True)
 
     def test_it_is_off_by_default(self, tmp_path):
@@ -556,7 +556,7 @@ class TestSnapMergeChainRefitGuard:
         for i, kw in enumerate((dict(post_selection_refit=False),
                                 dict(quant_mode="argmax"),
                                 dict(abundance_feedback=True))):
-            with pytest.raises(ValueError, match="requires the post-selection"):
+            with pytest.raises(ValueError, match="abundance refit is not in effect"):
                 self._cfg(tmp_path / f"c{i}", **kw)
 
     def test_a_negative_window_is_rejected_by_config_not_only_by_data(self, tmp_path):
@@ -571,3 +571,68 @@ def test_a_negative_window_is_rejected_even_with_no_models():
     with pytest.raises(ValueError, match="must be >= 0"):
         snap_quant_results({}, {}, tolerance=6, min_support=2, min_ratio=2.0,
                            chain_merge=True, chain_merge_window_bp=-1)
+
+
+class TestSnapMergeChainProfilePromotion:
+    """The `real-drna` profile now carries the mode. A setting the PROFILE
+    supplied must step aside with a warning when the rest of the operating point
+    cannot support it -- the same contract as folded_tss_recovery_mode -- while
+    one the caller asked for explicitly stays an error."""
+
+    def _cfg(self, tmp_path, explicit=(), **kw):
+        """A config as the CLI builds one: caller values overlaid by the profile,
+        except the fields the caller passed explicitly (`explicit`), which the
+        CLI also records in `profile_overrides`."""
+        from fin.pipeline.config import PipelineConfig, resolve_profile_values
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        bam = tmp_path / "r.bam"; bam.write_bytes(b"")
+        values = dict(snap_merge_chain=False, junction_snap=False,
+                      post_selection_refit=False, quant_mode="m2_em",
+                      abundance_feedback=False, assignment_channels="none",
+                      folded_tss_recovery_mode="off")
+        values.update(kw)
+        resolved = resolve_profile_values("real-drna", values,
+                                          explicit_fields=explicit)
+        cfg = PipelineConfig(bam_path=str(bam), work_dir=str(tmp_path / "w"),
+                             profile="real-drna",
+                             profile_overrides=tuple(sorted(explicit)), **resolved)
+        cfg.validate()
+        return cfg
+
+    def test_the_profile_turns_it_on(self, tmp_path):
+        assert self._cfg(tmp_path).snap_merge_chain is True
+
+    def test_every_incompatibility_makes_the_profile_value_step_aside(self, tmp_path):
+        """All three reasons, not just one, and each must WARN rather than raise
+        when the value came from the profile."""
+        import logging
+        cases = (dict(quant_mode="argmax"),
+                 dict(abundance_feedback=True),
+                 dict(endpoint_refine=True),
+                 # junction_snap IS a profile field, so turning it off is an
+                 # explicit override -- but snap_merge_chain itself still came
+                 # from the profile, so it must step aside rather than raise
+                 dict(junction_snap=False, explicit=("junction_snap",)))
+        for i, kw in enumerate(cases):
+            cfg = self._cfg(tmp_path / f"step{i}", **kw)
+            assert cfg.snap_merge_chain is False, kw
+
+    def test_it_steps_aside_when_the_profile_cannot_support_it(self, tmp_path):
+        # quant_mode is not a profile field, so a caller asking for argmax keeps
+        # it; the profile's refit then never takes effect and the
+        # profile-implied merge must disable itself rather than raise
+        cfg = self._cfg(tmp_path / "argmax", quant_mode="argmax")
+        assert cfg.quant_mode == "argmax"
+        assert cfg.snap_merge_chain is False
+
+    def test_an_explicit_request_is_still_an_error(self, tmp_path):
+        import pytest
+        from fin.pipeline.config import PipelineConfig
+        d = tmp_path / "explicit"; d.mkdir(parents=True, exist_ok=True)
+        bam = d / "r.bam"; bam.write_bytes(b"")
+        cfg = PipelineConfig(bam_path=str(bam), work_dir=str(d / "w"),
+                             profile="real-drna",
+                             profile_overrides=("snap_merge_chain",),
+                             snap_merge_chain=True, junction_snap=False)
+        with pytest.raises(ValueError, match="junction_snap is off"):
+            cfg.validate()
