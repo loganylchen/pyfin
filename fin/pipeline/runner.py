@@ -1874,7 +1874,11 @@ class PipelineRunner:
             self._nuisance_evidence_cache = sample_nuisance_evidence(
                 polya_map, read_ends, claimed_tes=self._annotated_tes(),
                 read_starts=read_starts if want_tss else None,
-                claimed_tss=self._annotated_tss() if want_tss else None)
+                claimed_tss=self._annotated_tss() if want_tss else None,
+                accept_adapter=bool(getattr(
+                    self.config, "polya_end_accept_adapter", False)),
+                qc_conditional=bool(getattr(
+                    self.config, "endpoint_qc_conditional", False)))
         return self._nuisance_evidence_cache
 
     def _read_extent_contradicted(self):
@@ -1893,15 +1897,33 @@ class PipelineRunner:
         evidence = self._nuisance_evidence()
         if ev is None or evidence is None:
             return None
-        from fin.analysis.molecule_evidence import POLYA_PASS, polya_state
+        from fin.analysis.molecule_evidence import polya_end_evidential
         from fin.analysis.sample_nuisance import fit_from_evidence
 
         polya_map, read_ends, read_starts = ev
         want_tss = getattr(self.config, "assignment_channels", "none") == "ends"
+        # This hook stays on the POOLED kernel and the name-based admission
+        # predicate even under --endpoint-qc-conditional. Its test is an
+        # ABSOLUTE one -- narrow_posterior(d) < 0.5 -- and that threshold is not
+        # invariant to the fitted eta: a class fitted as LESS reliable has a
+        # lower narrow posterior at every distance, so it would produce MORE
+        # contradictions and be protected by FEWER annotated alternatives, which
+        # inverts the intended meaning. The class-conditional widening therefore
+        # applies to assignment, whose question is a within-read contrast where a
+        # low-confidence class correctly moves the answer less.
+        # NOTE: no interval exclusion here, unlike `_endpoint_context`. This is
+        # a sample-level hook consulted during discovery, before intervals are
+        # judged, so every eligible read contributes to the kernel it is then
+        # tested against (a read with no end coordinate never reaches the fit; a
+        # read on a locus with no annotation is skipped by the annotated-distance
+        # branch but still participates in the split-half fallback).
+        # Pre-existing; the leave-one-interval-out contract covers assignment
+        # only.
         nuisance = fit_from_evidence(evidence)
         endpoint = nuisance.endpoint if nuisance.polya_available else None
         start = nuisance.start if want_tss else None
         min_start_reads = int(getattr(self.config, "tss_contradiction_min_reads", 3))
+        accept_adapter = bool(getattr(self.config, "polya_end_accept_adapter", False))
 
         def _tes(c):
             return c.end if getattr(c, "strand", "+") == "+" else c.start
@@ -1922,9 +1944,9 @@ class PipelineRunner:
             out: Dict[str, List[str]] = {}
             for rid in sorted(read_ids):
                 if endpoint is not None:
-                    qc, _ = polya_state(polya_map.get(rid))
                     loc = read_ends.get(rid)
-                    if qc == POLYA_PASS and loc is not None:
+                    if (polya_end_evidential(polya_map.get(rid), accept_adapter)
+                            and loc is not None):
                         e_r = loc[2]
                         d = (e_r - t_c) if strand == "+" else (t_c - e_r)
                         if (d > 0 and endpoint.narrow_posterior(d) < 0.5
@@ -1966,11 +1988,17 @@ class PipelineRunner:
         interval_reads = set(getattr(candidate_set, "read_ids", set()) or ())
         channels = getattr(self.config, "assignment_channels", "none")
         nuisance = fit_from_evidence(evidence, exclude_reads=interval_reads)
+        qc_conditional = bool(getattr(self.config, "endpoint_qc_conditional", False))
         ctx = {"polya": polya_map, "ends": read_ends,
+               "accept_adapter": bool(getattr(
+                   self.config, "polya_end_accept_adapter", False)),
+               "qc_conditional": qc_conditional,
+               "endpoint_by_qc": nuisance.endpoint_by_qc if qc_conditional else None,
                "endpoint": nuisance.endpoint if nuisance.polya_available else None,
                "starts": read_starts if channels == "ends" else None,
                "start": nuisance.start if channels == "ends" else None}
-        if ctx["endpoint"] is None and ctx["start"] is None:
+        if (ctx["endpoint"] is None and not ctx["endpoint_by_qc"]
+                and ctx["start"] is None):
             return None
         return ctx
 

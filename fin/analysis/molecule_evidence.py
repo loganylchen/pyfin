@@ -41,6 +41,63 @@ from typing import Dict, Mapping, Optional, Sequence, Tuple
 POLYA_PASS = "PASS"
 POLYA_FAIL = "FAIL"
 POLYA_MISSING = "MISSING"
+# krill's own verdicts, before they are collapsed to the three states above.
+# ADAPTER means a polyA region WAS located but the length estimate is
+# contaminated by the adapter signal; the 3' channel does not use the length.
+POLYA_QC_ADAPTER = "ADAPTER"
+POLYA_QC_NOREGION = "NOREGION"
+
+
+def polya_end_evidential(
+    call: Optional[Tuple[Optional[float], Optional[str]]],
+    accept_adapter: bool = False,
+    qc_conditional: bool = False,
+) -> bool:
+    """Is this call admitted to the 3' endpoint channel?
+
+    The 3'/polyA channel never reads the tail LENGTH -- it scores the read's
+    genomic 3' end, which comes from the alignment -- so what it needs from
+    krill is the existence statement: a polyA region was found on this molecule,
+    therefore this end is a polyadenylation site and not a fragment. There are
+    two ways to decide which verdicts make that statement, and this function
+    implements both.
+
+    BY VERDICT NAME (the default, and ``accept_adapter``).
+    ``PASS`` says exactly that. ``ADAPTER`` says the region was found but the
+    LENGTH is contaminated, which the channel does not care about, and the ends
+    bear that out: reads within 20 bp of an annotated TES are 82.8% of PASS
+    against 79.9% of ADAPTER on human dRNA (95.3 / 92.1 on HEYA8, 95.6 / 89.0
+    on Sequin), while ``NOREGION`` -- no polyA region at all -- is 10.1% on
+    human and lands a median 334 bp away (it is NOT bad everywhere; see below). ``READ_FAILED`` is krill declining to
+    process the read: technical missingness, which abstains by the same rule
+    that makes a missing call abstain rather than count against a model.
+
+    Takes krill's ``(polya_length, polya_qc)`` so the PASS branch stays exactly
+    :func:`polya_state`'s PASS -- a PASS verdict with no usable length is still
+    not evidence -- and only the ADAPTER branch is new. An ADAPTER call has no
+    trustworthy length by construction, so it is judged on the verdict alone.
+
+    BY FITTED KERNEL (``qc_conditional``), which applies to the ASSIGNMENT
+    channel only -- the discovery contradiction hook keeps the verdict-name rule
+    above, because its test is an absolute posterior threshold whose meaning
+    changes with the fitted eta (see `runner._read_extent_contradicted`). Every
+    read krill returned a verdict for is admitted HERE, and the abstention
+    decision moves to the kernel: each
+    class is fitted separately and a class whose fit is not `available` scores
+    nothing (see :meth:`SampleNuisanceModel.endpoint_for`). So under this mode
+    the paragraph above is NOT the rule -- a NOREGION read is admitted by this
+    function and abstains only if its class failed to fit. That is deliberate:
+    the classes are not equally good on every run (NOREGION is 10.1% within
+    20 bp of an annotated TES on the human sample and 74-75% on HEYA8), so which
+    ones to trust is a per-sample estimate rather than a name on a list.
+    """
+    if qc_conditional:
+        return call is not None and bool(call[1])
+    if polya_state(call)[0] == POLYA_PASS:
+        return True
+    if not accept_adapter or call is None:
+        return False
+    return call[1] == POLYA_QC_ADAPTER
 
 
 @dataclass(frozen=True)

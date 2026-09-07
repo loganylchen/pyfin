@@ -621,6 +621,102 @@ real human data (+9 points of TES agreement). The 5' end has no such statement
 -- measured, not assumed (section 4h) -- which is why its specificity comes from
 a read CLUSTER instead.
 
+## 4k. Widening the DRS channel: the polyA QC classes (2026-09-07, RUNNING)
+
+Section 4j ended with the conclusion that the 3'/polyA channel is where the raw
+signal actually pays. The measurement that follows from it: **the channel
+abstains on 57% of a human sample's reads**, because it admits only
+`polya_qc == PASS` (43.2% -- READ_FAILED 33%, ADAPTER 20%, NOREGION 7% of the
+49k reads on H9 chr1/19/21). The abstentions are not a statement about the 3'
+END; they are a statement about the tail LENGTH, which this channel never reads.
+
+Fraction of reads whose 3' end is within 20 bp of an annotated TES:
+
+| dataset | PASS | ADAPTER | READ_FAILED | NOREGION |
+| --- | --- | --- | --- | --- |
+| human H9 | 82.8 | 79.9 | 74.2 | **10.1** |
+| HEYA8 | 95.3 | 92.1 | 91.3 | 74.5 (75.1 on the largest sample) |
+| Sequin | 95.6 | 89.0 | 88.2 | 26.3 |
+| SIRV4 | 95.1 | 95.6 | 92.6 | 34.5 |
+
+NOREGION -- krill found no polyA region at all -- is genuinely bad on human
+(median 334 bp away) and genuinely fine on HEYA8. **Which classes are worth
+trusting is a property of the run**, so a whitelist is the wrong instrument.
+
+**The design under test (`--endpoint-qc-conditional`).** Admit every read krill
+returned a verdict for and fit the two-Laplace endpoint mixture SEPARATELY per QC
+class; score each read under its own class's kernel; a class whose kernel fails
+the existing `available` rule (n >= 50, b_narrow <= 25 bp) abstains. The broad
+weight eta is then a per-sample, per-class estimate of "how often this class's
+end is not a transcript end". Offline fits, all four grids
+(`qc_conditional_kernel_probe.py`):
+
+| dataset | eta PASS | eta ADAPTER | eta READ_FAILED | NOREGION |
+| --- | --- | --- | --- | --- |
+| human | 0.209 | 0.237 | 0.294 | b_narrow 4407 -> **abstains** |
+| HEYA8 | 0.245 | 0.127 | 0.104 | 0.256 (usable, and it is 75.1% good) |
+| Sequin | 0.045 | 0.126 | 0.202 | n=19 -> **abstains** |
+| SIRV4 | 0.190 | 0.095 | 0.153 | eta pinned at the cap |
+
+The eta ordering reproduces the measured accuracy ordering without being told
+it. **Abstention is decided by `available` -- the narrow SCALE and the count, not
+eta:** human NOREGION fits b_narrow 4407 bp and Sequin NOREGION has n=19, so both
+drop out under either cap. What the eta cap does is separate: the EM capped eta
+at 0.5, which is right for a POOLED fit (a sample cannot be more than half
+read-through) and wrong per class, because a class can fit a genuinely narrow
+component and still be mostly wrong -- SIRV4 NOREGION fits b_narrow 1.8 bp with
+only 34.5% of its ends within 20 bp of a TES. Released to 0.99 for per-class fits
+only, that class fits eta 0.695 (0.305 narrow weight per read) instead of the
+capped 0.5, while **every informative class fits an identical eta to 3 decimals
+on all four grids**. So the release calibrates weak classes; it does not create
+abstention.
+
+**Scope, forced by a Codex finding.** The conditional mode changes the
+ASSIGNMENT channel only. The other consumer of the endpoint kernel -- the
+discovery contradiction hook that decides whether a read's 3' end disagrees with
+an annotated TES -- tests `narrow_posterior(d) < 0.5`, an ABSOLUTE threshold that
+is not invariant to eta: a class fitted as LESS reliable has a lower narrow
+posterior at every distance, so it would raise MORE contradictions and be
+protected by FEWER annotated alternatives. Less confidence producing more
+aggression is backwards, so discovery keeps the pooled kernel and the
+verdict-name predicate, and the pooled kernel is fitted from a second, name-based
+evidence derivation (`NuisanceEvidence.pooled`) so it is bit-for-bit the kernel
+it was before the widening -- verified on the human sample
+(b_narrow 1.8686806129384694, eta 0.20867754234594615, identical). Extending the
+widening to discovery needs a contradiction rule that does not read eta, and that
+is a separate change with its own validation.
+
+`--polya-end-accept-adapter` is the simpler ablation: admit PASS+ADAPTER by name
+(43% -> 63% of human reads), one pooled kernel. Both default OFF, both running
+against the promoted default (`clust` / `gcclust`) on all four grids.
+
+Default inertness is verified twice: the pooled `EndpointModel` is bit-identical
+to the pre-change `_snap/clust` code on the human sample on BOTH fit paths
+(annotated: b_narrow 1.8686806129384694, eta 0.20867754234594615; annotation-free
+split-half: 1.051438057833809 / 0.18053688247926988), and a grid arm re-runs
+three human conditions with the flags off and `cmp`s the GTFs against `gcclust`.
+
+**Two side measurements, both negative, both worth not repeating:**
+
+* *polyA tail LENGTH as an identity term* (`tail_length_icc_probe.py`). It is the
+  one quantity only dRNA can measure and the pipeline uses it for nothing. Its
+  intraclass correlation across annotated TES sites (172 sites, >= 20 PASS reads
+  each) is **0.056**: a single read's tail favours its own site over a random
+  other site 58.4% of the time. Real but far too weak to discriminate the
+  candidates that are actually tied, which differ by tens of bp at the 3' end.
+* *a signal-derived 3' end* would not help either: the pooled narrow kernel is
+  already **b_narrow ~1.9 bp** on human and 0.5-2.5 bp on the spike-ins. There is
+  no precision left to buy at the 3' end -- only COVERAGE, which is what this
+  section is about.
+
+*(Open, not pursued: `internal_priming_probe.py` finds that reads ending on a
+genomic A-run of >= 8 nt are 0.87% of reads but sit far from any annotated TES
+(A-run 12-20: 2.8% within 20 bp, 67.3% more than 200 bp away) and CLUSTER hard --
+374 of 427 fall in 15 ten-bp bins, one holding 170 reads. That is the internal-
+priming signature, but the measured tail length does NOT separate them (median
+91-123 nt in every A-run bucket), so the discriminator is genomic sequence, not
+signal, and whether those sites are artifacts or unannotated APA is unsettled.)*
+
 ## 5. Validation protocol for ANY future change (frozen invariants)
 
 1. Opt-in flag, default off, no profile enables it; explicit misuse fails

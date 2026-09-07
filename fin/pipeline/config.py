@@ -305,6 +305,25 @@ class PipelineConfig:
     # one-sided 5' start term as well (a read cannot begin upstream of the model
     # it came from). "none" = current.
     assignment_channels: str = "none"
+    # Admit krill ADAPTER calls to the 3' ENDPOINT channel (never to anything
+    # that reads the tail length). An ADAPTER verdict means the polyA region was
+    # found but its length estimate is adapter-contaminated, and the channel
+    # scores the read's genomic 3' end, not the length -- see
+    # molecule_evidence.polya_end_evidential for the measured end quality per QC
+    # class. On a real human sample this takes the channel from 43% of reads to
+    # 63%.
+    polya_end_accept_adapter: bool = False
+    # Fit the 3' endpoint kernel PER krill polyA QC class instead of admitting a
+    # fixed whitelist of classes. Every verdict is admitted and each class's
+    # kernel is estimated from the sample's own ends. This changes the
+    # ASSIGNMENT channel only; the discovery contradiction hook keeps the pooled
+    # kernel and the verdict-name predicate. A class abstains when its
+    # own fit fails the availability rule (>= MIN_KERNEL_FIT ends and a narrow
+    # component no wider than NARROW_SCALE_MAX_BP), which is a test of whether
+    # its ends cluster, not a verdict on the biology. Supersedes
+    # polya_end_accept_adapter for assignment when set; with both set, adapter
+    # admission still widens the pooled population discovery uses.
+    endpoint_qc_conditional: bool = False
     # Minimum number of reads that must share a 5' start (within
     # sample_nuisance.TSS_CLUSTER_TOL_BP) before that start is allowed to
     # contradict an annotated TSS. One read starting upstream of an annotated

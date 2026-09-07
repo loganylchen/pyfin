@@ -623,17 +623,33 @@ def apply_endpoint_likelihood(d_tx, ties_by_read, kept_read_ids, cand_list, ctx)
     strand-aware signed distance from c's claimed TES to r's 3' end (positive =
     the read runs past the end). Then the row is re-anchored so its best cell
     stays at 0 (the EM is shift-invariant per row; this keeps the MISSING
-    sentinel meaningful). Reads without a PASS call are untouched: absence of
-    a call is abstention, never evidence. Returns the number of rows touched.
+    sentinel meaningful). A read carries no 3' TERM unless its polyA call
+    admits it AND its kernel is available: an absent or abstaining call is
+    abstention, never evidence. The 5' start channel is independent and can move
+    a row that has no admitted polyA call. Returns the number of rows touched.
     """
-    from fin.analysis.molecule_evidence import POLYA_PASS, polya_state
+    from fin.analysis.molecule_evidence import polya_end_evidential
 
     endpoint = ctx.get("endpoint")
     start = ctx.get("start")
     polya = ctx.get("polya") or {}
     ends = ctx.get("ends") or {}
     starts = ctx.get("starts") or {}
-    tes_on = endpoint is not None and getattr(endpoint, "available", False)
+    accept_adapter = bool(ctx.get("accept_adapter", False))
+    qc_conditional = bool(ctx.get("qc_conditional", False))
+    by_qc = ctx.get("endpoint_by_qc") or {}
+    if qc_conditional:
+        # Class-conditional: the read's own polyA QC class picks the kernel, and
+        # a class whose kernel is not `available` has no 3' statement to make.
+        def _kernel(rid):
+            m = by_qc.get((polya.get(rid) or (None, None))[1] or "")
+            return m if (m is not None and m.available) else None
+    else:
+        def _kernel(rid):
+            return endpoint
+
+    tes_on = (bool(by_qc) if qc_conditional
+              else endpoint is not None and getattr(endpoint, "available", False))
     tss_on = start is not None and getattr(start, "available", False)
     if not tes_on and not tss_on:
         return 0
@@ -646,18 +662,24 @@ def apply_endpoint_likelihood(d_tx, ties_by_read, kept_read_ids, cand_list, ctx)
         if len(vals) < 2:
             continue
         touched = False
-        # 3' / polyA: only a PASS read carries endpoint evidence
+        # 3' / polyA: which reads carry endpoint evidence is decided by
+        # molecule_evidence.polya_end_evidential -- by default the reads whose
+        # polyA region krill located, and under `qc_conditional` by whether the
+        # read's own QC class fitted an available kernel (so a class such as
+        # NOREGION participates on a sample where its ends do cluster).
         if tes_on:
-            qc, _ = polya_state(polya.get(rid))
             loc = ends.get(rid)
-            if qc == POLYA_PASS and loc is not None:
+            kernel = _kernel(rid)
+            if (kernel is not None and loc is not None
+                    and polya_end_evidential(polya.get(rid), accept_adapter,
+                                             qc_conditional)):
                 _c, _s, e_r = loc
                 for j in vals:
                     c = cand_list[j]
                     strand = getattr(c, "strand", "+")
                     t_c = c.end if strand == "+" else c.start
                     d = (e_r - t_c) if strand == "+" else (t_c - e_r)
-                    vals[j] += -endpoint.loglik(d)
+                    vals[j] += -kernel.loglik(d)
                 touched = True
         # 5' start: a read that begins UPSTREAM of a model's claimed TSS is
         # explained by that model only through the error kernel; reads at or

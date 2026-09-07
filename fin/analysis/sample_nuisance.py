@@ -17,19 +17,25 @@ PAST the claimed end) is modelled as a two-component mixture
 
 ``g`` is the narrow endpoint-jitter kernel of a true TES; ``b`` is the broad
 error kernel (chimeras, mapping truncation, read-through). Both are discrete
-Laplace densities; ``eta`` is the broad weight. All three are fitted by EM on
-split-half distances: modes are built from one half of the sample's
-polyA-PASS 3' ends and distances measured from the other half -- no annotation,
-no candidate, no condition name, and no read measured against a mode it helped
-define (which under-states the jitter and then penalises any TES coordinate a
-few bp from the read cluster).
+Laplace densities; ``eta`` is the broad weight. All three are fitted by EM, from
+the distances to the INPUT annotation's claimed TES positions when at least two
+of those exist (however far away they are -- there is no proximity filter), and
+otherwise -- no annotation, or fewer than two reads on an annotated locus -- from
+split-half distances: modes are built from one half of the sample's admitted 3'
+ends and distances measured from the other half, so no read is measured against a
+mode it helped define (which under-states the jitter and then penalises any TES
+coordinate a few bp from the read cluster). Neither path sees a candidate, a
+truth set or a condition name.
 
 Measured before this was written (three grids, 2026-09-05): relative to the
 nearest same-strand annotated TES, PASS reads have MAD 1 bp, q90 <= 8 bp, and a
 > 25 bp read-through rate of 0.2-0.4 %. The kernel is the same on every grid;
 that is why it is a nuisance parameter and not a tuning knob.
 
-Abstention: a read that is not PASS has no 3' term (0 for every candidate).
+Abstention: by default a read that is not polyA-PASS has no 3' term (0 for every
+candidate). Which verdicts carry a 3' term is what
+``polya_end_accept_adapter`` / ``endpoint_qc_conditional`` change; see
+:func:`fin.analysis.molecule_evidence.polya_end_evidential` for the two rules.
 A sample where krill scored nothing has no endpoint model, and the channel is
 reported unavailable rather than silently neutral.
 """
@@ -68,6 +74,23 @@ TSS_CLUSTER_TOL_BP = 10
 MIN_KERNEL_FIT = 50
 NARROW_SCALE_MAX_BP = 25.0
 BROAD_SCALE_MAX_BP = 500.0
+# Cap on the broad weight. Fitted on ONE pooled population the cap is a
+# regularizer -- it ASSUMES a sample is not more than half read-through, which is
+# not something measured here, and it stops a bimodal pooled sample from fitting
+# its way out of the channel entirely. Fitted PER
+# polyA QC CLASS the cap instead FORCES a class to claim at least half its
+# ends are jitter, which is false for a class that is mostly wrong: SIRV4
+# NOREGION has only 34.5% of its ends within 20 bp of an annotated TES yet fits
+# a narrow 1.8 bp component, so capped it claims 50% narrow mass and released it
+# fits eta 0.695 (0.305 narrow weight per read). Releasing the cap therefore
+# lets a weak class report a smaller within-read contrast. It is NOT what makes a
+# class abstain: that is `available`, which reads n_fit and the narrow SCALE and
+# never eta -- though the cap can move b_narrow, so the two are separable in
+# practice rather than by construction. On the four grids measured, every PASS /
+# ADAPTER / READ_FAILED class already fitted eta below 0.5 and is unchanged to
+# three decimals; only the NOREGION classes move.
+ETA_MAX = 0.5
+ETA_MAX_PER_CLASS = 0.99
 
 
 @dataclass(frozen=True)
@@ -130,9 +153,18 @@ def endpoint_distances(
     distances measured from the other, in both directions. Distances are signed
     in transcript orientation (positive = past the mode).
     """
+    return [d for _rid, d in endpoint_distance_pairs(ends_by_locus, read_ids_by_locus)]
+
+
+def endpoint_distance_pairs(
+    ends_by_locus: Mapping[Tuple[str, str], Sequence[int]],
+    read_ids_by_locus: Optional[Mapping[Tuple[str, str], Sequence[str]]] = None,
+) -> List[Tuple[str, int]]:
+    """:func:`endpoint_distances`, keeping each distance's read id so the fit can
+    be conditioned on the read's polyA QC class. Order is unchanged."""
     import hashlib
 
-    out: List[int] = []
+    out: List[Tuple[str, int]] = []
     for key, ends in ends_by_locus.items():
         chrom, strand = key
         ids = list(read_ids_by_locus.get(key, ())) if read_ids_by_locus else []
@@ -140,25 +172,31 @@ def endpoint_distances(
         for i, e in enumerate(ends):
             if i < len(ids):
                 h = int.from_bytes(hashlib.blake2b(ids[i].encode("utf-8"), digest_size=4).digest(), "big") & 1
+                rid = ids[i]
             else:
                 h = i & 1
-            halves[h].append(e)
+                rid = ""
+            halves[h].append((rid, e))
         for a, b in ((0, 1), (1, 0)):
-            modes = [m for m in _end_modes(halves[a]) if m[1] >= 2]
+            modes = [m for m in _end_modes([e for _r, e in halves[a]]) if m[1] >= 2]
             if not modes:
                 continue
             centres = [m[0] for m in modes]
-            for e in halves[b]:
+            for rid, e in halves[b]:
                 k = bisect.bisect_left(centres, e)
                 cands = [centres[j] for j in (k - 1, k) if 0 <= j < len(centres)]
                 d = min((e - c for c in cands), key=abs)
-                out.append(d if strand == "+" else -d)
+                out.append((rid, d if strand == "+" else -d))
     return out
 
 
 def fit_endpoint_model(distances: Sequence[int], *, max_iter: int = 200,
-                       tol: float = 1e-8) -> EndpointModel:
-    """EM for the two-Laplace mixture on split-half endpoint distances."""
+                       tol: float = 1e-8, eta_max: float = ETA_MAX) -> EndpointModel:
+    """EM for the two-Laplace mixture on a list of signed endpoint distances.
+
+    The caller decides what those are: distances to annotated TES positions,
+    split-half distances to the sample's own read modes, or (through
+    :func:`fit_start_model`) upstream 5' distances."""
     d = [int(x) for x in distances]
     n = len(d)
     if n < 2:
@@ -180,7 +218,7 @@ def fit_endpoint_model(distances: Sequence[int], *, max_iter: int = 200,
             w_sum += r
             s_n += (1 - r) * abs(x); n_n += (1 - r)
             s_b += r * abs(x); n_b += r
-        new_eta = min(max(w_sum / n, 1e-4), 0.5)
+        new_eta = min(max(w_sum / n, 1e-4), eta_max)
         new_bn = max(s_n / max(n_n, 1e-9), 0.5)
         # The broad component describes read-through / chimeric / truncation
         # errors, whose scale is that of a transcript (hundreds of bp), not the
@@ -239,14 +277,47 @@ def fit_start_model(upstream_distances: Sequence[int]) -> StartModel:
 @dataclass(frozen=True)
 class SampleNuisanceModel:
     endpoint: EndpointModel
-    polya_call_rate: float          # rho_s: PASS among scorable reads
+    polya_call_rate: float          # rho_s: evidential among scorable reads
     n_scorable: int
     start: Optional[StartModel] = None
+    # One endpoint kernel per krill polyA QC class, when the evidence was
+    # derived class-conditionally. A TUPLE, not a dict: this dataclass is frozen
+    # and callers may use a fitted model as a dict key or a cache argument, which
+    # a dict field would break. `qc_conditional` records WHICH mode produced this
+    # fit, so an empty mapping (no class qualified) is not mistaken for "pooled
+    # mode" -- otherwise this model and `apply_endpoint_likelihood` would
+    # disagree about whether the pooled kernel may be used.
+    endpoint_kernels: Tuple[Tuple[str, EndpointModel], ...] = ()
+    qc_conditional: bool = False
     version: str = "sample-nuisance-v1"
+
+    @property
+    def endpoint_by_qc(self) -> Dict[str, EndpointModel]:
+        return dict(self.endpoint_kernels)
 
     @property
     def polya_available(self) -> bool:
         return self.n_scorable > 0 and self.endpoint.available
+
+    def endpoint_for(self, qc: Optional[str]) -> Optional[EndpointModel]:
+        """The kernel that scores a read of QC class ``qc``, or None to abstain.
+
+        Class-conditional: krill's verdict is a raw-signal reliability label, and
+        each label's kernel is fitted from the sample's own ends, so how much a
+        class is trusted is estimated per sample rather than fixed by a
+        whitelist. A class abstains when its fit is not `available` -- fewer than
+        MIN_KERNEL_FIT ends, or a "narrow" component wider than
+        NARROW_SCALE_MAX_BP. That is a test of whether the class's ends CLUSTER
+        tightly enough to be a calibrated jitter model, which is a necessary
+        condition for carrying endpoint evidence and not a sufficient one; on the
+        human and Sequin samples measured it is what removes NOREGION, on HEYA8
+        NOREGION passes it (and its ends are in fact good there)."""
+        if not self.qc_conditional:
+            return self.endpoint if self.polya_available else None
+        for name, m in self.endpoint_kernels:      # a handful of QC classes
+            if name == qc:
+                return m if m.available else None
+        return None
 
 
 @dataclass(frozen=True)
@@ -262,11 +333,30 @@ class NuisanceEvidence:
 
     tes: Tuple[Tuple[str, int], ...]                 # (read_id, signed distance to claimed TES)
     tss: Tuple[Tuple[str, int], ...]                 # (read_id, upstream distance, >= 0)
-    ends_by_locus: Mapping[Tuple[str, str], Tuple[int, ...]]     # PASS 3' ends (fallback)
+    ends_by_locus: Mapping[Tuple[str, str], Tuple[int, ...]]     # evidential 3' ends (fallback)
     ids_by_locus: Mapping[Tuple[str, str], Tuple[str, ...]]
     n_scorable: int
-    n_pass: int
+    n_pass: int          # reads whose polyA call is 3'-end evidential
     has_claimed_tes: bool
+    # read_id -> krill polyA QC verdict, present only when the evidence was
+    # derived class-conditionally (every verdict admitted, the fit decides).
+    qc_by_read: Mapping[str, str] = ()
+    # which derivation produced this evidence. Recorded rather than inferred from
+    # `qc_by_read`, which is empty both when the mode is off and when it is on
+    # over a sample with no usable verdicts.
+    qc_conditional: bool = False
+    # In class-conditional mode, the evidence the NAME-based predicate alone
+    # would have produced. The POOLED kernel is fitted from THIS, so it is
+    # bit-for-bit the kernel it was before the widening -- not a re-fit on a
+    # filtered list, whose float summation order would differ. Its consumer is
+    # the discovery contradiction test, which asks an ABSOLUTE question
+    # ("narrow_posterior(d) < 0.5") whose meaning is not invariant to eta: a
+    # class fitted as LESS reliable has a lower narrow posterior everywhere, so
+    # it would produce MORE contradictions and be protected by FEWER annotated
+    # alternatives, which inverts the intent. The widening is an
+    # ASSIGNMENT-channel change, and assignment asks a within-read contrast where
+    # a lower-confidence class correctly moves the answer less.
+    pooled: Optional["NuisanceEvidence"] = None
     # sorted 5' starts per (chrom, strand) of every primary read, so a candidate
     # upstream start can be asked how many molecules share it
     starts_by_locus: Mapping[Tuple[str, str], Tuple[int, ...]] = ()
@@ -295,19 +385,33 @@ def sample_nuisance_evidence(
     claimed_tes: Optional[Mapping[Tuple[str, str], Sequence[int]]] = None,
     read_starts: Optional[Mapping[str, Tuple[str, str, int]]] = None,
     claimed_tss: Optional[Mapping[Tuple[str, str], Sequence[int]]] = None,
+    accept_adapter: bool = False,
+    qc_conditional: bool = False,
 ) -> NuisanceEvidence:
-    """Derive every read's endpoint distances once (annotation sorted once per locus)."""
-    from fin.analysis.molecule_evidence import POLYA_PASS, polya_state
+    """Derive every read's endpoint distances once (annotation sorted once per locus).
+
+    ``accept_adapter`` widens the 3' population to krill's ADAPTER calls;
+    ``qc_conditional`` admits every krill VERDICT and records each read's class so
+    the kernel can be fitted per class, and records which of them the NAME-based
+    predicate would have admitted so the pooled kernel keeps its own population.
+    The fit and the channel share one ADMISSION PREDICATE, so they cannot disagree
+    about which polyA calls carry 3' evidence. They do not see identical read
+    SETS: leave-one-interval-out exclusion, reads with no end coordinate, loci
+    with no annotation, split-half mode eligibility and per-class availability all
+    change who reaches the fit."""
+    from fin.analysis.molecule_evidence import polya_end_evidential
 
     by_locus: Dict[Tuple[str, str], List[int]] = {}
     ids_by_locus: Dict[Tuple[str, str], List[str]] = {}
+    qc_by_read: Dict[str, str] = {}
     n_scorable = n_pass = 0
     for rid in sorted(polya_map):
         n_scorable += 1
-        qc, _ = polya_state(polya_map[rid])
-        if qc != POLYA_PASS:
+        if not polya_end_evidential(polya_map[rid], accept_adapter, qc_conditional):
             continue
         n_pass += 1
+        if qc_conditional:
+            qc_by_read[rid] = polya_map[rid][1]
         loc = read_ends.get(rid)
         if loc is None:
             continue
@@ -354,8 +458,41 @@ def sample_nuisance_evidence(
         ends_by_locus={k: tuple(v) for k, v in by_locus.items()},
         ids_by_locus={k: tuple(v) for k, v in ids_by_locus.items()},
         n_scorable=n_scorable, n_pass=n_pass, has_claimed_tes=bool(claimed_tes),
+        qc_by_read=qc_by_read, qc_conditional=bool(qc_conditional),
+        # the same derivation under the name-based predicate, so the pooled
+        # kernel is computed by the identical code path on the identical inputs
+        pooled=(sample_nuisance_evidence(polya_map, read_ends,
+                                         claimed_tes=claimed_tes,
+                                         accept_adapter=accept_adapter)
+                if qc_conditional else None),
         starts_by_locus={k: tuple(sorted(v)) for k, v in starts_by_locus.items()},
     )
+
+
+def _surviving_pairs(evidence: NuisanceEvidence,
+                     excl: Iterable[str]) -> List[Tuple[str, int]]:
+    """(read_id, endpoint distance) for the reads left after exclusion, from the
+    annotation when there is one and from the split-half read modes otherwise."""
+    excl = set(excl)
+    pairs = [(rid, d) for rid, d in evidence.tes if rid not in excl]
+    if evidence.has_claimed_tes and len(pairs) >= 2:
+        return pairs
+    # With fewer than two surviving read-to-annotation distances -- no
+    # annotation, or an annotation no surviving read is measured against -- the
+    # split-half read-mode distances are the only reference; they depend on the
+    # surviving read set, so they are recomputed per fit.
+    ends, ids = {}, {}
+    for key, locus_ids in evidence.ids_by_locus.items():
+        keep = [(rid, e) for rid, e in zip(locus_ids, evidence.ends_by_locus[key])
+                if rid not in excl]
+        if keep:
+            ids[key] = [rid for rid, _ in keep]
+            ends[key] = [e for _, e in keep]
+    return endpoint_distance_pairs(ends, ids)
+
+
+def _fit_pooled(evidence: NuisanceEvidence, excl: Iterable[str]) -> EndpointModel:
+    return fit_endpoint_model([d for _rid, d in _surviving_pairs(evidence, excl)])
 
 
 def fit_from_evidence(
@@ -364,25 +501,32 @@ def fit_from_evidence(
     """Fit the mixtures on the evidence minus ``exclude_reads`` (leave-one-interval-out:
     the interval under test contributes nothing to the nuisance it is judged against)."""
     excl = set(exclude_reads)
-    dists = [d for rid, d in evidence.tes if rid not in excl]
-    if evidence.has_claimed_tes and len(dists) >= 2:
-        model = fit_endpoint_model(dists)
-    else:
-        # Without an annotation (or with no read near one) the split-half
-        # read-mode distances are the only reference; they depend on the
-        # surviving read set, so they are recomputed per fit.
-        ends, ids = {}, {}
-        for key, locus_ids in evidence.ids_by_locus.items():
-            keep = [(rid, e) for rid, e in zip(locus_ids, evidence.ends_by_locus[key])
-                    if rid not in excl]
-            if keep:
-                ids[key] = [rid for rid, _ in keep]
-                ends[key] = [e for _, e in keep]
-        model = fit_endpoint_model(endpoint_distances(ends, ids))
+    model = _fit_pooled(evidence.pooled or evidence, excl)
+    by_qc: List[Tuple[str, EndpointModel]] = []
+    if evidence.qc_by_read:
+        # deriving the surviving distances is not free -- in the annotation-free
+        # branch it rebuilds the split-half modes -- and only the per-class fits
+        # need the WIDENED set, so it stays inside this branch
+        pairs = _surviving_pairs(evidence, excl)
+        # One kernel per QC class over the WIDENED distances (the pooled kernel
+        # above stays on the name-admitted population), with the broad weight
+        # free (ETA_MAX_PER_CLASS) so a class that is mostly read-through can say
+        # so instead of being pinned at a cap that exists to protect a POOLED fit
+        # from turning itself off.
+        grouped: Dict[str, List[int]] = {}
+        for rid, d in pairs:
+            qc = evidence.qc_by_read.get(rid)
+            if qc:
+                grouped.setdefault(qc, []).append(d)
+        for qc, ds in grouped.items():
+            if len(ds) >= 2:
+                by_qc.append((qc, fit_endpoint_model(ds, eta_max=ETA_MAX_PER_CLASS)))
     ups = [u for rid, u in evidence.tss if rid not in excl]
     start_model = fit_start_model(ups) if len(ups) >= 2 else None
     return SampleNuisanceModel(
         endpoint=model,
+        endpoint_kernels=tuple(by_qc),
+        qc_conditional=evidence.qc_conditional,
         polya_call_rate=(evidence.n_pass / evidence.n_scorable) if evidence.n_scorable else 0.0,
         n_scorable=evidence.n_scorable,
         start=start_model,
@@ -397,6 +541,8 @@ def fit_sample_nuisance(
     claimed_tes: Optional[Mapping[Tuple[str, str], Sequence[int]]] = None,
     read_starts: Optional[Mapping[str, Tuple[str, str, int]]] = None,
     claimed_tss: Optional[Mapping[Tuple[str, str], Sequence[int]]] = None,
+    accept_adapter: bool = False,
+    qc_conditional: bool = False,
 ) -> SampleNuisanceModel:
     """Derive the sample's endpoint distances and fit the mixtures in one call.
 
@@ -417,7 +563,8 @@ def fit_sample_nuisance(
     return fit_from_evidence(
         sample_nuisance_evidence(
             polya_map, read_ends, claimed_tes=claimed_tes,
-            read_starts=read_starts, claimed_tss=claimed_tss),
+            read_starts=read_starts, claimed_tss=claimed_tss,
+            accept_adapter=accept_adapter, qc_conditional=qc_conditional),
         exclude_reads=exclude_reads,
     )
 

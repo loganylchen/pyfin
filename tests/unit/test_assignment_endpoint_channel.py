@@ -1288,3 +1288,235 @@ class TestExemptionIgnoresDroppedColumns:
         assert uncontradicted_gtf_columns([survivor, None], obs,
                                           containment_only=True) == {0}
         assert uncontradicted_gtf_columns([None, None], obs) == set()
+
+
+class TestPolyaQcAdmission:
+    """``polya_end_accept_adapter``: an ADAPTER call means krill LOCATED the
+    polyA region but its LENGTH is adapter-contaminated. The 3' channel scores
+    the read's genomic end and never the length, so the verdict alone decides.
+    Default OFF -- the default path must behave exactly as PASS-only did."""
+
+    def test_adapter_abstains_by_default_and_scores_when_admitted(self):
+        trunc = _cand("anno_trunc", 1000, 1900, source="gtf")
+        full = _cand("novel_full", 1000, 2000)
+        polya = {"r": (None, "ADAPTER")}
+        ends = {"r": ("c", "+", 2000)}
+
+        d = np.zeros((1, 2)); ties = {0: [0, 1]}
+        assert apply_endpoint_likelihood(d, ties, ["r"], [trunc, full], _ctx(polya, ends)) == 0
+        assert (d == 0).all()
+
+        d = np.zeros((1, 2))
+        ctx = _ctx(polya, ends); ctx["accept_adapter"] = True
+        assert apply_endpoint_likelihood(d, ties, ["r"], [trunc, full], ctx) == 1
+        assert d[0, 1] == 0.0 and d[0, 0] > 5.0
+
+    def test_admission_does_not_reach_the_other_qc_classes(self):
+        """NOREGION lands a median 334 bp from the true end on human dRNA and
+        READ_FAILED is krill declining to process the read; neither becomes
+        evidence when ADAPTER is admitted."""
+        trunc = _cand("anno_trunc", 1000, 1900, source="gtf")
+        full = _cand("novel_full", 1000, 2000)
+        reads = ["r_noregion", "r_failed", "r_none"]
+        polya = {"r_noregion": (None, "NOREGION"), "r_failed": (None, "READ_FAILED"),
+                 "r_none": None}
+        ends = {r: ("c", "+", 2000) for r in reads}
+        d = np.zeros((3, 2)); ties = {i: [0, 1] for i in range(3)}
+        ctx = _ctx(polya, ends); ctx["accept_adapter"] = True
+        assert apply_endpoint_likelihood(d, ties, reads, [trunc, full], ctx) == 0
+        assert (d == 0).all()
+
+    def test_a_pass_verdict_without_a_usable_length_is_still_not_evidence(self):
+        """The PASS branch stays byte-identical to ``polya_state``'s PASS, so
+        admitting ADAPTER cannot widen PASS by a side effect."""
+        trunc = _cand("anno_trunc", 1000, 1900, source="gtf")
+        full = _cand("novel_full", 1000, 2000)
+        d = np.zeros((2, 2)); ties = {0: [0, 1], 1: [0, 1]}
+        ctx = _ctx({"r_zero": (0.0, "PASS"), "r_nolen": (None, "PASS")},
+                   {"r_zero": ("c", "+", 2000), "r_nolen": ("c", "+", 2000)})
+        ctx["accept_adapter"] = True
+        assert apply_endpoint_likelihood(d, ties, ["r_zero", "r_nolen"],
+                                         [trunc, full], ctx) == 0
+        assert (d == 0).all()
+
+
+class TestQcConditionalChannel:
+    """With per-class kernels the channel scores every read krill gave a verdict
+    for, under its OWN class's kernel, and abstains for a class whose kernel the
+    sample could not fit."""
+
+    def _cands(self):
+        return [_cand("anno_trunc", 1000, 1900, source="gtf"), _cand("novel_full", 1000, 2000)]
+
+    def _ctx(self, polya, ends, by_qc):
+        return {"endpoint": None, "polya": polya, "ends": ends,
+                "qc_conditional": True, "endpoint_by_qc": by_qc}
+
+    def test_each_class_scores_under_its_own_kernel(self):
+        good = EndpointModel(b_narrow=1.0, b_broad=80.0, eta=0.04, n_fit=500)
+        noisy = EndpointModel(b_narrow=1.0, b_broad=80.0, eta=0.40, n_fit=500)
+        reads = ["r_pass", "r_failed"]
+        d = np.zeros((2, 2)); ties = {0: [0, 1], 1: [0, 1]}
+        ctx = self._ctx({"r_pass": (40.0, "PASS"), "r_failed": (None, "READ_FAILED")},
+                        {r: ("c", "+", 2000) for r in reads},
+                        {"PASS": good, "READ_FAILED": noisy})
+        assert apply_endpoint_likelihood(d, ties, reads, self._cands(), ctx) == 2
+        # both penalise the truncated model, the noisy class by less
+        assert d[0, 0] > d[1, 0] > 0
+        assert d[0, 1] == 0.0 and d[1, 1] == 0.0
+
+    def test_a_class_without_a_usable_kernel_abstains(self):
+        good = EndpointModel(b_narrow=1.0, b_broad=80.0, eta=0.04, n_fit=500)
+        unfit = EndpointModel(b_narrow=4407.0, b_broad=500.0, eta=0.81, n_fit=1702)
+        assert not unfit.available
+        reads = ["r_noregion", "r_unlisted"]
+        d = np.zeros((2, 2)); ties = {0: [0, 1], 1: [0, 1]}
+        ctx = self._ctx({"r_noregion": (None, "NOREGION"), "r_unlisted": (None, "OTHER")},
+                        {r: ("c", "+", 2000) for r in reads},
+                        {"PASS": good, "NOREGION": unfit})
+        assert apply_endpoint_likelihood(d, ties, reads, self._cands(), ctx) == 0
+        assert (d == 0).all()
+
+    def test_class_kernels_carry_the_channel_when_the_pooled_fit_is_absent(self):
+        """The context passes `endpoint: None` in conditional mode whenever the
+        pooled fit is unavailable; the class kernels must still switch the 3'
+        channel on, or the runner and the nuisance model disagree."""
+        good = EndpointModel(b_narrow=1.0, b_broad=80.0, eta=0.04, n_fit=500)
+        d = np.zeros((1, 2)); ties = {0: [0, 1]}
+        ctx = self._ctx({"r": (40.0, "PASS")}, {"r": ("c", "+", 2000)}, {"PASS": good})
+        assert ctx["endpoint"] is None
+        assert apply_endpoint_likelihood(d, ties, ["r"], self._cands(), ctx) == 1
+        assert d[0, 0] > 5.0 and d[0, 1] == 0.0
+
+    def test_no_class_qualifying_is_not_a_licence_to_use_the_pooled_kernel(self):
+        """An empty class map in conditional mode means no class fitted, which is
+        abstention -- not a fallback to the pooled model."""
+        pooled = EndpointModel(b_narrow=1.0, b_broad=80.0, eta=0.04, n_fit=500)
+        d = np.zeros((1, 2)); ties = {0: [0, 1]}
+        ctx = self._ctx({"r": (40.0, "PASS")}, {"r": ("c", "+", 2000)}, {})
+        ctx["endpoint"] = pooled
+        assert apply_endpoint_likelihood(d, ties, ["r"], self._cands(), ctx) == 0
+        assert (d == 0).all()
+
+
+class TestDiscoveryIsNotWidenedByTheConditionalMode:
+    """`--endpoint-qc-conditional` changes the ASSIGNMENT channel only. The
+    discovery contradiction hook tests `narrow_posterior(d) < 0.5`, an ABSOLUTE
+    threshold: a class fitted as less reliable has a lower narrow posterior at
+    every distance, so it would raise MORE contradictions and be protected by
+    FEWER annotated alternatives. Less confidence must not mean more aggression,
+    so this hook keeps the pooled kernel and the verdict-name rule."""
+
+    def _hook(self, tmp_path, *, qc_conditional):
+        """200 PASS reads AT the annotated TES define the narrow kernel; 30 PASS
+        reads 400 bp past it are genuine contradictions in either mode; and 400
+        NOREGION reads are shaped so their own class kernel is AVAILABLE and
+        high-eta -- otherwise a wrong implementation that selected class kernels
+        here would abstain for an unrelated reason and the comparison would pass
+        vacuously."""
+        import json
+        from fin.pipeline.config import PipelineConfig
+        from fin.pipeline.runner import PipelineRunner
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        cfg = PipelineConfig(bam_path=str(_tiny_bam(tmp_path / "r.bam")),
+                             work_dir=str(tmp_path / "w"), signal_path="/fake.blow5",
+                             assignment_channels="ends", quant_mode="m2_em",
+                             endpoint_qc_conditional=qc_conditional)
+        r = PipelineRunner(cfg)
+        polya, ends = {}, {}
+        for i in range(200):
+            polya[f"p{i}"] = [40.0, "PASS"]
+            ends[f"p{i}"] = ["c", "+", 3000 + (i % 3) - 1, 2000]
+        for i in range(30):
+            polya[f"q{i}"] = [40.0, "PASS"]
+            ends[f"q{i}"] = ["c", "+", 3400 + (i % 3) - 1, 2000]
+        for i in range(400):
+            polya[f"n{i}"] = [-1.0, "NOREGION"]
+            e = (i % 3) - 1 if i % 20 < 9 else ((i * 53) % 401) - 200
+            ends[f"n{i}"] = ["c", "+", 3000 + e, 2000]
+        (tmp_path / "w").mkdir(parents=True, exist_ok=True)
+        r._evidence_path().write_text(json.dumps(
+            {"polya": polya, "ends": ends, "version": "sample-evidence-v3",
+             "identity": r._evidence_identity(), "polya_status": "ok",
+             "n_ends": len(ends), "n_polya": len(polya)}))
+        r._annotated_tes = lambda: {("c", "+"): [3000]}
+        r._annotated_tss = lambda: {("c", "+"): [2000]}
+        return r
+
+    def _reads(self):
+        return ([f"p{i}" for i in range(200)] + [f"q{i}" for i in range(30)]
+                + [f"n{i}" for i in range(400)])
+
+    def test_the_noregion_class_really_would_have_scored(self, tmp_path):
+        """The precondition the comparison below depends on: fitted per class,
+        NOREGION is available and low-confidence, so an implementation that let
+        class kernels into this hook WOULD produce extra contradictions."""
+        from fin.analysis.sample_nuisance import ETA_MAX, fit_from_evidence
+
+        r = self._hook(tmp_path, qc_conditional=True)
+        m = fit_from_evidence(r._nuisance_evidence())
+        k = m.endpoint_for("NOREGION")
+        assert k is not None and k.available and k.eta > ETA_MAX
+        # and such a kernel would indeed call the scattered reads contradictions
+        assert k.narrow_posterior(150) < 0.5
+
+    def test_the_hook_gives_the_same_verdicts_with_the_mode_on(self, tmp_path):
+        model = _cand("anno", 2000, 3000, source="gtf")
+        reads = self._reads()
+        off = self._hook(tmp_path / "off", qc_conditional=False)
+        on = self._hook(tmp_path / "on", qc_conditional=True)
+        a = off._read_extent_contradicted()(model, reads)
+        b = on._read_extent_contradicted()(model, reads)
+        # non-vacuous: the 30 PASS reads past the annotated end DO contradict it,
+        # and no NOREGION read is admitted in either mode
+        assert a.get("tes") == sorted(f"q{i}" for i in range(30))
+        assert a == b
+
+    def test_the_same_holds_when_an_alternative_annotation_protects_reads(self, tmp_path):
+        model = _cand("anno", 2000, 3000, source="gtf")
+        alt = _cand("alt", 2000, 3400, source="gtf")
+        reads = self._reads()
+        off = self._hook(tmp_path / "off2", qc_conditional=False)
+        on = self._hook(tmp_path / "on2", qc_conditional=True)
+        a = off._read_extent_contradicted()(model, reads, [alt])
+        b = on._read_extent_contradicted()(model, reads, [alt])
+        # the alternative explains exactly the reads that contradicted before
+        assert "tes" not in a
+        assert a == b
+
+    def test_adapter_admission_does_reach_the_hook(self, tmp_path):
+        """The name-based widening is a different thing: one pooled kernel over a
+        wider population, no reliability inversion, and it is meant to apply to
+        both consumers."""
+        import json
+        from fin.pipeline.config import PipelineConfig
+        from fin.pipeline.runner import PipelineRunner
+
+        def build(accept):
+            d = tmp_path / f"ad{int(accept)}"
+            d.mkdir(parents=True, exist_ok=True)
+            cfg = PipelineConfig(bam_path=str(_tiny_bam(d / "r.bam")),
+                                 work_dir=str(d / "w"), signal_path="/fake.blow5",
+                                 assignment_channels="ends", quant_mode="m2_em",
+                                 polya_end_accept_adapter=accept)
+            r = PipelineRunner(cfg)
+            polya, ends = {}, {}
+            for i in range(200):
+                polya[f"p{i}"] = [40.0, "PASS"]
+                ends[f"p{i}"] = ["c", "+", 3000 + (i % 3) - 1, 2000]
+            for i in range(60):
+                polya[f"a{i}"] = [None, "ADAPTER"]
+                ends[f"a{i}"] = ["c", "+", 3000 + 60 + (i % 3), 2000]
+            (d / "w").mkdir(parents=True, exist_ok=True)
+            r._evidence_path().write_text(json.dumps(
+                {"polya": polya, "ends": ends, "version": "sample-evidence-v3",
+                 "identity": r._evidence_identity(), "polya_status": "ok",
+                 "n_ends": len(ends), "n_polya": len(polya)}))
+            r._annotated_tes = lambda: {("c", "+"): [3000]}
+            r._annotated_tss = lambda: {("c", "+"): [2000]}
+            return r._read_extent_contradicted()
+
+        model = _cand("anno", 2000, 3000, source="gtf")
+        reads = [f"p{i}" for i in range(200)] + [f"a{i}" for i in range(60)]
+        assert not build(False)(model, reads).get("tes")
+        assert build(True)(model, reads).get("tes")
