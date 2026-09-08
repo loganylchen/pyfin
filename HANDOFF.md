@@ -1053,6 +1053,75 @@ and sensitivity to reassignment (softmax confidence is not calibrated
 uncertainty); split-library reproducibility of chain-linked tail distributions;
 cold/warm wall time and peak memory.
 
+## 4n. Should the junction snap use raw signal? (2026-09-08, audit RUNNING)
+
+The owner's premise: raw signal is intrinsically better information and we are
+under-using it; concretely, should `junction_snap` (count-based, production
+default since 2026-08-27) take a signal vote?
+
+**Three facts that bound the answer, all from our own records.**
+
+1. **The election ablation, already in `SIRV4_IMPROVEMENT_PLAN.md`:** on the same
+   24 cells with the same nomination screen, `screen` alone 92.44 F1, `m1`
+   (base-space ballot) 89.15, `signal` ballot 89.13, `shuffle` 87.33, baseline
+   87.29. The signal vote equals the base-space vote and BOTH are below the
+   screen acting alone. The 97.6% "decisive ballot accuracy" is real, but the
+   incremental value of the raw current over the basecalled alignment on that
+   population was zero.
+2. **Per-read signal correction is harmful** (SIRV4, margin 10): read moves
+   own_TP->FP 612 vs own_FP->TP 448; new candidates 12 TP / 116 FP. Single-read
+   scores are dominated by one repeated k-mer run.
+3. **Snap's failure modes split by what signal can touch.** (a) ratio-abstained
+   wobble pairs (both survive, precision loss) -- signal could help; (b) a
+   genuine tandem site "corrected" away (recall loss; common in human, rare in
+   SIRV) -- signal cannot help and a forced vote makes it WORSE. Snap's exact
+   rule (Codex correction): support is a fresh primary-BAM scan, not the
+   registry, and the target needs `max(min_support, floor(cur*ratio)+1)` --
+   strictly MORE than 2x, so 2-vs-4 abstains and 2-vs-5 moves.
+
+**Codex's verdict: do not put the current signal scores into production snap;
+run the audit as an OPPORTUNITY assessment.** "Signal prefers A" is not
+sufficient evidence to merge B into A -- the missing test is whether B has its
+own credible molecular support. On the premise itself: raw signal is a richer
+MEASUREMENT, not automatically a better DECISION; the basecaller already
+integrates the current with a contextual model, so going back to it competes
+with that inference rather than starting from untouched evidence. It recovers
+discarded information only when the alternatives predict distinguishable
+sequence inside the observed signal AND both align comparably; when candidates
+predict the same observed sequence it is re-reading the same evidence with a
+weaker scorer.
+
+**If the audit justifies anything, the shape is:** abstention-only, aggregate,
+three outcomes (collapse to A / collapse to B / preserve both), never overriding
+a count decision, with a MINORITY VETO -- >= 3 technically qualified molecules
+robustly supporting the loser => preserve both. The decisive statistic is not
+the pooled majority but *among reads whose own chain carried the loser, do their
+signal contrasts defect to the winner?* (a wobble's reads defect; a genuine
+alternative keeps a loyal subset). A count x signal posterior is NOT the next
+step: placement and current derive from the same underlying signal, so
+multiplying them double-counts the observation.
+
+**What the audit CANNOT deliver:** the per-read `junction_correction.tsv`
+records total NLL and event counts only -- no per-run contributions, so the
+"one k-mer run = one vote" robust ballot is not reconstructible from it. Totals
+are a diagnostic baseline; a decision-grade vote needs retained event-level
+alignments.
+
+**Pre-registered gates (fixed before the numbers):** build a robust-scoring
+prototype only if >= 100 actionable one-catalogued abstention loci across >= 50
+genes AND a model-level oracle >= 0.2 F1; the vote rule if built: >= 10
+qualified molecules, >= 90% winner, >= 3 from each origin group, >= 80% of
+loser-origin molecules defect, preserve both if >= 3 loyal; zero merges on the
+both-catalogued preservation panel; must beat the best base-space comparator
+with a gene-clustered paired CI excluding zero; >= 0.1 F1 and no recall loss on
+>= 3 independent human libraries (`full`/`p00` are one library).
+
+The audit (`sigaudit.sbatch`, byte-inert: election + correction in audit mode on
+human `full` + `p00`, krill 0.1.6 overlay) and its analysis
+(`snap_signal_audit.py`, which replays snap's exact rule from the same BAM scan
+and computes the loser-origin defection) were launched before the gates were
+written down.
+
 ## 5. Validation protocol for ANY future change (frozen invariants)
 
 1. Opt-in flag, default off, no profile enables it; explicit misuse fails
