@@ -1,0 +1,16 @@
+BioRender-style scientific illustration, flat vector, clean white background, soft shadows under icons only, a friendly muted palette (teal, coral, amber, lavender, sage), rounded shapes, small clear sans-serif labels. Every label listed below must appear exactly once, spelled exactly as written; no other text anywhere.
+
+Composition: a left-to-right pipeline in FOUR zones separated by generous white space, connected by thick rounded arrows.
+
+ZONE 1, label "DIRECT RNA". An illustrated cell releasing several wavy RNA molecules, each drawn with a short string of "A" beads at one end labelled "polyA tail". Below them a stylised nanopore embedded in a membrane, with one RNA threading through it from the polyA end first; beside the pore a small squiggly electrical trace labelled "raw signal".
+
+ZONE 2, label "INPUTS". Five stacked document-style icons labelled "BAM", "reads FASTQ", "genome FASTA", "signal", and "GTF"; only the "GTF" icon carries a small "optional" tag.
+
+ZONE 3, label "PYFIN", drawn as one large rounded container. Inside it, at the top, a sage bracket labelled "per interval" enclosing two rounded boxes stacked vertically, each with an icon on its left and a label:
+  a gear-and-magnifier icon labelled "DISCOVER";
+  a scale-balance icon labelled "ASSIGN".
+Below the bracket, a downward arrow to a third rounded box with a funnel icon labelled "FINALIZE", tagged "whole sample".
+
+ZONE 4, label "OUTPUTS". Two icons: a transcript-model icon (a row of three connected rectangles) labelled "transcripts GTF", and a bar-chart icon labelled "abundance TSV".
+
+A thin light ribbon with a small droplet icon runs from the "signal" icon in zone 2 into the PYFIN container, clearly separate from the GTF icon, labelled "polyA evidence: cached or computed once".

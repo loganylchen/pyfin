@@ -1,0 +1,17 @@
+BioRender-style scientific illustration, flat vector, clean white background, soft shadows under icons only, a friendly muted palette (teal, coral, amber, lavender, sage), rounded shapes, small clear sans-serif labels. Every distinct label listed below must appear exactly once, except "extent sibling", which must appear twice: once on the step 5 output card and once as the inset title. Spell all labels exactly as written; no other text anywhere.
+
+Title at the top left in bold: "DISCOVER  one interval".
+
+A left-to-right flow in five steps, each step a numbered circle badge (1 to 5) above its content.
+
+STEP 1, badge "1", label "reads". Six horizontal read glyphs stacked vertically, each a row of small teal rectangles (exons) joined by thin lines (introns). Two reads share a longer chain of four exons; two share exactly its last three exons (a terminal sub-chain); two share the four-exon chain but with one internal junction shifted by a small amount, drawn with a tiny amber highlight on that shifted boundary.
+
+STEP 2, badge "2", label "group by intron chain". The six reads collapse into three stacked chain icons: the four-exon chain, the three-exon sub-chain, and the four-exon variant carrying the amber boundary. A small note beneath reads "ends ignored".
+
+STEP 3, badge "3", label "family". A rounded sage container enclosing the three chain icons, with a tag on its border reading "wobble 6 bp  cassette 70 bp".
+
+STEP 4, badge "4", label "collapse". Inside a copy of the container, the three-exon sub-chain fades to grey with a dashed outline, a thin dotted link ties it to the four-exon chain above it, and a small tag "shadow" sits beside it; the two four-exon chains stay solid. A note beneath: "annotated chains never fold".
+
+STEP 5, badge "5", label "candidates". Two solid output cards side by side joined by the word "or": a bookmark icon "annotated model" and a sparkle icon "novel". From the "annotated model" card a dashed optional branch leads to a third card with a stretched-arrow icon "extent sibling". Beneath the cards, a note: "per surviving chain".
+
+Below the whole flow, a separate small inset panel with a coral border, labelled "extent sibling". It shows one transcript glyph with a small flag marking its annotated end, and beneath it three read glyphs whose polyA-bead ends extend past the flag while their left ends line up with the transcript's left end; an arrow leads to two stacked glyphs labelled "annotation" and "read-supported extension" — the second identical to the first except that its right end is extended to the reads' end, its left end unchanged — with the note "both compete".

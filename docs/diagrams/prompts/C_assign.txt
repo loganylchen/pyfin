@@ -1,0 +1,17 @@
+BioRender-style scientific illustration, flat vector, clean white background, soft shadows under icons only, a friendly muted palette (teal, coral, amber, lavender, sage), rounded shapes, small clear sans-serif labels. Every distinct label listed below must appear exactly once, except "cost", which must appear twice: once on each endpoint-evidence arrow. Spell all labels exactly as written; no other text anywhere.
+
+Title at the top left in bold: "ASSIGN  one read".
+
+Left: a single read glyph (row of teal rectangles with a polyA bead string at its right end) labelled "read".
+
+An arrow to the centre: four candidate transcript glyphs stacked vertically, labelled "candidates". Two of them are highlighted with an amber glow and bracketed together with the label "tied for best alignment".
+
+From below the bracket, three evidence icons feed the tied pair, with a note beneath them: "tied candidates only".
+  A squiggly-trace icon labelled "junction signal" sends its arrow into a small gate-shaped valve symbol on the bracket, tagged "mask / prior".
+  A droplet icon with A beads labelled "polyA 3 prime" and a small flag icon labelled "upstream 5 prime" each send a thin arrow directly into the tied pair, both tagged with a small "cost" label.
+
+An arrow to the right: a rounded box with a dial icon labelled "soft assignment", and beneath it a tiny note "no abundance feedback".
+
+A final arrow, itself labelled "sum across reads", leads to a bar-chart icon labelled "abundance".
+
+Bottom right, a small inset panel with a lavender border labelled "endpoint kernel": a tiny line plot with a very tall narrow spike at the centre sitting on a low wide hump, with two leader labels "jitter" on the spike and "error" on the hump.

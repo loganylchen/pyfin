@@ -4,7 +4,26 @@ Five multi-panel figures. Everything below describes the **production default**
 (`--profile real-drna`) at commit `aa21414`. Options that ship default-off are
 named as options, never as part of the flow.
 
-| figure | panels | what it covers |
+Two figure sets share this specification. The **illustrated set** (BioRender
+style, icon-driven, for talks and the README) and the **schematic set** (Nature
+Methods style, denser labels, for the methods section). Each prompt in
+`prompts/` was reviewed by Codex against the code before generation — the first
+pass returned "revise" on all four (inputs shown incomplete, "one pass"
+overclaimed, the junction channel drawn as an additive cost, conditional outputs
+drawn as unconditional, a result badge that read as a guarantee), the second
+approved them. Known renderer liberties: `figB` added two accurate sub-labels
+("transcript (annotated end)", "reads (with polyA)") not in the prompt, and draws
+the read-supported extension as an appended block rather than a stretched last
+exon.
+
+| illustrated | covers |
+| --- | --- |
+| `figA_overview.png` | direct RNA → inputs → PyFIN (per interval / whole sample) → outputs; the polyA evidence ribbon |
+| `figB_discover.png` | reads → chain grouping → family → collapse (shadow) → candidates; the extent sibling |
+| `figC_assign.png` | one read: best-alignment tie, three evidence channels (junction = mask/prior, endpoints = cost), soft assignment, abundance; the endpoint kernel |
+| `figD_finalize.png` | aggregate → select → snap → merge → refit; the snap-collision merge; the tested-grid badge |
+
+| schematic | panels | what it covers |
 | --- | --- | --- |
 | `fig1_workflow.png` | a, b, c | the whole pipeline: sample prepass, per interval, finalize |
 | `fig2_discovery.png` | a, b | chain clustering; the extent sibling |

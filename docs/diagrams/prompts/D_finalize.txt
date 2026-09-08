@@ -1,0 +1,18 @@
+BioRender-style scientific illustration, flat vector, clean white background, soft shadows under icons only, a friendly muted palette (teal, coral, amber, lavender, sage), rounded shapes, small clear sans-serif labels. Every label listed below must appear exactly once, spelled exactly as written; no other text anywhere.
+
+Title at the top left in bold: "FINALIZE  whole sample".
+
+Top row: a left-to-right flow of five rounded boxes, each with an icon and a label, joined by arrows:
+  a puzzle-pieces icon "aggregate intervals";
+  a funnel icon "select";
+  a magnet icon "snap junctions";
+  a merge-arrows icon "merge duplicates";
+  a refresh icon "refit abundance".
+Beneath the third and fourth boxes, one thin bracket labelled "novel multi exon only".
+
+Bottom half: a wide inset panel with a teal border labelled "snap and merge", showing three stages left to right with small arrows:
+  stage label "discovered": inside one shared dashed sage outline tagged "one family", two transcript glyphs one above the other; their first intron gap differs slightly and each gap is ringed in coral; the lower glyph's left end starts a little further right than the upper one's, while both right ends line up exactly;
+  stage label "snapped": the same two glyphs inside the same outline, now with identical gaps and no rings, left ends still offset exactly as before, right ends still aligned; a small tag "eligible snap collision";
+  stage label "merged": one glyph; a small tag "one model".
+
+Bottom right corner, a small badge-style callout with a checkmark icon and two short lines: "tested grids: recall unchanged" and "precision same or higher".
