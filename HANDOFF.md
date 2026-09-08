@@ -953,6 +953,106 @@ involve an annotated model, which is exempt by design. Those need endpoint
 reconciliation, not identity reconciliation -- see 4k for why widening the polyA
 channel is NOT the way to get it.
 
+## 4m. Where the ceiling is, and what "fully use the signal" should mean (Codex consult, 2026-09-08)
+
+The owner asked two questions at production level: what can still improve, and
+how to FULLY utilise the raw signal. A full evidence dossier went to Codex
+(gpt-6-astra); its answer, with the parts I checked, is the current plan.
+
+**The verdict.** *Stop treating "consume more raw signal" as the objective; the
+objective is additional IDENTIFIABLE evidence, and most proposed channels cannot
+distinguish the hypotheses that currently survive.* Keep the default, run one
+narrow precision experiment, and move real effort to the axes this benchmark
+does not measure.
+
+**A. The ceiling is not a number we have.** The "63.8% of expressed transcripts
+have no full-chain read / we are above the 29.2% ceiling" headline conflates
+three quantities (scorer recall with no precision constraint, which is ~100% by
+echoing; recall supported by single complete-chain reads; recall identifiable
+from ALL molecules at a stated error rate -- the one that matters, unmeasured).
+Codex also found two definitional problems in `human_recall_decomposition.py`:
+the "no read" bucket is really "no exact-chain read AND not emitted", and the
+mono-exon read key `(chrom, strand, ())` carries no coordinates, so a mono read
+anywhere on the chromosome counts as support. Checked: mono-exon is 2.1% of the
+truth (157 / 7398), so the distortion is bounded and in the direction of
+UNDERSTATING fragmentation; the qualitative finding stands, the percentages are
+not a ceiling. The distinction to measure instead: **uniquely reconstructible /
+statistically distinguishable / observationally indistinguishable** -- junction
+coverage is not junction phasing, and assembling the Cartesian product of
+unlinked choices invents identities.
+
+**A, on the GTF exemption.** Do not override maximin on "it is right on human":
+it agrees better with NanoCount-derived labels, and both can favour spreading
+support over annotated isoforms the molecules do not distinguish. A human
+operating point is defensible only as a PROSPECTIVE product decision validated
+on independent human samples (not seven perturbations of one), with absent-
+isoform controls and rescued identities labelled prior-supported.
+
+**B. The one precision mechanism to build next:** extend the snap-collision
+merge to a pair of ONE annotated + ONE novel model, under every existing guard
+(snap-created, exact 3', bounded 5' diameter, original-family provenance). It is
+representation cleanup of a collision the pipeline itself created, not a new
+biological classifier. Do NOT start with different-3'-end pairs: that is an
+APA-vs-artifact inference, and neither "few reads" nor "A-rich and clustered"
+decides it -- report endpoint uncertainty rather than delete a biological
+possibility to please an intron-chain scorer. Expected: 0 to +0.5 SIRV4, ~0
+Sequin, 0 to +0.2 HEYA8, 0 to +0.1 human. It cannot close the 7-point espresso
+gap; the pre-merge redundancy oracle was only +2.78 Pr on human.
+
+**C. The raw signal, ranked by expected value (structural benchmark):**
+reliability calibration > narrow common-sample contrast > tail-boundary audit >
+terminal-signal audit > modification/structure identity.
+
+1. *Common-sample, alignment-marginalised nested contrast* -- principled, but
+   NOT a broad rescue of the 51.7%: when the read observes only the identical
+   suffix the likelihood ratio is neutral under any sequence-conditioned model.
+   Cheap kill test first: count contrasts whose candidates differ INSIDE the
+   recoverable common signal; if negligible, stop before HMM engineering.
+   `unequal_intron_count` is a coarse tie-set label, not proof of containment.
+2. *Dwell/current as modification or structure identity* -- dead end for now.
+   The missing link is prediction of UNOBSERVED structure conditional on shared
+   sequence; an isoform-modification association found after sequence-based
+   assignment runs the inference backwards. Credible test: establish identity
+   from uniquely informative molecules, hide the distinguishing sequence,
+   predict from shared-region signal, on independent runs.
+3. *PolyA tail signal beyond length* -- low structural value; the honest
+   question is boundary validity (adapter / A-rich / body segmentation), and a
+   genomic A and an added A do not encode their origin. Never train an artifact
+   classifier with "far from annotated TES" as the label.
+4. *Signal-level TSS* -- our probe measured "no large hidden segment after the
+   first aligned event", NOT terminal waveform / cap / motor release. One
+   bounded audit with capped-vs-fragmented controls is allowed; without labels
+   it is not a production project. A broken molecule also has an end.
+5. *Read reliability as a covariate* -- the most practical untested lever.
+   Local, candidate-NEUTRAL reliability measured in shared flanks tempers a
+   contrast's influence; never down-weight a read for fitting the preferred
+   candidate poorly; separate identity evidence from molecule count; treat many
+   samples from one k-mer run as ONE vote. Expect calibration gains, ~0 F1.
+6. *The DRS-native advantage we are not using:* joint molecular
+   characterisation with honest assignment uncertainty -- chain-linked tail
+   length and (independently validated) modification distributions, reported at
+   the identifiable equivalence-group level when transcript identity is
+   ambiguous. Low tail ICC makes tail length a weak IDENTITY feature; it does not
+   make tail regulation an uninteresting OUTPUT.
+
+**D. Stop / re-baseline:** the P2 sidecar's "44 loss cells" and +5 F1 gates
+belong to an older operating point -- re-baseline before continuing; defense
+election on p00: deprioritise; tail-length identity, step-5a correction, M3 DTW,
+broad same-chain collapse, more opaque current/dwell features, hunting a subset
+where the failed polyA widening wins: stop. Raise real-human revalidation on
+INDEPENDENT samples to the top -- perturbation cells of one library are not
+biological replication, and repeatedly inspected held-out grids are now
+regression panels, not renewable confirmation.
+
+**E. The plan:** (1) narrow annotated/novel collision reconciliation, default-off,
+frozen gates; (2) local reliability calibration, expect ~0 F1, judged on held-out
+contrast calibration; (3) freeze assembly and evaluate the OTHER axis --
+log-ratio error against Sequin molar inputs (not Spearman alone),
+abundance-stratified and replicate-consistent; mass in non-identifiable groups
+and sensitivity to reassignment (softmax confidence is not calibrated
+uncertainty); split-library reproducibility of chain-linked tail distributions;
+cold/warm wall time and peak memory.
+
 ## 5. Validation protocol for ANY future change (frozen invariants)
 
 1. Opt-in flag, default off, no profile enables it; explicit misuse fails
