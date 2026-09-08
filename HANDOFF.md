@@ -256,7 +256,60 @@ remaining gap to the best rival is PyFIN's PRECISION at high annotation
 completeness (~91 vs ~98 on SIRV4 full/p99)**, which is the wobble/extent-shadow
 FP population already characterised, not a recall problem.
 
-**Real human (GENCODE, H9 rep2 run2): the sweep left almost no competitor cells.**
+### 4b4. The human head-to-head, refreshed (2026-09-08)
+
+The GENCODE sweep has been filling in: **541 competitor assemblies** now exist
+where there were 4 (stringtie3 182, bambu 174, isotools 173, espresso 8,
+isoquant 4, spread over 15 samples). On the one sample whose reads and signal are
+staged locally, **6 of our 7 conditions now have at least one competitor**, giving
+13 head-to-head cells instead of 2. Same caveats as before: the competitors
+assembled genome-wide and their GTF is restricted to chr1/19/21 post hoc, and
+the pyfin column is the current production default (`GCSMC`).
+
+Sn / Pr / F1 per cell:
+
+| cond | pyfin | stringtie3 | espresso | isoquant | bambu | isotools |
+| --- | --- | --- | --- | --- | --- | --- |
+| full | 31.2/67.9/**42.8** | - | - | - | 100.0/18.3/30.9 | 27.3/14.2/18.7 |
+| p50 | 24.4/62.6/**35.1** | 22.9/59.1/33.0 | - | - | 55.6/19.6/29.0 | 27.3/14.2/18.7 |
+| p00 | 15.8/56.2/24.7 | 16.0/56.8/**25.0** | - | - | 13.8/62.2/22.6 | - |
+| c_merge50 | 27.1/61.3/37.6 | 28.0/57.6/**37.7** | - | - | - | - |
+| c_trunc3p50 | 30.9/66.5/**42.2** | - | - | 15.4/74.2/25.5 | - | 27.3/14.2/18.7 |
+| c_trunc5p50 | 30.5/66.8/41.9 | - | 29.4/74.2/**42.1** | - | 99.8/18.2/30.8 | - |
+| c_jitter50_10bp | 16.3/41.9/**23.5** | - | - | - | - | 27.1/14.1/18.5 |
+
+Paired means over the cells each tool actually covers (**different subsets, so the
+tools are not comparable to each other here — only each one to pyfin**):
+
+| tool | n | tool Sn/Pr/F1 | pyfin Sn/Pr/F1 | dF1 | pyfin wins |
+| --- | --- | --- | --- | --- | --- |
+| stringtie3 | 3 | 22.3/57.8/31.9 | 22.4/60.0/32.5 | **+0.57** | **1/3** |
+| espresso | 1 | 29.4/74.2/42.1 | 30.5/66.8/41.9 | **-0.23** | **0/1** |
+| isoquant | 1 | 15.4/74.2/25.5 | 30.9/66.5/42.2 | +16.69 | 1/1 |
+| bambu | 4 | 67.3/29.6/28.3 | 25.5/63.4/36.1 | +7.78 | 4/4 |
+| isotools | 4 | 27.2/14.2/18.6 | 25.7/59.7/35.9 | +17.23 | 4/4 |
+
+**The headline is that the spike-in dominance does not transfer, and now there
+are two peers rather than one.** stringtie3 is level (it takes p00 by 0.30 and
+c_merge50 by 0.10, we take p50 by 2.10) and espresso is level. The large margins
+are all against tools that fail in a way the expression contract is designed to
+expose: bambu re-emits the annotation (`full`: Sn 100.0, Pr 18.3, 40209 query
+models against our 3377), and isotools emits ~14k models on three chromosomes
+almost regardless of the input annotation -- its GTF barely moves across
+conditions (661124 / 661300 / 661135 / 663365 lines) so its score is near
+constant at 27.3/14.2/18.7. Neither margin says anything about the axis that
+matters.
+
+Against the two peers the shape is the same as on the spike-ins: **espresso buys
+precision (74.2 vs our 66.8) and pays recall; we are the opposite.** stringtie3
+sits between us on both. Our remaining work on real human data is precision, and
+the competitive claim to make is the one about degraded annotations, not a
+blanket lead.
+
+*(Harness: `experiments/prod_validation/human_headtohead.py`, run on the HOST --
+the scorer shells out to docker.)*
+
+**Real human, the older two-cell snapshot (superseded by 4b4 above):**
 Only two overlap conditions we ran, and the competitor assembled genome-wide, so
 its GTF is restricted to chr1/19/21 before scoring (same truth, same scorer; the
 restriction is post-hoc, so treat these two cells as indicative, not as a
