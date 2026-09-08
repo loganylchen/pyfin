@@ -93,15 +93,16 @@ def main():
         for r in csv.DictReader(fh, delimiter="\t"):
             n_rec += 1
             try:
-                own = tuple(int(v) for v in r["own_junction"].strip("()").split(","))
-                alt = tuple(int(v) for v in r["alt_junction"].strip("()").split(","))
+                own = tuple(int(v) for v in r["own_junction"].split("-"))
+                alt = tuple(int(v) for v in r["alt_junction"].split("-"))
                 own_nll, alt_nll = float(r["own_nll"]), float(r["alt_nll"])
             except (ValueError, KeyError):
                 continue
-            if r.get("reason", "") not in ("", "scored", "ok"):
-                # the audit records its own abstentions (no flank events, etc.)
-                if "abstain" in r.get("decision", "") or r.get("n_events_own", "0") in ("0", ""):
-                    continue
+            # a record with no scored events on either hypothesis carries no
+            # ballot; "abstain / own_margin_below_threshold" DOES carry one --
+            # it only means the read did not switch under the correction margin
+            if int(r.get("n_events_own") or 0) == 0 or int(r.get("n_events_alt") or 0) == 0:
+                continue
             # chrom/strand come from the interval string
             m = re.match(r"([^:]+):", r["interval"])
             if not m:
@@ -207,6 +208,19 @@ def main():
               f"median defect fraction {sorted(fr)[len(fr)//2]:.2f}; "
               f"pairs with >= 3 LOYAL loser reads (a real minority): "
               f"{sum(1 for r in withb if r['loyal'] >= 3)}")
+
+    print("\n--- the flip: could loser-loyalty VETO the count moves that collapse real tandem sites?")
+    for lab, sel in (("both-anno MOVED (real site collapsed)",
+                      [r for r in rows if r["decision"] == "moved" and r["status"] == "both"]),
+                     ("one-anno MOVED (count was right 99.9%)",
+                      [r for r in rows if r["decision"] == "moved" and r["status"] == "one"])):
+        withb = [r for r in sel if r["loyal"] + r["defect"] >= 3]
+        veto = sum(1 for r in withb if r["loyal"] >= 3)
+        print(f"    {lab}: {len(sel)} pairs, {len(withb)} with >= 3 loser-origin ballots, "
+              f"veto (>= 3 loyal) would fire on {veto}"
+              + (f"  <- {100*veto/max(1,len(withb)):.0f}% of testable real sites protected"
+                 if "both" in lab else
+                 f"  <- {100*veto/max(1,len(withb)):.0f}% of testable CORRECT moves blocked"))
 
     print("\n--- the danger: BOTH-annotated ABSTENTIONS where the signal would force a choice")
     both_abs = [r for r in rows if r["decision"] == "abstain" and r["status"] == "both"]

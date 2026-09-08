@@ -1053,7 +1053,7 @@ and sensitivity to reassignment (softmax confidence is not calibrated
 uncertainty); split-library reproducibility of chain-linked tail distributions;
 cold/warm wall time and peak memory.
 
-## 4n. Should the junction snap use raw signal? (2026-09-08, audit RUNNING)
+## 4n. Should the junction snap use raw signal? (2026-09-08, audit DONE -- no)
 
 The owner's premise: raw signal is intrinsically better information and we are
 under-using it; concretely, should `junction_snap` (count-based, production
@@ -1121,6 +1121,47 @@ human `full` + `p00`, krill 0.1.6 overlay) and its analysis
 (`snap_signal_audit.py`, which replays snap's exact rule from the same BAM scan
 and computes the loser-origin defection) were launched before the gates were
 written down.
+
+**RESULT (human H9 rep2 run2, chr1/19/21; both cells byte-identical to
+production; `full` and `p00` give IDENTICAL numbers because the per-read audit
+runs on raw reads before any annotation is consulted -- leakage-free by
+construction).** 23803 registry junctions, 2031 pairs within 6 bp at both
+coordinates, 146267 usable per-read signal ballots over 3107 pairs.
+
+| snap replay | both annotated | one annotated | neither |
+| --- | --- | --- | --- |
+| moved | **95** | 1385 | 94 |
+| abstained | 65 | **202** | 190 |
+
+* **(a) the population signal could address -- one-annotated abstentions: 202.**
+  The signal reaches quorum + supermajority on **18** of them (9%), and those 18
+  agree with the annotation 100%. The pre-registered gate was >= 100 actionable
+  loci across >= 50 genes: **fails by 5x.**
+* **Where count and signal both act, the signal is not better:** on the 1385
+  one-annotated pairs the count moved, count is right **99.9%**, signal **98.9%**
+  (1067 called). Same finding as the election ablation, on human.
+* **The loser-origin test** (do the count loser's own reads defect?) behaves as
+  Codex predicted: on both-annotated abstentions the loser's reads stay loyal
+  (median defect 0.17; 16 of 21 testable pairs keep >= 3 loyal reads), on
+  one-annotated abstentions it is a coin flip (median 0.50). So a minority veto
+  would correctly preserve tandem sites -- but there are only 65 such
+  abstentions, and a forced signal vote would collapse 4 of them.
+* **The flip -- signal loyalty as a VETO on count moves -- is net negative:** it
+  would protect 17 of the 95 collapsed real tandem sites (28 testable) but block
+  60 of 214 testable CORRECT moves.
+
+**Verdict: no signal in snap.** Addressable headroom is ~18 loci on three
+chromosomes, the signal is slightly less accurate than the count where both act,
+and neither the tie-breaker nor the veto form survives its own pre-registered
+gate.
+
+**The secondary finding is base-space and worth a follow-up:** snap's count rule
+collapses **95 pairs where both coordinates are annotated** -- failure mode (b),
+more than 5x the size of (a). Whether that costs recall depends on whether the
+collapsed model was the only carrier of its chain; the original three-sample
+validation showed recall UP under snap, so the net is positive, but a count-only
+minority guard (do not move when the loser has >= N indel-clean reads of its own)
+is a cheap base-space experiment with a clear falsifier.
 
 ## 5. Validation protocol for ANY future change (frozen invariants)
 
