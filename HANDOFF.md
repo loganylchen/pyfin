@@ -1150,10 +1150,45 @@ coordinates, 146267 usable per-read signal ballots over 3107 pairs.
   would protect 17 of the 95 collapsed real tandem sites (28 testable) but block
   60 of 214 testable CORRECT moves.
 
-**Verdict: no signal in snap.** Addressable headroom is ~18 loci on three
-chromosomes, the signal is slightly less accurate than the count where both act,
-and neither the tie-breaker nor the veto form survives its own pre-registered
+**Verdict, first pass: no signal in snap** -- ~18 addressable loci, signal
+slightly less accurate than count where both act, neither form survives its
 gate.
+
+**Then the owner objected, correctly, and the objection was tested
+(`snap_signal_independence.py`).** The principle: two independent ~90% features
+should combine to beat either. On the 1085 one-annotated pairs where both
+features decide:
+
+| | signal right | signal wrong |
+| --- | --- | --- |
+| count right | 1068 | 12 |
+| count wrong | **5** | **0** |
+
+Count 99.54%, signal 98.89%. The errors ARE independent: the signal is right on
+all 5 count errors, joint-wrong observed 0 against 0.055 expected under
+independence. So my "same source, so correlated errors" argument was WRONG on
+this data. What still makes a hard combination negative is the combining rule:
+letting the signal override fixes 5 and breaks 12 (net -7); with two features
+and a hard disagreement you follow the more accurate one, and the pair equals
+its better member. The principle needs a third voter or per-case calibration.
+
+**Calibration exists, and it is the COUNT's margin, not the signal's.** The
+signal's own supermajority is 0.75-1.00 on both the fixes and the breaks --
+uninformative. The count ratio separates them almost perfectly: the 5 fixes sit
+at ratio 1.3-3.2, the 12 breaks at 3.0-28. Rule "defer to the signal only when
+the count ratio < 2.5": fixes 4, breaks 0, **net +4** -- and all four fall in
+snap's ABSTENTION region, i.e. exactly the abstention-only tie-breaker Codex
+specified. Extrapolated genome-wide that is ~15-25 junctions; the F1 effect
+depends on whether each corrected model is its chain's only carrier, and is
+0.0x at best.
+
+**Corrected verdict:** the owner's principle holds and the data confirm
+independence; the abstention-only signal tie-breaker is a small, real, safe
+positive (+4 corrected pairs on chr1/19/21, 0 broken), buildable as opt-in under
+the gates above. It is not the answer to "we are under-using the signal": the
+count is already at 99.5% on this decision, so a second opinion can only touch
+the residual 0.5%. The signal pays where the basecaller makes NO statement
+(polyA), not where it already makes a 99.5%-correct one.
 
 **The secondary finding is base-space and worth a follow-up:** snap's count rule
 collapses **95 pairs where both coordinates are annotated** -- failure mode (b),
