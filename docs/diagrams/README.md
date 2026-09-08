@@ -1,8 +1,16 @@
 # The PyFIN pipeline, as it runs today
 
-Four figures, one per layer. Everything below describes the **production default**
+Five multi-panel figures. Everything below describes the **production default**
 (`--profile real-drna`) at commit `aa21414`. Options that ship default-off are
 named as options, never as part of the flow.
+
+| figure | panels | what it covers |
+| --- | --- | --- |
+| `fig1_workflow.png` | a, b, c | the whole pipeline: sample prepass, per interval, finalize |
+| `fig2_discovery.png` | a, b | chain clustering; the extent sibling |
+| `fig3_evidence.png` | a, b, c | the endpoint kernel; the tie set; what each channel does |
+| `fig4_merge_rule.png` | a, b | the snap-collision merge and its admission rule |
+| `fig5_result.png` | a, b | why the merge cannot cost recall; the four-grid result |
 
 Codex fact-checked this file against the code twice. The first pass found twelve
 inaccuracies, the second found that nine were fixed, one over-corrected, two
@@ -22,7 +30,10 @@ is labelled as such.
 
 ---
 
-## Figure 1 — `01_overview.png`: the three layers
+## Figure 1 — `fig1_workflow.png`: the three layers
+
+*Panels: **a** sample prepass, **b** per interval, **c** finalize. Each box carries
+its stage name and the two or three facts that matter for that stage.*
 
 **Sample prepass (once).** `runner.run()` calls `generate_isolated_intervals()`.
 Intervals are isolated by read coverage **and by annotation spans**, so an
@@ -62,7 +73,9 @@ write) is inside `_finalize_and_write()`.
 
 ---
 
-## Figure 2 — `02_discovery.png`: candidate discovery in one interval
+## Figure 2 — `fig2_discovery.png`: candidate discovery in one interval
+
+*Panels: **a** chain clustering, **b** the extent sibling.*
 
 `discover_candidates()` → `_chain_cluster_candidates()`.
 
@@ -91,7 +104,7 @@ write) is inside `_finalize_and_write()`.
    *alternative* annotation explains are excluded, and the 5' side additionally
    requires a start CLUSTER. The sibling carries `source="gtf"`.
 
-In the figure, the greyed "FOLDED SHADOW" belongs to its surviving container —
+In panel **a**, the greyed shadow chain belongs to its surviving container —
 it is provenance, not an independently emitted candidate. The three output arrows
 are **conditional alternatives**, not three things emitted for every member: a
 member becomes the annotated model *or* a novel candidate, and the extent sibling
@@ -105,7 +118,11 @@ junction-dominance gate exists but is default-off.
 
 ---
 
-## Figure 3 — `03_assignment.png`: which candidate does a read belong to
+## Figures 3 — `fig3_evidence.png`: which candidate does a read belong to
+
+*Panels: **a** the fitted endpoint kernel (narrow jitter spike on a broad error
+hump, weight `eta`), **b** the per-read tie set with the three channels feeding
+only the tied cells, **c** what each channel actually does.*
 
 Per interval, inside `_quant_m2_em()` → `Assigner.assign()`.
 
@@ -154,7 +171,11 @@ Per interval, inside `_quant_m2_em()` → `Assigner.assign()`.
 
 ---
 
-## Figure 4 — `04_snap_merge.png`: finalize, and the duplicate-model fix
+## Figures 4 and 5 — `fig4_merge_rule.png`, `fig5_result.png`: finalize, and the duplicate-model fix
+
+*Figure 4 panels: **a** the discovery/snap/merge sequence, **b** the six admission
+conditions and the three refusals. Figure 5 panels: **a** why removing a
+duplicate cannot cost recall, **b** the four-grid result.*
 
 Cross-interval:
 
@@ -180,12 +201,12 @@ Cross-interval:
    than reassigned somewhere arbitrary.
 5. Write GTF + TSV.
 
-**What the figure shows.** *Discovery* emits two **different** chains that sit in
+**What Figure 4a shows.** *Discovery* emits two **different** chains that sit in
 one family, differing at a junction (the circled gap) — not two variants of one
 chain, which is precisely the case this merge refuses. *Snap* corrects the minority junction onto the
 consensus, so the two now carry the same chain and differ only in where the first
-exon begins. Note that the differing start is already present in the discovery
-panel: snapping moves **internal donor/acceptor coordinates only**, never the
+exon begins. Note that the differing start is already present in the DISCOVERY
+stage and the red circles appear there only: snapping moves **internal donor/acceptor coordinates only**, never the
 outer endpoints. (The figure reads as a plus-strand example; the code is
 strand-aware and takes the 3' end as `start` on the minus strand.) *Merge*
 reconciles them into one model.
@@ -206,10 +227,12 @@ every original member; identical strand-aware 3' ends; and a 5' spread within
 own geometry.
 
 **Measured** against the previous default (expression contract, paired bootstrap,
-seed 20260831): SIRV4 dPr +1.45 / dF1 +0.70, HEYA8 +0.82 / +0.32, human GENCODE
-+0.30 / +0.043, Sequin inert; recall unchanged to two decimals on every condition
-of every grid and no cell degraded. These are empirical results on those grids,
-**not guarantees the merge algorithm enforces**.
+seed 20260831): SIRV4 dPr +1.45 / dF1 +0.70 over **156 cells**, HEYA8 +0.82 /
++0.32 over **130**, human GENCODE +0.30 / +0.043 over **7** (one sample, seven
+conditions — not a full human grid), Sequin inert over **104**. Reported recall
+is unchanged to two decimals on every condition of every grid and no evaluated
+cell degraded. These are empirical results on those grids, **not guarantees the
+merge algorithm enforces** — the merge criteria never consult reference matches.
 
 ---
 
