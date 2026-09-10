@@ -192,13 +192,58 @@ disappears when only the signal is removed is 81% on SIRV4 and 78% on HEYA8.
 HEYA8 makes the precision mechanism even plainer: `off` costs 5.14 points of
 precision there for **+0.11** recall.
 
-Caveats that still bound the claim. Both grids are spike-ins. `.ext`
-read-extent siblings are far more common on human than here, so the
-structure-level grouping carries more weight there and the human behaviour is
-not implied — that is the replication still worth running. And the control
-measures the **total** effect of structural junction preference inside the
-production pipeline, endpoint-channel interactions included, not an
-endpoint-free junction-only effect.
+### On real human data the mechanism holds and the magnitude collapses
+
+The same three arms on GENCODE v44 (H9 rep2 run2, chr1/19/21, 7 conditions),
+scored against the 7398-transcript expressed truth under the expression
+contract. One library, so this is a within-library cell comparison and there is
+no honest confidence interval — 7 conditions of one sample are not independent
+replicates.
+
+| cond | base Sn/Pr/F1 | `off` dSn/dPr/dF1 | `scram` dSn/dPr/dF1 |
+| --- | --- | --- | --- |
+| `full` | 31.2 / 67.9 / 42.75 | −0.20 / −1.10 / −0.41 | +0.00 / −0.70 / −0.14 |
+| `p50` | 24.4 / 62.6 / 35.11 | −0.20 / −1.40 / −0.43 | −0.10 / −1.00 / −0.26 |
+| `p00` | 15.8 / 56.2 / 24.67 | +0.10 / −1.50 / −0.03 | +0.00 / −0.80 / −0.08 |
+| `c_merge50` | 27.1 / 61.3 / 37.58 | −0.10 / −0.80 / −0.25 | +0.00 / −0.60 / −0.11 |
+| `c_trunc3p50` | 30.9 / 66.5 / 42.19 | −0.20 / −1.00 / −0.39 | +0.00 / −0.70 / −0.14 |
+| `c_trunc5p50` | 30.5 / 66.8 / 41.88 | −0.30 / −1.30 / −0.54 | +0.00 / −0.90 / −0.18 |
+| `c_jitter50_10bp` | 16.3 / 41.9 / 23.47 | +0.20 / −0.50 / **+0.13** | +0.00 / −0.40 / −0.06 |
+| **mean** | | −0.10 / −1.09 / −0.27 | −0.01 / −0.73 / −0.14 |
+
+Every qualitative feature of the spike-in result reproduces:
+
+* recall is untouched (−0.10 for `off`, −0.01 for `scram`) and the entire effect
+  is precision;
+* the signal, not the concentration, carries the majority of it — **67%** of the
+  precision effect (−0.73 of −1.09) disappears when only the signal is removed;
+* concentration alone is worth +0.36 Pr of the 1.09, and +0.13 F1.
+
+What does *not* transfer is the size. The whole tie-break is worth −0.27 F1 on
+human against −0.93 and −0.76 on the spike-ins, and the signal-only component is
+−0.14 against −0.75 and −0.59: roughly a **quarter** of the spike-in magnitude.
+So "the signal does real discriminative work" survives contact with real human
+data; "the signal is worth ~0.9 F1" does not, and was a spike-in artefact of how
+densely those grids pack the wobble-shadow contests the tight junction window is
+built for. On human the ambiguity is dominated by cases the junction window
+cannot speak to at all.
+
+One cell inverts: under `c_jitter50_10bp`, turning M2 off is *better*
+(+0.13 F1) — the only such cell anywhere in this campaign, and consistent with
+the spike-in family table where jitter is also where the signal is worth least.
+
+**A scoring trap worth recording.** The first pass of this comparison scored
+against genome-wide GENCODE v44 while the assemblies cover only chr1/19/21,
+which diluted Sn about thirty-fold (`full` came out at Sn 1.1 / F1 2.17) and made
+every F1 delta read as ±0.00. Precision was unaffected and was the only column
+carrying signal. The numbers above are the rescore against the expression
+contract's own truth; `full` lands at 42.75, matching the 42.8 recorded for that
+cell in the earlier head-to-head, which is the check that the rescore is right.
+
+Remaining bounds. One human library, so no interval. And the control measures
+the **total** effect of structural junction preference inside the production
+pipeline, endpoint-channel interactions included, not an endpoint-free
+junction-only effect.
 
 ### The signal helps most exactly where the reads are most ambiguous
 
