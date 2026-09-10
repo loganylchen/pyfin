@@ -133,3 +133,95 @@ snapshot for both spike-in grids.
 | SIRV4 (156) | `adef` 211946 | `aatt` 211947 |
 | HEYA8 (130) | `adef` 211948 | `aatt` 211949 |
 | human (7) | `m2base` (verified byte-identical at default) | `aatt` 211950 |
+
+
+---
+
+# Outcome: promoted (commit `17fec28`)
+
+All four rules passed. The lever is now `real-drna`'s default at K=3.
+
+| grid | dSn | dPr | dF1 | 95% CI |
+| --- | ---: | ---: | ---: | --- |
+| human GENCODE (7 conds) | **+1.47** | **+0.36** | **+1.45** | one library, no honest CI |
+| SIRV4 (156 / 6 libs) | +0.18 | −0.15 | +0.12 | [−0.05, +0.32] |
+| HEYA8 (130 / 5) | +0.04 | −0.03 | +0.04 | [+0.01, +0.09] |
+
+| cond | before | after | vs stringtie3 |
+| --- | --- | --- | ---: |
+| `full` | 31.2/67.9/42.75 | **34.0/68.8/45.51** | +0.83 |
+| `c_trunc5p50` | 30.5/66.8/41.88 | **33.3/67.8/44.66** | +1.09 |
+| `c_trunc3p50` | 30.9/66.5/42.19 | **32.5/66.8/43.73** | +0.65 |
+| `c_merge50` | 27.1/61.3/37.58 | 28.8/61.0/39.13 | +1.44 |
+| `p50` | 24.4/62.6/35.11 | 25.7/63.4/36.57 | +3.56 |
+| `c_jitter50_10bp` | 16.3/41.9/23.47 | 16.4/41.7/23.54 | +10.48 |
+| `p00` | 15.8/56.2/24.67 | *inert* | −0.30 |
+
+**Cells beating stringtie3: 2/7 → 6/7.** Rule 3 (the three target cells)
++2.36. Rule 2: no corruption family negative in the mean on either spike-in
+grid; worst single cells −0.43 (SIRV4) and −0.16 (HEYA8) against the −1.0
+rejection line. `p00` is exactly inert, which is the right behaviour — with no
+annotation an annotation-conditioned exemption has nothing to readmit, and it
+is also the one cell still behind.
+
+**Precision rose.** 194 distinct newly-matched truth transcripts from 232 new
+models = 84% marginal precision against the 21.4% break-even. The lever did not
+spend the precision surplus; it added output purer than what was already there.
+
+## Rule 4, and the correction I nearly shipped
+
+My first sharing audit reported the sharing buckets as *purer* (alone 87%,
+pairs 93%, groups 100%) and I was one commit from recording "the failure mode
+was falsified in the opposite direction". Codex found three defects:
+
+* it counted query-side `=` labels, so several added models matching the same
+  reference each scored as a win;
+* its predicate required one whole chain to contain the other, missing the
+  ordinary case — `[A,C]` and `[B,C]` are both attestable by a read carrying
+  `[C]` while neither contains the other;
+* its grouping joined a model to the first group it matched and never merged
+  the rest, so `[A,C]`, `[B,C]`, `[C]` came out as a pair plus a singleton.
+
+Rebuilt with distinct-reference counting, any-shared-suffix linking and
+union-find, "alone" drops from 178 models to 107 and the picture reverses:
+
+| sharing bucket | models | new truth | marginal Pr |
+| --- | ---: | ---: | ---: |
+| alone (1) | 107 | 96 | **90%** |
+| pair (2) | 64 | 48 | **75%** |
+| group (≥3) | 61 | 50 | **82%** |
+
+(replicated on `c_trunc5p50`: 91 / 79 / 82.)
+
+So the shared-suffix buckets yield **8–15 pp less**, consistent with the
+predicted vulnerability rather than contradicting it — and still clearing
+break-even by 3.5–4×. The honest statement is that the vulnerable regime did
+not cost us *here*, not that the vulnerability is absent. Two limits on even
+that: the audit sees only models that survived the whole selection cascade, so
+the GTF floor may already be removing the weak members of ambiguous families
+(a reason to leave the floor untouched in the same change), and it groups by
+structural ambiguity rather than observed shared reads.
+
+## The configuration trap this uncovered
+
+Adding the key to the profile did nothing. `resolve_profile_values` returns a
+dict and the CLI must lift each key into the local it passes to
+`PipelineConfig`; the profile entry existed, 3 was computed, and click's flag
+default of 0 is what ran. Nothing raised. The only symptom was a verification
+run coming out byte-identical to the arm it was supposed to differ from.
+
+The guard is now behavioural: ten tests through the real click command
+asserting on the config the runner is handed, including one that iterates every
+profile and checks every key arrives. Verified to fail when the read-back line
+is deleted. A textual source check — which is what I wrote first — passes on a
+key that appears in a comment, in dead code, or in an assignment that is later
+overwritten, and would not have caught this.
+
+## Next lever
+
+A `--selection-audit` pass on the human `full` cell under the new default is
+running, to attribute the *remaining* loss now that the gate is no longer the
+owner. Per Codex, the accounting to build from it is
+`exempted → reaches global selection → GTF floor drop → final distinct truth`,
+splitting floor casualties into zero-mass and (0,1). The floor stays fixed in
+this change: it may be part of why the exemption is safe.
