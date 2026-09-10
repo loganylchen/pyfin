@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -500,10 +501,48 @@ def polya5p_drops(
 def compute_tpm(
     results: Dict[str, QuantResult],
     transcript_lengths: Dict[str, int],
+    length_normalize: bool = True,
 ) -> Dict[str, float]:
     """Compute Transcripts Per Million (TPM) from abundance and transcript lengths.
 
-    TPM = (abundance / length_kb) / sum(abundance / length_kb) * 1e6
+    ``length_normalize`` True (default, the short-read convention):
+        TPM = (abundance / length_kb) / sum(abundance / length_kb) * 1e6
+
+    ``length_normalize`` False (the direct-RNA convention, as used by NanoCount
+        and by ``salmon --ont``): TPM = abundance / sum(abundance) * 1e6.
+
+    Which one is right is a question about the library, not a matter of taste.
+    Length normalisation exists because a short-read protocol fragments a
+    molecule, so a longer transcript yields proportionally more reads and the
+    count must be divided by length to recover a MOLAR quantity. Direct RNA
+    sequences whole molecules: one molecule yields at most one read regardless
+    of its length, so the count does not carry that length factor and dividing
+    by length produces an INVERSE-length-weighted quantity (not a mass-like
+    one -- mass concentration is molarity TIMES length).
+
+    That does not make the raw count an unbiased molar estimate: the expected
+    count is the input molarity times a per-transcript efficiency (survival
+    through preparation, capture, translocation, mapping and every filter),
+    and that efficiency may itself depend on length. The claim here is only the
+    negative one -- that dividing by the ANNOTATED length is the wrong
+    correction for this protocol -- which is also the convention NanoCount and
+    `salmon --ont` follow. A calibrated efficiency term is a separate,
+    unmeasured question.
+
+    Measured against the Sequin spike-in's known INPUT MOLARITY (attomol/uL;
+    104 evaluated cells, 103 eligible common-set comparisons across four
+    libraries, `experiments/prod_validation/quant_accuracy.py`): reporting the
+    count instead improves pyfin's own agreement with molarity on commonly
+    detected transcripts by Spearman +0.074 [+0.036, +0.112] and symmetric
+    MARD -0.104 [-0.134, -0.068], and every library's mean Spearman improves.
+    The improvement is NOT uniform: among 124 matched transcript-cell
+    observations with length >= 2 kb the count has the higher median symmetric
+    error (0.911 vs 0.646); signed, it over-estimates them (median log2
+    estimate/truth +1.42 vs -0.45). That direction is recorded, not explained.
+
+    No structural selection decision consumes this value -- it affects the
+    scores.tsv column and the refit diagnostics only -- so the choice does not
+    move any structural result.
 
     Args:
         results: Dict mapping candidate_id -> QuantResult.
@@ -512,6 +551,17 @@ def compute_tpm(
     Returns:
         Dict mapping candidate_id -> TPM value.
     """
+    if not length_normalize:
+        vals = {cid: float(qr.abundance) for cid, qr in results.items()}
+        if any(not math.isfinite(v) or v < 0.0 for v in vals.values()):
+            raise ValueError(
+                "compute_tpm(length_normalize=False) requires finite, "
+                "non-negative abundances"
+            )
+        total = sum(vals.values())
+        if total <= 0:
+            return {cid: 0.0 for cid in vals}
+        return {cid: 1e6 * v / total for cid, v in vals.items()}
     # Compute RPK (reads per kilobase) for each transcript
     rpk = {}
     for cid, qr in results.items():

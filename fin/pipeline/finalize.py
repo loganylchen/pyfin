@@ -49,7 +49,8 @@ def write_unfiltered_diagnostic(
                 qr.gene_id = tx.gene_id
         if not qr.gene_id:
             qr.gene_id = qr.candidate_id
-    write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path)
+    write_scoring_tsv(aggregated, transcript_lengths_uf, unfiltered_path,
+                      length_normalize=bool(getattr(config, "tpm_length_normalize", True)))
     logger.info(
         "Wrote unfiltered scoring TSV (pre-filter): %s (n=%d)",
         unfiltered_path,
@@ -115,7 +116,8 @@ def finalize_outputs(
             cid: sum(end - start for start, end in qr.exons) if qr.exons else 0
             for cid, qr in aggregated.items()
         }
-        write_scoring_tsv(aggregated, transcript_lengths, output_tsv)
+        write_scoring_tsv(aggregated, transcript_lengths, output_tsv,
+                          length_normalize=bool(getattr(config, "tpm_length_normalize", True)))
         logger.info("Wrote TSV output: %s", output_tsv)
 
     if config.fusion_enabled and config.output_bedpe:

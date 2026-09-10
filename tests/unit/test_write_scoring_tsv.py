@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import os
 import tempfile
 from typing import Dict
@@ -143,3 +145,80 @@ def test_write_scoring_tsv_sorted_by_id():
     _, data_lines = _write_and_read(results, lengths)
     ids = [line.split("\t")[0] for line in data_lines]
     assert ids == sorted(ids)
+
+
+class TestTpmConvention:
+    """The direct-RNA TPM convention: no length normalisation.
+
+    A whole molecule yields at most one read regardless of length, so the count
+    does not carry the length factor that short-read normalisation removes, and
+    dividing by length gives an INVERSE-length-weighted quantity. Measured
+    against the Sequin spike-in's known input molarity, the un-normalised value
+    agrees better (see analysis.quantification.compute_tpm).
+    """
+
+    def _results(self):
+        from fin.analysis.quantification import QuantResult
+        # same abundance, 10x different lengths
+        return {
+            "short": QuantResult("short", 10.0, 1.0, 10, "gtf", exons=((0, 1000),)),
+            "long": QuantResult("long", 10.0, 1.0, 10, "gtf", exons=((0, 10000),)),
+        }, {"short": 1000, "long": 10000}
+
+    def test_length_normalized_favours_the_short_transcript(self):
+        from fin.analysis.quantification import compute_tpm
+        r, lens = self._results()
+        t = compute_tpm(r, lens)
+        assert t["short"] > t["long"]
+        assert abs(t["short"] / t["long"] - 10.0) < 1e-6
+        assert abs(sum(t.values()) - 1e6) < 1e-3
+
+    def test_molar_convention_treats_equal_counts_equally(self):
+        from fin.analysis.quantification import compute_tpm
+        r, lens = self._results()
+        t = compute_tpm(r, lens, length_normalize=False)
+        assert abs(t["short"] - t["long"]) < 1e-6
+        assert abs(sum(t.values()) - 1e6) < 1e-3
+
+    def test_molar_convention_ignores_the_length_table_entirely(self):
+        from fin.analysis.quantification import compute_tpm
+        r, _ = self._results()
+        assert (compute_tpm(r, {}, length_normalize=False)
+                == compute_tpm(r, {"short": 5, "long": 999999}, length_normalize=False))
+
+    def test_zero_total_abundance_is_not_a_division_error(self):
+        from fin.analysis.quantification import QuantResult, compute_tpm
+        r = {"a": QuantResult("a", 0.0, 0.0, 0, "gtf", exons=((0, 100),))}
+        assert compute_tpm(r, {"a": 100}, length_normalize=False) == {"a": 0.0}
+
+    def test_writer_threads_the_flag(self, tmp_path):
+        import csv
+        from fin.io.io_tsv import write_scoring_tsv
+        r, lens = self._results()
+        for norm, expect_equal in ((True, False), (False, True)):
+            p = tmp_path / f"s{norm}.tsv"
+            write_scoring_tsv(r, lens, str(p), length_normalize=norm)
+            got = {row["candidate_id"]: float(row["tpm"])
+                   for row in csv.DictReader(open(p), delimiter="\t")}
+            assert (abs(got["short"] - got["long"]) < 1e-6) is expect_equal
+
+    def test_non_finite_or_negative_abundance_is_rejected(self):
+        from fin.analysis.quantification import QuantResult, compute_tpm
+        for bad in (float("nan"), float("inf"), -1.0):
+            r = {"a": QuantResult("a", bad, 0.0, 0, "gtf", exons=((0, 100),)),
+                 "b": QuantResult("b", 10.0, 1.0, 10, "gtf", exons=((0, 100),))}
+            with pytest.raises(ValueError, match="finite"):
+                compute_tpm(r, {"a": 100, "b": 100}, length_normalize=False)
+
+    def test_empty_result_set(self):
+        from fin.analysis.quantification import compute_tpm
+        assert compute_tpm({}, {}, length_normalize=False) == {}
+
+    def test_refit_diagnostics_follow_the_same_convention(self):
+        """`tpm` must not mean two different things in two files of one run."""
+        import inspect
+        from fin.analysis import abundance_refit as A
+        assert "length_normalize" in inspect.signature(A.refit_survivor_abundance).parameters
+        src = inspect.getsource(A.refit_survivor_abundance)
+        assert src.count("length_normalize=length_normalize") == 2, (
+            "both the before and after TPM in the diagnostics must honour the flag")

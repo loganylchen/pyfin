@@ -482,6 +482,8 @@ class PipelineRunner:
             aggregated, diagnostics = refit_survivor_abundance(
                 aggregated, ledgers, snap_redirects=snap_redirects,
                 split_routes=endpoint_routes, split_primary=endpoint_primary,
+                length_normalize=bool(getattr(
+                    self.config, "tpm_length_normalize", True)),
             )
             # P0 strict-positive GTF gate, post-refit enforcement: the refit
             # can zero a GTF survivor that passed the pre-refit A4 gate; the
@@ -2004,6 +2006,11 @@ class PipelineRunner:
         endpoint = nuisance.endpoint if nuisance.polya_available else None
         start = nuisance.start if want_tss else None
         min_start_reads = int(getattr(self.config, "tss_contradiction_min_reads", 3))
+        # Magnitude floors: a read end this close to the annotated end never
+        # contradicts it, whatever the kernel says. See config for the
+        # measurement that motivates an asymmetric 5'/3' treatment.
+        min_tss_bp = int(getattr(self.config, "tss_contradiction_min_bp", 0))
+        min_tes_bp = int(getattr(self.config, "tes_contradiction_min_bp", 0))
         accept_adapter = bool(getattr(self.config, "polya_end_accept_adapter", False))
 
         def _tes(c):
@@ -2030,7 +2037,7 @@ class PipelineRunner:
                             and loc is not None):
                         e_r = loc[2]
                         d = (e_r - t_c) if strand == "+" else (t_c - e_r)
-                        if (d > 0 and endpoint.narrow_posterior(d) < 0.5
+                        if (d > min_tes_bp and endpoint.narrow_posterior(d) < 0.5
                                 and not any(endpoint.narrow_posterior(abs(e_r - t)) >= 0.5
                                             for t in alt_tes)):
                             out.setdefault("tes", []).append(rid)   # polyA read past the claimed end
@@ -2039,7 +2046,7 @@ class PipelineRunner:
                     if loc5 is not None:
                         s_r = loc5[2]
                         u = (s_c - s_r) if strand == "+" else (s_r - s_c)
-                        if (u > 0 and start.narrow_posterior(u) < 0.5
+                        if (u > min_tss_bp and start.narrow_posterior(u) < 0.5
                                 and not any(start.narrow_posterior(abs(s_r - t)) >= 0.5
                                             for t in alt_tss)
                                 # a start is evidence about a TRANSCRIPT's start

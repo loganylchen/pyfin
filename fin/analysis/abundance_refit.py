@@ -147,6 +147,7 @@ def refit_survivor_abundance(
     snap_redirects: Mapping[str, str] | None = None,
     split_routes: Mapping[str, Mapping[str, str]] | None = None,
     split_primary: Mapping[str, str] | None = None,
+    length_normalize: bool = True,
 ) -> tuple[Dict[str, QuantResult], dict]:
     """Renormalize each assignable read over final surviving candidates.
 
@@ -307,8 +308,10 @@ def refit_survivor_abundance(
         )
 
     lengths = _transcript_lengths(results)
-    old_tpm = compute_tpm(results, lengths)
-    new_tpm = compute_tpm(refitted, lengths)
+    # the diagnostics must use the SAME convention as the reported column,
+    # or "tpm" means two different things in two files of one run
+    old_tpm = compute_tpm(results, lengths, length_normalize=length_normalize)
+    new_tpm = compute_tpm(refitted, lengths, length_normalize=length_normalize)
     abundance_shifts = {
         cid: refitted[cid].abundance - old_abundance[cid]
         for cid in results

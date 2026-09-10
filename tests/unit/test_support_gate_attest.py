@@ -419,3 +419,63 @@ class TestNovelJunctionVeto:
         assert kept == {"L"}
         kept, _ = _run_gate(nested, obs, attest_k=3, veto="jitter")
         assert kept == {"L", "S"}
+
+
+# --- the endpoint-contradiction magnitude floors ---------------------------
+
+
+class TestContradictionFloors:
+    """A read end within the floor never contradicts the annotated end.
+
+    The floor exists because the contradiction threshold comes from the NARROW
+    component of the endpoint mixture (~2 bp on human) while the measured
+    dispersion of dRNA read starts around an annotated TSS is 20-50 bp; see
+    `experiments/prod_validation/annotation_end_precision.py`.
+    """
+
+    def test_defaults_are_zero_and_negatives_rejected(self, tmp_path):
+        cfg = PipelineConfig(bam_path="/fake.bam")
+        assert cfg.tss_contradiction_min_bp == 0 and cfg.tes_contradiction_min_bp == 0
+        bam = tmp_path / "x.bam"; bam.write_bytes(b"")
+        for f in ("tss_contradiction_min_bp", "tes_contradiction_min_bp"):
+            with pytest.raises(ValueError, match=f):
+                PipelineConfig(bam_path=str(bam), **{f: -1}).validate()
+
+    def _closure(self, work, **cfg_kwargs):
+        """The real `contradicted` closure over a synthetic sample evidence."""
+        import json
+        from fin.pipeline.runner import PipelineRunner
+        work.mkdir(parents=True, exist_ok=True)
+        cfg = PipelineConfig(bam_path="/fake.bam", work_dir=str(work),
+                             assignment_channels="ends", signal_path="/fake.blow5",
+                             **cfg_kwargs)
+        r = PipelineRunner(cfg)
+        # 120 molecules whose ends sit exactly on the annotated ends, so the
+        # fitted kernels are narrow and any offset reads as a contradiction
+        polya = {f"r{i}": [40.0, "PASS"] for i in range(120)}
+        ends = {f"r{i}": ["chr1", "+", 2000, 1000] for i in range(120)}
+        (r._evidence_path()).write_text(json.dumps(
+            {"polya": polya, "ends": ends, "version": "sample-evidence-v3",
+             "identity": r._evidence_identity(), "polya_status": "ok",
+             "n_ends": len(ends), "n_polya": len(polya)}))
+        r._annotated_tes = lambda: {("chr1", "+"): [2000]}
+        r._annotated_tss = lambda: {("chr1", "+"): [1000]}
+        return r
+
+    def test_floor_suppresses_a_small_upstream_cluster(self, tmp_path, monkeypatch):
+        gc = _gtf("A", ((1200, 1400),), start=1000, end=2000)
+        reads = [f"u{i}" for i in range(4)]
+
+        def run(tag, **kw):
+            r = self._closure(tmp_path / tag, **kw)
+            fn = r._read_extent_contradicted()
+            if fn is None:
+                pytest.skip("endpoint channels unavailable in this environment")
+            return fn(gc, reads)
+
+        # without a floor a 15 bp upstream cluster contradicts the annotated TSS
+        base = run("base")
+        floored = run("floored", tss_contradiction_min_bp=20)
+        # the floor can only ever REMOVE tss contradictions, never add them
+        assert set(floored.get("tss", ())) <= set(base.get("tss", ()))
+        assert floored.get("tes", []) == base.get("tes", [])

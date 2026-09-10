@@ -20,6 +20,7 @@ def write_scoring_tsv(
     results: Dict[str, QuantResult],
     transcript_lengths: Dict[str, int],
     path: str,
+    length_normalize: bool = True,
 ) -> None:
     """Write quantification scoring results to a TSV file.
 
@@ -28,7 +29,8 @@ def write_scoring_tsv(
         transcript_lengths: Dict mapping candidate_id -> spliced length in bp.
         path: Output file path.
     """
-    tpm_values = compute_tpm(results, transcript_lengths)
+    tpm_values = compute_tpm(results, transcript_lengths,
+                             length_normalize=length_normalize)
 
     with open(path, "w") as f:
         f.write(_HEADER)

@@ -402,6 +402,33 @@ class PipelineConfig:
     # junction, or lying inside a candidate exon). See
     # m2_junction_nll.unjittered_gtf_columns for the measurements.
     m2_support_gate_attest_veto: str = "novel"
+    # Magnitude floor on the read-extent contradiction test, per end. A read
+    # end nearer than this to the annotated end never contradicts it, whatever
+    # the fitted kernel says. Rationale (measured, human H9 chr1/19/21, 1111
+    # annotated chains carried by >= 3 exact primary reads,
+    # `annotation_end_precision.py`): the contradiction threshold comes from
+    # the NARROW component of the endpoint mixture (b_narrow ~1.9 bp on human),
+    # i.e. the precision of reads that DO hit the annotated end -- but the
+    # actual dispersion of read starts around an annotated TSS is an order of
+    # magnitude larger (modal read start 20 bp INSIDE the annotation, |offset|
+    # median 20-22 bp, p75 40-53 bp), because dRNA 5' ends are degraded. Three
+    # reads 15 bp upstream are not a distinguishable signal against that
+    # background. The 3' end is a different measurement -- polyA is sequenced
+    # first, |offset| median 8 bp with 57% within 10 -- so its floor is
+    # separate and defaults to the same 0 (no floor) until measured per sample.
+    # 0 disables (byte-identical). Opt-in.
+    # TPM convention. True (default) = the short-read one, abundance/length_kb.
+    # False = the direct-RNA one used by NanoCount and `salmon --ont`: a whole
+    # molecule yields at most one read regardless of length, so the count does
+    # not carry the length factor that short-read normalisation removes, and
+    # dividing by length gives an inverse-length-weighted quantity. Measured
+    # against the Sequin spike-in's known input molarity, the un-normalised
+    # count agrees better in aggregate but is WORSE on transcripts >= 2 kb (see
+    # analysis.quantification.compute_tpm). No structural selection decision
+    # consumes tpm -- it affects TSV reporting and refit diagnostics only.
+    tpm_length_normalize: bool = True
+    tss_contradiction_min_bp: int = 0
+    tes_contradiction_min_bp: int = 0
     # Catalog completion. PyFIN's default contract is an EXPRESSED assembly:
     # an annotated transcript with no EM mass is dropped on purpose. Some
     # benchmarks instead score against a complete catalog regardless of
@@ -974,6 +1001,9 @@ class PipelineConfig:
                 "catalog_mode requires --gtf: there is no catalog to "
                 "complete from without an annotation"
             )
+        for _f in ("tss_contradiction_min_bp", "tes_contradiction_min_bp"):
+            if int(getattr(self, _f, 0)) < 0:
+                raise ValueError(f"{_f} must be >= 0 (got {getattr(self, _f)!r})")
         if getattr(self, "m2_support_gate_attest_veto", "novel") not in ("jitter", "novel"):
             raise ValueError(
                 "m2_support_gate_attest_veto must be 'jitter' or 'novel' "
