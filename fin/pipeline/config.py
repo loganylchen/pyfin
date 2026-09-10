@@ -79,10 +79,62 @@ PIPELINE_PROFILES: dict[str, dict[str, object]] = {
         # and no cell degrades anywhere: the pass only removes models that
         # duplicate another model's structural match.
         "snap_merge_chain": True,
+        # Let a gate-dropped annotated model back in when >= 3 reads are
+        # compatible with its chain (exact, or the strand-aware 3' suffix that
+        # dRNA 5'-degradation produces) AND no observed junction contradicts
+        # it. The support gate is by far the largest single owner of recall
+        # loss on real human data -- a selection audit attributes 4566 of 7398
+        # expressed truth transcripts, and 475 of the 554 that stringtie3
+        # matched and we did not, to this one gate, none of them lost in
+        # discovery.
+        #
+        # Decision run under the frozen protocol of
+        # docs/PRODUCTION_ATTESTATION_DEFAULT_DECISION.md (K and veto fixed
+        # before the arms, one snapshot, one lever, default re-run on the same
+        # snapshot). Human GENCODE +1.47 Sn / +0.36 Pr / +1.45 F1, and cells
+        # beating stringtie3 go 2/7 -> 6/7; SIRV4 +0.18 / -0.15 / +0.12 with
+        # every corruption family positive; HEYA8 +0.04 / -0.03 / +0.04, CI
+        # [+0.01,+0.09]. No family anywhere is negative in the mean.
+        #
+        # PRECISION RISES rather than falls: what is readmitted recovers 194
+        # distinct truth transcripts from 232 new models on `full` (84%),
+        # against a break-even marginal precision of F1/2 = 21.4%, so the
+        # additions are far purer than the output they join.
+        #
+        # On the pre-registered failure mode -- one shared 3' suffix crediting
+        # every compatible annotated EXTENSION -- the measurement is an
+        # ASSOCIATION, not a demonstrated cost. Bucketing the added models by
+        # whether they share a strand-aware 3' suffix with other added models:
+        # alone 90% yield, pairs 75%, groups of >= 3 82% (replicated on
+        # c_trunc5p50: 91 / 79 / 82). The shared-suffix buckets yield 8-15 pp
+        # less, which is consistent with the predicted vulnerability -- though
+        # locus complexity and expression differ between the buckets too, and
+        # this observes structural ambiguity groups rather than actual shared
+        # reads. Either way it is nowhere near enough to hurt: the lower
+        # buckets still clear break-even by 3.5-4x.
+        #
+        # Read that as "the vulnerable regime did not cost us here", NOT as
+        # "the vulnerability is absent". The audit sees only models that
+        # survived the whole selection cascade, so a clean result is also
+        # consistent with the GTF floor already removing the weak members of
+        # ambiguous families -- which would mean the floor is part of why this
+        # is safe, and is a reason to keep it fixed rather than relax it in the
+        # same change.
+        #
+        # p00 is exactly inert (no annotation, so an annotation-conditioned
+        # exemption has nothing to readmit).
+        "m2_support_gate_attest_reads": 3,
     },
     "custom": {},
 }
 PIPELINE_PROFILES["real-drna-precision"] = {
+    # Inherits every real-drna value, INCLUDING m2_support_gate_attest_reads=3.
+    # That inheritance is intentional rather than incidental: the exemption
+    # raised precision on human (+0.36) as well as recall, so it pulls the same
+    # way this profile does. But this exact combination (attestation together
+    # with min_novel_reads=2) was NOT part of the decision campaign -- only
+    # real-drna was benchmarked. Treat it as inherited-by-design and
+    # unvalidated-in-combination.
     **PIPELINE_PROFILES["real-drna"],
     "min_novel_reads": 2,
 }

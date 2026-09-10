@@ -257,3 +257,100 @@ def test_the_precision_profile_inherits_the_snap_chain_merge(monkeypatch, tmp_pa
     cfg, _ = _invoke(monkeypatch, tmp_path, "--profile", "real-drna-precision")
     assert cfg.snap_merge_chain is True
     assert cfg.min_novel_reads == 2
+
+
+# --- the support-gate attestation exemption, as a profile default ------------
+#
+# Promoted under docs/PRODUCTION_ATTESTATION_DEFAULT_DECISION.md. These go
+# through the real Click command and assert on the CONFIG THE RUNNER IS HANDED,
+# because the bug this lever actually hit was invisible to any test of the
+# resolver: the profile entry existed, `resolve_profile_values` computed 3, and
+# the CLI never lifted the key out of `resolved`, so the flag default of 0 was
+# what ran. Nothing raised. The only symptom was a benchmark arm that came out
+# byte-identical to the arm it was supposed to differ from.
+
+
+def test_attestation_is_on_by_default(monkeypatch, tmp_path):
+    cfg, _ = _invoke(monkeypatch, tmp_path)
+    assert cfg.m2_support_gate_attest_reads == 3
+
+
+def test_attestation_is_on_under_real_drna(monkeypatch, tmp_path):
+    cfg, _ = _invoke(monkeypatch, tmp_path, "--profile", "real-drna")
+    assert cfg.m2_support_gate_attest_reads == 3
+
+
+def test_the_precision_derivative_inherits_it_by_design(monkeypatch, tmp_path):
+    # real-drna-precision splats real-drna, so it inherits K=3. Intentional --
+    # the exemption raised precision as well as recall -- but this exact
+    # combination was not benchmarked, so it is pinned rather than assumed.
+    cfg, _ = _invoke(monkeypatch, tmp_path, "--profile", "real-drna-precision")
+    assert cfg.m2_support_gate_attest_reads == 3
+    assert cfg.min_novel_reads == 2
+
+
+def test_the_untested_sirv_profile_leaves_it_off(monkeypatch, tmp_path):
+    cfg, _ = _invoke(monkeypatch, tmp_path, "--profile", "sirv")
+    assert cfg.m2_support_gate_attest_reads == 0
+
+
+def test_custom_leaves_it_off(monkeypatch, tmp_path):
+    cfg, _ = _invoke(monkeypatch, tmp_path, "--profile", "custom")
+    assert cfg.m2_support_gate_attest_reads == 0
+
+
+def test_an_explicit_zero_disables_it_against_the_profile(monkeypatch, tmp_path):
+    cfg, _ = _invoke(monkeypatch, tmp_path,
+                     "--m2-support-gate-attest-reads", "0")
+    assert cfg.m2_support_gate_attest_reads == 0
+
+
+def test_an_explicit_value_overrides_the_profile(monkeypatch, tmp_path):
+    cfg, _ = _invoke(monkeypatch, tmp_path,
+                     "--m2-support-gate-attest-reads", "5")
+    assert cfg.m2_support_gate_attest_reads == 5
+
+
+def test_the_veto_it_was_validated_with_is_what_runs(monkeypatch, tmp_path):
+    # K was frozen together with the veto; a different veto is a different
+    # lever and would need its own decision run.
+    cfg, _ = _invoke(monkeypatch, tmp_path)
+    assert cfg.m2_support_gate_attest_veto == "novel"
+    assert cfg.m2_support_gate_attest_veto_bp == 10
+
+
+def test_the_manifest_records_the_operating_value(monkeypatch, tmp_path):
+    # The manifest is how an arm's configuration is audited after the fact, so
+    # this has to read the artifact on disk. Asserting on the in-memory config
+    # instead would pass even if the manifest omitted the key entirely, which
+    # is exactly the failure that makes a campaign unreconstructable.
+    _, output = _invoke(monkeypatch, tmp_path)
+    manifest = json.loads((output / "run_manifest.json").read_text())
+    assert manifest["config"]["m2_support_gate_attest_reads"] == 3
+
+
+def test_no_profile_value_is_silently_dropped_on_the_way_to_the_runner(
+        monkeypatch, tmp_path):
+    """Every profile key must survive into the constructed config.
+
+    The general form of the bug above. `m2_metric` is exempt because the CLI
+    deliberately resolves the `auto` sentinel to a concrete metric before
+    constructing the config (covered by the m2_metric tests); every other key
+    must arrive unchanged.
+    """
+    from fin.pipeline.config import PIPELINE_PROFILES
+
+    transformed = {"m2_metric"}
+    for name, values in PIPELINE_PROFILES.items():
+        if not values:
+            continue
+        cfg, _ = _invoke(monkeypatch, tmp_path, "--profile", name)
+        for key, want in values.items():
+            if key in transformed:
+                continue
+            assert getattr(cfg, key) == want, (
+                f"profile {name!r} sets {key}={want!r} but the runner was "
+                f"handed {getattr(cfg, key)!r} -- the value is computed and "
+                f"then dropped somewhere between resolve_profile_values and "
+                f"PipelineConfig"
+            )

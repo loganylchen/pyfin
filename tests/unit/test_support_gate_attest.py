@@ -799,3 +799,50 @@ class TestModalReadExtent:
         bam = tmp_path / "x.bam"; bam.write_bytes(b"")
         with pytest.raises(ValueError, match="read_extent_mode_tol_bp"):
             PipelineConfig(bam_path=str(bam), read_extent_mode_tol_bp=-1).validate()
+
+
+class TestRealDrnaProfileDefault:
+    """The exemption is a production default for real direct-RNA, and the
+    evidence for that is dataset-specific, so the profile is where it belongs.
+
+    Promoted under the frozen protocol in
+    docs/PRODUCTION_ATTESTATION_DEFAULT_DECISION.md: human GENCODE +1.47 Sn /
+    +0.36 Pr / +1.45 F1 (cells beating stringtie3 2/7 -> 6/7), SIRV4 +0.12 F1,
+    HEYA8 +0.04 F1 with CI [+0.01, +0.09], no corruption family negative in the
+    mean on any grid.
+    """
+
+    def test_real_drna_enables_it_at_k3(self):
+        from fin.pipeline.config import PIPELINE_PROFILES
+
+        assert PIPELINE_PROFILES["real-drna"]["m2_support_gate_attest_reads"] == 3
+
+    def test_the_dataclass_default_stays_off(self):
+        # Only the profile carries the evidence. A caller constructing a
+        # PipelineConfig directly, or using another profile, must not silently
+        # inherit a lever validated on direct-RNA grids.
+        from fin.pipeline.config import PipelineConfig
+
+        assert PipelineConfig.m2_support_gate_attest_reads == 0
+
+    def test_the_untested_sirv_profile_is_untouched(self):
+        from fin.pipeline.config import PIPELINE_PROFILES
+
+        assert "m2_support_gate_attest_reads" not in PIPELINE_PROFILES["sirv"]
+
+    def test_the_veto_settings_it_was_validated_with_are_the_defaults(self):
+        # K was frozen together with the veto; a different veto is a different
+        # lever and would need its own decision run.
+        from fin.pipeline.config import PipelineConfig
+
+        assert PipelineConfig.m2_support_gate_attest_veto == "novel"
+        assert PipelineConfig.m2_support_gate_attest_veto_bp == 10
+
+    def test_an_explicit_cli_value_still_wins_over_the_profile(self):
+        from fin.pipeline.config import resolve_profile_values
+
+        resolved = resolve_profile_values(
+            "real-drna", {"m2_support_gate_attest_reads": 0},
+            explicit_fields=("m2_support_gate_attest_reads",),
+        )
+        assert resolved["m2_support_gate_attest_reads"] == 0
