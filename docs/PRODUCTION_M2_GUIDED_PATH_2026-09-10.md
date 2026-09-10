@@ -143,6 +143,84 @@ with the default and matching the stored arm's `assembly.gtf` sha256 exactly
 (`run_manifest.json` does change — it serialises the config, which now has one
 more field).
 
+## Result: the benefit is the signal, not the concentration
+
+All three arms, 156 paired cells over 6 libraries, one source snapshot,
+library-block bootstrap (seed 20260831):
+
+| contrast | what it removes | dSn | dPr | dF1 | 95% CI | cells up/down |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+| `off` − `base` | signal **and** concentration | −0.16 | −3.04 | **−0.93** | [−1.46, −0.49] | 13 / 136 |
+| `scram` − `base` | signal only | −0.07 | −2.83 | **−0.75** | [−1.05, −0.45] | 6 / 142 |
+| `scram` − `off` | *adds* concentration, no signal | +0.08 | +0.21 | **+0.18** | [−0.27, +0.60] | 72 / 48 |
+
+The third row is the answer. Concentrating a tied read onto an **arbitrary**
+structure, with the signal carrying no information, buys **+0.18 F1 with a
+confidence interval that straddles zero** — nothing measurable, and the
+cell-level split (72 up, 48 down, 36 unchanged) is close to a coin flip.
+Meanwhile removing only the signal, while keeping every read concentrated onto
+exactly one structure, costs −0.75 of the −0.93 the whole tie-break is worth.
+
+So the mechanism I proposed after the two-arm result — "M2 helps by
+concentrating mass" — is **wrong**. It predicted that an arbitrary tie-break
+would recover most of the benefit, and it recovers none of it. The tie-break's
+value is the signal picking the *right* structure. Concentration is the
+delivery mechanism, not the source.
+
+That is the first direct evidence in this project that the nanopore signal is
+doing real discriminative work on the production path, as opposed to being a
+tie-breaking ritual whose benefit could have come from any deterministic rule.
+It is also the reason the earlier raw-DTW failures did not sink the M2 channel:
+the channel survives because it scores *inside* an M1 tie, on the tight
+differing-junction window, with an abstention threshold — and within that niche
+its content is what matters.
+
+### It replicates on an independent grid
+
+The same three arms on HEYA8 (130 cells, 5 libraries, a different spike-in mix,
+different libraries, same snapshot and protocol):
+
+| contrast | SIRV4 dF1 [95% CI] | HEYA8 dF1 [95% CI] |
+| --- | --- | --- |
+| `off` − `base` | −0.93 [−1.46, −0.49] | −0.76 [−0.96, −0.56] |
+| `scram` − `base` | −0.75 [−1.05, −0.45] | −0.59 [−0.90, −0.32] |
+| `scram` − `off` | **+0.18 [−0.27, +0.60]** | **+0.17 [−0.23, +0.50]** |
+
+The concentration-only effect is +0.18 on one grid and +0.17 on the other, with
+the interval straddling zero both times. The share of the tie-break's value that
+disappears when only the signal is removed is 81% on SIRV4 and 78% on HEYA8.
+HEYA8 makes the precision mechanism even plainer: `off` costs 5.14 points of
+precision there for **+0.11** recall.
+
+Caveats that still bound the claim. Both grids are spike-ins. `.ext`
+read-extent siblings are far more common on human than here, so the
+structure-level grouping carries more weight there and the human behaviour is
+not implied — that is the replication still worth running. And the control
+measures the **total** effect of structural junction preference inside the
+production pipeline, endpoint-channel interactions included, not an
+endpoint-free junction-only effect.
+
+## The remaining third of the prescription: per-base normalisation
+
+Production uses the tight window and a real abstention threshold, but an
+**undivided** sum — the form with the known longer-template bias.
+`sqrt_count_mean_llr` is the per-candidate-base normalised variant, and it had
+never been benchmarked on the production path. One lever vs `m2base`, full
+SIRV4 grid:
+
+dSn +0.00, **dPr +0.32**, dF1 +0.08, 95% CI [−0.04, +0.21]; 60 cells up, 27
+down, 69 unchanged.
+
+Not significant — the interval includes zero. But the direction is consistent
+in a way that a null effect usually is not: every corruption family has a
+non-negative mean, recall does not move at all, and the gain is entirely
+precision. That is the profile of a real but small effect, and it is the
+opposite sign from this project's earlier raw-DTW finding that dividing by
+length *worsens* things (that was a different scorer on a different task —
+whole-template DTW, not a tight in-tie contrast — so the two are not in
+conflict). A HEYA8 replication is running; nothing should change on the
+strength of one grid and a CI that includes zero.
+
 ## Decision, fixed in advance
 
 Report Sn and Pr for every cell, never F1 alone, and pair by cell with a
