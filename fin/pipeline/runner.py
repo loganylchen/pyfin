@@ -751,6 +751,8 @@ class PipelineRunner:
             # attestation will read it, so the default path pays nothing
             collect_compatible_depths=bool(
                 getattr(self.config, "m2_support_gate_attest_reads", 0) > 0),
+            read_extent_mode_tol_bp=int(getattr(
+                self.config, "read_extent_mode_tol_bp", 0)),
             junction_correction=self._make_junction_correction(interval, chrom_seq),
             junction_correction_apply=self._junction_correction_apply(),
             read_extent_contradicted=self._read_extent_contradicted(),

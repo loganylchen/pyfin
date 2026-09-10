@@ -470,6 +470,18 @@ class PipelineConfig:
     # the repair exactly where it is needed (-3.60 F1 on human c_trunc5p50),
     # while a per-locus rule lets the reads that cluster at the true start speak
     # there. 0 disables (byte-identical).
+    # Re-estimate a contradicted end from the MODAL position of the
+    # contradicting reads (window +-N bp) instead of the most extreme one.
+    # Admitting a read as evidence and letting the single most extreme of them
+    # define the coordinate are different decisions: measured on human `full`,
+    # of 141 emitted siblings still missing the annotation by more than 25 bp,
+    # only 66 have a claimed start that itself dominates its locus (median
+    # dominance 0.40, q25 0.00) even though every contributing READ had to
+    # clear that bar. MEASURED AND NOT ADOPTED: it buys +0.05 end-aware F1 on
+    # human `full` over the gate alone and costs -0.10 over 156 SIRV4 cells
+    # (c_trunc5p -0.92, c_trunc3p -0.35), where the reads are full-length so the
+    # extreme read IS the true end. 0 keeps the extreme (byte-identical).
+    read_extent_mode_tol_bp: int = 0
     tss_contradiction_min_share: float = 0.0
     tss_contradiction_auto_gate: bool = False
     # What the gate DOES when it fires. Not "switch the mechanism off" -- a
@@ -1059,6 +1071,8 @@ class PipelineConfig:
                 "catalog_mode requires --gtf: there is no catalog to "
                 "complete from without an annotation"
             )
+        if int(getattr(self, "read_extent_mode_tol_bp", 0)) < 0:
+            raise ValueError("read_extent_mode_tol_bp must be >= 0")
         if float(getattr(self, "tss_contradiction_mode_share", 0.5)) < 0.0:
             raise ValueError(
                 "tss_contradiction_mode_share must be >= 0 "

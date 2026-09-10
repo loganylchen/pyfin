@@ -389,14 +389,49 @@ def _graph_groups(non_fusion_reads, strand, tol, min_edge_reads,
     return groups
 
 
-def _read_extent(gc, contradicted, spans):
+def _modal_position(values, tol_bp):
+    """The centre of the densest cluster among ``values`` (window +-``tol_bp``).
+
+    ``None`` when the mode is AMBIGUOUS -- when the positions achieving the
+    maximum density span more than ``tol_bp``, i.e. two or more separate
+    clusters are equally dense. Callers fall back to their previous rule there;
+    inventing a winner would have to break the tie by genomic direction, and
+    the same geometry would then answer differently on the two strands.
+    """
+    vals = sorted(values)
+    if not vals:
+        return None
+    if len(vals) <= 2:
+        return vals[len(vals) // 2]
+    import bisect as _b
+    counts = [(_b.bisect_right(vals, v + tol_bp) - _b.bisect_left(vals, v - tol_bp))
+              for v in vals]
+    best = max(counts)
+    tied = [v for v, n in zip(vals, counts) if n == best]
+    if tied[-1] - tied[0] > tol_bp:
+        return None                      # ambiguous: separate equal clusters
+    return tied[len(tied) // 2]          # the cluster's middle member
+
+
+def _read_extent(gc, contradicted, spans, mode_tol_bp: int = 0):
     """The read-extent sibling's span. ONLY a contradicted end is re-estimated,
     from the CONTRADICTING reads alone (``contradicted`` maps "tes"/"tss" to
     those read ids) and only outward (min/max with the annotated coordinate),
     so the span always contains the annotation's intron chain and a read that
     another annotated model explains never defines this model's end. The other
     end keeps the annotated value. On '+' the TES is ``end`` and the TSS
-    ``start``; on '-' the reverse."""
+    ``start``; on '-' the reverse.
+
+    ``mode_tol_bp`` > 0 re-estimates from the MODAL position of the
+    contradicting reads instead of the most extreme one. Admitting a read as
+    evidence and then letting the single most extreme of them define the
+    coordinate are different decisions: measured on human `full`, of 141
+    emitted siblings that still miss the annotation by more than 25 bp, only 66
+    have a claimed start that itself dominates its locus (median dominance
+    0.40, q25 0.00) even though every contributing READ had to clear that bar.
+    The evidence is the cluster; the extreme read is the tail of the same
+    degradation/run-through distribution. 0 keeps the extreme (byte-identical).
+    """
     start, end = gc.start, gc.end
     tes_is_end = getattr(gc, "strand", "+") == "+"
     for which, rids in contradicted.items():
@@ -405,9 +440,11 @@ def _read_extent(gc, contradicted, spans):
             continue
         extend_end = (which == "tes") == tes_is_end
         if extend_end:
-            end = max(end, max(e[1] for e in sp))
+            cand = _modal_position([e[1] for e in sp], mode_tol_bp) if mode_tol_bp > 0 else None
+            end = max(end, cand if cand is not None else max(e[1] for e in sp))
         else:
-            start = min(start, min(e[0] for e in sp))
+            cand = _modal_position([e[0] for e in sp], mode_tol_bp) if mode_tol_bp > 0 else None
+            start = min(start, cand if cand is not None else min(e[0] for e in sp))
     return start, end
 
 
@@ -432,7 +469,7 @@ def _chain_cluster_candidates(
     genome_fasta, strand, min_novel_reads, *, wobble_bp, cassette_max_exon_bp,
     fold_monoexon_contained=False, fold_span_guard=False, clustering="read_chains",
     collect_chain_evidence=True, junction_correction=None, junction_correction_apply=None,
-    read_extent_contradicted=None, collect_compatible_depths=False,
+    read_extent_contradicted=None, collect_compatible_depths=False, read_extent_mode_tol_bp=0,
 ) -> CandidateSet:
     """NEW generation: build candidates via intron-chain clustering.
 
@@ -751,7 +788,8 @@ def _chain_cluster_candidates(
                             g, key_reads, [a for a in alternatives if a is not g])
                         if not which:
                             continue
-                        sib_start, sib_end = _read_extent(g, which, spans)
+                        sib_start, sib_end = _read_extent(
+                            g, which, spans, mode_tol_bp=read_extent_mode_tol_bp)
                         sib_ids = _emit(
                             m.chain, key_reads, sib_start, sib_end,
                             None, family_id,
@@ -918,6 +956,7 @@ def discover_candidates(
     junction_correction_apply=None,
     read_extent_contradicted=None,
     collect_compatible_depths: bool = False,
+    read_extent_mode_tol_bp: int = 0,
 ) -> CandidateSet:
     """Discover transcript candidates for a genomic interval.
 
@@ -1013,6 +1052,7 @@ def discover_candidates(
             junction_correction_apply=junction_correction_apply,
             read_extent_contradicted=read_extent_contradicted,
             collect_compatible_depths=collect_compatible_depths,
+            read_extent_mode_tol_bp=read_extent_mode_tol_bp,
         )
 
     # 2. Group reads by 3' + intron chain → novel candidate groups.

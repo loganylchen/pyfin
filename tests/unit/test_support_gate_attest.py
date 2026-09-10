@@ -738,3 +738,64 @@ class TestGateBehaviour:
         src = inspect.getsource(type(r)._read_extent_contradicted)
         assert "max(min_tss_share, gate_share)" in src or "max(" in src
         assert r.config.tss_contradiction_min_share == 0.8
+
+
+class TestModalReadExtent:
+    """Re-estimate a contradicted end from the cluster, not from its tail.
+
+    Admitting a read as evidence and letting the single most extreme of them
+    define the coordinate are different decisions.
+    """
+
+    def _gc(self, strand="+"):
+        return _gtf("A", ((1200, 1400),), strand=strand, start=1000, end=2000)
+
+    def test_extreme_is_the_default(self):
+        from fin.candidates.discovery import _read_extent
+        spans = {"r1": (900, 2000), "r2": (901, 2000), "r3": (902, 2000),
+                 "far": (500, 2000)}
+        s, e = _read_extent(self._gc(), {"tss": list(spans)}, spans)
+        assert s == 500 and e == 2000
+
+    def test_modal_uses_the_cluster(self):
+        from fin.candidates.discovery import _read_extent
+        spans = {"r1": (900, 2000), "r2": (901, 2000), "r3": (902, 2000),
+                 "far": (500, 2000)}
+        s, e = _read_extent(self._gc(), {"tss": list(spans)}, spans, mode_tol_bp=10)
+        assert s == 901 and e == 2000        # the cluster's middle member
+
+    def test_it_still_only_moves_outward(self):
+        from fin.candidates.discovery import _read_extent
+        # the modal start is INSIDE the annotation: keep the annotated start
+        spans = {f"r{i}": (1500 + i, 2000) for i in range(4)}
+        s, e = _read_extent(self._gc(), {"tss": list(spans)}, spans, mode_tol_bp=10)
+        assert s == 1000
+
+    def test_minus_strand_tss_is_the_right_end(self):
+        from fin.candidates.discovery import _read_extent
+        spans = {"r1": (1000, 2100), "r2": (1000, 2101), "r3": (1000, 2102),
+                 "far": (1000, 2600)}
+        s, e = _read_extent(self._gc("-"), {"tss": list(spans)}, spans, mode_tol_bp=10)
+        assert e == 2101 and s == 1000
+
+    def test_an_ambiguous_mode_falls_back_instead_of_guessing(self):
+        """Two equally dense clusters: any winner would be picked by genomic
+        direction, so the caller keeps its previous rule."""
+        from fin.candidates.discovery import _modal_position, _read_extent
+        assert _modal_position([100, 101, 200, 201], 10) is None
+        assert _modal_position([-201, -200, -101, -100], 10) is None
+        spans = {"a": (100, 2000), "b": (101, 2000), "c": (200, 2000), "d": (201, 2000)}
+        s, _ = _read_extent(self._gc(), {"tss": list(spans)}, spans, mode_tol_bp=10)
+        assert s == 100          # the extreme, as without the option
+
+    def test_degenerate_inputs(self):
+        from fin.candidates.discovery import _modal_position
+        assert _modal_position([], 10) is None
+        assert _modal_position([7], 10) == 7
+        assert _modal_position([7, 9], 10) == 9
+
+    def test_config_default_off_and_validated(self, tmp_path):
+        assert PipelineConfig(bam_path="/fake.bam").read_extent_mode_tol_bp == 0
+        bam = tmp_path / "x.bam"; bam.write_bytes(b"")
+        with pytest.raises(ValueError, match="read_extent_mode_tol_bp"):
+            PipelineConfig(bam_path=str(bam), read_extent_mode_tol_bp=-1).validate()
