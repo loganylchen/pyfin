@@ -200,6 +200,70 @@ measures the **total** effect of structural junction preference inside the
 production pipeline, endpoint-channel interactions included, not an
 endpoint-free junction-only effect.
 
+### The signal helps most exactly where the reads are most ambiguous
+
+A prediction worth testing, because it follows from the mechanism rather than
+from the numbers: direct RNA is 3'-biased, so a truncated read loses the 5'
+region that distinguishes similar isoforms, and its assignment becomes more
+ambiguous ([NanoCount](https://academic.oup.com/nar/article/50/4/e19/6439677);
+[Pervasive effects of RNA degradation on Nanopore direct RNA
+sequencing](https://academic.oup.com/nargab/article/5/2/lqad060/7192649) makes
+the degradation-to-ambiguity link explicitly). If the tie-break's value is the
+signal *discriminating* structures, the signal should be worth most in the
+conditions that produce the most ambiguous reads.
+
+The corruption families give that test directly, on runs already in hand —
+`scram − base` (signal removed, concentration kept) broken down by family:
+
+| family | SIRV4 | HEYA8 | mean |
+| --- | ---: | ---: | ---: |
+| `c_trunc5p` | −0.95 | −0.99 | **−0.97** |
+| `c_trunc3p` | −1.04 | −0.85 | **−0.95** |
+| `full` | −0.84 | −1.01 | −0.93 |
+| `c_spurious` | −0.83 | −1.01 | −0.92 |
+| `c_flip` | −0.70 | −0.71 | −0.70 |
+| `c_skip` | −0.71 | −0.62 | −0.67 |
+| `c_ir` | −0.60 | −0.69 | −0.65 |
+| `c_merge` | −0.63 | −0.63 | −0.63 |
+| `ratio` | −0.71 | −0.29 | −0.50 |
+| `c_jitter` | −0.66 | −0.28 | −0.47 |
+
+The two truncation families are the top two, at −0.96 against −0.68 for
+everything else, and the two grids agree on the ordering (Pearson r = +0.63
+across the ten families — independent mixes, independent libraries). That is
+the predicted direction, and it is a second, structurally different piece of
+evidence for the same conclusion: the channel is doing discrimination, not
+arbitration.
+
+The bottom of the table is informative too. `c_jitter` and `ratio` are the
+conditions where the annotation is wobbled or removed, and they are where
+removing the signal costs least — consistent with the tie sets there being
+different in kind (novel-candidate contests rather than
+annotated-versus-shadow), which is also where this pipeline's lead over
+competitors is largest for annotation-independence reasons that have nothing to
+do with signal.
+
+### Where the literature actually is
+
+Worth recording because it bounds what can be borrowed: a search for
+signal-level isoform assignment turns up **nothing operating in squiggle space**.
+Every current method — NanoCount, Bambu, LIQA, the EM family — works
+post-basecalling and post-alignment, and resolves ambiguity by *fractional*
+assignment (NanoCount splits a read 0.7/0.3 across surviving alignments) rather
+than by consulting the signal. Bayesian alternatives such as
+[BIISQ](https://arxiv.org/pdf/1703.08260) put a fuller posterior over the same
+alignment-level evidence. Signal-level work in direct RNA is concentrated on
+**modification detection**, not isoform deconvolution
+([workflow assessment and tool benchmarking](https://link.springer.com/article/10.1007/s44307-025-00093-5)).
+
+So there is no published per-base-normalised-posterior isoform assigner to
+adopt, and the NanoSplicer form this campaign started from is a *splice-junction
+caller's* prescription being borrowed across tasks. That is worth knowing before
+borrowing more of it: the one piece of it production does not implement turned
+out to be a null (below), and the two pieces it does implement — the tight
+discriminating window and a real abstention threshold — are the ones carrying
+the result above.
+
 ## The remaining third of the prescription: per-base normalisation
 
 Production uses the tight window and a real abstention threshold, but an
