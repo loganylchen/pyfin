@@ -265,6 +265,23 @@ class PipelineConfig:
     # default; log lines always exist.
     m2_contrast_stats_jsonl: bool = False
 
+    # SIGNAL-FREE CONTROL (EXPERIMENTAL; 0 = off, and the assembly is then
+    # byte-identical -- run_manifest.json still records the field, since it
+    # serialises the config). Permutes each finalized M2 contrast across its
+    # STRUCTURES, using a blake2b hash of (seed, read_id, structure): the
+    # diff-cover gate reduces candidates that share an intron chain to one
+    # hypothesis before thresholding, so the structure -- not the candidate --
+    # is the unit whose preference must be randomized. The scored column set,
+    # the structure partition, every abstention path, and the gate's
+    # thresholded margin are preserved exactly; only which structure the
+    # junction channel prefers changes. The null for "does the tie-break's
+    # benefit come from the SIGNAL, or only from concentrating a tie onto one
+    # hypothesis?" -- which --m2-metric off cannot answer, because off also
+    # restores the fractional split. Requires quant_mode="m2_em" and
+    # m2_diff_cover_gate (the CLI rejects a positive seed otherwise).
+    # Never a production setting.
+    m2_scramble_seed: int = 0
+
     # EndpointRefine (EXPERIMENTAL, off by default; requires the final
     # abundance refit because post-split requantification is mandatory).
     # Splits a novel multi-exon survivor into at most endpoint_max_splits

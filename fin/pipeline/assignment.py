@@ -20,6 +20,7 @@ Byte-identical extraction. The runner keeps thin ``_tie_nll`` / ``_eff_lengths``
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 from collections import defaultdict
@@ -113,6 +114,106 @@ def _record_abstention(stats, rid, tie, cand_list, reason):
         })
 
 
+def structure_key(c):
+    """The identity the junction channel actually compares.
+
+    The M2 channel contrasts STRUCTURES, not candidates: two candidates that
+    share an intron chain (an annotated model and its read-extent sibling, say)
+    are one hypothesis to it, and the diff-cover gate reduces them with ``min``
+    before thresholding. Mono-exon and fusion candidates are each their own
+    structure -- a fusion's ``intron_chain`` holds arm A only, so sharing it
+    with a linear transcript would merge two different things.
+
+    Module-level rather than a closure so the assigner and the signal-free
+    control cannot drift apart: a control that grouped candidates differently
+    from the gate it is controlling for would silently change the gate's
+    decision instead of isolating the signal.
+    """
+    if getattr(c, "source", "") == "fusion":
+        return ("fusion", c.candidate_id)
+    introns = tuple(getattr(c.intron_chain, "introns", ()) or ())
+    return introns if introns else ("mono", c.candidate_id)
+
+
+def _scramble_contrast(nlls, seed, read_id, cands=None):
+    """Permute a finalized contrast across its STRUCTURES (signal-free control).
+
+    The null for "is the tie-break's benefit the SIGNAL CONTENT, or merely the
+    act of concentrating a tied read onto one hypothesis?". ``--m2-metric off``
+    cannot answer it, because off also restores M1's fractional 1/K split --
+    it removes the signal AND the concentration. This removes only the signal.
+
+    Permuting at the CANDIDATE level would not be a clean control. The
+    diff-cover gate first reduces the scored candidates to per-structure minima
+    (``by_group[k] = min(...)``) and thresholds the margin between those
+    minima, so moving values between two candidates of the SAME structure can
+    change that margin -- and with it the hard-assign/abstain classification
+    and the covered-vote prior that redistributes OTHER reads. Preserving the
+    candidate multiset does not preserve the quantity the gate reads.
+
+    So the permutation is over structures, using the gate's own
+    :func:`structure_key`:
+
+      * the scored column set, the structure partition, and every abstention
+        path are untouched;
+      * the multiset of per-structure minima is preserved exactly, so the
+        gate's margin -- and therefore whether the read is hard-assigned or
+        deferred -- is identical to the live run;
+      * each member keeps its offset from its own structure's minimum, so
+        within-structure order survives. NON-strictly: the offset is exact for
+        the minimum member (it is 0.0) but a tiny positive offset added to a
+        large-magnitude base can round back onto it, turning "strictly worse
+        than its group minimum" into "equal to it". The gate reads minima only,
+        so its decision is unaffected, but a candidate-level consumer that
+        collects every column at the best value -- the support gate's
+        ``v <= best`` -- can see one extra winner. This is a known limitation
+        of the control, not of production;
+      * only WHICH structure receives the best score is replaced, by a blake2b
+        hash of (seed, read_id, structure). blake2b rather than Python's
+        salted ``hash`` so the six grid workers and any rerun agree.
+
+    ``seed <= 0`` (the default) returns ``nlls`` unchanged.
+    """
+    if seed <= 0 or len(nlls) < 2 or not cands:
+        return nlls
+    groups: Dict[object, List[int]] = {}
+    for j in nlls:
+        groups.setdefault(structure_key(cands[j]), []).append(j)
+    if len(groups) < 2:
+        # One structure scored: the gate abstains on this read either way, and
+        # there is no structural choice to randomize.
+        return nlls
+    mins = {k: min(nlls[j] for j in cols) for k, cols in groups.items()}
+
+    def _key(k):
+        return hashlib.blake2b(
+            f"{seed}\t{read_id}\t{k}".encode(), digest_size=8
+        ).digest()
+
+    # Lowest NLL = best, so the lowest-hashing structure wins. The digest is
+    # 8 bytes over distinct structures; ``repr`` of the key breaks any tie so
+    # the order stays total and reproducible.
+    order = sorted(groups, key=lambda k: (_key(k), repr(k)))
+    assigned = dict(zip(order, sorted(mins.values())))
+    out = {}
+    for k, cols in groups.items():
+        base = assigned[k]
+        for j in cols:
+            # Anchored on the ASSIGNED minimum, not reconstructed through a
+            # shift. `x + (new_min - x)` is not exactly `new_min` in floating
+            # point, and the residue is enough to move a preserved margin of
+            # 1.0 to 0.9999999999999942 -- which crosses the production
+            # threshold and turns a hard assignment into an abstention, the
+            # exact invariant this control exists to hold fixed. Written this
+            # way the minimum member's offset is exactly 0.0, so it lands on
+            # `base` (numerically -- adding +0.0 does normalise a -0.0, which
+            # no consumer here distinguishes) and the margin between structure
+            # minima is preserved exactly. Verified by fuzzing over subnormals,
+            # signed zeros and the full finite range.
+            out[j] = base + (nlls[j] - mins[k])
+    return out
+
+
 def _finalize_contrast(metric, nlls, evs, stats, *, read_id=None,
                        cand_ids=None, coverage=None):
     """Record contrast observability and apply the sqrt-count rescale.
@@ -182,10 +283,17 @@ def _log_contrast_stats(metric, stats, config=None):
 
     Always logs one compact line per interval. When
     ``config.m2_contrast_stats_jsonl`` is enabled (experimental), also
-    appends a machine-readable JSON record under
-    ``<work_dir>/m2_contrasts/`` (one file per interval batch, pid+counter
-    named, aggregate afterwards) so calibration/reliability analysis does not
-    have to parse log text.
+    appends a machine-readable JSON record under ``<work_dir>/m2_contrasts/``
+    (one file per interval batch, pid+counter named, aggregate afterwards) so
+    calibration/reliability analysis does not have to parse log text.
+
+    Everything recorded here is a PRE-SCRAMBLE CANDIDATE-CONTRAST diagnostic.
+    Both producers finalize before applying the signal-free control, so under a
+    positive ``m2_scramble_seed`` ``decided``, ``margin_sum`` and ``min_ev_sum``
+    describe the LIVE contrast between the original best two CANDIDATES, not the
+    scrambled gate's decision between STRUCTURES. Describing the live signal is
+    the right job for a signal diagnostic, but do not read ``mean_margin`` from
+    a control run as the margin the gate acted on.
     """
     if metric not in ("summed_llr", "sqrt_count_mean_llr"):
         return
@@ -251,6 +359,7 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
     gate (config.m2_diff_cover_gate) is ON; otherwise it is empty.
     """
     metric = getattr(config, "m2_metric", "mean")
+    scramble = int(getattr(config, "m2_scramble_seed", 0))
     gate = bool(getattr(config, "m2_diff_cover_gate", False))
     n_c = len(cand_list)
     if metric == "off":
@@ -478,6 +587,7 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
                     cand_ids={j: cand_list[j].candidate_id for j in nlls},
                     coverage=cover_val,
                 )
+                nlls = _scramble_contrast(nlls, scramble, rid, cand_list)
                 n_refined += 1
                 nlls_by_read[i] = nlls
                 if gate and cover_val is not None:
@@ -517,6 +627,7 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
                 cand_ids={j: cand_list[j].candidate_id for j in nlls},
                 coverage=None,
             )
+            nlls = _scramble_contrast(nlls, scramble, rid, cand_list)
             n_refined += 1
             nlls_by_read[i] = nlls
         elif evs or per_cidj:
@@ -984,14 +1095,7 @@ class Assigner:
             # vote -- its mass would flow to wobble variants that did.
             # Single-exon candidates have no junctions to compare and keep
             # their own identity. Singleton groups == legacy behaviour.
-            def _structure_key(c):
-                if getattr(c, "source", "") == "fusion":
-                    # a fusion's intron_chain holds arm A only; its structure is
-                    # its own (both arms), never shared with a linear transcript
-                    return ("fusion", c.candidate_id)
-                introns = tuple(getattr(c.intron_chain, "introns", ()) or ())
-                return introns if introns else ("mono", c.candidate_id)
-            group_of = [_structure_key(c) for c in cand_list]
+            group_of = [structure_key(c) for c in cand_list]
             covered_vote: Dict[object, float] = {}
             fuzzy: List[int] = []
             for i in range(n_r):

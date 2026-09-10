@@ -193,6 +193,7 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
     show_default=True,
     help="(--quant-mode m2_em) Signal refinement for exact M1 ties. 'mean' is the legacy wide-window mean NLL; 'summed_llr' uses tight differing-junction windows and an undivided NLL sum; 'sqrt_count_mean_llr' (EXPERIMENTAL, never auto-routed) shares the tight footprint but rescales mean NLL by sqrt(min event count) so unequal per-candidate coverage cannot masquerade as signal; 'off' keeps the M1 tie; 'auto' selects mean with a usable GTF and summed_llr when unguided. Profile-controlled unless explicitly set.",
 )
+@click.option("--m2-scramble-seed", default=0, show_default=True, type=int, help="EXPERIMENTAL signal-free CONTROL, never a production setting (0 = off; the assembly is then byte-identical, though run_manifest.json records the field). Requires --quant-mode m2_em and the diff-cover gate. Permutes each M2 contrast across its STRUCTURES (candidates sharing an intron chain are one hypothesis to the gate) by a deterministic hash of (seed, read id, structure), preserving the scored read set, the structure partition, every abstention, and the gate's thresholded margin exactly -- so only WHICH structure the junction channel prefers is randomized. Answers 'is the benefit the signal, or just concentrating the tie onto one hypothesis?', which --m2-metric off cannot: off also restores the fractional split. Measures the TOTAL effect of structural junction preference in the production pipeline, endpoint-channel interactions included.")
 @click.option("--m2-summed-llr-margin", default=2.0, show_default=True, type=float, help="(--m2-metric summed_llr) Minimum summed-NLL runner-up gap for a hard winner. Sum has a different scale from the legacy mean margin.")
 @click.option("--m2-summed-llr-flank", default=6, show_default=True, type=int, help="(--m2-metric summed_llr) Genomic bp flank around each differing junction boundary in the tight scoring window.")
 @click.option("--m2-diff-cover-gate/--no-m2-diff-cover-gate", "m2_diff_cover_gate", default=True, show_default=True, help="(--quant-mode m2_em only) Diff-region coverage gate. For a read in a >=2 best-AS tie: if the configured M2 margin reaches its metric-specific threshold, hard-assign its full mass to the best candidate (and, if it straddles every wobbling junction donor->acceptor, contribute that vote to the locus isoform-ratio prior); otherwise the read is ambiguous and follows the covered-read prior (flat 1/K only when no prior exists). A valid contrast requires two scored hypotheses. No read is dropped. Profile-controlled.")
@@ -358,6 +359,7 @@ def main(
     m2_tiebreak_margin,
     m2_tiebreak_junction_k,
     m2_metric,
+    m2_scramble_seed,
     m2_summed_llr_margin,
     m2_summed_llr_flank,
     m2_diff_cover_gate,
@@ -467,6 +469,40 @@ def main(
     if gpu_workers > threads:
         raise click.BadParameter(
             f"must be <= --threads ({threads})", param_hint="--gpu-workers"
+        )
+    if m2_scramble_seed > 0 and m2_metric == "off":
+        # `tie_nll` returns before scoring when the metric is off, so the seed
+        # would be a silent no-op and the "control" arm would just be the
+        # no-signal arm under a different name.
+        raise click.BadParameter(
+            "--m2-metric off skips scoring entirely, so the control would "
+            "scramble nothing; that arm is --m2-metric off itself",
+            param_hint="--m2-scramble-seed",
+        )
+    if m2_scramble_seed > 0 and not m2_diff_cover_gate:
+        # With the gate off the assignment builds a soft NLL skeleton instead
+        # (`miss = (hi - lo) + PAD`, then median scaling). Those quantities are
+        # candidate-level and are NOT preserved by a structure permutation, so
+        # the arm would differ from production for a second reason.
+        raise click.BadParameter(
+            "the signal-free control preserves the DIFF-COVER GATE's decision "
+            "(per-structure minima and its thresholded margin); with "
+            "--no-m2-diff-cover-gate the soft skeleton is rescaled by "
+            "candidate-level extrema, which a structure permutation does not "
+            "preserve, so the arm would be uninterpretable",
+            param_hint="--m2-scramble-seed",
+        )
+    if m2_scramble_seed > 0 and quant_mode != "m2_em":
+        # The control is applied inside the m2_em assignment layer. The argmax
+        # mode reaches the signal through a different resolver
+        # (PipelineRunner._quant_argmax_keep -> m2_resolve_tie), which this
+        # flag does not touch -- so a positive seed there would silently
+        # produce a PARTIAL control and an uninterpretable arm. Fail instead.
+        raise click.BadParameter(
+            "the signal-free control only covers the m2_em assignment layer; "
+            f"--quant-mode {quant_mode} resolves ties elsewhere and would give "
+            "a partially-scrambled, uninterpretable arm",
+            param_hint="--m2-scramble-seed",
         )
 
     # Pin per-process thread pools to 1 BEFORE importing numpy (BLAS reads these at
@@ -592,6 +628,7 @@ def main(
         assignment_channels=assignment_channels,
         catalog_mode=catalog_mode,
         m2_contrast_stats_jsonl=m2_contrast_stats_jsonl,
+        m2_scramble_seed=m2_scramble_seed,
         lazy_genome=lazy_genome,
         genome_cache_chroms=genome_cache_chroms,
         max_soft_mass_ratio=max_soft_mass_ratio,

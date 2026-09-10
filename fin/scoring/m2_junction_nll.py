@@ -824,7 +824,10 @@ def containment_shadow_drops(cands, em_ab, *, tol_bp, min_ratio, exclude=None):
     away). A shadow is emitted only when ``em_ab[a] <= em_ab[b] * min_ratio`` (the
     shadow is the minor member). Among eligible parents the highest-EM-abundance one
     is chosen, ties broken by a RUN-STABLE structural key (start, end, intron chain,
-    source: gtf<novel) -- NEVER by ``candidate_id`` (novel ids are random uuids).
+    source: gtf<novel) rather than by ``candidate_id``. Both are deterministic --
+    ``_generate_novel_id`` is a blake2b digest of the candidate's own geometry, not
+    a random uuid -- but an id order is an arbitrary permutation of the candidates,
+    while the structural key breaks the tie by a property that means something.
 
     The match is exact on the shared suffix introns (no per-junction wobble), so a
     genuine exon-skipping or alternative-internal-splicing isoform -- whose chain is
