@@ -154,6 +154,99 @@ def _exons_from_chain(start: int, end: int, chain: IntronChain) -> List[tuple]:
     return [(s, e) for s, e in exons if e > s]
 
 
+COMPATIBLE_READ_END_TOL_BP = 50   # read 3' end may run past the annotated TES by this much
+COMPATIBLE_READ_SLOP_BP = 10      # alignment slop allowed at the upstream model intron
+COMPATIBLE_READ_INDEL_FLANK_BP = 0  # 0: no per-read indel policy (see below)
+
+
+def chain_compatible_read_depths(
+    gtf_models, reads, indels_by_read, *,
+    end_tol_bp: int = COMPATIBLE_READ_END_TOL_BP,
+    flank_bp: int = COMPATIBLE_READ_SLOP_BP,
+    indel_flank_bp: int = COMPATIBLE_READ_INDEL_FLANK_BP,
+) -> Dict[str, int]:
+    """Distinct reads whose alignment is COMPATIBLE with an annotated chain.
+
+    A read is compatible with an annotated multi-exon model when its own intron
+    chain is EQUAL to the model's chain or a strand-aware contiguous 3' SUFFIX of
+    it (the 5'-degraded dRNA fragment of a longer molecule: on '+' the chain's
+    tail, on '-' its head, introns in ascending genomic order), its span does not
+    run across the model intron immediately upstream of that suffix by more than
+    ``flank_bp`` (an unspliced read over that intron contradicts the model, it is
+    not degraded from it), and its 3' end lies within ``end_tol_bp`` of the
+    annotated 3' end. The 3' condition is an OVERSHOOT limit only: a read may
+    end anywhere inside the model's last exon (an upstream polyadenylation
+    site is compatible with the chain) but not more than ``end_tol_bp`` past
+    the annotated end. The 3' side is the read's END on '+' and its START on
+    '-' -- the polyA side, the one dRNA sequences first and can be trusted. Reads are counted once per
+    model by query name; a read compatible with several nested models counts
+    for each of them. An exact chain match does NOT make a read a complete
+    molecule of that model (a 5'-truncated read of a longer isoform can carry
+    exactly the shorter annotated chain), so no exclusivity is applied: this is
+    COMPATIBILITY support, not evidence that singles a model out, and callers
+    must treat it as such.
+
+    ``indel_flank_bp`` > 0 additionally requires every junction the read carries
+    to be indel-clean within that flank. It is OFF by default: the read's
+    junctions must already EQUAL the annotated ones, so an indel-shifted junction
+    shows up as a mismatch, and on dRNA (~1 indel per 10-20 bases) requiring
+    every junction of a read to be clean is a read-length filter, not an
+    evidence filter -- measured on human H9 `full`, it cut the >= 3-read
+    attested set from 1079 to 210 candidates at no precision gain (90% vs 95%
+    truth, i.e. it removed 775 true transcripts to remove 61 false ones).
+
+    ``gtf_models``: {intron tuple: [TranscriptCandidate,...]} for one strand-
+    separated interval. ``reads``: iterable of (query_name, strand, intron tuple,
+    ref_start, ref_end) for MAPQ>=1 primary alignments. Returns
+    {candidate_id: depth}; models with no compatible read are absent.
+    """
+    by_terminal: Dict[Tuple[str, Tuple[int, int]], list] = {}
+    for chain, models in gtf_models.items():
+        if not chain:
+            continue
+        for g in models:
+            strand = getattr(g, "strand", "+")
+            term = chain[-1] if strand == "+" else chain[0]
+            by_terminal.setdefault((strand, term), []).append((chain, g))
+    if not by_terminal:
+        return {}
+    seen: Dict[str, set] = {}
+    for q, strand, rchain, rs, re_ in reads:
+        if not rchain:
+            continue
+        if indel_flank_bp > 0:
+            ind = indels_by_read.get(q, ())
+            if not all(
+                not (lo - indel_flank_bp <= d <= hi + indel_flank_bp
+                     or lo - indel_flank_bp <= a <= hi + indel_flank_bp)
+                for d, a in rchain for lo, hi in ind
+            ):
+                continue
+        term = rchain[-1] if strand == "+" else rchain[0]
+        for chain, g in by_terminal.get((strand, term), ()):
+            n = len(rchain)
+            if n > len(chain):
+                continue
+            if strand == "+":
+                if chain[len(chain) - n:] != rchain:
+                    continue
+                # the model intron just upstream of the suffix (5' side): the
+                # read must start at or after its acceptor, allowing alignment slop
+                if n < len(chain) and rs < chain[len(chain) - n - 1][1] - flank_bp:
+                    continue
+                if re_ > g.end + end_tol_bp:
+                    continue
+            else:
+                if chain[:n] != rchain:
+                    continue
+                if n < len(chain) and re_ > chain[n][0] + flank_bp:
+                    continue
+                if rs < g.start - end_tol_bp:
+                    continue
+            seen.setdefault(g.candidate_id, set()).add(q)
+    return {cid: len(qs) for cid, qs in seen.items()}
+
+
 def _build_spliced_sequence(
     genome_fasta: str,
     start: int,
@@ -339,7 +432,7 @@ def _chain_cluster_candidates(
     genome_fasta, strand, min_novel_reads, *, wobble_bp, cassette_max_exon_bp,
     fold_monoexon_contained=False, fold_span_guard=False, clustering="read_chains",
     collect_chain_evidence=True, junction_correction=None, junction_correction_apply=None,
-    read_extent_contradicted=None,
+    read_extent_contradicted=None, collect_compatible_depths=False,
 ) -> CandidateSet:
     """NEW generation: build candidates via intron-chain clustering.
 
@@ -452,6 +545,21 @@ def _chain_cluster_candidates(
                 mono_gtf_candidates.append(gc)
     for models in gtf_models.values():
         models.sort(key=lambda g: (g.start, g.end, g.candidate_id))
+    # Compatibility support for every annotated multi-exon model (exact or
+    # strand-aware 3'-suffix reads, MAPQ>=1 only: those are the reads with an
+    # indel record). Unlike the complete-chain depths (one extra CIGAR walk),
+    # this is a per-read x per-model scan, so it is computed only when the
+    # support-gate attestation will actually read it -- the default path pays
+    # nothing.
+    if gtf_models and collect_compatible_depths:
+        depths = chain_compatible_read_depths(
+            gtf_models,
+            ((q, read_strands[q], read_junctions[q], spans[q][0], spans[q][1])
+             for q in indels_by_read),
+            indels_by_read)
+        for models in gtf_models.values():
+            for g in models:
+                g.compatible_read_depth = depths.get(g.candidate_id, 0)
 
     family_result = None
     cluster_family_ids: List[Optional[str]] = []
@@ -571,6 +679,14 @@ def _chain_cluster_candidates(
             raw_supporting_read_ids=set(member_reads),
             chrom=interval.chrom, strand=strand, start=start, end=end,
             family_id=family_id, extent_of=extent_of,
+            # a read-extent sibling inherits ITS annotation's chain-level
+            # support; the count was span-conditioned on the annotated ends,
+            # not the sibling's, so treat it as chain support only
+            compatible_read_depth=(
+                next((m.compatible_read_depth
+                      for m in gtf_models.get(tuple(chain.introns), ())
+                      if m.candidate_id == extent_of), 0)
+                if extent_of is not None else 0),
             complete_chain_junction_depths=tuple(junction_depths),
             complete_chain_weakest_indel_clean_depth=(
                 min(junction_depths) if junction_depths else 0
@@ -801,6 +917,7 @@ def discover_candidates(
     junction_correction=None,
     junction_correction_apply=None,
     read_extent_contradicted=None,
+    collect_compatible_depths: bool = False,
 ) -> CandidateSet:
     """Discover transcript candidates for a genomic interval.
 
@@ -895,6 +1012,7 @@ def discover_candidates(
             junction_correction=junction_correction,
             junction_correction_apply=junction_correction_apply,
             read_extent_contradicted=read_extent_contradicted,
+            collect_compatible_depths=collect_compatible_depths,
         )
 
     # 2. Group reads by 3' + intron chain → novel candidate groups.

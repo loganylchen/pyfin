@@ -35,12 +35,16 @@ from fin.pipeline.config import PipelineConfig
 from fin.pipeline.finalize import finalize_outputs, write_unfiltered_diagnostic
 from fin.pipeline.junction_snap import apply_junction_snap
 from fin.pipeline.selection import (
+    append_selection_audit_global,
+    audit_rows_for_candidates,
+    audit_rows_for_outcomes,
     canonical_gate_select,
     enforce_gtf_positive_after_refit,
     junction_dominance_select,
     select_global,
     select_m2_interval,
     unify_extent_pairs,
+    write_selection_audit_shard,
 )
 from fin.scoring.em_inputs import build_em_matrices
 from fin.scoring.krill_tiebreak import krill_tiebreak
@@ -190,6 +194,20 @@ class PipelineRunner:
         # before anything derived from the old ones is consulted.
         self._reset_input_snapshot()
         # Generate intervals
+        if getattr(self.config, "selection_audit", False):
+            # a stale shard or global file left by an earlier run in the same
+            # work dir would be read as this run's record, so a failure to
+            # remove it is fatal, not ignorable
+            import shutil as _shutil
+            _shard_dir = Path(self.config.work_dir) / "selection_audit"
+            _shutil.rmtree(_shard_dir, ignore_errors=True)
+            (Path(self.config.work_dir) / "selection_audit_global.tsv").unlink(
+                missing_ok=True)
+            if _shard_dir.exists():
+                raise RuntimeError(
+                    f"could not clear the stale selection audit at {_shard_dir}; "
+                    "refusing to append this run's records to another run's"
+                )
         result = generate_isolated_intervals(
             self.config.bam_path,
             gtf_path=self.config.gtf_path,
@@ -244,6 +262,10 @@ class PipelineRunner:
         # that split across intervals is unified BEFORE aggregation, so its
         # reads and soft mass are deduplicated under one identity.
         extent_redirects, extent_outcomes = unify_extent_pairs(all_quant_results)
+        if getattr(self.config, "selection_audit", False):
+            append_selection_audit_global(
+                self.config.work_dir,
+                audit_rows_for_outcomes("*", "extent_unification", extent_outcomes))
         if extent_redirects:
             logger.info("Unified %d annotated extent pair(s) across intervals",
                         len(extent_redirects))
@@ -326,6 +348,10 @@ class PipelineRunner:
         aggregated, _global_outcomes = select_global(
             self.config, aggregated, self._apply_polya5p_filter,
         )
+        if getattr(self.config, "selection_audit", False):
+            append_selection_audit_global(
+                self.config.work_dir,
+                audit_rows_for_outcomes("*", "global_cascade", _global_outcomes))
         want_evidence = bool(getattr(self.config, "candidate_evidence", False))
         want_ranking = (
             getattr(self.config, "ranking_mode", "off") == "filter"
@@ -474,6 +500,14 @@ class PipelineRunner:
                     "survivor(s) after refit (gtf_zero_mass): %s",
                     len(zero_gtf_ids), ",".join(zero_gtf_ids[:8]),
                 )
+            if getattr(self.config, "selection_audit", False):
+                append_selection_audit_global(
+                    self.config.work_dir,
+                    [("*", "junction_snap", loser, "", "", "fold", "snap_merge", winner)
+                     for loser, winner in sorted(dict(snap_redirects or {}).items())
+                     if loser not in (extent_redirects or {})]
+                    + [("*", "post_refit", cid, "", "", "drop", "gtf_zero_mass", "")
+                       for cid in zero_gtf_ids])
             write_abundance_refit_diagnostics(
                 Path(self.config.work_dir) / "abundance_refit.json",
                 diagnostics,
@@ -498,6 +532,13 @@ class PipelineRunner:
                     "survivor(s) after snap (gtf_zero_mass): %s",
                     len(zero_gtf_ids), ",".join(zero_gtf_ids[:8]),
                 )
+            if getattr(self.config, "selection_audit", False):
+                # snap merges are not returned on this path; only the removals
+                # are recorded here
+                append_selection_audit_global(
+                    self.config.work_dir,
+                    [("*", "post_snap", cid, "", "", "drop", "gtf_zero_mass", "")
+                     for cid in zero_gtf_ids])
             if (
                 getattr(self.config, "post_selection_refit", False)
                 and getattr(
@@ -514,6 +555,12 @@ class PipelineRunner:
                         "structural_identity": "not_applicable",
                     },
                 )
+        if getattr(self.config, "selection_audit", False):
+            append_selection_audit_global(
+                self.config.work_dir,
+                [("*", "final", cid, getattr(qr, "source", ""),
+                  getattr(qr, "num_assigned_reads", ""), "keep", "", "")
+                 for cid, qr in sorted(aggregated.items())])
         return finalize_outputs(
             self.config, aggregated, output_gtf, output_tsv, self._gtf_reader,
         )
@@ -698,6 +745,10 @@ class PipelineRunner:
             chain_cluster_fold_span_guard=getattr(
                 self.config, "chain_cluster_fold_span_guard", False),
             clustering=getattr(self.config, "clustering", "read_chains"),
+            # a per-read x per-model scan: computed only when the support-gate
+            # attestation will read it, so the default path pays nothing
+            collect_compatible_depths=bool(
+                getattr(self.config, "m2_support_gate_attest_reads", 0) > 0),
             junction_correction=self._make_junction_correction(interval, chrom_seq),
             junction_correction_apply=self._junction_correction_apply(),
             read_extent_contradicted=self._read_extent_contradicted(),
@@ -720,6 +771,16 @@ class PipelineRunner:
                 self.config, "denovo_graph_tss_frac", 0.4),
         )
 
+        # Selection audit (opt-in): every candidate's fate through the gates,
+        # written as one shard per interval at the end of this method. Rows are
+        # collected here; nothing below reads them.
+        audit = bool(getattr(self.config, "selection_audit", False))
+        audit_key = interval.region_string
+        audit_rows: List[tuple] = []
+        if audit:
+            audit_rows += audit_rows_for_candidates(
+                audit_key, "discovered", candidate_set.candidates)
+
         # Always-on record of the interval junction registry (raw / indel-clean
         # support per junction). Evidence only; no gate reads this file.
         if getattr(candidate_set, "junction_support", None):
@@ -738,7 +799,10 @@ class PipelineRunner:
         # GTF-passthrough and fusion candidates are exempt (annotated junctions
         # are trusted); mono candidates trivially pass.
         if getattr(self.config, "canonical_gate", False):
-            self._apply_canonical_gate(candidate_set, chrom_seq)
+            gate_outcomes = self._apply_canonical_gate(candidate_set, chrom_seq)
+            if audit:
+                audit_rows += audit_rows_for_outcomes(
+                    audit_key, "canonical_gate", gate_outcomes or [])
 
         # --- Phase 1.7: Junction-dominance gate (PRE-EM, junction-first) ---
         # Drop NOVEL multi-exon candidates with a junction that is weak
@@ -747,14 +811,23 @@ class PipelineRunner:
         # shadows before EM so they never compete for reads. gtf/fusion/mono
         # exempt. OFF (default) -> no drops (byte-identical).
         if getattr(self.config, "junction_dominance_filter", False):
-            self._apply_junction_dominance_gate(candidate_set, interval)
+            gate_outcomes = self._apply_junction_dominance_gate(candidate_set, interval)
+            if audit:
+                audit_rows += audit_rows_for_outcomes(
+                    audit_key, "junction_dominance_gate", gate_outcomes or [])
 
         if candidate_set.num_candidates == 0:
             logger.info("No candidates for interval %s", interval.region_string)
+            if audit:
+                write_selection_audit_shard(self.config.work_dir, interval, audit_rows)
             return None
 
         if not candidate_set.read_ids:
             logger.info("No reads for interval %s", interval.region_string)
+            if audit:
+                audit_rows.append((audit_key, "interval", "*", "", 0,
+                                   "drop", "no_reads_in_interval", ""))
+                write_selection_audit_shard(self.config.work_dir, interval, audit_rows)
             return None
 
         # Sort once; canonical read axis for every distance matrix.
@@ -765,6 +838,7 @@ class PipelineRunner:
         # krill-only (no f5c CLI).
         quant_mode = getattr(self.config, "quant_mode", "m2_em")
         ledger: Optional[ResponsibilityLedger] = None
+        self._audit_interval_rows = [] if audit else None
         if quant_mode == "argmax":
             results = self._quant_argmax_keep(candidate_set, read_ids, interval)
         elif quant_mode == "m1_em":
@@ -777,6 +851,13 @@ class PipelineRunner:
             results = self._quant_cluster(candidate_set, read_ids, interval)
         else:
             raise ValueError(f"unknown quant_mode: {quant_mode!r}")
+        if audit:
+            audit_rows += self._audit_interval_rows or []
+            self._audit_interval_rows = None
+            audit_rows += [(audit_key, "interval_survivor", qr.candidate_id,
+                            getattr(qr, "source", ""), getattr(qr, "num_assigned_reads", ""),
+                            "keep", "", "") for qr in (results or [])]
+            write_selection_audit_shard(self.config.work_dir, interval, audit_rows)
         if not results and ledger is None:
             return None
 
@@ -2494,6 +2575,12 @@ class PipelineRunner:
         quant_results, outcomes = select_m2_interval(
             self.config, qo, candidate_set, interval, self._observed_junctions,
         )
+        if getattr(self, "_audit_interval_rows", None) is not None:
+            key = interval.region_string
+            self._audit_interval_rows += audit_rows_for_candidates(
+                key, "entered_em", qo.cand_list)
+            self._audit_interval_rows += audit_rows_for_outcomes(
+                key, "interval_cascade", outcomes)
         if ledger is not None:
             annotate_selection_metadata(
                 ledger,
@@ -2656,7 +2743,7 @@ class PipelineRunner:
         """Stage B canonical-junction gate. Delegates to the selection layer
         (fin.pipeline.selection.canonical_gate_select); kept as a method so tests can
         call this seam directly. Mutates ``candidate_set.candidates`` in place."""
-        canonical_gate_select(self.config, candidate_set, chrom_seq)
+        return canonical_gate_select(self.config, candidate_set, chrom_seq)
 
     def _apply_junction_dominance_gate(
         self, candidate_set: CandidateSet, interval: GenomicInterval
@@ -2664,7 +2751,7 @@ class PipelineRunner:
         """Pre-EM junction-dominance gate. Delegates to the selection layer
         (fin.pipeline.selection.junction_dominance_select); kept as a method so tests can
         call this seam directly. Mutates ``candidate_set.candidates`` in place."""
-        junction_dominance_select(
+        return junction_dominance_select(
             self.config, candidate_set, interval, self._observed_junctions
         )
 

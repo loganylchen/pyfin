@@ -377,6 +377,31 @@ class PipelineConfig:
     # the data is asking for. A configurable heuristic (two read-equivalents of
     # soft mass), NOT a calibrated threshold; 0 disables the requirement.
     m2_support_gate_gtf_exempt_min_mass: float = 2.0
+    # Compatibility attestation: an ANNOTATED multi-exon candidate is exempt
+    # from the support gate when >= N distinct MAPQ>=1 reads carry its exact
+    # chain or a strand-aware 3' suffix of it with a compatible span
+    # (TranscriptCandidate.compatible_read_depth) AND the reads contradict none
+    # of its junctions (the exemption's veto: a jittered/merged junction sits
+    # beside an observed one; a suffix can attest a corrupt chain's tail, so
+    # the veto is what keeps corrupted annotation gated). Compatibility
+    # support is shared by nested isoforms and does not single any out; it is
+    # the prior that an annotated isoform whose only reads are 5'-degraded
+    # fragments is expressed. 0 disables (byte-identical). Measured on human
+    # GENCODE H9 chr1/19/21 `full`: 1595 gate-dropped annotated candidates have
+    # >= 3 such reads, 77% of them NanoCount-expressed. Opt-in.
+    m2_support_gate_attest_reads: int = 0
+    # Window of the attestation veto: an unobserved annotated junction with an
+    # observed junction within this many bp on BOTH boundaries is a jitter of
+    # it and disqualifies the candidate (m2_junction_nll.unjittered_gtf_columns).
+    # 10 = the corruption ladder's jitter magnitude; sharing ONE site is
+    # alternative splicing and does not veto.
+    m2_support_gate_attest_veto_bp: int = 10
+    # Veto shape: "jitter" = rule 1 only; "novel" = rule 1 plus the
+    # novel-junction contradiction (an observed junction in NO annotated chain
+    # of the interval sharing a splice site with an unobserved candidate
+    # junction, or lying inside a candidate exon). See
+    # m2_junction_nll.unjittered_gtf_columns for the measurements.
+    m2_support_gate_attest_veto: str = "novel"
     # Catalog completion. PyFIN's default contract is an EXPRESSED assembly:
     # an annotated transcript with no EM mass is dropped on purpose. Some
     # benchmarks instead score against a complete catalog regardless of
@@ -855,6 +880,12 @@ class PipelineConfig:
     # than mis-classifying filter drops as "missing_candidate". Path is
     # derived from output_tsv with the ".unfiltered.tsv" suffix.
     write_unfiltered_scores: bool = False
+    # Diagnostic: record every candidate's fate through the selection layer
+    # (discovered -> pre-assign gates -> interval cascade -> global cascade) as
+    # TSV shards under <work_dir>/selection_audit/ plus a global file. The GTF
+    # and scores are unaffected; the record exists so a missed transcript can be
+    # attributed to the gate that dropped it instead of inferred from absence.
+    selection_audit: bool = False
 
     # Fusion detection
     fusion_enabled: bool = False
@@ -942,6 +973,21 @@ class PipelineConfig:
             raise ValueError(
                 "catalog_mode requires --gtf: there is no catalog to "
                 "complete from without an annotation"
+            )
+        if getattr(self, "m2_support_gate_attest_veto", "novel") not in ("jitter", "novel"):
+            raise ValueError(
+                "m2_support_gate_attest_veto must be 'jitter' or 'novel' "
+                f"(got {self.m2_support_gate_attest_veto!r})"
+            )
+        if int(getattr(self, "m2_support_gate_attest_veto_bp", 10)) < 0:
+            raise ValueError(
+                "m2_support_gate_attest_veto_bp must be >= 0 "
+                f"(got {self.m2_support_gate_attest_veto_bp!r})"
+            )
+        if int(getattr(self, "m2_support_gate_attest_reads", 0)) < 0:
+            raise ValueError(
+                "m2_support_gate_attest_reads must be >= 0 "
+                f"(got {self.m2_support_gate_attest_reads!r})"
             )
         if int(getattr(self, "complete_chain_rescue_reads", 0)) < 0:
             raise ValueError(

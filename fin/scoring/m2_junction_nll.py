@@ -447,6 +447,98 @@ def uncontradicted_gtf_columns(cands, observed_jct, wobble_bp: int = 6,
     return out
 
 
+def unjittered_gtf_columns(cands, observed_junctions, window_bp: int = 10,
+                           novel_junction_veto: bool = False,
+                           annotated_junctions=None):
+    """Annotated multi-exon columns whose structure the reads do not contradict,
+    under the compatibility-attestation veto.
+
+    Two shapes of contradiction, both about the place where the candidate's
+    UNOBSERVED structure differs from what the reads show:
+
+    1. Jitter: an unobserved annotated junction has an observed junction within
+       ``window_bp`` on BOTH boundaries. That is what a jittered/wobbled
+       annotation looks like; a nearby alternative splice site shares only one
+       boundary and does not fire this rule.
+    2. (``novel_junction_veto``) Novel contradiction: an observed junction that
+       is in NO annotated chain of the interval either shares a splice site
+       (within ``window_bp``) with an unobserved candidate junction, or lies
+       entirely inside a candidate exon. The reads are showing a splice the
+       annotation does not know about, exactly where this candidate claims
+       something else -- a merged, exon-skipped or intron-retaining corruption
+       of an annotation leaves the real transcript's junction unannotated and
+       observed. An observed junction that belongs to ANOTHER annotated isoform
+       is alternative splicing, not a contradiction, and does not fire.
+
+    Measured on human H9 `full` (annotation intact): of 1075 candidates with
+    >= 3 compatible reads, rule 1 vetoes ~7%, rule 2 ~33% (94% of those are
+    NanoCount-expressed -- the cost of rule 2 is compatibility-credited
+    isoforms, the benefit is the corrupted-catalog case); the broader
+    ``uncontradicted_gtf_columns`` predicate vetoes 60%.
+
+    ``observed_junctions`` is the interval's set of (donor, acceptor) read
+    junctions under the SAME read-eligibility policy as the compatibility depth
+    (MAPQ >= 1 primary alignments: ``CandidateSet.junction_support``). The
+    interval is strand-separated, so the set is not strand-keyed. Empty or
+    missing observations -> the test cannot be made and nothing is returned
+    (fail closed).
+
+    ``annotated_junctions`` is the interval's IMMUTABLE annotation universe for
+    rule 2 and must be supplied by the caller from EVERY annotated candidate,
+    including any a previous gate has masked out of ``cands``: whether a read
+    junction is novel is a property of the supplied annotation, not of which
+    candidates happen to have survived selection so far. It defaults to the
+    annotated columns of ``cands`` for direct/testing use, which is only the
+    same thing when nothing is masked.
+    """
+    out = set()
+    obs = set(observed_junctions or ())
+    if not obs or window_bp < 0:
+        return out
+    novel = ()
+    if novel_junction_veto:
+        if annotated_junctions is None:
+            annotated_junctions = {
+                j for c in cands
+                if c is not None and getattr(c, "source", "") == "gtf"
+                for j in tuple(c.intron_chain.introns)
+            }
+        novel = [j for j in obs if j not in annotated_junctions]
+    for j, c in enumerate(cands):
+        if c is None or getattr(c, "source", "") != "gtf":
+            continue
+        introns = tuple(c.intron_chain.introns)
+        if not introns:
+            continue
+        # exons from the chain and the candidate's own span. A candidate whose
+        # span does not bracket its own chain, or whose introns are unordered
+        # or overlapping, has no well-defined geometry -- refuse the exemption
+        # under EITHER veto rather than test a nonsense shape.
+        bounds = [c.start] + [x for don, acc in introns for x in (don, acc)] + [c.end]
+        if any(bounds[i] > bounds[i + 1] for i in range(len(bounds) - 1)):
+            continue
+        contradicted = False
+        for don, acc in introns:
+            if (don, acc) in obs:
+                continue
+            if any((od, oa) != (don, acc) and abs(od - don) <= window_bp
+                   and abs(oa - acc) <= window_bp for od, oa in obs):
+                contradicted = True
+                break
+            if novel and any(abs(od - don) <= window_bp or abs(oa - acc) <= window_bp
+                             for od, oa in novel):
+                contradicted = True
+                break
+        if not contradicted and novel:
+            exons = [(bounds[i], bounds[i + 1]) for i in range(0, len(bounds), 2)]
+            if any(es <= od and oa <= ee and oa - od > window_bp
+                   for od, oa in novel for es, ee in exons):
+                contradicted = True
+        if not contradicted:
+            out.add(j)
+    return out
+
+
 def _wobble_chain(a, b, bp: int) -> bool:
     """Same intron count, every boundary within ``bp`` (the decidable contest)."""
     if len(a) != len(b) or not a:

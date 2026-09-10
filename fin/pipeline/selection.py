@@ -352,6 +352,45 @@ def select_m2_interval(
                     "support gate (no junction contradicted by the reads)",
                     interval.region_string, len(exempt & _d))
                 _d = _d - exempt
+        # Compatibility attestation (opt-in): an annotated multi-exon
+        # candidate carried by >= K distinct exact-or-3'-suffix reads, none of
+        # whose junctions is a jitter of an observed junction, is exempt. The
+        # veto is what keeps a jittered annotation gated -- a suffix can attest
+        # the tail of a chain whose upstream junction is wrong -- while an
+        # unobserved junction with no jittered neighbour is silence, not
+        # disagreement (alternative splice sites are not contradictions).
+        attest_k = int(getattr(config, "m2_support_gate_attest_reads", 0))
+        if attest_k > 0 and _d:
+            from fin.scoring.m2_junction_nll import unjittered_gtf_columns
+            # the same MAPQ>=1 read policy as the compatibility depth (the
+            # BAM-scan registry also counts MAPQ 0 primaries)
+            live = [c if j not in drop_cols else None
+                    for j, c in enumerate(cand_list)]
+            unjittered = unjittered_gtf_columns(
+                live, getattr(candidate_set, "junction_support", None) or {},
+                window_bp=int(getattr(config, "m2_support_gate_attest_veto_bp", 10)),
+                novel_junction_veto=(
+                    getattr(config, "m2_support_gate_attest_veto", "novel") == "novel"),
+                # the annotation universe is every annotated candidate of the
+                # interval, INCLUDING the ones earlier gates masked: "is this
+                # read junction novel" is a question about the supplied
+                # annotation, not about what survived selection
+                annotated_junctions={
+                    j for c in cand_list
+                    if getattr(c, "source", "") == "gtf"
+                    for j in tuple(c.intron_chain.introns)
+                })
+            attested = {
+                j for j in _d
+                if j in unjittered
+                and int(getattr(cand_list[j], "compatible_read_depth", 0)) >= attest_k
+            }
+            if attested:
+                logger.info(
+                    "m2_em interval %s: %d annotated candidate(s) exempt from the "
+                    "support gate by >= %d compatible reads",
+                    interval.region_string, len(attested), attest_k)
+                _d = _d - attested
         _d, n_rescued = apply_complete_chain_rescue(
             _d, cand_list,
             int(getattr(config, "complete_chain_rescue_reads", 0)),
@@ -1093,3 +1132,54 @@ def junction_dominance_select(
         )
         candidate_set.candidates = kept
     return outcomes
+
+
+# ---------------------------------------------------------------------------
+# Selection audit (diagnostic, opt-in via ``config.selection_audit``)
+# ---------------------------------------------------------------------------
+
+AUDIT_SHARD_DIR = "selection_audit"
+AUDIT_GLOBAL_FILE = "selection_audit_global.tsv"
+AUDIT_COLUMNS = ("interval", "stage", "candidate_id", "source", "n_reads",
+                 "action", "reason", "fold_into")
+
+
+def audit_rows_for_candidates(interval_key: str, stage: str, candidates) -> List[tuple]:
+    """One ``present`` row per candidate at a named stage (its read support as of then)."""
+    return [(interval_key, stage, c.candidate_id, getattr(c, "source", ""),
+             len(getattr(c, "supporting_read_ids", ()) or ()), "present", "", "")
+            for c in candidates]
+
+
+def audit_rows_for_outcomes(interval_key: str, stage: str,
+                            outcomes: List[SelectionOutcome]) -> List[tuple]:
+    return [(interval_key, stage, o.candidate_id, "", "", o.action, o.reason,
+             o.fold_into or "") for o in outcomes]
+
+
+def write_selection_audit_shard(work_dir, interval, rows: List[tuple]) -> None:
+    """Write one interval's audit rows atomically under ``<work_dir>/selection_audit/``."""
+    if not rows:
+        return
+    d = Path(work_dir) / AUDIT_SHARD_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    name = (f"{interval.chrom}_{interval.start}_{interval.end}_"
+            f"{interval.strand or 'u'}.tsv")
+    tmp = d / (name + ".tmp")
+    with tmp.open("w") as fh:
+        for r in rows:
+            fh.write("\t".join(str(x) for x in r) + "\n")
+    tmp.replace(d / name)
+
+
+def append_selection_audit_global(work_dir, rows: List[tuple]) -> None:
+    """Append global-scope rows (extent unification, global cascade, snap) to one file."""
+    if not rows:
+        return
+    path = Path(work_dir) / AUDIT_GLOBAL_FILE
+    new = not path.exists()
+    with path.open("a") as fh:
+        if new:
+            fh.write("\t".join(AUDIT_COLUMNS) + "\n")
+        for r in rows:
+            fh.write("\t".join(str(x) for x in r) + "\n")

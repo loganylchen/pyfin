@@ -210,6 +210,9 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
 @click.option("--snap-merge-chain-window-bp", "snap_merge_chain_window_bp", type=int, default=25, show_default=True, help="(--snap-merge-chain) Maximum 5' spread, as a group DIAMETER, among models merged as one snap collision. 25 bp is the repository's endpoint-resolution window; it is an engineering bound, not a measured equivalence threshold.")
 @click.option("--endpoint-qc-conditional/--no-endpoint-qc-conditional", "endpoint_qc_conditional", default=False, show_default=True, help="(--assignment-channels) Fit the 3' endpoint kernel PER krill polyA QC class instead of admitting a fixed whitelist. Every verdict is admitted and each class's kernel is estimated from the sample's own ends, so how far a class is trusted is a per-sample estimate: on human dRNA PASS/ADAPTER/READ_FAILED fit broad weights 0.21/0.24/0.29 (matching their measured end accuracy 82.8/79.9/74.2%) while NOREGION's narrow scale diverges (4407 bp) so the class fails the kernel availability rule and abstains. On a run where a class's ends do cluster it participates instead -- HEYA8 NOREGION is 74-75% within 20 bp and is kept. Applies to the ASSIGNMENT channel only: the discovery contradiction hook keeps the pooled kernel and the verdict-name rule, because its test is an absolute posterior threshold whose meaning is not invariant to the fitted eta. Supersedes --polya-end-accept-adapter for assignment; with both set, adapter admission still widens discovery's pooled population.")
 @click.option("--m2-support-gate-gtf-exempt/--no-m2-support-gate-gtf-exempt", "m2_support_gate_gtf_exempt", default=False, show_default=True, help="(--m2-support-gate) Exempt an ANNOTATED multi-exon candidate from the support gate when the reads CONTRADICT none of its junctions (a different observed junction sharing one of its splice sites within the wobble tolerance). The gate asks a read to DISCRIMINATE a candidate, which a 5'-degraded fragment shared by several annotated isoforms cannot do, so on a real transcriptome the gate drops genuine transcripts; the contradiction test keeps its anti-corruption purpose (a jittered/merged junction IS contradicted). Human GENCODE: the gate costs 7.7 F1 on an uncorrupted annotation and buys ~1 F1 under jitter.")
+@click.option("--m2-support-gate-attest-reads", "m2_support_gate_attest_reads", type=int, default=0, show_default=True, help="Compatibility attestation exemption from the m2 support gate: an ANNOTATED multi-exon candidate is kept when >= N distinct MAPQ>=1 reads carry its exact intron chain or a strand-aware 3' suffix of it with a compatible span (5'-degraded fragments count) AND no junction of it is contradicted by an observed read junction. Shared-suffix reads support every nested isoform they fit; this is the prior that such an annotated isoform is expressed, not evidence singling it out. 0 disables. Opt-in.")
+@click.option("--m2-support-gate-attest-veto", "m2_support_gate_attest_veto", type=click.Choice(["jitter", "novel"]), default="novel", show_default=True, help="(--m2-support-gate-attest-reads) veto shape. jitter: only an unobserved annotated junction with an observed junction within the window on BOTH boundaries disqualifies. novel: additionally, an observed junction that belongs to NO annotated chain of the interval and shares a splice site with an unobserved candidate junction, or lies inside a candidate exon, disqualifies (a merged/skipped/intron-retaining corruption leaves the real junction unannotated and observed).")
+@click.option("--m2-support-gate-attest-veto-bp", "m2_support_gate_attest_veto_bp", type=int, default=10, show_default=True, help="(--m2-support-gate-attest-reads) an unobserved annotated junction with an observed junction within this many bp on BOTH boundaries is a jitter of it and vetoes the exemption. Sharing one splice site is alternative splicing, not a contradiction.")
 @click.option("--m2-support-gate-gtf-exempt-min-mass", "m2_support_gate_gtf_exempt_min_mass", type=float, default=2.0, show_default=True, help="(--m2-support-gate-gtf-exempt) EM soft mass an exempt annotated candidate must still carry. The exemption says no read COULD have singled it out, not that no read supports it. 0 disables.")
 @click.option("--m2-support-gate-tie/--no-m2-support-gate-tie", "m2_support_gate_tie", default=True, show_default=True, help="(--m2-support-gate) Count a candidate tied for the lowest M2 NLL as M2-best (recall-safer). --no-... requires a strict unique M2 win.")
 @click.option("--containment-collapse/--no-containment-collapse", "containment_collapse", default=False, show_default=True, help="(--quant-mode m2_em only) Lever 1: after EM, fold a NOVEL candidate whose intron chain is a pure 3' SUFFIX of a longer candidate (a 5'-truncation shadow: same downstream junctions, 3' terminus within --containment-3p-tol-bp, 5' end interior, EM abundance <= parent * --containment-min-abundance-ratio) into that longer parent (reads + soft mass reassigned, shadow dropped). gtf candidates are never folded away. STRICT suffix match -> exon-skip/alt-3'-end isoforms never folded. WARNING: cannot distinguish 5'-truncation from a genuine low-abundance alt-TSS isoform -> NOT recall-safe; default OFF, enable only after real-data validation.")
@@ -263,6 +266,7 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
 @click.option("--threads", default=1, show_default=True, type=int, help="Interval-level worker processes. The pipeline is CPU-bound serial Python, so prefer many light workers; each worker is pinned to 1 BLAS/krill thread so total threads stay ~N. NOTE: the genome FASTA is loaded per worker (N× memory). 1 keeps the serial path.")
 @click.option("--gpu-workers", default=0, show_default=True, type=int, help="Of --threads workers, how many hold a GPU context (live CUDA contexts <= G; VRAM bound = G× per-context). 0 = all workers CPU-only. Forced to 0 with --no-gpu. Over-provisioned GPU workers auto-fall back to CPU on OOM.")
 @click.option("--write-unfiltered-scores/--no-write-unfiltered-scores", "write_unfiltered_scores", default=False, show_default=True, help="Diagnostic: also write scores.unfiltered.tsv (post-EM, PRE post-EM-filter snapshot of every candidate) alongside scores.tsv. Lets FN root-cause analysis split 'candidate dropped by a post-EM filter' (present in unfiltered, absent in final) from 'never reached EM / not generated' (absent in both). No effect on the emitted GTF. OFF by default.")
+@click.option("--selection-audit/--no-selection-audit", "selection_audit", default=False, show_default=True, help="Diagnostic: record every candidate's fate through the selection layer (discovered, pre-assign gates, interval cascade, global cascade) as TSV shards under <work-dir>/selection_audit/ and selection_audit_global.tsv. Lets a missed transcript be attributed to the gate that dropped it. No effect on the emitted GTF or scores. OFF by default.")
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
 @click.pass_context
 def main(
@@ -362,6 +366,9 @@ def main(
     snap_merge_chain,
     snap_merge_chain_window_bp,
     m2_support_gate_gtf_exempt_min_mass,
+    m2_support_gate_attest_reads,
+    m2_support_gate_attest_veto_bp,
+    m2_support_gate_attest_veto,
     m2_support_gate_tie,
     containment_collapse,
     containment_3p_tol_bp,
@@ -403,6 +410,7 @@ def main(
     threads,
     gpu_workers,
     write_unfiltered_scores,
+    selection_audit,
     verbose,
 ):
     """pyfin: nanopore signal-based transcriptome assembly.
@@ -612,6 +620,9 @@ def main(
         snap_merge_chain=snap_merge_chain,
         snap_merge_chain_window_bp=snap_merge_chain_window_bp,
         m2_support_gate_gtf_exempt_min_mass=m2_support_gate_gtf_exempt_min_mass,
+        m2_support_gate_attest_reads=m2_support_gate_attest_reads,
+        m2_support_gate_attest_veto_bp=m2_support_gate_attest_veto_bp,
+        m2_support_gate_attest_veto=m2_support_gate_attest_veto,
         m2_support_gate_tie=m2_support_gate_tie,
         containment_collapse=containment_collapse,
         containment_3p_tol_bp=containment_3p_tol_bp,
@@ -653,6 +664,7 @@ def main(
         threads=threads,
         gpu_workers=gpu_workers,
         write_unfiltered_scores=write_unfiltered_scores,
+        selection_audit=selection_audit,
     )
 
     try:

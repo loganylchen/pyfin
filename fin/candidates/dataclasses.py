@@ -78,6 +78,11 @@ class TranscriptCandidate:
     # () / 0 for mono, fusion, legacy paths, and disabled collection.
     complete_chain_junction_depths: Tuple[int, ...] = ()
     complete_chain_weakest_indel_clean_depth: int = 0
+    # Distinct MAPQ>=1 reads whose chain EQUALS this annotated model's chain or
+    # is a strand-aware 3' suffix of it with a compatible span (see
+    # discovery.chain_compatible_read_depths). Compatibility support shared by
+    # nested models, not discriminating evidence. 0 for novel/mono/fusion.
+    compatible_read_depth: int = 0
     # Provenance split of supporting_read_ids (which stays the union for every
     # existing consumer): reads whose RAW alignment chain produced this candidate
     # vs reads whose signal ballot proposed it (step-5a additive correction).
