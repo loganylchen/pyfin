@@ -2005,6 +2005,46 @@ class PipelineRunner:
         nuisance = fit_from_evidence(evidence)
         endpoint = nuisance.endpoint if nuisance.polya_available else None
         start = nuisance.start if want_tss else None
+        min_tss_share = float(getattr(self.config, "tss_contradiction_min_share", 0.0))
+        if start is not None and getattr(self.config, "tss_contradiction_auto_gate", False):
+            # Does THIS run's 5' end resolve annotated starts at all? Where it
+            # does, an outlier start cluster is evidence; where it does not, it
+            # is dispersion. See config for the measured bimodality.
+            from fin.analysis.sample_nuisance import annotated_tss_tracking
+
+            anno_tss = self._annotated_tss()
+            frac, n_loci = annotated_tss_tracking(
+                getattr(evidence, "starts_by_locus", None) or {},
+                anno_tss or {},
+                track_bp=int(getattr(self.config, "tss_contradiction_track_bp", 25)),
+                min_mode_share=float(getattr(
+                    self.config, "tss_contradiction_mode_share", 0.5)),
+            )
+            need = float(getattr(self.config, "tss_contradiction_track_frac", 0.89))
+            if n_loci == 0:
+                logger.info(
+                    "5' extent contradiction: no annotated TSS could be scored; "
+                    "leaving it ENABLED (unknown is not evidence)")
+            elif frac < need:
+                # NOT switched off: switched to the per-LOCUS form of the same
+                # question. A sample whose 5' ends are imprecise still has loci
+                # where the reads cluster on one start, and those are exactly
+                # the loci a truncated annotation needs. Turning the mechanism
+                # off wholesale costs 3.60 F1 on a 5'-truncated human
+                # annotation; demanding a dominant local start instead costs
+                # 0.28 and keeps most of the gain.
+                gate_share = float(getattr(
+                    self.config, "tss_contradiction_gate_share", 0.5))
+                logger.info(
+                    "5' extent contradiction RESTRICTED to dominant local "
+                    "starts (share >= %.2f): this run resolves a 5' end at only "
+                    "%.3f of %d annotated loci (need %.2f)",
+                    gate_share, frac, n_loci, need)
+                min_tss_share = max(min_tss_share, gate_share)
+            else:
+                logger.info(
+                    "5' extent contradiction enabled: this run resolves a 5' end "
+                    "at %.3f of %d annotated loci (need %.2f)", frac, n_loci, need)
         min_start_reads = int(getattr(self.config, "tss_contradiction_min_reads", 3))
         # Magnitude floors: a read end this close to the annotated end never
         # contradicts it, whatever the kernel says. See config for the
@@ -2052,7 +2092,12 @@ class PipelineRunner:
                                 # a start is evidence about a TRANSCRIPT's start
                                 # only when other molecules end there too
                                 and evidence.start_support(loc5[0], loc5[1], s_r)
-                                >= min_start_reads):
+                                >= min_start_reads
+                                # ... and be the DOMINANT start of its locus, not
+                                # one shoulder of a 5'-degradation smear
+                                and (min_tss_share <= 0.0
+                                     or evidence.start_share(loc5[0], loc5[1], s_r)
+                                     >= min_tss_share)):
                             out.setdefault("tss", []).append(rid)   # read begins upstream
             return out
 

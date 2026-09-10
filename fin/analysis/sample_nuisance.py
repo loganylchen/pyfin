@@ -370,6 +370,118 @@ class NuisanceEvidence:
         return (bisect.bisect_right(arr, pos + tol)
                 - bisect.bisect_left(arr, pos - tol))
 
+    def start_share(self, chrom: str, strand: str, pos: int,
+                    tol: int = TSS_CLUSTER_TOL_BP, window: int = 200) -> float:
+        """Share of this locus's nearby starts that sit within ``tol`` of ``pos``.
+
+        The per-LOCUS form of the question the sample-level gate asks: is this
+        position a dominant start, or one shoulder of a smear? A count alone
+        cannot tell those apart -- three reads is a cluster among five and noise
+        among fifty -- and on 5'-degraded dRNA the second case is the common one.
+        Returns 0.0 when nothing is within ``window``.
+        """
+        arr = (self.starts_by_locus or {}).get((chrom, strand))
+        if not arr:
+            return 0.0
+        lo = bisect.bisect_left(arr, pos - window)
+        hi = bisect.bisect_right(arr, pos + window)
+        n_local = hi - lo
+        if n_local <= 0:
+            return 0.0
+        return self.start_support(chrom, strand, pos, tol) / n_local
+
+
+def annotated_tss_tracking(
+    starts_by_locus: Mapping[Tuple[str, str], Sequence[int]],
+    annotated_tss: Mapping[Tuple[str, str], Sequence[int]],
+    *,
+    min_reads: int = 3,
+    window_bp: int = 200,
+    mode_tol_bp: int = 10,
+    track_bp: int = 25,
+    min_mode_share: float = 0.5,
+) -> Tuple[float, int]:
+    """Fraction of annotated loci where this run RESOLVES a 5' end.
+
+    Answers one question about a SAMPLE: does this run place 5' ends precisely
+    enough for an outlier start cluster to be evidence? For every annotated TSS
+    with at least ``min_reads`` read starts within ``window_bp``, find the
+    densest start position (the mode of a ``mode_tol_bp`` window -- the mode,
+    not the mean, so a degradation tail does not drag it). The locus counts as
+    RESOLVED when EITHER
+
+      * the mode is within ``track_bp`` of the annotated TSS, or
+      * the mode holds at least ``min_mode_share`` of the local starts.
+
+    The second clause is not slack, it removes a confound. A locus can fail to
+    track for two opposite reasons: the run's 5' ends are imprecise (which is
+    what this statistic is for), or the ANNOTATION's TSS is wrong -- and the
+    second is exactly the case the 5' extent repair exists to fix. A tight
+    cluster sitting away from the annotated TSS is evidence against the
+    annotation, not against the reads. Measured: on a SIRV library the
+    tracking-only fraction collapses 0.797 -> 0.438 when the annotation's 5'
+    ends are truncated (`c_trunc5p50`) while this combined fraction is
+    unchanged (0.957 -> 0.959), and a gate built on tracking alone therefore
+    switched the repair off exactly where it was needed (-4.88 F1 on that
+    family).
+
+    Separation on the combined statistic, over 14 measurements: human dRNA
+    0.824-0.871, SIRV4 0.918-0.971 (including two with a 5'-truncated
+    annotation), Sequin 1.000. The gap is 0.871-0.918, i.e. 0.047 wide -- thin,
+    and confounded with depth: the 0.871 human value is the lowest-depth BAM,
+    and fewer local starts raise the share. These datasets were INSPECTED while
+    designing this, so the separation is development-derived calibration, not a
+    held-out result.
+
+    The scoring unit is the annotated POSITION, deduplicated per locus, so a
+    gene whose isoforms share a TSS votes once. A locus tracks when SOME densest
+    window sits within ``track_bp`` of the annotated TSS: that is invariant under
+    coordinate reflection, while a first-maximum tie-break makes the answer
+    depend on which strand the locus lies on.
+
+    What this measures is a LOCAL GENOMIC CONCENTRATION of read starts around a
+    supplied annotated position -- not this transcript's start. Neighbouring
+    promoters, overlapping genes and alternative isoforms contribute to the same
+    window. The +-200 bp and +-10 bp scales are engineering choices, not
+    established optima.
+
+    Returns ``(fraction_resolved, n_loci_scored)``; ``(0.0, 0)`` when nothing
+    could be scored, which callers must treat as "unknown", not as "unresolved".
+    """
+    if not starts_by_locus or not annotated_tss:
+        return 0.0, 0
+    tracked = scored = 0
+    for key, positions in annotated_tss.items():
+        arr = starts_by_locus.get(key)
+        if not arr:
+            continue
+        # one vote per POSITION, not per transcript: annotated TSSs are shared
+        # by the isoforms of a gene, so counting them per transcript would give
+        # annotation-rich loci extra weight in the fraction
+        for t in sorted(set(positions)):
+            lo = bisect.bisect_left(arr, t - window_bp)
+            hi = bisect.bisect_right(arr, t + window_bp)
+            local = arr[lo:hi]
+            if len(local) < min_reads:
+                continue
+            scored += 1
+            counts = [(bisect.bisect_right(local, x + mode_tol_bp)
+                       - bisect.bisect_left(local, x - mode_tol_bp))
+                      for x in local]
+            best_n = max(counts)
+            # Ties must not be broken by genomic direction. Taking the FIRST
+            # maximum makes the answer depend on which strand the locus lies on
+            # -- the same geometry can score 0 on '+' and 1 on its mirror image
+            # -- and taking the midpoint of all tied maxima lands between two
+            # distant clusters, on nothing. The question is whether SOME densest
+            # window sits on the annotated TSS, and that is invariant under
+            # reflection because the positions and `t` reflect together.
+            tied = [x for x, n in zip(local, counts) if n == best_n]
+            if (any(abs(x - t) <= track_bp for x in tied)
+                    or best_n / len(local) >= min_mode_share):
+                tracked += 1
+    return (tracked / scored if scored else 0.0), scored
+
 
 def _nearest_signed(sorted_pos: Sequence[int], x: int) -> int:
     """Signed genomic distance from the nearest position in ``sorted_pos``."""

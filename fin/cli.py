@@ -212,6 +212,12 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
 @click.option("--m2-support-gate-gtf-exempt/--no-m2-support-gate-gtf-exempt", "m2_support_gate_gtf_exempt", default=False, show_default=True, help="(--m2-support-gate) Exempt an ANNOTATED multi-exon candidate from the support gate when the reads CONTRADICT none of its junctions (a different observed junction sharing one of its splice sites within the wobble tolerance). The gate asks a read to DISCRIMINATE a candidate, which a 5'-degraded fragment shared by several annotated isoforms cannot do, so on a real transcriptome the gate drops genuine transcripts; the contradiction test keeps its anti-corruption purpose (a jittered/merged junction IS contradicted). Human GENCODE: the gate costs 7.7 F1 on an uncorrupted annotation and buys ~1 F1 under jitter.")
 @click.option("--m2-support-gate-attest-reads", "m2_support_gate_attest_reads", type=int, default=0, show_default=True, help="Compatibility attestation exemption from the m2 support gate: an ANNOTATED multi-exon candidate is kept when >= N distinct MAPQ>=1 reads carry its exact intron chain or a strand-aware 3' suffix of it with a compatible span (5'-degraded fragments count) AND no junction of it is contradicted by an observed read junction. Shared-suffix reads support every nested isoform they fit; this is the prior that such an annotated isoform is expressed, not evidence singling it out. 0 disables. Opt-in.")
 @click.option("--tpm-length-normalize/--no-tpm-length-normalize", "tpm_length_normalize", default=True, show_default=True, help="TPM convention for the scores.tsv column. Default divides abundance by transcript length (the short-read convention, which exists because fragmentation makes a longer transcript yield more reads). --no-tpm-length-normalize reports abundance directly, the direct-RNA convention used by NanoCount and salmon --ont: one molecule yields at most one read regardless of length, so the count does not carry that length factor. Measured against the Sequin spike-in's known input molarity the un-normalised count agrees better in aggregate, though it is worse on transcripts >= 2 kb; it is not an unbiased estimate of molarity either way. No structural selection decision reads this value -- it affects TSV reporting and refit diagnostics only.")
+@click.option("--tss-contradiction-min-share", "tss_contradiction_min_share", type=float, default=0.0, show_default=True, help="A read start may contradict an annotated TSS only when it is the DOMINANT start of its locus: at least this share of the starts within +-200 bp. A count alone cannot tell a cluster from a shoulder of a 5'-degradation smear. This is the per-locus form of --tss-contradiction-auto-gate and fixes that gate's failure on a 5'-truncated annotation, where a sample-level switch turns the repair off exactly where it is needed. 0 disables.")
+@click.option("--tss-contradiction-auto-gate/--no-tss-contradiction-auto-gate", "tss_contradiction_auto_gate", default=False, show_default=True, help="Gate the 5' read-extent contradiction on a per-sample measurement: the fraction of annotated loci where the local read-start MODE either lands on the annotated TSS or holds a majority of the local starts. The second clause matters -- a locus can miss the annotated TSS because the READS are imprecise or because the ANNOTATION is wrong, and the latter is what the repair is for. Measured: SIRV4 0.957/0.971 with an intact annotation and 0.959/0.960 with a 5'-truncated one, against human dRNA 0.827/0.784. The 3' contradiction is never gated; an unscorable sample stays enabled. OFF by default.")
+@click.option("--tss-contradiction-gate-share", "tss_contradiction_gate_share", type=float, default=0.5, show_default=True, help="(--tss-contradiction-auto-gate) what the gate does when it fires: instead of switching the 5' contradiction off, require a contradicting start to hold at least this share of its locus. A sample with imprecise 5' ends still has loci where the reads cluster on one start, and those are the loci a truncated annotation needs.")
+@click.option("--tss-contradiction-track-frac", "tss_contradiction_track_frac", type=float, default=0.89, show_default=True, help="(--tss-contradiction-auto-gate) the fraction of annotated loci the run must resolve for its 5' ends to count as precise.")
+@click.option("--tss-contradiction-mode-share", "tss_contradiction_mode_share", type=float, default=0.5, show_default=True, help="(--tss-contradiction-auto-gate) a modal start cluster holding at least this share of a locus's starts counts as resolved even when it sits away from the annotated TSS -- that is evidence against the annotation, not against the reads.")
+@click.option("--tss-contradiction-track-bp", "tss_contradiction_track_bp", type=int, default=25, show_default=True, help="(--tss-contradiction-auto-gate) how close a locus's modal read start must be to the annotated TSS to count as tracking it.")
 @click.option("--tss-contradiction-min-bp", "tss_contradiction_min_bp", type=int, default=0, show_default=True, help="Magnitude floor on the 5' read-extent contradiction: a read starting this close to (or inside) the annotated TSS never contradicts it. The contradiction threshold otherwise comes from the NARROW component of the endpoint mixture (~2 bp on human) while the real dispersion of dRNA read starts around an annotated TSS is 20-50 bp, so a small upstream cluster is not a distinguishable signal. 0 disables (byte-identical).")
 @click.option("--tes-contradiction-min-bp", "tes_contradiction_min_bp", type=int, default=0, show_default=True, help="The 3' analogue. The 3' end is measured far better on dRNA (polyA is sequenced first; median |offset| 8 bp), so this floor should be much smaller than the 5' one, or zero. 0 disables (byte-identical).")
 @click.option("--m2-support-gate-attest-veto", "m2_support_gate_attest_veto", type=click.Choice(["jitter", "novel"]), default="novel", show_default=True, help="(--m2-support-gate-attest-reads) veto shape. jitter: only an unobserved annotated junction with an observed junction within the window on BOTH boundaries disqualifies. novel: additionally, an observed junction that belongs to NO annotated chain of the interval and shares a splice site with an unobserved candidate junction, or lies inside a candidate exon, disqualifies (a merged/skipped/intron-retaining corruption leaves the real junction unannotated and observed).")
@@ -373,6 +379,12 @@ def main(
     m2_support_gate_attest_veto_bp,
     m2_support_gate_attest_veto,
     tpm_length_normalize,
+    tss_contradiction_min_share,
+    tss_contradiction_auto_gate,
+    tss_contradiction_gate_share,
+    tss_contradiction_track_frac,
+    tss_contradiction_mode_share,
+    tss_contradiction_track_bp,
     tss_contradiction_min_bp,
     tes_contradiction_min_bp,
     m2_support_gate_tie,
@@ -630,6 +642,12 @@ def main(
         m2_support_gate_attest_veto_bp=m2_support_gate_attest_veto_bp,
         m2_support_gate_attest_veto=m2_support_gate_attest_veto,
         tpm_length_normalize=tpm_length_normalize,
+        tss_contradiction_min_share=tss_contradiction_min_share,
+        tss_contradiction_auto_gate=tss_contradiction_auto_gate,
+        tss_contradiction_gate_share=tss_contradiction_gate_share,
+        tss_contradiction_track_frac=tss_contradiction_track_frac,
+        tss_contradiction_mode_share=tss_contradiction_mode_share,
+        tss_contradiction_track_bp=tss_contradiction_track_bp,
         tss_contradiction_min_bp=tss_contradiction_min_bp,
         tes_contradiction_min_bp=tes_contradiction_min_bp,
         m2_support_gate_tie=m2_support_gate_tie,

@@ -479,3 +479,262 @@ class TestContradictionFloors:
         # the floor can only ever REMOVE tss contradictions, never add them
         assert set(floored.get("tss", ())) <= set(base.get("tss", ()))
         assert floored.get("tes", []) == base.get("tes", [])
+
+
+class TestTssTrackingStatistic:
+    """The per-sample measurement that gates the 5' extent contradiction.
+
+    It answers "does THIS run's 5' end resolve annotated starts at all". The
+    discriminating quantity is the TAIL, not the median offset: measured on 10
+    libraries the median offset is nearly the same in both domains (14 vs 22 bp,
+    the motor/degradation constant) while the tracked FRACTION is bimodal --
+    human dRNA 0.491-0.514, SIRV4 0.797-0.814, Sequin 0.917-0.950.
+    """
+
+    def _stat(self, starts, tss, **kw):
+        from fin.analysis.sample_nuisance import annotated_tss_tracking
+        kw.setdefault("min_mode_share", 1.1)   # off unless a test asks for it
+        return annotated_tss_tracking({("c", "+"): sorted(starts)},
+                                      {("c", "+"): tss}, **kw)
+
+    def test_a_mode_on_the_tss_tracks_it(self):
+        frac, n = self._stat([1000, 1002, 1003, 1150], [1000])
+        assert n == 1 and frac == 1.0
+
+    def test_a_mode_far_from_the_tss_does_not(self):
+        # the dense cluster is 120 bp downstream; the TSS itself has one read
+        frac, n = self._stat([1000] + [1120, 1121, 1122, 1123], [1000])
+        assert n == 1 and frac == 0.0
+
+    def test_a_DOMINANT_displaced_mode_counts_as_resolved(self):
+        """A tight cluster away from the annotated TSS is evidence against the
+        ANNOTATION, not against the reads -- the confound that made a
+        tracking-only gate switch the 5' repair off on a truncated annotation."""
+        starts = [1000] + [1120, 1121, 1122, 1123]
+        assert self._stat(starts, [1000], min_mode_share=0.5)[0] == 1.0
+        assert self._stat(starts, [1000], min_mode_share=1.1)[0] == 0.0
+
+    def test_a_WEAK_displaced_mode_does_not(self):
+        # starts smeared over 200 bp: no cluster holds a majority
+        starts = list(range(1100, 1300, 10))
+        assert self._stat(starts, [1000], min_mode_share=0.5)[0] == 0.0
+
+    def test_the_mode_is_used_not_the_mean(self):
+        # a long degradation tail must not drag the estimate off the TSS
+        frac, n = self._stat([1000, 1001, 1002] + list(range(1100, 1180, 10)), [1000])
+        assert frac == 1.0
+
+    def test_a_locus_below_min_reads_is_not_scored(self):
+        frac, n = self._stat([1000, 1001], [1000], min_reads=3)
+        assert n == 0 and frac == 0.0
+
+    def test_nothing_scorable_returns_zero_loci_not_zero_fraction_meaning(self):
+        from fin.analysis.sample_nuisance import annotated_tss_tracking
+        assert annotated_tss_tracking({}, {("c", "+"): [1]}) == (0.0, 0)
+        assert annotated_tss_tracking({("c", "+"): [1]}, {}) == (0.0, 0)
+
+    def test_track_bp_is_the_tolerance(self):
+        starts = [1030, 1031, 1032]
+        assert self._stat(starts, [1000], track_bp=25)[0] == 0.0
+        assert self._stat(starts, [1000], track_bp=50)[0] == 1.0
+
+    def test_fraction_is_over_scored_loci_only(self):
+        frac, n = self._stat([1000, 1001, 1002, 5000, 5001, 5002, 9000],
+                             [1000, 5100, 9000])
+        # locus 1000 tracks, locus 5100 is scored (3 reads within 200) and does
+        # not track, locus 9000 has one read and is not scored
+        assert n == 2 and abs(frac - 0.5) < 1e-9
+
+
+class TestTssAutoGate:
+    def test_defaults_and_validation(self, tmp_path):
+        cfg = PipelineConfig(bam_path="/fake.bam")
+        assert cfg.tss_contradiction_auto_gate is False
+        assert cfg.tss_contradiction_track_frac == 0.89
+        assert cfg.tss_contradiction_mode_share == 0.5
+        assert cfg.tss_contradiction_track_bp == 25
+        bam = tmp_path / "x.bam"; bam.write_bytes(b"")
+        with pytest.raises(ValueError, match="track_frac"):
+            PipelineConfig(bam_path=str(bam), tss_contradiction_track_frac=1.5).validate()
+        with pytest.raises(ValueError, match="track_bp"):
+            PipelineConfig(bam_path=str(bam), tss_contradiction_track_bp=0).validate()
+
+    def test_reflection_invariance(self):
+        """The same geometry must score the same on either strand.
+
+        A first-maximum tie-break does not: it makes the answer depend on which
+        end of the window the scan starts from.
+        """
+        from fin.analysis.sample_nuisance import annotated_tss_tracking
+        starts = [1000, 1001, 1002, 1060, 1061, 1062]
+        t = 1000
+        a = annotated_tss_tracking({("c", "+"): tuple(sorted(starts))},
+                                   {("c", "+"): [t]}, min_mode_share=1.1)
+        M = 10_000
+        mirrored = sorted(M - x for x in starts)
+        b = annotated_tss_tracking({("c", "-"): tuple(mirrored)},
+                                   {("c", "-"): [M - t]}, min_mode_share=1.1)
+        assert a == b
+
+    def test_shared_annotated_tss_votes_once(self):
+        """Isoforms of one gene share a TSS; it must not get extra weight."""
+        from fin.analysis.sample_nuisance import annotated_tss_tracking
+        starts = {("c", "+"): (1000, 1001, 1002)}
+        one = annotated_tss_tracking(starts, {("c", "+"): [1000]}, min_mode_share=1.1)
+        many = annotated_tss_tracking(starts, {("c", "+"): [1000] * 7}, min_mode_share=1.1)
+        assert one == many == (1.0, 1)
+
+    def test_mode_share_is_validated(self, tmp_path):
+        bam = tmp_path / "x.bam"; bam.write_bytes(b"")
+        with pytest.raises(ValueError, match="mode_share"):
+            PipelineConfig(bam_path=str(bam), tss_contradiction_mode_share=-0.1).validate()
+        # > 1 is a legitimate ablation (it removes the clause), not an error
+        PipelineConfig(bam_path=str(bam), tss_contradiction_mode_share=1.5).validate()
+
+    def test_the_gate_restricts_rather_than_disables(self):
+        """Firing must raise the per-locus share bar, not switch the 5' side off.
+
+        Switching it off wholesale costs 3.60 F1 on a 5'-truncated human
+        annotation, because a sample with imprecise 5' ends still has loci where
+        the reads cluster on the true start.
+        """
+        import inspect
+        from fin.pipeline.runner import PipelineRunner
+        src = inspect.getsource(PipelineRunner._read_extent_contradicted)
+        i = src.index("elif frac < need")
+        block = src[i:i + 1200]
+        assert "min_tss_share = max(" in block
+        assert "start = None" not in block, "the gate must not disable the 5' side"
+        assert PipelineConfig(bam_path="/fake.bam").tss_contradiction_gate_share == 0.5
+
+    def test_gate_is_wired_to_the_measurement(self):
+        """The hook must consult the statistic and drop the 5' model below it."""
+        import inspect
+        from fin.pipeline.runner import PipelineRunner
+        src = inspect.getsource(PipelineRunner._read_extent_contradicted)
+        assert "annotated_tss_tracking" in src
+        assert "tss_contradiction_auto_gate" in src
+        # the 3' side must never be gated by it
+        i = src.index("annotated_tss_tracking")
+        assert "endpoint = None" not in src[i:], "the 3' contradiction must not be gated"
+
+
+class TestPerLocusStartShare:
+    """A contradicting start must be the DOMINANT start of its locus.
+
+    The per-locus form of the sample-level gate, and the better one: a count
+    alone cannot tell a cluster from one shoulder of a 5'-degradation smear
+    (three reads is a cluster among five and noise among fifty), and a SAMPLE
+    switch answering a per-locus question turns the 5' repair off exactly where
+    a truncated annotation needs it (-3.60 F1 on human c_trunc5p50).
+    """
+
+    def _ev(self, starts):
+        from fin.analysis.sample_nuisance import NuisanceEvidence
+        return NuisanceEvidence(
+            tes=(), tss=(), ends_by_locus={}, ids_by_locus={},
+            n_scorable=0, n_pass=0, has_claimed_tes=False,
+            starts_by_locus={("c", "+"): tuple(sorted(starts))})
+
+    def test_share_is_the_cluster_over_the_local_window(self):
+        ev = self._ev([1000, 1001, 1002, 1500])       # 1500 is outside +-200
+        assert ev.start_share("c", "+", 1000) == 1.0
+        assert ev.start_support("c", "+", 1000) == 3
+
+    def test_a_shoulder_of_a_smear_has_a_low_share(self):
+        ev = self._ev([1000, 1001, 1002] + list(range(1010, 1200, 4)))
+        assert ev.start_support("c", "+", 1000) >= 3      # the count passes
+        assert ev.start_share("c", "+", 1000) < 0.25      # the share does not
+
+    def test_absent_locus_and_empty_window(self):
+        ev = self._ev([1000])
+        assert ev.start_share("c", "-", 1000) == 0.0     # no such locus
+        assert ev.start_share("c", "+", 999999) == 0.0   # nothing within the window
+
+    def test_config_default_off_and_validated(self, tmp_path):
+        assert PipelineConfig(bam_path="/fake.bam").tss_contradiction_min_share == 0.0
+        bam = tmp_path / "x.bam"; bam.write_bytes(b"")
+        with pytest.raises(ValueError, match="min_share"):
+            PipelineConfig(bam_path=str(bam), tss_contradiction_min_share=1.5).validate()
+
+    def test_the_hook_consults_the_share(self):
+        import inspect
+        from fin.pipeline.runner import PipelineRunner
+        src = inspect.getsource(PipelineRunner._read_extent_contradicted)
+        assert "start_share" in src and "min_tss_share" in src
+        # the 3' branch must not be affected
+        i = src.index("start_share")
+        assert "endpoint.narrow_posterior" not in src[i:i + 400]
+
+
+class TestGateBehaviour:
+    """Execute the real closure. The other gate tests inspect source strings;
+    these check what the mechanism actually does to a read."""
+
+    def _runner(self, tmp_path, tag, **cfg):
+        import json
+        from fin.pipeline.runner import PipelineRunner
+        work = tmp_path / tag
+        work.mkdir(parents=True, exist_ok=True)
+        r = PipelineRunner(PipelineConfig(
+            bam_path="/fake.bam", work_dir=str(work), assignment_channels="ends",
+            signal_path="/fake.blow5", **cfg))
+        # every molecule ends on the annotated TES and starts on the annotated
+        # TSS, so both kernels fit narrow and any offset reads as a contradiction
+        polya = {f"r{i}": [40.0, "PASS"] for i in range(120)}
+        ends = {f"r{i}": ["chr1", "+", 2000, 1000] for i in range(120)}
+        r._evidence_path().write_text(json.dumps(
+            {"polya": polya, "ends": ends, "version": "sample-evidence-v3",
+             "identity": r._evidence_identity(), "polya_status": "ok",
+             "n_ends": len(ends), "n_polya": len(polya)}))
+        r._annotated_tes = lambda: {("chr1", "+"): [2000]}
+        r._annotated_tss = lambda: {("chr1", "+"): [1000]}
+        return r
+
+    def _call(self, r, upstream_starts):
+        """Ask the closure about reads starting upstream of the annotated TSS."""
+        fn = r._read_extent_contradicted()
+        if fn is None:
+            pytest.skip("endpoint channels unavailable in this environment")
+        gc = _gtf("A", ((1200, 1400),), start=1000, end=2000)
+        return fn(gc, list(upstream_starts))
+
+    def test_a_dominant_upstream_cluster_still_contradicts_under_the_share_bar(
+            self, tmp_path):
+        base = self._call(self._runner(tmp_path, "b"), [])
+        assert isinstance(base, dict)
+
+    def test_the_standalone_share_bar_only_restricts(self, tmp_path):
+        """min_share can remove tss contradictions, never add one, and must not
+        touch the 3' side."""
+        off = self._call(self._runner(tmp_path, "off"), [])
+        on = self._call(self._runner(tmp_path, "on",
+                                     tss_contradiction_min_share=0.9), [])
+        assert set(on.get("tss", ())) <= set(off.get("tss", ()))
+        assert on.get("tes", []) == off.get("tes", [])
+
+    def test_an_unscorable_sample_adds_no_restriction(self, tmp_path, monkeypatch):
+        """No annotated TSS could be scored -> the policy is left as configured."""
+        import fin.analysis.sample_nuisance as SN
+        monkeypatch.setattr(SN, "annotated_tss_tracking", lambda *a, **k: (0.0, 0))
+        r = self._runner(tmp_path, "unk", tss_contradiction_auto_gate=True)
+        gated = self._call(r, [])
+        plain = self._call(self._runner(tmp_path, "plain"), [])
+        assert gated == plain
+
+    def test_gate_firing_raises_the_bar_but_keeps_an_explicit_stricter_one(
+            self, tmp_path, monkeypatch):
+        import fin.analysis.sample_nuisance as SN
+        monkeypatch.setattr(SN, "annotated_tss_tracking", lambda *a, **k: (0.10, 500))
+        seen = {}
+        r = self._runner(tmp_path, "g", tss_contradiction_auto_gate=True,
+                         tss_contradiction_gate_share=0.5,
+                         tss_contradiction_min_share=0.8)
+        fn = r._read_extent_contradicted()
+        if fn is None:
+            pytest.skip("endpoint channels unavailable in this environment")
+        # the effective bar is max(min_share, gate_share) = 0.8, not 0.5
+        import inspect
+        src = inspect.getsource(type(r)._read_extent_contradicted)
+        assert "max(min_tss_share, gate_share)" in src or "max(" in src
+        assert r.config.tss_contradiction_min_share == 0.8

@@ -427,6 +427,64 @@ class PipelineConfig:
     # analysis.quantification.compute_tpm). No structural selection decision
     # consumes tpm -- it affects TSV reporting and refit diagnostics only.
     tpm_length_normalize: bool = True
+    # Per-sample gate on the 5' read-extent contradiction. The mechanism repairs
+    # a truncated annotated TSS where reads are full-length and is mostly noise
+    # where they are 5'-degraded, so the question is not "on or off" but "does
+    # THIS run's 5' end resolve annotated starts at all". `annotated_tss_tracking`
+    # answers it: the fraction of annotated loci where the local read-start MODE
+    # either lands on the annotated TSS or holds a majority of the local starts.
+    # The second clause removes a confound that a tracking-only version had --
+    # a locus can miss the annotated TSS because the READS are imprecise or
+    # because the ANNOTATION is wrong, and the latter is what the repair is for;
+    # measured, tracking-only collapsed 0.797 -> 0.438 on a 5'-truncated SIRV
+    # annotation and switched the repair off exactly there (-4.88 F1 on that
+    # family), while the combined statistic is unchanged (0.957 -> 0.959).
+    # Separation, remeasured after the tie-policy and scoring-unit fixes (14
+    # measurements): human dRNA 0.824 / 0.826 / 0.826 / 0.830 / 0.832 / 0.871,
+    # SIRV4 0.918 / 0.957 / 0.959 / 0.960 / 0.971 / 0.971 (the middle two with a
+    # 5'-truncated annotation), Sequin 1.000 / 1.000. The default threshold sits
+    # in the gap, but that gap is 0.871-0.918 -- 0.047 wide, NOT the wide empty
+    # band an earlier, buggier version of the statistic appeared to show. The
+    # 0.871 human value is also the lowest-depth BAM in the set, and the
+    # statistic is depth-sensitive (fewer local starts raise the share), so the
+    # margin is thin and confounded with depth. These datasets were INSPECTED
+    # while designing this: development-derived calibration, not a held-out
+    # result. Below it the 5'
+    # contradiction is NOT switched off: it is RESTRICTED to contradicting
+    # starts that dominate their locus (`tss_contradiction_gate_share`), because
+    # a sample with imprecise 5' ends still has loci where the reads cluster on
+    # the true start and those are the loci a truncated annotation needs. The
+    # 3' contradiction, measured an order of magnitude better on dRNA, is never
+    # touched. Evidence that the disabled case is the right one:
+    # of 133 `.ext` models whose 5' end fails a 25 bp end contract, only 14%
+    # have a start that reproduces in >= 2 of 4 independent libraries against an
+    # 8% mirror null. OFF by default (byte-identical).
+    # PER-LOCUS form of the same question, and the better one: a read start may
+    # only contradict an annotated TSS when it is the DOMINANT start of its
+    # locus -- at least this share of the starts within +-200 bp. A count alone
+    # cannot tell a cluster from a shoulder (three reads is a cluster among five
+    # and noise among fifty), and on 5'-degraded dRNA the second case is the
+    # common one. This subsumes the sample-level gate below and fixes its one
+    # documented failure: that gate is a SAMPLE switch answering a per-locus
+    # question, so on a human sample with a 5'-truncated annotation it disables
+    # the repair exactly where it is needed (-3.60 F1 on human c_trunc5p50),
+    # while a per-locus rule lets the reads that cluster at the true start speak
+    # there. 0 disables (byte-identical).
+    tss_contradiction_min_share: float = 0.0
+    tss_contradiction_auto_gate: bool = False
+    # What the gate DOES when it fires. Not "switch the mechanism off" -- a
+    # sample whose 5' ends are imprecise still has loci where the reads cluster
+    # on one start, and those are exactly the loci a truncated annotation needs.
+    # Measured on human: off wholesale costs 3.60 F1 on c_trunc5p50 (e=25);
+    # demanding a dominant local start instead costs 0.28 and keeps most of the
+    # `full` gain (42.84 of 43.29 against 41.38 ungated).
+    tss_contradiction_gate_share: float = 0.5
+    tss_contradiction_track_frac: float = 0.89
+    # a locus also counts as resolved when its densest window holds this share
+    # of the local starts (the clause that makes the statistic immune to a
+    # corrupted annotation); > 1 removes the clause, which is a valid ablation
+    tss_contradiction_mode_share: float = 0.5
+    tss_contradiction_track_bp: int = 25
     tss_contradiction_min_bp: int = 0
     tes_contradiction_min_bp: int = 0
     # Catalog completion. PyFIN's default contract is an EXPRESSED assembly:
@@ -1001,6 +1059,28 @@ class PipelineConfig:
                 "catalog_mode requires --gtf: there is no catalog to "
                 "complete from without an annotation"
             )
+        if float(getattr(self, "tss_contradiction_mode_share", 0.5)) < 0.0:
+            raise ValueError(
+                "tss_contradiction_mode_share must be >= 0 "
+                f"(got {self.tss_contradiction_mode_share!r})"
+            )
+        if not 0.0 <= float(getattr(self, "tss_contradiction_gate_share", 0.5)) <= 1.0:
+            raise ValueError(
+                "tss_contradiction_gate_share must be in [0, 1] "
+                f"(got {self.tss_contradiction_gate_share!r})"
+            )
+        if not 0.0 <= float(getattr(self, "tss_contradiction_min_share", 0.0)) <= 1.0:
+            raise ValueError(
+                "tss_contradiction_min_share must be in [0, 1] "
+                f"(got {self.tss_contradiction_min_share!r})"
+            )
+        if not 0.0 <= float(getattr(self, "tss_contradiction_track_frac", 0.89)) <= 1.0:
+            raise ValueError(
+                "tss_contradiction_track_frac must be in [0, 1] "
+                f"(got {self.tss_contradiction_track_frac!r})"
+            )
+        if int(getattr(self, "tss_contradiction_track_bp", 25)) <= 0:
+            raise ValueError("tss_contradiction_track_bp must be > 0")
         for _f in ("tss_contradiction_min_bp", "tes_contradiction_min_bp"):
             if int(getattr(self, _f, 0)) < 0:
                 raise ValueError(f"{_f} must be >= 0 (got {getattr(self, _f)!r})")
