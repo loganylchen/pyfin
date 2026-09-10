@@ -211,15 +211,29 @@ SIRV4 grid:
 dSn +0.00, **dPr +0.32**, dF1 +0.08, 95% CI [−0.04, +0.21]; 60 cells up, 27
 down, 69 unchanged.
 
-Not significant — the interval includes zero. But the direction is consistent
-in a way that a null effect usually is not: every corruption family has a
-non-negative mean, recall does not move at all, and the gain is entirely
-precision. That is the profile of a real but small effect, and it is the
-opposite sign from this project's earlier raw-DTW finding that dividing by
-length *worsens* things (that was a different scorer on a different task —
-whole-template DTW, not a tight in-tie contrast — so the two are not in
-conflict). A HEYA8 replication is running; nothing should change on the
-strength of one grid and a CI that includes zero.
+Not significant — the interval includes zero. Reading that SIRV4 result on its
+own, I argued the direction was consistent in a way a null effect usually is
+not: every corruption family non-negative, recall exactly flat, the whole move
+in precision. **The HEYA8 replication says that reading was wrong.**
+
+| grid | dSn | dPr | dF1 | 95% CI | up / down / same |
+| --- | ---: | ---: | ---: | --- | --- |
+| SIRV4 (156) | +0.00 | +0.32 | +0.08 | [−0.04, +0.21] | 60 / 27 / 69 |
+| HEYA8 (130) | −0.03 | +0.04 | **−0.02** | [−0.26, +0.23] | 46 / 50 / 34 |
+
+On HEYA8 the effect is not merely insignificant, it is absent: the cell split is
+even, and the family means flip sign rather than all leaning one way. So the
+honest conclusion is that **per-candidate-base normalisation is a null on the
+production path**, and the apparent consistency on SIRV4 was grid-specific
+structure, not a small real effect. Production keeps the undivided sum. This is
+also a reminder of why the one-grid direction argument is not evidence: it read
+exactly like a real small effect and it did not survive contact with a second
+mix.
+
+It does not contradict this project's earlier raw-DTW result that dividing by
+length *worsens* things — that was whole-template DTW, a different scorer on a
+different task, not a tight in-tie contrast. The two simply do not speak to each
+other, and neither supports changing the metric.
 
 ## Decision, fixed in advance
 
