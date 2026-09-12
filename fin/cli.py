@@ -119,11 +119,12 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
     show_default=True,
     help="Signal file format.",
 )
-@click.option("--fusion", "fusion_enabled", is_flag=True, default=False, help="Enable fusion detection.")
-@click.option("--min-support", default=2, show_default=True, type=int, help="Minimum read support for fusion breakpoint (only with --fusion).")
-@click.option("--max-dist", default=500, show_default=True, type=int, help="Maximum distance (bp) for breakpoint clustering (only with --fusion).")
-@click.option("--flank-bp", default=500, show_default=True, type=int, help="Flank size (bp) around fusion breakpoint (only with --fusion).")
-@click.option("--fusion-max-internal-gap-bp", default=30, show_default=True, type=int, help="Adapter-bridged chimera guard (only with --fusion): drop a chimeric read whose two arms are separated by an internal stretch of read sequence mapping to NEITHER arm of >= this many bp (typically a nanopore ONT internal adapter — a false fusion, cf. DeepChopper). 0 disables.")
+@click.option("--fusion", "fusion_enabled", is_flag=True, default=False, help="Run independent multi-gene fusion analysis after unchanged assembly; outputs in OUTPUT_DIR/fusion/.")
+@click.option("--min-support", default=2, show_default=True, type=click.IntRange(min=1), help="Minimum distinct reads spanning the complete fusion chain (only with --fusion).")
+@click.option("--max-dist", default=6, show_default=True, type=click.IntRange(min=0), help="Maximum cluster diameter in breakpoint coordinates, not transitive linkage (only with --fusion).")
+@click.option("--flank-bp", default=35, show_default=True, type=click.IntRange(min=12, max=100), help="Fixed-query junction comparison flank (only with --fusion).")
+@click.option("--fusion-junction-tolerance", default=3, show_default=True, type=click.IntRange(min=0, max=20), help="Maximum proposed fusion/internal splice boundary correction in bp; requires read sequence evidence.")
+@click.option("--fusion-max-internal-gap-bp", default=30, show_default=True, type=click.IntRange(min=0), help="Reject fusion paths with an internal unmapped read gap >= this many bp; 0 disables this nomination guard, not sequence validation. A gap alone does not identify an adapter.")
 @click.option("--max-reads-per-interval-for-dtw", "max_reads_for_dtw", default=2000, show_default=True, type=int, help="Cap reads per interval for read-to-read DTW (subsample beyond this).")
 @click.option("--min-novel-reads", default=1, show_default=True, type=int, help="Drop novel candidates with fewer supporting reads (after collapsing).")
 @click.option("--min-abundance", default=3.0, show_default=True, type=float, help="NOVEL soft-abundance floor (GTF has --min-gtf-abundance; fusion exempt). Named profiles resolve SIRV=3 inclusive and real-dRNA=1 strict; explicit values override either profile.")
@@ -295,6 +296,7 @@ def main(
     min_support,
     max_dist,
     flank_bp,
+    fusion_junction_tolerance,
     fusion_max_internal_gap_bp,
     max_reads_for_dtw,
     min_novel_reads,
@@ -585,14 +587,10 @@ def main(
         work_dir=output_dir,
         output_gtf=os.path.join(output_dir, "assembly.gtf"),
         output_tsv=os.path.join(output_dir, "scores.tsv"),
-        output_bedpe=os.path.join(output_dir, "fusions.bedpe") if fusion_enabled else None,
+        output_bedpe=None,
         use_gpu=use_gpu,
         signal_format=signal_format,
-        fusion_enabled=fusion_enabled,
-        fusion_min_support=min_support,
-        fusion_max_dist=max_dist,
-        fusion_flank_bp=flank_bp,
-        fusion_max_internal_gap_bp=fusion_max_internal_gap_bp,
+        fusion_enabled=False,
         max_reads_per_interval_for_dtw=max_reads_for_dtw,
         min_novel_reads=min_novel_reads,
         min_abundance=min_abundance,
@@ -757,12 +755,43 @@ def main(
     )
     _write_run_manifest(cfg, output_dir)
 
-    runner = PipelineRunner(cfg)
-    try:
-        runner.setup()
-        runner.run()
-    finally:
-        runner.cleanup()
+    from contextlib import nullcontext
+
+    fusion_context = nullcontext()
+    if fusion_enabled:
+        from fin.fusion.analysis import FusionSettings
+        from fin.fusion.output import FusionPublication
+        from fin.fusion.pipeline import run_fusion_analysis
+
+        fusion_settings = FusionSettings(
+            min_support=min_support, breakpoint_tolerance=max_dist, junction_flank=flank_bp,
+            correction_tolerance=fusion_junction_tolerance,
+            max_query_gap=fusion_max_internal_gap_bp - 1 if fusion_max_internal_gap_bp else 2147483647,
+        )
+        fusion_settings.validate()
+        fusion_context = FusionPublication(output_dir)
+    with fusion_context as publication:
+        runner = PipelineRunner(cfg)
+        try:
+            runner.setup()
+            runner.run()
+        finally:
+            runner.cleanup()
+        if fusion_enabled:
+            from fin.fusion.signal import FusionSignalSettings
+
+            assembly_support = os.path.join(output_dir, "junction_support.tsv")
+            has_assembly_support = os.path.isfile(assembly_support) and os.path.isfile(cfg.output_gtf)
+            run_fusion_analysis(bam, genome, output_dir, gtf_path=gtf, sequence_path=fastq,
+                                settings=fusion_settings, threads=threads, publication=publication,
+                                signal_path=cfg.signal_path,
+                                signal_settings=FusionSignalSettings(
+                                    pore=cfg.krill_pore, use_gpu=cfg.use_gpu,
+                                    flank=cfg.m2_summed_llr_flank, min_margin=cfg.m2_summed_llr_margin,
+                                ),
+                                assembly_gtf_path=cfg.output_gtf if has_assembly_support else None,
+                                assembly_support_path=assembly_support if has_assembly_support else None)
+            click.echo(f"Independent fusion output written to {output_dir}/fusion/")
 
     click.echo(f"Assembly output written to {output_dir}/")
 

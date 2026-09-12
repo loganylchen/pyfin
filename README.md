@@ -2,7 +2,7 @@
 
 A Python package for nanopore Direct RNA-seq **transcriptome assembly with fusion
 detection and per-transcript signal-based scoring**. Reference-based discovery of
-known and novel isoforms; SA-tag fusion calling; and bounded krill eventalign
+known and novel isoforms; independent multi-gene fusion analysis; and bounded krill eventalign
 that refines exact M1 ties before read-to-transcript assignment, yielding
 signal-aware abundance / TPM per candidate.
 
@@ -11,13 +11,8 @@ signal-aware abundance / TPM per candidate.
 ```
 BAM + GTF + POD5/SLOW5/BLOW5 + FASTQ + genome FASTA
                 |
-   +------------+--------------+
-   v                           v
-Phase 1                     Phase 1.5
-Candidate Discovery         Fusion Detection (--fusion)
-(GTF + novel isoforms)      (SA-tags -> breakpoints
-   |                         -> fusion candidates)
-   +------------+------------+
+        Phase 1: Candidate Discovery
+                  - GTF + novel isoforms
                 v
         Phase 2: M1 alignment + M2 junction eventalign
                 |
@@ -33,17 +28,22 @@ Candidate Discovery         Fusion Detection (--fusion)
                   - assembly.gtf       (with abundance attributes)
                   - scores.tsv         (per-candidate metrics + TPM)
                   - abundance_refit.json (mass/TPM diagnostics)
-                  - fusions.bedpe      (when --fusion)
+                |
+                v
+        Optional independent fusion analysis (--fusion)
+                  - complete multi-arm read paths + junction correction
+                  - normal/paralog mapping competition
+                  - fusion/ tables, FASTA, arm paths and audits
 ```
 
 ### Phase Details
 
 1. **Candidate Discovery** - Reference-based: GTF transcripts + novel isoforms via intron-chain extraction + 3' end clustering
-1.5. **Fusion Detection** *(optional, `--fusion`)* - Parses SA tags, clusters breakpoints, builds spliced fusion candidates merged into the same `CandidateSet`
 2. **Signal Scoring** - M1 supplies a mappy structural mask; krill M2 junction NLL refines exact ties inside shared genomic disagreement windows
 3. **Assignment** - Probabilistic read-to-transcript responsibilities with production read-by-read coherence disabled (`beta=0`)
 4. **Existence selection** - Structural/support gates fix the final transcript set; real profiles then apply read-supported junction consensus
 5. **Quantification** - Named profiles renormalize each assignable read over the final survivors, report orphaned mass, and write coherent abundance/TPM to GTF/TSV
+6. **Independent Fusion Analysis** *(optional, `--fusion`)* - Scans BAM/SA evidence and realigns full molecules and clipped arms; validates complete gene chains and junction corrections without inserting candidates into assembly or changing its read assignments.
 
 ## Installation
 
@@ -183,14 +183,16 @@ validation before promotion):
 ### CLI — assembly + fusion detection
 
 ```bash
-pyfin \
+fin \
     --bam reads.bam --gtf annotations.gtf --genome genome.fa \
     --fastq reads.fq --signal signal.blow5 \
     --output-dir pyfin_out/ \
-    --fusion --min-support 2 --max-dist 500 --flank-bp 500
+    --fusion --min-support 2 --max-dist 6 --flank-bp 35
 ```
 
-Adds `pyfin_out/fusions.bedpe` listing called fusion breakpoints with read support.
+Adds results under `pyfin_out/fusion/`. Ordinary `assembly.gtf`, `scores.tsv`
+and `abundance_refit.json` remain assembly-only. Fusion support counts are not
+assembly EM abundance estimates.
 
 ### Python API
 
@@ -208,8 +210,7 @@ config = PipelineConfig.from_profile(
     work_dir="./pyfin_output",
     output_gtf="./pyfin_output/assembly.gtf",
     output_tsv="./pyfin_output/scores.tsv",
-    output_bedpe="./pyfin_output/fusions.bedpe",
-    fusion_enabled=True,        # SA-tag fusion calling
+    fusion_enabled=False,
     use_gpu=True,
     em_sigma=1.0,
 )
@@ -222,6 +223,13 @@ runner.cleanup()
 
 for cid, qr in sorted(results.items(), key=lambda x: -x[1].abundance):
     print(f"{qr.candidate_id}\t{qr.abundance:.2f}\t{qr.num_assigned_reads}\t{qr.source}")
+
+from fin.fusion.pipeline import run_fusion_analysis
+
+fusion_results = run_fusion_analysis(
+    "reads.bam", "genome.fa", "./pyfin_output",
+    gtf_path="annotations.gtf", sequence_path="reads.fq",
+)
 ```
 
 ## Per-Transcript Scoring
@@ -238,16 +246,68 @@ on them.
 
 ## Fusion Detection
 
-Enabled with `--fusion`. The pipeline:
+Enabled with `--fusion`, after ordinary assembly finishes. The independent path:
 
-1. Parses BAM `SA` tags to extract supplementary-alignment breakpoints.
-2. Clusters breakpoints within `--max-dist` bp on both sides (default 500 bp).
-3. Drops clusters with fewer than `--min-support` supporting reads (default 2).
-4. Builds spliced fusion candidates by joining `±flank-bp` of genome sequence
-   around each breakpoint (default 500 bp).
-5. Fusion candidates flow through the same signal-scoring → EM pipeline as
-   regular transcripts; they appear in `assembly.gtf` with
-   `transcript_source "fusion"` and in `fusions.bedpe`.
+1. Scans BAM records and SA tags without relying on assembly intervals. It
+   normalizes forward-query coordinates, including reverse and hard-clipped
+   alignments, and checks optional FASTQ/FASTA sequences for conflicts.
+2. Realigns full molecules and clipped arms to the genome, retaining normal
+   full-length and paralogous competitors rather than choosing a single partner.
+3. Preserves ordered N-arm paths. A-B-C requires reads spanning the whole chain;
+   independent A-B and B-C reads cannot manufacture it. The default minimum is
+   two distinct read IDs; supplementary records do not add votes.
+4. Proposes internal splice and fusion-junction corrections within
+   `--fusion-junction-tolerance` (default 3 bp). Read-window sequence evidence,
+   both-side anchors and complete stitched-transcript validation are required.
+   Canonical motifs and annotation are nominations, not evidence of expression.
+5. Clusters coordinate tuples with bounded diameter `--max-dist` (default 6 bp).
+   Microhomology/near-tied coordinates remain explicit alternatives, even when
+   the ordered gene chain is supported. Readthrough candidates are classified
+   separately; missing annotation produces loci, not fabricated gene names.
+
+After assembly, `--fusion` reads the final `assembly.gtf` and
+`junction_support.tsv`. Final-model junctions with at least three indel-clean
+reads supply nearby nominations and structural annotations, never extra fusion
+read votes. Fusion-edge donor/acceptor support is not support for the edge itself.
+These aggregated counts are not claimed to be independently signal-validated.
+
+Fusion also uses the supplied signal with assembly's krill eventalign and local
+**summed-LLR** reducer, pore, GPU request, window flank and decision margin.
+Only already sequence-supported complete paths are eligible: conflicting
+coordinate alternatives are removed, while identical-template ambiguity,
+missing signal, incomplete contrasts and weak coverage explicitly abstain.
+If all alternatives conflict, the read no longer supplies a fusion vote.
+Abstention retains clearly labeled sequence-only evidence, not a signal pass.
+This shares the scoring scheme, not assembly's AS-tie gate, candidates or EM.
+The standalone API remains sequence-only unless `signal_path` is provided.
+These RNA-level calls do not establish genomic rearrangements.
+
+`fusion/fusions.tsv` contains supported, unresolved-coordinate and insufficient-
+support chains with explicit statuses; do not count every row as an accepted
+call. `fusions.bedpe` has N-1 rows per chain with chain ID and edge index, using
+representative coordinates. `fusion_transcripts.fa` and `fusion_arms.jsonl`
+retain alternative templates and exon paths; no fictitious multi-chromosome GTF
+is emitted. `fusion_reads.jsonl`, `junction_corrections.jsonl`, `junction_signal.jsonl` and
+`fusion_manifest.json` preserve decisions, limits, settings and provenance.
+The TSV's `signal_status` distinguishes full/partial local signal support from
+sequence-only calls. See `docs/FUSION_SIGNAL_VALIDATION.md` for scope and checks.
+
+Publication switches the `fusion/` symlink atomically between run-local
+directories. Check `fusion_manifest.json` for `status="complete"` before using
+results. A failed rerun exposes a failed manifest, not the previous calls.
+
+Migration from the older prototype: the public `--fusion` path no longer
+mixes fusion candidates into assembly EM, writes root-level `fusions.bedpe`, or
+uses 500-bp clustering/flank defaults. The legacy `PipelineConfig.fusion_*`
+fields remain for internal compatibility; use `FusionSettings` and
+`run_fusion_analysis` for the isolated Python API. Existing un-managed
+`fusion/` directories must be moved aside before publication.
+
+The independent scan covers the input BAM, not just assembly's scheduled
+intervals or read-limit subset. Use an explicitly subsetted BAM when a restricted
+fusion analysis is intended; candidate/search caps abstain or fail rather than
+silently sample a prefix. Implementation acceptance and the synthetic/real-signal
+assembly byte comparisons are recorded in `docs/FUSION_VALIDATION_2026-09-12.md`.
 
 ### Using individual modules
 
@@ -354,7 +414,7 @@ fin/
 | `work_dir` | str | "./pyfin_work" | Working directory for intermediate files |
 | `output_gtf` | str | None | Output assembly GTF path |
 | `output_tsv` | str | None | Output per-candidate scoring TSV path |
-| `output_bedpe` | str | None | Output fusion BEDPE path (with `fusion_enabled`) |
+| `output_bedpe` | str | None | Legacy coupled-fusion output; not used by public `--fusion` |
 | `three_prime_threshold` | int | 24 | 3' end clustering distance (bp) |
 | `isoform_fraction_locus` | str | "family" | Use persistent splice families for minor-isoform denominators; "overlap" restores legacy behavior |
 | `post_selection_refit` | bool | False | Renormalize beta=0 M2 responsibilities over final survivors; named profiles enable it |
@@ -371,10 +431,10 @@ fin/
 | `em_tol` | float | 1e-4 | EM convergence tolerance |
 | `use_gpu` | bool | True | Enable GPU acceleration (DTW + EM) |
 | `max_reads_per_interval_for_dtw` | int | 2000 | DTW subsampling cap per interval |
-| `fusion_enabled` | bool | False | Enable SA-tag fusion detection |
-| `fusion_min_support` | int | 2 | Min supporting reads per fusion breakpoint |
-| `fusion_max_dist` | int | 500 | Breakpoint clustering distance (bp) |
-| `fusion_flank_bp` | int | 500 | Flank on each side of breakpoint for fusion sequence |
+| `fusion_enabled` | bool | False | Legacy interval-coupled API; keep False and use `run_fusion_analysis` for isolation |
+| `fusion_min_support` | int | 2 | Legacy coupled-fusion support; independent API uses `FusionSettings.min_support` |
+| `fusion_max_dist` | int | 500 | Legacy value; independent API defaults to a 6-bp bounded cluster diameter |
+| `fusion_flank_bp` | int | 500 | Legacy value; independent API defaults to 35-bp read-window flanks |
 | `f5c_path` | str | "f5c" | Path to f5c binary |
 | `max_reads` | int | None | Limit total reads processed |
 
