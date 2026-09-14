@@ -815,7 +815,7 @@ class TestRealDrnaProfileDefault:
     def test_real_drna_enables_it_at_k3(self):
         from fin.pipeline.config import PIPELINE_PROFILES
 
-        assert PIPELINE_PROFILES["real-drna"]["m2_support_gate_attest_reads"] == 3
+        assert PIPELINE_PROFILES["real-drna"]["m2_support_gate_attest_reads"] == 1
 
     def test_the_dataclass_default_stays_off(self):
         # Only the profile carries the evidence. A caller constructing a

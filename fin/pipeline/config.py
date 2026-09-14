@@ -123,7 +123,18 @@ PIPELINE_PROFILES: dict[str, dict[str, object]] = {
         #
         # p00 is exactly inert (no annotation, so an annotation-conditioned
         # exemption has nothing to readmit).
-        "m2_support_gate_attest_reads": 3,
+        #
+        # K=1 (2026-09-13/15), same frozen rule, one snapshot, one lever:
+        # human +0.99 Sn / +0.34 Pr / +0.97 F1 over K=3 (5 up / 1 down, the
+        # one down is c_jitter50 by -0.05); the K=3->K=1 step is 85% marginal
+        # precision on `full`; SIRV4 is BYTE-IDENTICAL across K=3/2/1 (the
+        # depth threshold never binds on a high-depth spike-in, only the veto
+        # does); HEYA8 +0.07 / -0.04 / +0.07 vs default, CI [+0.02,+0.09],
+        # +0.03 over K=3, worst family -0.01. The remaining-loss audit under
+        # K=3 still put 81.8% of missed expressed truth on this gate, and the
+        # suffix-1..2 tier it had not reached is 59% truth against a 21.4%
+        # break-even -- the operating point, not a new mechanism.
+        "m2_support_gate_attest_reads": 1,
     },
     "custom": {},
 }

@@ -225,3 +225,32 @@ owner. Per Codex, the accounting to build from it is
 `exempted → reaches global selection → GTF floor drop → final distinct truth`,
 splitting floor casualties into zero-mass and (0,1). The floor stays fixed in
 this change: it may be part of why the exemption is safe.
+
+
+---
+
+# Operating point: K=3 → K=1 (2026-09-15)
+
+The same frozen rule, one snapshot (`_snap/att_land`), one lever, default
+re-run on the same snapshot. Human arms scored against the expressed truth:
+
+| K | human mean Sn/Pr/F1 | vs K=3 | beats stringtie3 |
+| --- | --- | --- | --- |
+| 0 | 25.17/60.46/35.38 | −1.45 | 2/7 |
+| 3 | 26.64/60.81/36.83 | — | 6/7 |
+| 2 | 27.14/61.04/37.34 | +0.50 (5 up / 1 down) | 6/7 |
+| **1** | **27.63/61.16/37.80** | **+0.97** (5 up / 1 down) | 6/7 |
+
+Monotone in Sn AND Pr; `full` 34.0/68.8 → **35.7/69.4**; the K=3→1 step is
+85% marginal precision on `full`; the one cell down is `c_jitter50_10bp` at
+−0.05. SIRV4: K=3/2/1 produce **byte-identical** assemblies (the depth
+threshold never binds on a high-depth spike-in; only the veto does). HEYA8
+K=1: +0.07 Sn / −0.04 Pr / +0.07 F1 vs default, CI [+0.02, +0.09], 21 up /
+3 down, worst family −0.01 (`c_merge`); +0.03 over K=3 (10 up / 2 down).
+
+Rule 1 ✓ (positive on all three), rule 2 ✓ (no family ≤ −1.0), rule 3 ✓
+(the three human target cells all rise), rule 4 unchanged in kind (the same
+gate, a lower depth threshold; the remaining-loss audit under K=3 still put
+81.8% of missed expressed truth on it, and the suffix-1..2 tier is 59% truth
+against a 21.4% break-even). Landed as the `real-drna` default; the new
+default reproduces the `attK1` arm byte for byte on SIRV4 `full`.

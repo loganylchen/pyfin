@@ -272,12 +272,12 @@ def test_the_precision_profile_inherits_the_snap_chain_merge(monkeypatch, tmp_pa
 
 def test_attestation_is_on_by_default(monkeypatch, tmp_path):
     cfg, _ = _invoke(monkeypatch, tmp_path)
-    assert cfg.m2_support_gate_attest_reads == 3
+    assert cfg.m2_support_gate_attest_reads == 1   # K=1 since 2026-09-15; K=3 landed first
 
 
 def test_attestation_is_on_under_real_drna(monkeypatch, tmp_path):
     cfg, _ = _invoke(monkeypatch, tmp_path, "--profile", "real-drna")
-    assert cfg.m2_support_gate_attest_reads == 3
+    assert cfg.m2_support_gate_attest_reads == 1
 
 
 def test_the_precision_derivative_inherits_it_by_design(monkeypatch, tmp_path):
@@ -285,7 +285,7 @@ def test_the_precision_derivative_inherits_it_by_design(monkeypatch, tmp_path):
     # the exemption raised precision as well as recall -- but this exact
     # combination was not benchmarked, so it is pinned rather than assumed.
     cfg, _ = _invoke(monkeypatch, tmp_path, "--profile", "real-drna-precision")
-    assert cfg.m2_support_gate_attest_reads == 3
+    assert cfg.m2_support_gate_attest_reads == 1
     assert cfg.min_novel_reads == 2
 
 
@@ -326,7 +326,7 @@ def test_the_manifest_records_the_operating_value(monkeypatch, tmp_path):
     # is exactly the failure that makes a campaign unreconstructable.
     _, output = _invoke(monkeypatch, tmp_path)
     manifest = json.loads((output / "run_manifest.json").read_text())
-    assert manifest["config"]["m2_support_gate_attest_reads"] == 3
+    assert manifest["config"]["m2_support_gate_attest_reads"] == 1
 
 
 def test_no_profile_value_is_silently_dropped_on_the_way_to_the_runner(
