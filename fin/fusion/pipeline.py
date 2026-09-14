@@ -69,6 +69,17 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
                 signal_settings = signal_settings or FusionSignalSettings()
                 analysis = validate_fusion_signal(analysis, evidence, genome, signal_path, signal_settings)
             write_fusion_outputs(analysis, genome, publication.work_dir)
+            # Fused-transcript level, computed from the finished molecule-level
+            # analysis and written BESIDE the chain artifacts: which isoform of
+            # each gene, the conventional exon-rank junction name, labelled
+            # 5'/3' completion, and molecule assignment with unique vs
+            # compatible votes. Nothing here feeds back into chains/signal.
+            from fin.fusion.transcript_models import TranscriptIndex, build_fused_transcript_models
+            from fin.fusion.transcript_output import write_transcript_outputs
+
+            transcript_index = TranscriptIndex.from_transcripts(transcripts)
+            models, collapsed = build_fused_transcript_models(analysis, transcript_index, genome)
+            write_transcript_outputs(models, collapsed, genome, publication.work_dir)
             if any(_snapshot(inputs[name]) != snapshot for name, snapshot in snapshots.items()):
                 raise FusionInputError("fusion input changed before publication")
             source_root = Path(__file__).resolve().parents[2]
@@ -79,6 +90,14 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
             publication.complete({
                 "settings": asdict(settings), "inputs": inputs, "input_snapshots": snapshots,
                 "record_counts": analysis.record_counts, "annotation_status": analysis.annotation_status,
+                "fused_transcript_models": {
+                    "count": len(models),
+                    "unique_support_total": sum(len(m.unique_read_ids) for m in models),
+                    "multi_gene_models": sum(1 for m in models if len(m.arms) > 2),
+                    "collapsed_structures": len(collapsed),
+                    "interpretation": ("evidence-constrained models in fusion_models.fa; annotated completion "
+                                       "hypotheses in fusion_models.annotated.fa are NOT observations"),
+                },
                 "signal_status": analysis.signal_status, "mappy_version": version("mappy"),
                 "signal_settings": asdict(signal_settings) if signal_path is not None else None,
                 "signal_method": "krill_local_summed_llr" if signal_path is not None else None,
