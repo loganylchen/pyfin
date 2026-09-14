@@ -55,7 +55,7 @@ def scan_fusion_bam(
     bam_path,
     genes: Optional[GeneIndex] = None,
     *,
-    min_soft_clip=100,
+    min_soft_clip=250,
     max_candidate_reads=100000,
     max_segments_per_read=64,
 ) -> FusionInput:

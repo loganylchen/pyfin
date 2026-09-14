@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J k562_fusion
 #SBATCH -p mne4
-#SBATCH -c 8
+#SBATCH -c 10
 #SBATCH --mem=120G
 #SBATCH -t 12:00:00
 #SBATCH -o /SSD/logan/dev/pyfin/logs/slurm/k562_fusion_%j.out
@@ -19,5 +19,5 @@ singularity exec --pwd /tmp -B /autofs,/SSD experiments/prod_validation/_img/pyf
   --reference $B/refs/host/GRCh38.primary_assembly.genome.fa \
   --gtf $B/refs/host/gencode.v44.primary_assembly.annotation.gtf \
   --fastq $B/data/K562directRNAreplicate4run1/fastq/pass.fq.gz \
-  --out "$O" --threads 8
+  --out "$O" --threads 8 --realign-workers 8
 echo "rc=$? $(date +%T)"

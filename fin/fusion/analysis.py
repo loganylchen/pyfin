@@ -8,7 +8,8 @@ from typing import Optional, Tuple
 from fin.fusion.annotation import AnnotatedReadPath, GeneIndex, annotate_read_path
 from fin.fusion.chains import FusionChain, build_fusion_chains, coordinate_key, topology_key
 from fin.fusion.correction import PathCorrection, annotation_junction_registry, correct_read_path, correction_alternatives, observed_junction_registry
-from fin.fusion.paths import find_read_paths
+from fin.fusion.paths import coverage_domain, find_read_paths
+from fin.fusion.records import reconcile_sa_locators
 from fin.fusion.validation import TranscriptValidation, validate_stitched_path
 
 
@@ -32,7 +33,7 @@ class FusionSettings:
     max_hits: int = 32
     max_windows: int = 64
     max_junction_candidates: int = 128
-    min_clip_bases: int = 100
+    min_clip_bases: int = 250  # dRNA adapter/polyA carry-through sits at ~80 bp; 100 nominates ~9% of a real library
 
     def validate(self):
         import math
@@ -72,6 +73,8 @@ class FusionReadAudit:
     corrections: Tuple[PathCorrection, ...] = ()
     signal: Tuple[dict, ...] = ()
     assembly_junctions: Tuple[dict, ...] = ()
+    sa_supersessions: Tuple[dict, ...] = ()
+    coverage_domain: Tuple[int, int] = (0, 0)
 
 
 @dataclass(frozen=True)
@@ -91,7 +94,7 @@ def _geometry(path):
 
 
 def analyze_fusion_input(evidence, genome, aligner, genes=None, settings=None, *, annotation_transcripts=(),
-                         assembly_junctions=None):
+                         assembly_junctions=None, realign_workers=1):
     """Adjudicate complete molecules before counting any sample-level support."""
     if not evidence.complete:
         raise ValueError("cannot analyze incomplete fusion evidence")
@@ -103,24 +106,35 @@ def analyze_fusion_input(evidence, genome, aligner, genes=None, settings=None, *
     molecules = {molecule.read_id: molecule for molecule in evidence.molecules}
     if len(molecules) != len(evidence.molecules):
         raise ValueError("duplicate molecule IDs in fusion input")
+    ready = [(m.read_id, m.sequence, m.segments) for m in evidence.molecules if m.status == "ready"]
+    realignments = aligner.map_many(ready, workers=realign_workers) if ready else {}
+    if len(realignments) != len(ready):
+        raise ValueError("fusion realignment did not return every molecule")
     for molecule in evidence.molecules:
         if molecule.status != "ready":
             audits[molecule.read_id] = FusionReadAudit(molecule.read_id, "unresolved", molecule.reason)
             continue
-        mapped = aligner.map_molecule(molecule.read_id, molecule.sequence, molecule.segments)
+        mapped = realignments[molecule.read_id]
         if mapped.status != "complete":
             audits[molecule.read_id] = FusionReadAudit(molecule.read_id, "unresolved", mapped.reason,
                                                       search_windows=mapped.searched_windows)
             continue
+        # SA entries are locators, not geometries: an SA CIGAR is written as
+        # one M plus one I/D and has lost every intron. Once a BAM record or
+        # the realignment describes the same placement in full, the summary
+        # must not stand as a competing observed structure.
+        segments, supersessions = reconcile_sa_locators(molecule.segments + mapped.segments)
+        domain = coverage_domain(segments, len(molecule.sequence))
         paths = find_read_paths(
-            molecule.segments + mapped.segments, min_mapping_quality=0,
+            segments, min_mapping_quality=0,
             min_anchor_bases=settings.min_arm_bases, max_query_gap=settings.max_query_gap,
             max_query_overlap=settings.max_query_overlap, min_read_coverage=settings.min_read_coverage,
-            max_segments=settings.max_segments, max_paths=settings.max_paths,
+            max_segments=settings.max_segments, max_paths=settings.max_paths, domain=domain,
         )
         if not paths.paths:
             audits[molecule.read_id] = FusionReadAudit(molecule.read_id, "unresolved", paths.reason,
-                                                      search_windows=mapped.searched_windows)
+                                                      search_windows=mapped.searched_windows,
+                                                      sa_supersessions=supersessions, coverage_domain=domain)
             continue
         annotated = {}
         for path in paths.paths:
@@ -129,22 +143,23 @@ def analyze_fusion_input(evidence, genome, aligner, genes=None, settings=None, *
             key = _geometry(candidate)
             if key not in annotated or quality < annotated[key][1]:
                 annotated[key] = candidate, quality
-        searches[molecule.read_id] = tuple(annotated[key] for key in sorted(annotated)), mapped.searched_windows
-    registry = observed_junction_registry(candidate for candidates, _ in searches.values()
+        searches[molecule.read_id] = (tuple(annotated[key] for key in sorted(annotated)), mapped.searched_windows,
+                                      supersessions, domain)
+    registry = observed_junction_registry(candidate for candidates, *_ in searches.values()
                                            for candidate, _ in candidates)
     auxiliary = {}
     if assembly_junctions is not None:
         auxiliary = assembly_junctions.registry(
-            (candidate for candidates, _ in searches.values() for candidate, _ in candidates),
+            (candidate for candidates, *_ in searches.values() for candidate, _ in candidates),
             tolerance=settings.correction_tolerance,
         )
     annotation_registry = annotation_junction_registry(
-        (candidate for candidates, _ in searches.values() for candidate, _ in candidates),
+        (candidate for candidates, *_ in searches.values() for candidate, _ in candidates),
         annotation_transcripts, tolerance=settings.correction_tolerance,
     )
     representatives = []
     for read_id in sorted(searches):
-        candidates, windows = searches[read_id]
+        candidates, windows, supersessions, domain = searches[read_id]
         molecule = molecules[read_id]
         evaluated = []
         failures = []
@@ -178,7 +193,7 @@ def analyze_fusion_input(evidence, genome, aligner, genes=None, settings=None, *
                     validation = validate_stitched_path(
                         proposal, molecule.sequence, genome, min_anchor=settings.junction_anchor,
                         min_identity=settings.min_identity, min_coverage=settings.min_read_coverage,
-                        max_hits=settings.max_hits,
+                        max_hits=settings.max_hits, domain=domain,
                     )
                 evaluated.append(EvaluatedPath(candidate, proposal, correction, validation, quality))
                 if validation.status == "unresolved":
@@ -190,7 +205,8 @@ def analyze_fusion_input(evidence, genome, aligner, genes=None, settings=None, *
         if technical or not valid:
             audits[read_id] = FusionReadAudit(read_id, "unresolved", technical[0] if technical else
                                              "no_validated_complete_transcript", len(candidates), evaluated,
-                                             search_windows=windows, corrections=tuple(corrections))
+                                             search_windows=windows, corrections=tuple(corrections),
+                                             sa_supersessions=supersessions, coverage_domain=domain)
             continue
         best = max(item.validation.score for item in valid)
         competitive = [item for item in valid if item.validation.score == best
@@ -215,7 +231,7 @@ def analyze_fusion_input(evidence, genome, aligner, genes=None, settings=None, *
             reason = "coordinate_ambiguity" if len(set(coordinates)) > 1 else "whole_chain_validated"
             representatives.append(selected[0])
         audits[read_id] = FusionReadAudit(read_id, status, reason, len(candidates), evaluated, selected, windows,
-                                         tuple(corrections))
+                                         tuple(corrections), sa_supersessions=supersessions, coverage_domain=domain)
     if assembly_junctions is not None:
         audits = {read_id: replace(read, assembly_junctions=tuple(
             {"alternative_index": index, "path_coordinates": coordinate_key(path),

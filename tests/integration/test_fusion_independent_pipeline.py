@@ -329,6 +329,23 @@ def test_internal_splice_and_fusion_edges_are_jointly_corrected_end_to_end(tmp_p
             record.set_tag("SA", "B,501,+,300S302M298N298M300S,60,4;C,501,+,900S300M,60,0;")
             record.set_tag("NM", 0)
             writer.write(record)
+            # The shifted intron must be an OBSERVED geometry for the corrector
+            # to act on. An SA entry is only a locator (minimap2 writes SA
+            # CIGARs as one M plus one I/D), so it is superseded once the
+            # realignment describes the same placement in full; a
+            # supplementary RECORD carrying the shifted CIGAR is detailed
+            # evidence and stays observed.
+            supplementary = pysam.AlignedSegment(writer.header)
+            supplementary.query_name = f"read{index}"
+            supplementary.query_sequence = query
+            supplementary.flag = 2048
+            supplementary.reference_id = 1
+            supplementary.reference_start = 500
+            supplementary.mapping_quality = 60
+            supplementary.cigarstring = "300S302M298N298M300S"
+            supplementary.set_tag("SA", "A,501,+,300M900S,60,0;C,501,+,900S300M,60,0;")
+            supplementary.set_tag("NM", 4)
+            writer.write(supplementary)
     result = run_fusion_analysis(bam, reference, tmp_path / "result", gtf_path=gtf, sequence_path=fastq)
     assert len(result.chains) == 1
     assert result.chains[0].representative.gene_path == (("A",), ("B",), ("C",))

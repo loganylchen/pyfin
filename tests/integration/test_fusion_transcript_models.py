@@ -398,24 +398,28 @@ def test_compatibility_is_judged_per_molecule_not_per_representative(tmp_path, o
     assert "s1" not in json.loads(by_len[600]["unique_read_ids"]) + json.loads(by_len[450]["unique_read_ids"])
 
 
-def test_supported_shorter_structure_survives_an_unsupported_longer_one(tmp_path):
-    # the full A1-B1 structure (3 A exons) is seen by ONE molecule only, i.e.
-    # an insufficient-support chain; a structure missing A exon 1 entirely is
-    # seen by two. The shorter is a strict 5' truncation of the longer, but the
-    # longer is not eligible -- so the shorter MUST be reported, not erased.
+def test_unsupported_longer_observation_joins_the_supported_shorter_ones_in_one_envelope(tmp_path):
+    # the full A1-B1 structure (3 A exons) is seen by ONE molecule; a
+    # structure missing A exon 1 is seen by two. They are one transcript
+    # observed to different extents: the model is the aggregate envelope
+    # (full A1), supported by all three, and the record says only one
+    # molecule actually reaches the 5' extent.
     molecules = [("full_once", [("A", A1), ("B", B1)]),
                  ("deg_a", [("A", [(300, 400), (500, 600)]), ("B", B1)]),
                  ("deg_b", [("A", [(300, 400), (500, 600)]), ("B", B1)])]
-    _, _, published, rows, _, _, _ = _run(tmp_path, molecules)
+    _, _, published, rows, fasta, _, _ = _run(tmp_path, molecules)
     assert len(rows) == 1
-    assert rows[0]["observed_length"] == "500"
-    assert json.loads(rows[0]["unique_read_ids"]) == ["deg_a", "deg_b"]
-    assert "full_once" not in json.loads(rows[0]["unique_read_ids"]) + json.loads(rows[0]["compatible_read_ids"])
-    # two-exon A structure is compatible with A1 (missing intron outside coverage)
-    # and NOT with A2 (A2's intron [200,500) overlaps the observed [300,400))
+    assert rows[0]["observed_length"] == "600"
+    assert json.loads(rows[0]["unique_read_ids"]) == ["deg_a", "deg_b", "full_once"]
+    assert rows[0]["five_prime_observed_reads"] == "1"
+    assert rows[0]["three_prime_observed_reads"] == "3"
     assert json.loads(rows[0]["compatible_transcript_ids"])[0] == ["A1"]
-    assert json.loads(rows[0]["arm_match_classes"])[0] == "arm_ism_5p"
-    assert rows[0]["extension_bases_5p"] == "100"
+    assert json.loads(rows[0]["arm_match_classes"])[0] == "arm_fsm"
+    assert rows[0]["five_prime_status"] == "annotated_boundary_observed"
+    # the two-exon structure was folded, and the audit says into what
+    collapsed = [json.loads(l) for l in (published / "fusion_model_collapsed.jsonl").read_text().splitlines()]
+    assert [c["read_ids"] for c in collapsed] == [["deg_a", "deg_b"]]
+    assert collapsed[0]["compatible_model_ids"] == [rows[0]["model_id"]]
 
 
 def test_distinct_loci_with_identical_sequence_stay_distinct(tmp_path):

@@ -184,4 +184,6 @@ def write_fusion_outputs(analysis, genome, output_dir):
                                      "path_count": read.path_count, "search_windows": read.search_windows,
                                      "correction_ids": sorted(seen_corrections),
                                      "signal": read.signal, "assembly_junctions": read.assembly_junctions,
+                                     "sa_supersessions": list(read.sa_supersessions),
+                                     "coverage_domain": list(read.coverage_domain),
                                      "selected": [asdict(path) for path in read.selected], "evaluated": evaluated}) + "\n")

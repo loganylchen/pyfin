@@ -233,3 +233,82 @@ def deduplicate_segments(segments: Iterable[AlignmentSegment]) -> Tuple[Alignmen
             sources=sources, secondary=all(item.secondary for item in copies),
         ))
     return tuple(output)
+
+
+def _detailed(segment: AlignmentSegment) -> bool:
+    """A geometry that carries the alignment's real CIGAR: a BAM record or a
+    realignment. An SA entry is a LOCATOR -- minimap2 writes SA CIGARs as
+    ``min(query span, reference span)M`` plus one I/D for the difference, so
+    every intron and indel position is discarded (the BCR-ABL1 read that
+    motivated this carried ``175M723D`` for a spliced ``...2M717N26M...``)."""
+    return any(source != "sa" for source in segment.sources)
+
+
+def reconcile_sa_locators(segments: Iterable[AlignmentSegment], *, min_reciprocal_overlap: float = 0.9,
+                          endpoint_tolerance: int = 10):
+    """Drop SA-only geometries that a detailed alignment already represents.
+
+    An SA locator corresponds to a detailed segment when they share read,
+    chromosome, strand and full read length, their query intervals overlap
+    reciprocally by at least ``min_reciprocal_overlap``, and both the query
+    endpoints and the outer reference endpoints agree within
+    ``endpoint_tolerance``. Query overlap alone is not enough: it would
+    collapse a same-chromosome paralogous placement onto the wrong locus.
+
+    Superseded locators are removed from path eligibility, never reinterpreted
+    (a long SA deletion cannot be turned into an intron -- the position was
+    discarded when the tag was written). Every distinct detailed geometry is
+    kept; nothing is chosen by MAPQ, source or input order. An SA entry with
+    no corroboration is kept as it is: it still nominates the molecule and
+    the search windows, and the caller reports it if it could matter.
+
+    Returns ``(segments, events)``; each event records the raw locator, the
+    replacement geometries and the correspondence metrics for the audit.
+    """
+    if not 0 < min_reciprocal_overlap <= 1 or endpoint_tolerance < 0:
+        raise ValueError("invalid SA reconciliation thresholds")
+    supplied = tuple(segments)
+    detailed = [segment for segment in supplied if _detailed(segment)]
+    kept = []
+    events = []
+    for segment in supplied:
+        if _detailed(segment):
+            kept.append(segment)
+            continue
+        matches = []
+        for other in detailed:
+            if (other.read_id, other.chrom, other.strand, other.read_length) != (
+                    segment.read_id, segment.chrom, segment.strand, segment.read_length):
+                continue
+            overlap = min(segment.query_end, other.query_end) - max(segment.query_start, other.query_start)
+            if overlap <= 0:
+                continue
+            if (overlap / (segment.query_end - segment.query_start) < min_reciprocal_overlap
+                    or overlap / (other.query_end - other.query_start) < min_reciprocal_overlap):
+                continue
+            if (abs(segment.query_start - other.query_start) > endpoint_tolerance
+                    or abs(segment.query_end - other.query_end) > endpoint_tolerance):
+                continue
+            lo_s, hi_s = segment.blocks[0].reference_start, segment.blocks[-1].reference_end
+            lo_o, hi_o = min(b.reference_start for b in other.blocks), max(b.reference_end for b in other.blocks)
+            if segment.strand == "-":
+                lo_s, hi_s = min(b.reference_start for b in segment.blocks), max(b.reference_end for b in segment.blocks)
+            if abs(lo_s - lo_o) > endpoint_tolerance or abs(hi_s - hi_o) > endpoint_tolerance:
+                continue
+            matches.append((other, overlap))
+        if not matches:
+            kept.append(segment)
+            continue
+        events.append({
+            "event": "sa_geometry_superseded",
+            "read_id": segment.read_id, "chrom": segment.chrom, "strand": segment.strand,
+            "sa_query": [segment.query_start, segment.query_end],
+            "sa_reference": [min(b.reference_start for b in segment.blocks), max(b.reference_end for b in segment.blocks)],
+            "sa_blocks": len(segment.blocks),
+            "replacements": [{"sources": list(other.sources), "blocks": len(other.blocks),
+                              "query": [other.query_start, other.query_end],
+                              "reference": [min(b.reference_start for b in other.blocks),
+                                            max(b.reference_end for b in other.blocks)],
+                              "query_overlap": overlap} for other, overlap in matches],
+        })
+    return tuple(kept), tuple(events)

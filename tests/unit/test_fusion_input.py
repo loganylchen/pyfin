@@ -64,10 +64,13 @@ def test_supplementary_records_are_found_even_without_sa_tags(tmp_path):
 
 def test_hard_clipped_primary_without_sa_is_nominated_for_sequence_recovery(tmp_path):
     bam = tmp_path / "fusion.bam"
-    _write_bam(bam, [{"cigar": "100M200H"}])
+    # the nomination threshold is 250 bp of clip on real direct RNA (adapter
+    # and poly(A) carry-through sit at ~80 bp and would nominate ~9% of a
+    # library at 100); a 300-bp hard clip is above it
+    _write_bam(bam, [{"cigar": "100M300H"}])
     molecule, = scan_fusion_bam(bam).molecules
     assert molecule.status == "needs_sequence"
-    assert molecule.segments[0].read_length == 300
+    assert molecule.segments[0].read_length == 400
 
 
 def test_secondary_normal_alignment_is_retained_as_competitor(tmp_path):
@@ -131,7 +134,8 @@ def test_duplicate_sa_and_bam_records_do_not_trip_distinct_segment_limit(tmp_pat
 
 def test_candidate_limit_does_not_publish_a_prefix(tmp_path):
     bam = tmp_path / "many.bam"
-    _write_bam(bam, [{"name": "one"}, {"name": "two"}])
+    # clips above the 250-bp nomination threshold, so both reads nominate
+    _write_bam(bam, [{"name": "one", "cigar": "100M300S"}, {"name": "two", "cigar": "100M300S"}])
     with pytest.raises(FusionInputError, match="limit"):
         scan_fusion_bam(bam, max_candidate_reads=1)
 

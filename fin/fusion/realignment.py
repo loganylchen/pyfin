@@ -8,6 +8,15 @@ from typing import Tuple
 from fin.fusion.records import AlignmentSegment, deduplicate_segments, segment_from_cigar
 
 
+_POOL_ALIGNER = None
+
+
+def _map_one(item):
+    """Worker entry: the aligner and its index are inherited through fork."""
+    read_id, sequence, segments = item
+    return _POOL_ALIGNER.map_molecule(read_id, sequence, segments)
+
+
 @dataclass(frozen=True)
 class GenomeRealignment:
     read_id: str
@@ -59,6 +68,42 @@ class FusionGenomeAligner:
                                     n_threads=threads)
         if not self.aligner:
             raise ValueError("cannot build fusion genome index")
+
+    def map_many(self, molecules, workers=1):
+        """Realign a batch, optionally across forked workers sharing the index.
+
+        mappy releases no GIL for `map`, so threads do not help; `n_threads`
+        only speeds the index build. Forking after the index exists gives each
+        worker the whole index copy-on-write. Results come back keyed by read
+        id and are consumed in the caller's deterministic order, so the number
+        of workers cannot change the analysis.
+
+        Operational limits, deliberately not hidden: not thread-safe or
+        reentrant (`_POOL_ALIGNER` is process-global, one batch at a time);
+        fork-based, so Linux only; an ordinary worker exception propagates and
+        the pool is cleaned up, but abrupt native worker death would leave the
+        blocking map awaiting a task -- crash supervision is separate work.
+        Workers touch only the inherited mappy index, never the genome
+        mapping; a worker that needs the genome must reopen it itself.
+        """
+        if int(workers) < 1:
+            raise ValueError("realignment workers must be a positive integer")
+        items = list(molecules)
+        if workers <= 1 or len(items) < 2:
+            return {read_id: self.map_molecule(read_id, sequence, segments)
+                    for read_id, sequence, segments in items}
+        import multiprocessing
+
+        context = multiprocessing.get_context("fork")
+        chunk = max(1, min(64, (len(items) + workers - 1) // workers))
+        global _POOL_ALIGNER
+        _POOL_ALIGNER = self
+        try:
+            with context.Pool(processes=workers) as pool:
+                results = pool.map(_map_one, items, chunksize=chunk)
+        finally:
+            _POOL_ALIGNER = None
+        return {result.read_id: result for result in results}
 
     def map_molecule(self, read_id, sequence, existing_segments=()):
         """Search whole molecule, existing arms and independently clipped tails.

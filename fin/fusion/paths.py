@@ -38,6 +38,26 @@ class ReadPath:
     def coverage_fraction(self) -> float:
         return self.query_covered_bases / self.segments[0].read_length
 
+    def effective_coverage(self, domain) -> float:
+        """Coverage over the molecule-level domain ``(lead, trail)``: the
+        terminal bases the genome search could not place anywhere are excluded
+        from the denominator (see :func:`coverage_domain`)."""
+        lead, trail = domain
+        length = self.segments[0].read_length
+        lo, hi = lead, length - trail
+        if hi <= lo:
+            return 0.0
+        intervals = sorted((max(lo, block.query_start), min(hi, block.query_end))
+                           for segment in self.segments for block in segment.blocks)
+        total = 0
+        covered_end = lo
+        for start, end in intervals:
+            if end <= start:
+                continue
+            total += max(0, end - max(covered_end, start))
+            covered_end = max(covered_end, end)
+        return total / (hi - lo)
+
     @property
     def junctions(self) -> tuple:
         return tuple(
@@ -60,6 +80,39 @@ class PathSearchResult:
     segment_count: int
 
 
+def coverage_domain(segments: Iterable[AlignmentSegment], read_length: int, *,
+                    max_end_bases: int = 100, max_total_bases: int = 120, max_fraction: float = 0.2):
+    """Terminal query bases no detailed alignment could place: ``(lead, trail)``.
+
+    Direct-RNA molecules carry non-genomic sequence at the ends (adapter and
+    poly(A) carry-through at the 3' end, a few bases at the 5' end). Judged on
+    the UNION of every detailed mapping of the molecule -- low-MAPQ, normal and
+    paralogous alternatives included -- so an independently placed terminal arm
+    is never excluded. Only a whole eligible overhang is excluded, never a
+    slice of a longer one, and never anything internal. The bounds are
+    proposed acceptance settings, not literature constants.
+    """
+    if read_length <= 0 or min(max_end_bases, max_total_bases) < 0 or not 0 <= max_fraction <= 1:
+        raise ValueError("invalid coverage-domain bounds")
+    placed = [(block.query_start, block.query_end) for segment in segments
+              if _detailed(segment) for block in segment.blocks]
+    if not placed:
+        return 0, 0
+    lead = min(start for start, _ in placed)
+    trail = read_length - max(end for _, end in placed)
+    lead = lead if 0 < lead <= max_end_bases else 0
+    trail = trail if 0 < trail <= max_end_bases else 0
+    if lead + trail > max_total_bases or lead + trail > max_fraction * read_length:
+        # too much unexplained sequence to wave through: keep the full read
+        # as the denominator and let the coverage rule speak
+        return 0, 0
+    return lead, trail
+
+
+def _detailed(segment):
+    return any(source != "sa" for source in segment.sources)
+
+
 def find_read_paths(
     segments: Iterable[AlignmentSegment],
     *,
@@ -71,17 +124,26 @@ def find_read_paths(
     coverage_tolerance_bases: int = 5,
     max_segments: int = 64,
     max_paths: int = 64,
+    domain=(0, 0),
 ) -> PathSearchResult:
-    """Keep all competitive paths or abstain when search cannot be completed.
+    """Keep every coverage-qualified path or abstain when search cannot be completed.
 
     A unique path is only a mapping result, not a confident fusion call. Normal
     whole-read mappings remain competitors and gene/path validation comes later.
+    Coverage is judged over ``domain`` (see :func:`coverage_domain`), and NO
+    path is discarded for merely covering a few bases fewer than the best one:
+    covered bases are not a defensible substitute for the sequence adjudication
+    that follows, and a slightly longer wrong geometry must not erase the right
+    hypothesis. ``coverage_tolerance_bases`` is retained for signature
+    compatibility and no longer prunes.
     """
     if not 0 <= min_mapping_quality <= 254 or min_anchor_bases <= 0:
         raise ValueError("invalid mapping quality or anchor threshold")
     if (min(max_query_gap, max_query_overlap, coverage_tolerance_bases) < 0
             or min(max_segments, max_paths) <= 0 or not 0 < min_read_coverage <= 1):
         raise ValueError("invalid path search bounds")
+    if min(domain) < 0:
+        raise ValueError("invalid coverage domain")
     supplied = tuple(segments)
     read_ids = {segment.read_id for segment in supplied}
     if len(read_ids) > 1:
@@ -122,15 +184,10 @@ def find_read_paths(
             completed.append(ReadPath(read_id, tuple(eligible[index] for index in indices)))
         if len(pending) + len(completed) > max_paths:
             return PathSearchResult(read_id, "unresolved", "path_limit", (), len(unique))
-    covered = [path for path in completed if path.coverage_fraction >= min_read_coverage]
+    covered = [path for path in completed if path.effective_coverage(domain) >= min_read_coverage]
     if not covered:
         return PathSearchResult(read_id, "unresolved", "insufficient_query_coverage", (), len(unique))
-    best_coverage = max(path.query_covered_bases for path in covered)
-    competitive = tuple(sorted(
-        (path for path in covered
-         if path.query_covered_bases >= best_coverage - coverage_tolerance_bases),
-        key=lambda path: path.geometry_key,
-    ))
+    competitive = tuple(sorted(covered, key=lambda path: path.geometry_key))
     status = "unique" if len(competitive) == 1 else "ambiguous"
     reason = "one_query_path" if status == "unique" else "competing_query_paths"
     return PathSearchResult(read_id, status, reason, competitive, len(unique))

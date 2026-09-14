@@ -18,7 +18,8 @@ from fin.fusion.realignment import FusionGenomeAligner
 def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
                         sequence_path=None, settings=None, threads=1, publication=None,
                         signal_path=None, signal_settings=None, assembly_gtf_path=None,
-                        assembly_support_path=None, assembly_min_clean_reads=3):
+                        assembly_support_path=None, assembly_min_clean_reads=3,
+                        realign_workers=1):
     """Never instantiate an assembly runner or touch its candidates or caches."""
     from fin.io.io_gtf import GTFReader
     from fin.io.lazy_genome import open_genome
@@ -62,7 +63,8 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
         genome = open_genome(str(reference_path))
         try:
             analysis = analyze_fusion_input(evidence, genome, aligner, genes, settings,
-                                            annotation_transcripts=transcripts, assembly_junctions=assembly_junctions)
+                                            annotation_transcripts=transcripts, assembly_junctions=assembly_junctions,
+                                            realign_workers=realign_workers)
             if signal_path is not None:
                 from fin.fusion.signal import FusionSignalSettings, validate_fusion_signal
 
@@ -89,6 +91,7 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
                 source_digest.update(b"\0" + source.read_bytes() + b"\0")
             publication.complete({
                 "settings": asdict(settings), "inputs": inputs, "input_snapshots": snapshots,
+                "realign_workers": realign_workers,
                 "record_counts": analysis.record_counts, "annotation_status": analysis.annotation_status,
                 "fused_transcript_models": {
                     "count": len(models),

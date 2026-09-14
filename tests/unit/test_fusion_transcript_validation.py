@@ -26,7 +26,10 @@ def test_whole_three_gene_transcript_spans_both_edges():
     assert result.status == "validated"
     assert result.query_coverage == result.identity == 1
     assert result.score == 1800
-    assert result.junction_anchors == ((12, 12), (12, 12))
+    # anchors now count aligned template positions within the 24-bp window on
+    # each side of a boundary (a nanopore read with a 2-bp deletion inside a
+    # 12-bp flank is no longer rejected); an error-free read fills the window
+    assert result.junction_anchors == ((24, 24), (24, 24))
 
 
 def test_partial_read_cannot_validate_complete_chain():

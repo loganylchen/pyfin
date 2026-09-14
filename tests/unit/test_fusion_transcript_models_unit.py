@@ -205,3 +205,167 @@ def test_unavailable_annotated_completion_sequence_fails_the_writer(tmp_path):
             write_transcript_outputs(models, collapsed, genome, tmp_path)
     finally:
         module._slice = module_slice
+
+
+# ---------------------------------------------------------------------------
+# the second review's five reproduced defects
+# ---------------------------------------------------------------------------
+
+
+def test_two_decisive_placements_on_different_molecules_are_not_pooled():
+    # each molecule settled on ONE placement, 3 bp apart; proximity is not
+    # evidence, so neither becomes support for the other and nothing reports
+    a = _path("A", [("A", "+", [(100, 200), (300, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    b = _path("B", [("A", "+", [(100, 200), (303, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    analysis = _analysis({"A": [a], "B": [b]}, ["A", "B"])
+    models, _ = build_fused_transcript_models(analysis, INDEX, GENOME)
+    assert models == ()
+
+
+def test_placements_held_by_one_molecule_as_alternatives_do_merge_within_diameter():
+    # both molecules carry BOTH placements (the corrector could not settle):
+    # one model, both unique, the other placement listed
+    a1 = _path("A", [("A", "+", [(100, 200), (300, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    a2 = _path("A", [("A", "+", [(100, 200), (303, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    b1 = _path("B", [("A", "+", [(100, 200), (300, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    b2 = _path("B", [("A", "+", [(100, 200), (303, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    analysis = _analysis({"A": [a1, a2], "B": [b1, b2]}, ["A", "B"])
+    models, _ = build_fused_transcript_models(analysis, INDEX, GENOME)
+    assert len(models) == 1
+    assert models[0].unique_read_ids == ("A", "B")
+    assert models[0].coordinate_status == "unresolved_nearby_placements"
+    assert models[0].arms[0].exons == ((100, 200), (300, 400))       # annotation-agreeing record
+
+
+def test_no_single_linkage_chaining_across_the_tolerance():
+    # offsets 0, 6 and 12 with tolerance 6: a bridge molecule holding 0 and
+    # 6, another holding 6 and 12. 0 and 12 are 12 apart: never one group.
+    p0 = lambda r: _path(r, [("A", "+", [(100, 200), (300, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    p6 = lambda r: _path(r, [("A", "+", [(100, 200), (306, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    p12 = lambda r: _path(r, [("A", "+", [(100, 200), (312, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    analysis = _analysis({"X": [p0("X"), p6("X")], "Y": [p6("Y"), p12("Y")], "Z": [p0("Z")], "W": [p12("W")]},
+                         ["X", "Y", "Z", "W"])
+    models, _ = build_fused_transcript_models(analysis, INDEX, GENOME)
+    assert len(models) >= 2                          # 0/6 and 6/12 are distinct populations
+    for m in models:
+        record = m.arms[0].exons[1][0]
+        assert record in (300, 306, 312)
+        # every listed alternative is within the tolerance of the record at
+        # the INTERNAL acceptor -- the fusion breakpoint is identical across
+        # all three, so checking it would be vacuous
+        for alt in m.coordinate_alternatives:
+            placement = json.loads(alt)
+            assert abs(placement[0][2][1][0] - record) <= 6
+    assert not any(len(m.unique_read_ids) == 4 for m in models)
+
+
+def test_alias_chains_resolve_across_both_merge_passes():
+    """A genuine two-stage retirement: Q -> P (same sequence) -> new id.
+
+    P and Q are identical-sequence placements of one junction (400/500 vs
+    404/504 on a 4-mer repeat genome), so the first pass retires Q behind P.
+    R shares P's junction but shifts the internal acceptor 3 bp and reaches
+    50 bp further at the 3' end; M holds both P and R, so the second pass
+    merges them -- and because the aggregate envelope takes R's longer 3'
+    extent, the surviving model gets a NEW id and P itself is retired. Q's
+    alias must follow through both hops.
+    """
+    genome = {"A": "ACGT" * 250, "B": "ACGT" * 250}
+    P = [("A", "+", [(100, 200), (300, 400)], "A"), ("B", "+", [(500, 600)], "B")]
+    Q = [("A", "+", [(100, 200), (300, 404)], "A"), ("B", "+", [(504, 600)], "B")]
+    R = [("A", "+", [(100, 200), (297, 400)], "A"), ("B", "+", [(500, 650)], "B")]
+    molecules = {"P0": [_path("P0", P)], "P1": [_path("P1", P)],
+                 "Q0": [_path("Q0", Q)], "Q1": [_path("Q1", Q)],
+                 "M": [_path("M", P), _path("M", R)], "N": [_path("N", R)]}
+    analysis = _analysis(molecules, list(molecules))
+    models, collapsed = build_fused_transcript_models(analysis, INDEX, genome)   # must not raise
+    assert len(models) == 1
+    model = models[0]
+    emitted = {m.model_id for m in models}
+    for item in collapsed:
+        assert set(item.compatible_model_ids) <= emitted
+    # both retirements happened: the id is neither P's nor Q's own structure
+    assert model.model_id not in {_model_id_of(P), _model_id_of(Q)}
+    # the aggregate envelope kept R's 3' extent and P's internal placement
+    assert model.arms[0].exons == ((100, 200), (300, 400))
+    assert model.arms[-1].exons == ((500, 650),)
+    # every retired placement is still listed, including the one inherited
+    # from the first pass
+    placements = {tuple(tuple(a[2][i]) for i in range(len(a[2]))) for alt in model.coordinate_alternatives
+                  for a in json.loads(alt)}
+    assert ((100, 200), (300, 404)) in placements          # Q, via the alias chain
+    assert ((100, 200), (297, 400)) in placements          # R
+    assert set(model.unique_read_ids) == set(molecules)
+    # the extended 3' end is at 650; the annotated B exon ends at 600, so the
+    # regenerated envelope must NOT inherit the members' "annotated boundary
+    # observed" -- its own resolution does not support that claim
+    assert model.arms[-1].exons == ((500, 650),)
+    assert model.arms[-1].resolution.completion_exons == ()
+    assert model.three_prime_status == "observed_end_completeness_unknown"
+
+
+def _model_id_of(arms_spec):
+    from fin.fusion.transcript_models import ModelArm, _model_id
+    return _model_id(tuple(ModelArm(c, s, tuple(e), None) for c, s, e, _ in arms_spec))
+
+
+def test_endpoint_reach_is_recomputed_against_the_final_envelope():
+    # observation R1 starts at 100 (exact fit), R2 starts at 103 and holds
+    # both placements of the acceptor; after the merge only R1 reaches the
+    # surviving envelope's 5' extent
+    r1 = _path("R1", [("A", "+", [(100, 200), (300, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    r2a = _path("R2", [("A", "+", [(103, 200), (300, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    r2b = _path("R2", [("A", "+", [(103, 200), (303, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    r3 = _path("R3", [("A", "+", [(103, 200), (303, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    r3b = _path("R3", [("A", "+", [(103, 200), (300, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    analysis = _analysis({"R1": [r1], "R2": [r2a, r2b], "R3": [r3, r3b]}, ["R1", "R2", "R3"])
+    models, _ = build_fused_transcript_models(analysis, INDEX, GENOME)
+    assert len(models) == 1
+    assert models[0].arms[0].exons[0] == (100, 200)
+    assert models[0].five_prime_observed_read_ids == ("R1",)
+
+
+def test_mixed_sequence_group_does_not_keep_the_same_sequence_claim():
+    genome = {"A": "ACGT" * 250, "B": "ACGT" * 250}
+    p = [_path(f"P{i}", [("A", "+", [(100, 200), (300, 400)], "A"), ("B", "+", [(500, 600)], "B")]) for i in range(2)]
+    q = [_path(f"Q{i}", [("A", "+", [(100, 200), (300, 404)], "A"), ("B", "+", [(504, 600)], "B")]) for i in range(2)]
+    # a molecule holding the same-sequence survivor AND a 3-bp-shorter placement
+    s1 = _path("S", [("A", "+", [(100, 200), (300, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    s2 = _path("S", [("A", "+", [(100, 200), (300, 397)], "A"), ("B", "+", [(500, 600)], "B")])
+    t = _path("T", [("A", "+", [(100, 200), (300, 397)], "A"), ("B", "+", [(500, 600)], "B")])
+    molecules = {x.read_id: [x] for x in p + q}
+    molecules["S"] = [s1, s2]
+    molecules["T"] = [t]
+    analysis = _analysis(molecules, list(molecules))
+    models, _ = build_fused_transcript_models(analysis, INDEX, genome)
+    assert len(models) == 1
+    assert models[0].coordinate_status == "unresolved_nearby_placements"
+
+
+def test_nearby_decisive_molecule_is_reported_not_counted():
+    a = [_path(f"A{i}", [("A", "+", [(100, 200), (300, 400)], "A"), ("B", "+", [(500, 600)], "B")]) for i in range(2)]
+    n = _path("N", [("A", "+", [(100, 200), (302, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+    analysis = _analysis({**{x.read_id: [x] for x in a}, "N": [n]}, ["A0", "A1", "N"])
+    models, _ = build_fused_transcript_models(analysis, INDEX, GENOME)
+    assert len(models) == 1
+    assert models[0].unique_read_ids == ("A0", "A1")
+    assert models[0].nearby_read_ids == ("N",)
+    assert models[0].coordinate_status != "unresolved_nearby_placements"
+
+
+def test_a_regenerated_envelope_is_not_called_same_sequence_on_its_members():
+    # an all-A reference: P and Q spell the same 250 bases, but the aggregate
+    # record combines P's 5' extent with Q's 3' extent and is 297 -- a
+    # sequence neither member has, so the stronger claim must not survive
+    genome = {"A": "A" * 1000, "B": "A" * 1000}
+    index = TranscriptIndex([TranscriptModel("A1", "A", "gA", "A", "+", ((100, 200), (300, 400))),
+                             TranscriptModel("B1", "B", "gB", "B", "+", ((500, 600),))])
+    P = [("A", "+", [(100, 200), (300, 400)], "A"), ("B", "+", [(500, 550)], "B")]
+    Q = [("A", "+", [(150, 200), (297, 400)], "A"), ("B", "+", [(500, 597)], "B")]
+    molecules = {"M": [_path("M", P), _path("M", Q)], "N": [_path("N", P), _path("N", Q)]}
+    analysis = _analysis(molecules, list(molecules))
+    models, _ = build_fused_transcript_models(analysis, index, genome)
+    assert len(models) == 1
+    model = models[0]
+    assert len(model_sequence(model.arms, genome)[0]) == 297
+    assert model.coordinate_status == "unresolved_nearby_placements"
