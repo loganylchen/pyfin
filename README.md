@@ -292,6 +292,26 @@ is emitted. `fusion_reads.jsonl`, `junction_corrections.jsonl`, `junction_signal
 The TSV's `signal_status` distinguishes full/partial local signal support from
 sequence-only calls. See `docs/FUSION_SIGNAL_VALIDATION.md` for scope and checks.
 
+**Fused-transcript level.** On top of the chains, `fusion_models.tsv` reports
+one row per *fused transcript model*: which annotated isoform of each gene
+took part (`compatible_transcript_ids`, per-arm `arm_match_classes`), the
+conventional junction name from exon ranks (`gA:e13>gB:e2`), the breakpoints,
+and molecule support split into `support_unique` (fits this model alone),
+`support_compatible` (fits this and other models -- a 5'-degraded molecule
+usually cannot single out one isoform) and `support_partial`. Multi-gene
+models (A-B-C) appear here with three arms exactly when complete molecules
+span the whole chain. Two FASTAs are written and never share a record id:
+`fusion_models.fa` is evidence-constrained (the envelope of what molecules
+observed, reference-projected), `fusion_models.annotated.fa` extends the
+outer arms to compatible annotated ends and says so in the header
+(`kind=annotated_completion extension_bases_5p=... extension_observed=false`).
+`fusion_model_exons.tsv` is the multi-chromosome exon table (0-based
+half-open genomic and transcript offsets, per-exon provenance) that
+reconstructs either FASTA; `fusion_model_evidence.jsonl` carries the read ids;
+`fusion_model_collapsed.jsonl` lists observed structures that were folded into
+a longer model as possible 5' truncations, with the models they could be. See
+`docs/FUSION_TRANSCRIPT_MODELS_2026-09-15.md`.
+
 Publication switches the `fusion/` symlink atomically between run-local
 directories. Check `fusion_manifest.json` for `status="complete"` before using
 results. A failed rerun exposes a failed manifest, not the previous calls.
