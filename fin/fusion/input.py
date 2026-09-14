@@ -38,17 +38,35 @@ def _snapshot(path):
 
 
 def _is_nomination(record, genes, min_soft_clip):
+    """Which route, if any, nominates this record. Returns "" or the route."""
     if record.is_unmapped:
-        return False
+        return ""
     if record.is_supplementary or record.has_tag("SA"):
-        return True
+        return "supplementary_or_sa"
     if any(code in (4, 5) and length >= min_soft_clip for code, length in record.cigartuples or ()):
-        return True
+        return "soft_clip"
     if genes.genes and any(code == 3 for code, _ in record.cigartuples or ()):
         segment, = segments_from_record(record, include_sa=False)
         path = annotate_read_path(ReadPath(record.query_name, (segment,)), genes)
-        return len(path.arms) > 1
-    return False
+        if len(path.arms) < 2:
+            return ""
+        # A GENE TRANSITION, not merely a change of label set. `labels()`
+        # attaches a gene to a block on ONE base of exonic overlap, so on a
+        # real annotation a read that simply enters an overlapping gene's
+        # territory ({A} -> {A,B}) splits into arms and would be nominated:
+        # measured at 6.1% of records on chr9+chr22 of a real library, which
+        # alone exceeds the candidate cap. A transition requires each side to
+        # carry a gene the other lacks, and both sides to be annotated at all
+        # -- leaving annotated territory ({A} -> {}) is novel structure, not a
+        # gene change. This route only ever sees ONE collinear segment, so it
+        # can only find adjacent-gene readthrough; a genuine distant fusion
+        # arrives with a supplementary alignment or a large clip. Tightening
+        # it takes 6.09% -> 0.19% on that measurement.
+        sets = [set(arm.gene_ids) for arm in path.arms]
+        if any(left and right and not (left <= right or right <= left)
+               for left, right in zip(sets, sets[1:])):
+            return "gene_transition"
+    return ""
 
 
 def scan_fusion_bam(
@@ -67,8 +85,11 @@ def scan_fusion_bam(
     """
     if min_soft_clip <= 0 or min(max_candidate_reads, max_segments_per_read) <= 0:
         raise ValueError("fusion input limits must be positive")
+    import logging
+
     import pysam
 
+    log = logging.getLogger(__name__)
     genes = genes if genes is not None else GeneIndex()
     counts = Counter()
     nominated = set()
@@ -78,6 +99,9 @@ def scan_fusion_bam(
         with pysam.AlignmentFile(str(bam_path), "rb") as reader:
             for record in reader.fetch(until_eof=True):
                 counts["alignment_records"] += 1
+                if counts["alignment_records"] % 200000 == 0:
+                    log.info("fusion scan pass 1: %d records, %d nominated",
+                             counts["alignment_records"], len(nominated))
                 if not record.is_secondary and not record.is_supplementary:
                     counts["primary_records"] += 1
                 if record.is_unmapped:
@@ -87,11 +111,14 @@ def scan_fusion_bam(
                 if not read_id:
                     raise FusionInputError("mapped BAM record has no read identity")
                 try:
-                    candidate = _is_nomination(record, genes, min_soft_clip)
+                    route = _is_nomination(record, genes, min_soft_clip)
                 except (ValueError, TypeError) as exc:
-                    candidate = True
+                    route = "invalid_alignment"
                     invalid[read_id] = f"invalid_alignment:{type(exc).__name__}"
-                if candidate:
+                if route:
+                    counts["nominated_by_" + route] += 1
+                    if read_id not in nominated:
+                        counts["nominated_first_by_" + route] += 1
                     nominated.add(read_id)
                     if len(nominated) > max_candidate_reads:
                         raise FusionInputError("candidate read limit exceeded; no complete fusion analysis")

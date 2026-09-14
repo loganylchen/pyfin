@@ -177,3 +177,48 @@ def test_record_order_does_not_change_evidence(tmp_path):
     _write_bam(first, entries)
     _write_bam(second, list(reversed(entries)))
     assert scan_fusion_bam(first) == scan_fusion_bam(second)
+
+
+def test_entering_an_overlapping_gene_is_not_a_gene_transition(tmp_path):
+    """`labels()` attaches a gene on ONE base of exonic overlap, so on a real
+    annotation a read that merely enters an overlapping gene's territory
+    ({A} -> {A,B}) splits into arms. Nominating those made 6.1% of a real
+    library candidates -- more than the cap -- for no fusion evidence."""
+    bam = tmp_path / "overlap.bam"
+    _write_bam(bam, [{"cigar": "100M800N100M"}])
+    genes = GeneIndex([
+        GeneModel("geneA", "chr1", "+", ((100, 200), (1000, 1100))),
+        GeneModel("geneB", "chr1", "+", ((1000, 1100),)),
+    ])
+    assert scan_fusion_bam(bam, genes).molecules == ()
+
+
+def test_a_real_gene_transition_is_still_nominated(tmp_path):
+    bam = tmp_path / "readthrough.bam"
+    _write_bam(bam, [{"cigar": "100M800N100M"}])
+    genes = GeneIndex([
+        GeneModel("geneA", "chr1", "+", ((100, 200),)),
+        GeneModel("geneB", "chr1", "+", ((1000, 1100),)),
+    ])
+    molecule, = scan_fusion_bam(bam, genes).molecules
+    assert scan_fusion_bam(bam, genes).record_counts["nominated_by_gene_transition"] == 1
+
+
+def test_leaving_annotated_territory_is_not_a_gene_transition(tmp_path):
+    # {A} -> {} is novel structure; a genuine distant fusion would arrive
+    # with a supplementary alignment or a large clip, not on one collinear
+    # segment
+    bam = tmp_path / "novel.bam"
+    _write_bam(bam, [{"cigar": "100M800N100M"}])
+    genes = GeneIndex([GeneModel("geneA", "chr1", "+", ((100, 200),))])
+    assert scan_fusion_bam(bam, genes).molecules == ()
+
+
+def test_nomination_routes_are_counted_separately(tmp_path):
+    bam = tmp_path / "routes.bam"
+    _write_bam(bam, [{"name": "clipped", "cigar": "100M300S"},
+                     {"name": "tagged", "cigar": "100M300S", "sa": "chr2,101,+,100S100M200S,60,0;"}])
+    counts = scan_fusion_bam(bam).record_counts
+    assert counts["nominated_by_supplementary_or_sa"] == 1
+    assert counts["nominated_by_soft_clip"] == 1
+    assert counts["nominated_molecules"] == 2

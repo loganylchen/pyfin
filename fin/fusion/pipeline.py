@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict
 from contextlib import nullcontext
 import hashlib
+import logging
+import time
 from importlib.metadata import version
 from pathlib import Path
 
@@ -13,6 +15,8 @@ from fin.fusion.annotation import GeneIndex
 from fin.fusion.input import FusionInputError, _snapshot, scan_fusion_bam, supply_fusion_sequences
 from fin.fusion.output import FusionPublication, write_fusion_outputs
 from fin.fusion.realignment import FusionGenomeAligner
+
+logger = logging.getLogger(__name__)
 
 
 def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
@@ -50,17 +54,30 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
                 reader.parse()
                 transcripts = tuple(reader.transcripts.values())
                 genes = GeneIndex.from_transcripts(transcripts)
+        # a real library is ~1e6 records and a genome index is minutes: a run
+        # with no progress is indistinguishable from a hung one
+        started = time.monotonic()
+        elapsed = lambda: f"{time.monotonic() - started:.0f}s"
+        if gtf_path is not None:
+            logger.info("fusion: annotation indexed, %d genes [%s]", len(genes.genes), elapsed())
+        logger.info("fusion: scanning %s (min clip %d bp) [%s]", bam_path, settings.min_clip_bases, elapsed())
         evidence = scan_fusion_bam(bam_path, genes, min_soft_clip=settings.min_clip_bases,
                                    max_candidate_reads=settings.max_candidate_reads,
                                    max_segments_per_read=settings.max_segments)
+        logger.info("fusion: %s [%s]", " ".join(f"{k}={v}" for k, v in sorted(evidence.record_counts.items())),
+                    elapsed())
         if sequence_path is not None:
+            logger.info("fusion: recovering read sequences from %s [%s]", sequence_path, elapsed())
             evidence = supply_fusion_sequences(evidence, sequence_path)
+        logger.info("fusion: building the genome index [%s]", elapsed())
         aligner = FusionGenomeAligner(
             reference_path, max_hits=settings.max_hits, max_windows=settings.max_windows,
             max_segments=settings.max_segments, min_anchor=settings.min_arm_bases,
             min_identity=settings.min_identity, threads=threads,
         )
         genome = open_genome(str(reference_path))
+        logger.info("fusion: index ready; adjudicating %d molecules on %d worker(s) [%s]",
+                    sum(1 for m in evidence.molecules if m.status == "ready"), realign_workers, elapsed())
         try:
             analysis = analyze_fusion_input(evidence, genome, aligner, genes, settings,
                                             annotation_transcripts=transcripts, assembly_junctions=assembly_junctions,
@@ -70,6 +87,8 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
 
                 signal_settings = signal_settings or FusionSignalSettings()
                 analysis = validate_fusion_signal(analysis, evidence, genome, signal_path, signal_settings)
+            logger.info("fusion: %d chains from %d molecules [%s]",
+                        len(analysis.chains), len(analysis.reads), elapsed())
             write_fusion_outputs(analysis, genome, publication.work_dir)
             # Fused-transcript level, computed from the finished molecule-level
             # analysis and written BESIDE the chain artifacts: which isoform of
@@ -82,8 +101,17 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
             transcript_index = TranscriptIndex.from_transcripts(transcripts)
             models, collapsed = build_fused_transcript_models(analysis, transcript_index, genome)
             write_transcript_outputs(models, collapsed, genome, publication.work_dir)
-            if any(_snapshot(inputs[name]) != snapshot for name, snapshot in snapshots.items()):
-                raise FusionInputError("fusion input changed before publication")
+            logger.info("fusion: %d fused-transcript models (%d multi-gene), %d collapsed [%s]",
+                        len(models), sum(1 for m in models if len(m.arms) > 2), len(collapsed), elapsed())
+            drifted = {name: (snapshot, _snapshot(inputs[name])) for name, snapshot in snapshots.items()
+                       if _snapshot(inputs[name]) != snapshot}
+            if drifted:
+                fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+                detail = "; ".join(
+                    f"{name} [{inputs[name]}] " + ", ".join(
+                        f"{field} {was}->{now}" for field, was, now in zip(fields, before, after) if was != now)
+                    for name, (before, after) in sorted(drifted.items()))
+                raise FusionInputError("fusion input changed before publication: " + detail)
             source_root = Path(__file__).resolve().parents[2]
             source_digest = hashlib.sha256()
             for source in sorted((source_root / "fin").rglob("*.py")):

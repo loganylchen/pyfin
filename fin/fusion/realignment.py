@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Tuple
 
+import logging
+
 from fin.fusion.records import AlignmentSegment, deduplicate_segments, segment_from_cigar
+
+logger = logging.getLogger(__name__)
 
 
 _POOL_ALIGNER = None
@@ -96,6 +100,8 @@ class FusionGenomeAligner:
 
         context = multiprocessing.get_context("fork")
         chunk = max(1, min(64, (len(items) + workers - 1) // workers))
+        logger.info("fusion realignment: %d molecules across %d forked workers, chunk %d",
+                    len(items), workers, chunk)
         global _POOL_ALIGNER
         _POOL_ALIGNER = self
         try:
