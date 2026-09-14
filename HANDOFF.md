@@ -1,10 +1,59 @@
-# PyFIN SIRV4 Optimization — Session Handoff
+# PyFIN Optimization — Session Handoff
 
-Last updated: 2026-09-02. This document is the authoritative handoff for
-continuing the SIRV4 expression-performance work. Read it TOGETHER with
-`SIRV4_IMPROVEMENT_PLAN.md` (full evidence + acceptance gates per lever) and
-`SIRV4_GRID_STUDY.md` (benchmark semantics). Treat live source and generated
-artifacts as authoritative over any narrative.
+Last updated: 2026-09-13. This document is the authoritative handoff. Read it
+TOGETHER with `SIRV4_IMPROVEMENT_PLAN.md` (evidence + acceptance gates per
+lever) and `SIRV4_GRID_STUDY.md` (benchmark semantics). Treat live source and
+generated artifacts as authoritative over any narrative.
+
+**START HERE (2026-09-13).** Sections 1-3 and the ladder in section 2 are the
+HISTORICAL SIRV-profile campaign (kept for provenance). The shipped production
+default is the `real-drna` profile chosen by cross-dataset maximin (4d), with
+the endpoint channels (4g), snap-merge (4l) and -- since 2026-09-11 -- the
+support-gate attestation exemption at K=3 (4t). Current standing on real human
+GENCODE vs stringtie3, the one real peer: ahead on 6 of 7 conditions, mean
++1.4 Sn / +5.8 Pr / +2.54 F1; the single open structural dimension is de novo
+(`p00`, -0.30). Where things stand per dimension: 4u and
+`docs/PRODUCTION_ALL_DIMENSION_AUDIT_2026-09-11.md`. Git state: section 6.
+Next lever, chosen by measurement: section 7 (the K operating point; HEYA8
+K=1 arm is SLURM 211963).
+
+Parallel algorithm notebook (2026-09-09; not a SIRV benchmark result):
+`docs/PRODUCTION_RAW_DTW_CASEBOOK.md` records the original chr19 seven-read
+raw-DTW case plus five additional junction pairs / 57 reads, reproducible
+inputs and paths, calibration flips, and a possible longer-template preference.
+No production scoring defaults changed; no staging or commits performed.
+Follow-up: `docs/PRODUCTION_PRIMARY_EVENT_DTW.md` records primary-only observed
+event means vs uncalibrated pore means (64 reads; 2x2 event/raw and calibration
+controls; no new eventalign). Treat numerical preferences as exploratory, not truth.
+User-confirmed next-direction contract (2026-09-09):
+`docs/PRODUCTION_DTW_SHARED_CALIBRATION_DECISION.md` — candidate A/B model means
+must share that read's final primary scale/shift and exact krill built-in model;
+observed raw/events remain unchanged. Raw vs event DTW is not yet decided.
+This is a recorded future direction, not an implemented production migration.
+Executed exploratory follow-up: `docs/PRODUCTION_RAW_DTW_EXPANSION.md` records
+8 new pairs / 105 reads with exact built-in means and shared final calibration;
+105 primary calls, zero candidate eventalign, 420 paths independently checked.
+Experimental scripts support this mode; production remains unchanged.
+Full frozen spike-in validation (2026-09-09):
+`docs/PRODUCTION_JUNCTION_ACCURACY_BENCHMARK.md` — all 6 SIRV4 + 4 Sequin
+libraries, 10,521 reads / 42,315 read-junctions, annotation-blind prediction.
+The minimum raw-DTW SSE rule FAILS the primary metric: SIRV4 exact catalog-valid
+read-junction fraction 93.144% -> 71.377% (-21.767 pp); Sequin 93.775% -> 93.498%
+(-0.277 pp, CI includes zero). SIRV4 raw fixes 641 but damages 8,988 observations;
+95.438% of damaged observations move to longer spliced templates. This is an
+experimental junction re-selection test, NOT production transcript F1. 68 unit
+tests and full numerical/input audit pass; production is unchanged. Do not
+promote this unpenalized minimum-SSE rule based on the earlier human examples.
+Follow-up cached ablation (2026-09-09):
+`docs/PRODUCTION_DTW_NORMALIZATION_ABLATION.md` — all ten libraries, 16 frozen
+exploratory settings, zero new eventalign. Dividing SSE by k-mer count worsens
+SIRV4/Sequin to 63.447%/92.515%. Minimum 5 raw samples per model state improves
+unconstrained DTW to 81.521%/94.103%, but remains below SIRV4 BAM; Sequin gain
+over BAM is +0.328 pp with CI [-0.254,+0.928]. Strong length penalties reverse
+the bias: alpha 1 gives Sequin 84.274%, with 412/415 damaged observations moving
+to shorter templates. No new abstentions; 84 tests and full score/path audit
+pass. These already-inspected libraries are development data, not held-out
+validation. Keep production unchanged.
 
 ## 1. Mission and scoring contracts
 
@@ -27,7 +76,12 @@ Two contracts — never pool them:
 
 "Top/tied N/156" = cells where PyFIN F1 >= best available competitor F1.
 
-## 2. Current result ladder (expression contract, all live 156-cell runs)
+## 2. Result ladder of the SIRV-profile campaign (HISTORICAL; expression contract, 156-cell runs)
+
+> Superseded on 2026-09-05 by 4d: the `sirv` profile and the P0 / rescue /
+> election levers are benchmark working points, NOT the shipped default. They
+> win on SIRV4 and lose on the held-out Sequin set. The numbers below remain
+> the reproducible record of that campaign.
 
 | Stage | Flags added | Sn | Pr | F1 | Top/tied |
 |---|---|---:|---:|---:|---:|
@@ -308,6 +362,56 @@ blanket lead.
 
 *(Harness: `experiments/prod_validation/human_headtohead.py`, run on the HOST --
 the scorer shells out to docker.)*
+
+### 4b5. The human head-to-head, complete for the three sweep tools (2026-09-09)
+
+The sweep finished for stringtie3 / bambu / isotools: **1184 assemblies, 390
+each = 15 samples x 26 conditions** (espresso 10, isoquant 4). Every one of our
+7 production conditions on H9 rep2 run2 now has all three, so the head-to-head
+is **23 cells** (same harness, same caveats as 4b4: genome-wide assembly
+restricted to chr1/19/21 post hoc; pyfin = `GCSMC`).
+
+| cond | pyfin | stringtie3 | espresso | isoquant | bambu | isotools |
+| --- | --- | --- | --- | --- | --- | --- |
+| full | 31.2/67.9/42.8 | 33.9/65.5/**44.7** | - | - | 100.0/18.3/30.9 | 27.3/14.2/18.7 |
+| p50 | 24.4/62.6/**35.1** | 22.9/59.1/33.0 | - | - | 55.6/19.6/29.0 | 27.3/14.2/18.7 |
+| p00 | 15.8/56.2/24.7 | 16.0/56.8/**25.0** | - | - | 13.8/62.2/22.6 | 27.2/14.2/18.7 |
+| c_merge50 | 27.1/61.3/37.6 | 28.0/57.6/**37.7** | - | - | 72.0/13.6/22.9 | 27.3/14.2/18.7 |
+| c_trunc3p50 | 30.9/66.5/42.2 | 32.7/63.1/**43.1** | - | 15.4/74.2/25.5 | 99.8/18.2/30.8 | 27.3/14.2/18.7 |
+| c_trunc5p50 | 30.5/66.8/41.9 | 33.5/62.3/**43.6** | 29.4/74.2/42.1 | - | 99.8/18.2/30.8 | 27.3/14.2/18.7 |
+| c_jitter50_10bp | 16.3/41.9/**23.5** | 9.5/20.9/13.1 | - | - | 5.4/1.0/1.7 | 27.1/14.1/18.5 |
+
+| tool | n | tool Sn/Pr/F1 | pyfin Sn/Pr/F1 | dF1 | pyfin wins |
+| --- | --- | --- | --- | --- | --- |
+| stringtie3 | 7 | 25.2/55.0/34.3 | 25.2/60.5/35.4 | +1.09 | **2/7** |
+| espresso | 1 | 29.4/74.2/42.1 | 30.5/66.8/41.9 | -0.23 | 0/1 |
+| isoquant | 1 | 15.4/74.2/25.5 | 30.9/66.5/42.2 | +16.69 | 1/1 |
+| bambu | 7 | 63.8/21.6/24.1 | 25.2/60.5/35.4 | +11.29 | 7/7 |
+| isotools | 7 | 27.3/14.2/18.7 | 25.2/60.5/35.4 | +16.72 | 7/7 |
+
+**What the four new stringtie3 cells change:** the +1.09 mean is carried
+entirely by `c_jitter50_10bp` (+10.41, stringtie3 collapses to 9.5/20.9 when the
+annotation is jittered) and `p50` (+2.10). On the five conditions where the
+annotation is intact or merely truncated/merged, **stringtie3 is ahead on every
+one, by 0.10 to 1.92 F1**, and the shape is constant: it recalls ~2-3 pp more
+(33.9 vs 31.2 on `full`) while we are ~2.5-4.5 pp more precise (67.9 vs 65.5).
+Its extra recall is not bought with junk -- its query count is only ~12% above
+ours (3804 vs 3377 on `full`). So on real human data with a usable annotation
+the honest statement is "level with stringtie3, slightly behind on F1, ahead on
+precision, behind on recall"; the clear lead is confined to corrupted (`jitter`)
+and half-removed (`p50`) annotations, and disappears at `p00` (-0.30).
+
+bambu and isotools are unchanged in kind: bambu echoes the annotation (`full`
+Sn 100.0 / Pr 18.3; at `p00` it drops to 13.8/62.2 and we beat it by 2.08) and
+isotools is annotation-blind (27.3/14.2/18.7 in all 7 cells, ~14.1k models).
+These 14 "wins" say nothing about the axis that matters.
+
+**Next thing this points at:** the 19 conditions we have not run (p01..p99,
+the 10% corruptions, flip/ir/skip/spurious at 50%) are now fully covered by
+stringtie3. Running `GCSMC` on them would make the human comparison a full
+26-cell curve against the one real peer, and would show where between `p50`
+(+2.10) and `full` (-1.92) the crossover sits. Each run is one SLURM job on the
+staged chr1/19/21 BAM.
 
 **Real human, the older two-cell snapshot (superseded by 4b4 above):**
 Only two overlap conditions we ran, and the competitor assembled genome-wide, so
@@ -1198,6 +1302,595 @@ validation showed recall UP under snap, so the net is positive, but a count-only
 minority guard (do not move when the loser has >= N indel-clean reads of its own)
 is a cheap base-space experiment with a clear falsifier.
 
+## 4o. The human recall gap has ONE owner, and an exemption that closes most of it (2026-09-09/10; LANDED opt-in 82f0151, PROMOTED to default 17fec28 -- see 4t)
+
+Full record (Chinese): `docs/PRODUCTION_SUPPORT_GATE_ATTESTATION_2026-09-10.md`.
+Literature review commissioned for this campaign: `docs/LITERATURE_REVIEW_2026-09-09.md`.
+(Status line at the time of writing: everything below was uncommitted. It has
+since landed; the K=0 default described here is now K=3 under `real-drna`.)
+
+**Where the stringtie3-only matches die.** With the complete human curve in
+hand (4b5: 13/26, crossover at p80, every loss is recall), the `full` cell was
+dissected: 554 stringtie3-only `=` (NanoCount median 1 read; 272 of them have a
+BAM read carrying their exact chain). A new opt-in `--selection-audit` (per-
+interval shards + a global file recording every SelectionOutcome from
+`discovered` to `final`; collector `selection_audit_collect.py`; GTF verified
+structurally identical with the flag on) attributes **475 of the 554 to
+`m2_support_gate`**, and **4566 of all 7398 expressed truth transcripts (62%)**
+to the same gate. None of the 554 is lost in discovery (all are GTF candidates;
+none folded). The gate drops 20,294 of the 31,418 candidates entering EM on
+that cell. This is 4i's finding with an exact attribution instead of an
+inference.
+
+**What the dropped annotated candidates look like** (`gate_drop_precision.py`,
+truth = NanoCount TPM>0, "suffix" = read chain is a strand-aware contiguous 3'
+suffix of the candidate chain, count includes exact reads):
+
+| tier | n | truth |
+| --- | --- | --- |
+| exact reads >= 3 | 122 | 75% |
+| exact == 2 / == 1 | 71 / 347 | 65% / 45% |
+| no exact, suffix >= 3 | 1367 | **77.5%** |
+| no exact, suffix 1-2 | 2160 | 59% |
+| no chain read at all | 15929 | 12% |
+
+Exact-or-suffix >= 3: 1595 candidates at 77% truth, above the cell's 67.9%
+precision -- admitting them raises Sn AND Pr. Codex's caveat stands: that 77%
+is agreement with a compatibility-based pseudo-truth, not independent evidence
+of expression.
+
+**The lever: `--m2-support-gate-attest-reads K` (flag default 0 = byte-identical; `real-drna` profile default 3 since 17fec28).**
+An annotated multi-exon candidate is exempt from the support gate iff
+`compatible_read_depth >= K` (distinct MAPQ>=1 primary reads whose chain equals
+the candidate's or is its strand-aware 3' suffix, not running across the
+upstream model intron, 3' end within 50 bp past the annotated TES; computed
+always in `discovery.chain_compatible_read_depths`) AND no unobserved junction
+of it is a JITTER of an observed one (both boundaries within
+`--m2-support-gate-attest-veto-bp` 10 of a junction in the MAPQ>=1 registry;
+`m2_junction_nll.unjittered_gtf_columns`, fails closed). No EM-mass bar. Three
+things were tried and rejected on data, each with Codex: requiring every
+junction of the read to be indel-clean (v1: a read-length filter on dRNA,
+1079 -> 210 candidates for 95% vs 90% precision); the OR-shaped
+`uncontradicted_gtf_columns` veto (vetoed 129 attested candidates, 128 of them
+expressed -- alternative splice sites are not contradictions); and an
+"exclusive" rule where an exact-chain read attests only its own chain (v3:
+Codex -- an exact chain match does not make a molecule complete; inert on the
+corruption ladder, -0.3 on human).
+
+**FINAL (v6 = the committed code; snapshot `_snap/attest6`, verified
+byte-identical to the pre-commit tree `_snap/attest8` on two human cells):**
+
+| dataset | cells/libs | dSn | dPr | dF1 [95% CI] | up/down/same | worst family |
+| --- | --- | --- | --- | --- | --- | --- |
+| human | 26/1 | +1.65 | +0.42 | **+1.63 [+1.25, +2.02]** | **24/0/2** | c_jitter +0.34 |
+| SIRV4 | 156/6 | +0.36 | -0.15 | +0.09 [-0.11, +0.34] | 37/16/103 | c_trunc3p +0.07 |
+| Sequin | 104/4 | +0.00 | -0.03 | -0.01 [-0.03, +0.00] | 0/1/103 | c_ir -0.15 |
+| HEYA8 | 130/5 | +0.10 | -0.02 | +0.05 [+0.01, +0.12] | 12/2/116 | c_jitter +0.05 |
+
+Human vs stringtie3 on the end-blind contract: production 13/26 (mean +1.41)
+-> **25/26 (mean +3.04)**; the only loss left is p00 (-0.30), where the lever
+is inert because there is no annotation. K=0 control on human `full` is
+BYTE-identical to production. **Under an end-aware contract the human picture
+is different and we do not lead -- see 4p.**
+
+**These are NOT a confirmation.** Rule 2's shape was chosen after inspecting
+the v2 failures, so the panels are post-selection characterization; the
+bootstrap intervals do not account for that selection; one human library gives
+a within-library bound, not a population one; precision falls slightly on three
+panels. The flag ships DEFAULT-OFF and no profile enables it.
+
+**A bug the verification caught, worth remembering:** `collect_compatible_depths`
+was added to the outer and inner signatures but the FORWARD line was lost in a
+script exception, so the gated build silently never fired the exemption (output
+fell back to production's 3377 models). The unit test only checked that the
+runner passed the flag. Asserting equivalence is not verifying it.
+
+**Sentinels (one library each, paired vs the production default):**
+
+| cell | v2 |
+| --- | --- |
+| human `full` | Sn 31.2 -> **34.8**, Pr 67.9 -> **69.3**, F1 42.75 -> **46.33** (+3.58; stringtie3 44.68) |
+| human c_jitter10 / c_jitter50 / p00 | +0.83 / +0.06 / 0.00 |
+| SIRV4 one library, 26 cells | mean -0.12 [-0.28, 0.00]; c_ir50 -0.9, c_merge50 -0.9, c_skip50 -1.3; 23/26 identical |
+| HEYA8 one library, 26 cells | mean -0.03; c_skip50 -0.68; 24/26 identical |
+| K=0 same-snapshot control | model multiset identical to production |
+
+The spike-in FPs are the corrupted entries themselves: c_merge50's SIRV409 is
+SIRV409's 5' part merged onto SIRV410's chain with SIRV410's own entry REMOVED,
+so SIRV410's 35 reads (equal to no annotated chain) attest the chimera as a
+suffix; c_skip50/c_ir50 are the same shape. **A corrupted junction the reads
+never cover is silence, and chain compatibility cannot tell it from a human
+degradation fragment.** A TSS-peak block (reads with piled-up 5' ends are
+complete molecules, not fragments) was measured offline (costs 181 of 874 human
+truths at M>=5) and NOT adopted -- Codex: a 5' pile-up implies neither
+completeness nor zero contribution from longer isoforms.
+
+**Codex's ruling on the contract:** the pre-frozen stop rule (no corruption
+family mean below -0.5) was breached by c_skip on the SIRV4 sentinel, so the
+panels now running (human 26 + SIRV4 156 + Sequin 100 + HEYA8 125 on the
+repaired v2, snapshot `_snap/attest4`, arms `gcatt4` / `att4`) are
+CHARACTERIZATION, not the continuation of an unbroken promotion test. A
+repaired arm needs a newly frozen protocol: human mean dF1 >= +1 with paired
+LCB > 0; every other dataset LCB > -0.25; every corruption family mean >= -0.5;
+missing cells block; no cross-dataset offsetting; library-block bootstrap.
+`arm_compare.py` now lists missing cells, maps families explicitly and
+bootstraps libraries as blocks.
+
+**What this lever IS (Codex's wording, adopted):** an annotation-prior rescue
+that exempts multi-exon models from the support gate when >= 3 distinct
+eligible primary reads carry an exact or 3'-suffix chain and pass the span
+checks, provided no unobserved junction has an observed neighbour within 10 bp
+on both boundaries. It raised F1 3.58 on the inspected human full-annotation
+cell with both axes up and beat stringtie3 there under the NanoCount contract;
+it can also rescue incorrect annotated structures whose distinguishing
+upstream region is unobserved (merge/skip/IR sentinel FPs, 1-2 models per
+50%-corruption cell).
+
+## 4p. Two dimensions nobody had measured, and what they say (2026-09-10)
+
+Full record (Chinese, both parts): `docs/PRODUCTION_QUANT_ACCURACY_2026-09-10.md`.
+Harnesses: `quant_accuracy.py`, `strict_match_rescore.py`. No production code
+changed for either. Both conclusions were REVISED after Codex review -- the
+first versions of both harnesses flattered us.
+
+### QUANTIFICATION, against real concentrations
+
+Every result in this file scores STRUCTURE against a pseudo-truth (NanoCount
+TPM>0). The Sequin grid has actual quantitative truth --
+`refs/concentration/RNAsequins_MixA_v1.tsv`, attomol/uL, 164/165 ids matching
+our Sequin truth GTF (the grid is `sequin_v1_...`, so **v1, not V2**). 104
+paired cells over 4 libraries, pyfin production default vs stringtie3:
+
+| metric | denominator | mean d (pyfin - st3) | pyfin better |
+| --- | --- | --- | --- |
+| rho | each tool's OWN detections | -0.004 | 42/104 |
+| rho | **COMMON detections** | **-0.022** | 44/103 |
+| MARD (lower better) | COMMON detections | **+0.056** | 32/103 |
+| rho_all | expressed set, misses = 0 | **+0.126** | 75/104 |
+| MARD_all (lower better) | expressed set, misses = 0 | **-0.211** | 80/104 |
+| unmatched TPM fraction | whole output | **0.044 vs 0.145** | - |
+
+**On the transcripts both tools found, stringtie3's abundances are slightly
+BETTER than ours.** Our advantage in the joint metrics is entirely detection.
+The one abundance-side win is that only 4.4% of our TPM sits on models matching
+no truth transcript, against stringtie3's 14.5%. We are also behind the
+NanoCount oracle (which is handed the true annotation): 0.756/0.661/0.631 vs
+our 0.725/0.543/0.707 unconditional. Never claim a better quantifier.
+
+Codex fixed two things that had inflated us: comparing each tool on its OWN
+detected set compares different problems, and the first version renormalised
+away the abundance a tool put on wrong structures (no penalty for mass
+misallocation). An even earlier version used all 164 mix transcripts as the
+denominator, which saturates the symmetric MARD at its 2.0 ceiling for every
+tool including the oracle and made us look better than it.
+
+### END-AWARE STRUCTURE (`gffcompare --strict-match`)
+
+gffcompare's default `=` is intron-chain only -- its own docs say matching
+transcripts may differ in the length of the first and last exons -- so **every
+precision number in this file is TSS/TES-blind**.
+
+**Convention trap, measured on 0.12.6:** with `--strict-match` the `.tmap`
+class code demands EXACT terminal coordinates (all 2167 survivors on a real
+human cell have max |offset| = 0; a 19 bp shift is `~` even at `-e 25`) while
+the `.stats` transcript level honours `-e` (same run: 2557 blind, 2468 at
+e=100, 2333 at e=25, byte-identical tmap codes). The F1 numbers below are the
+`.stats`, i.e. the tolerance convention; attribution must be recomputed from
+coordinates, not read off the tmap.
+
+SIRV4, 4 conditions x 6 libraries, mean F1 blind -> e=100 -> e=25:
+pyfin **85.67 -> 85.24 -> 85.10** (-0.57); stringtie3 69.18 -> 64.28 ->
+**59.64** (-9.54, Pr 79.4 -> 66.9); espresso 78.91 flat; isoquant 56.00 ->
+54.80. **On the spike-ins strictness widens our lead, +16.5 -> +25.5.**
+
+Human, 26 conditions, 1 library, mean dF1 vs stringtie3 (cells won):
+blind +1.41 (13/26) production, **+3.60 (25/26)** with attestation; e=100
+-0.26 / +2.03; **e=25 -1.52 / +0.70 (12/26)**. Per condition: with a complete
+annotation stringtie3 inherits correct ends from `-G` and beats us at e=25
+(full 44.54 vs 42.31); with a degraded or corrupted annotation we win under
+every contract (c_jitter50 12.62 vs 8.00, c_flip50 29.19 vs 23.97).
+
+**Cause, at the reference level** (own coordinate recount, reconciled with the
+stats to within 4 of 2554): at 100 bp we lose 90 references, 87 of them matched
+ONLY by an `.ext`; at **25 bp we lose 222 (8.7%), 219 of them (99%) ext-only**;
+at exact ends 394 (389 ext-only). Of the 397 `.ext` models only 169 have both
+boundaries within 25 bp; their 5' ends mostly extend UPSTREAM of the annotation
+(median 15 bp) and their 3' ends mostly fall short. That is
+`read_extent_contradicted` working as designed -- it fires only when reads
+OVERRUN an annotated end, at the fitted narrow kernel (b_narrow ~1.9 bp on
+human) gated by 3 clustered reads -- so three reads 15 bp upstream overturn an
+annotated TSS.
+
+**Whether that is an error, this benchmark cannot say**: truth IS the GENCODE
+end, but LRGASP reports high reference-TSS agreement with low CAGE support.
+Codex's ranking of the decisive experiments: (1) stage a second human library
+and test whether the same `.ext` TSS reproduces (strongest, but replication
+shows reproducible structure, not cap-defined initiation); (2) check whether
+the `.ext` 5' end coincides with an annotated TSS of ANOTHER isoform of the
+gene (diagnoses mis-assignment, not expression); (3) act on the 3' side only
+(an ablation, not evidence about the 5' end).
+
+**The lever is NOT "emit both models."** `resolve_extent_pairs` deliberately
+keeps one (more EM mass wins, ties to the annotation) and `snap_merge_chain`
+never merges the pair (it is novel-only). The lever is a MAGNITUDE FLOOR on the
+contradiction test. It is not free -- the `.ext` competes in EM, so removing it
+moves read assignment -- and Codex's condition is that any floor be calibrated
+on independent endpoint evidence, **not set at 25 bp because that rescues this
+benchmark**.
+
+### The honest one-sentence claim (Codex's wording, adopted)
+
+> Across the evaluated annotation-perturbation panels, PyFIN shows strong
+> intron-chain recovery and favorable joint detection-abundance performance on
+> Sequin; its relative endpoint accuracy is dataset-dependent, with robust
+> SIRV4 agreement but weaker agreement with complete human reference
+> annotations at a 25-bp tolerance.
+
+## 4q. The quantification gap was a REPORTING-CONVENTION bug (2026-09-10, LANDED opt-in 8782013)
+
+Full record: `docs/PRODUCTION_QUANT_ACCURACY_2026-09-10.md` part 3.
+
+`scores.tsv`'s `tpm` column is `abundance / length_kb` -- the SHORT-READ
+convention, which exists because fragmentation makes a longer transcript yield
+proportionally more reads. Direct RNA sequences whole molecules (one molecule,
+at most one read, regardless of length), so the count does not carry that
+factor and dividing by length gives an INVERSE-length-weighted quantity (not a
+"mass-like" one -- mass is molarity TIMES length; Codex corrected that).
+NanoCount and `salmon --ont` omit the correction for the same reason.
+
+Measured against the Sequin spike-in's known INPUT MOLARITY -- the only real
+quantitative truth this project has -- 104 evaluated cells, 103 eligible
+common-set comparisons across 4 libraries, library-block bootstrap:
+
+| comparison | length-normalised | count |
+| --- | --- | --- |
+| paired change WITHIN pyfin, Spearman | - | **+0.074 [+0.036, +0.112]**, 83/103 |
+| paired change WITHIN pyfin, MARD | - | **-0.104 [-0.134, -0.068]**, 94/103 |
+| vs stringtie3, common set, Spearman | -0.022 [-0.099, +0.053], 44/103 | **+0.052 [+0.013, +0.091]**, 82/103 |
+| vs NanoCount (reference-assisted), joint Spearman / MARD | 0.725 / 0.707 | **0.788 / 0.611** (its 0.756 / 0.631) |
+
+Every library's mean Spearman improves (0.678->0.694, 0.830->0.889,
+0.588->0.683, 0.694->0.823). **This is what 4p's "we are slightly behind
+stringtie3 per transcript" actually was: a reporting convention, not an
+estimator gap.**
+
+**It is not uniformly better, and my first explanation of why was wrong in the
+direction.** Among 124 matched transcript-cell observations with length >= 2 kb
+the count has the HIGHER median symmetric error (0.911 vs 0.646); signed, it
+OVER-estimates them (median log2 estimate/truth +1.42 vs -0.45) -- so length
+division is not "compensating for long-molecule loss", it is pulling an
+over-estimate down. Recorded, not explained. Bin the errors after normalising
+ONCE per cell; normalising inside each bin destroys the between-bin effect the
+length question lives in (I got that wrong first too).
+
+`--no-tpm-length-normalize`, default unchanged. `compute_tpm`'s only consumers
+are the scores.tsv column and the refit diagnostics (which take the same flag,
+so "tpm" means one thing per run); verified on two real cells -- GTF
+byte-identical, scores.tsv differs only in `tpm`, new `tpm` == 1e6 *
+abundance / sum on every row. Codex favours making it the `real-drna` default
+in a small explicit follow-up that also exercises `scores.unfiltered.tsv` and
+the refit JSON numerically and adds an output-semantics note.
+
+**The endpoint floor shipped in the same commit is a NEGATIVE result kept at 0**
+(`--tss-contradiction-min-bp` / `--tes-...`): motivated by an independent
+measurement (`annotation_end_precision.py`: the contradiction threshold uses the
+narrow component, ~2 bp on human, while dRNA read starts disperse 20-50 bp
+around an annotated TSS with the mode 20 bp INSIDE it; the 3' end is measured an
+order of magnitude better, median 8 bp), but at 5' = 20 bp it suppressed 145 of
+515 read-extent siblings and moved 126 transcripts onto annotated geometry for
++0.06 end-aware F1 -- because the suppressed ones were already inside the 25 bp
+tolerance (median offset 12) while the failures sit at exactly 25. A floor big
+enough to catch those exceeds the measured resolvable scale. **The end-aware
+human gap is not fixable by a calibrated contradiction floor.**
+
+## 4r. The endpoint dimension, answered by replication (2026-09-10)
+
+Full record: `docs/PRODUCTION_QUANT_ACCURACY_2026-09-10.md` 8.2-8.2e.
+
+4p left one open algorithmic question: under an end-aware contract our human
+result is carried by `.ext` read-extent siblings whose 5' end differs from the
+annotation, and the benchmark cannot say who is right. **It is now answered,
+by replication rather than by the benchmark**, and the test needed no pipeline
+run -- only a second library's BAM, and all 15 human libraries have one.
+
+**Pre-registered** (`ext_tss_replication.py` docstring, written before any
+result): population = the 133 `.ext` models whose 5' end is >25 bp from the
+annotated TSS; "reproduces" in a library iff >= 3 chain-compatible MAPQ>=1
+reads start within 10 bp of the claimed start AND more than start within 10 bp
+of the annotated TSS; NULL = the mirror position t+(t-s) under the identical
+rule.
+
+**Result: 19/133 (14%) reproduce in >= 2 of 4 libraries, against an 8% mirror
+null** (per library 12/7%, 21/8%, 13/8%, 7/6%). By the pre-registered rule that
+is "~ null": **86% of the `.ext` 5' claims are library-specific read-start
+dispersion, not reproducible structure.** And **no single-library statistic
+finds the reproducible minority** (base rate 15%: "claimed start is the modal
+start" 17% precision, ">= 30/50/70% read share" 14-16%; the EXISTING >= 3-read
+rule is the best at 33% precision / 95% recall).
+
+**So turning the 5' contradiction off is supported by independent evidence --
+but it is a DOMAIN trade, not a fix:**
+
+| | end-blind F1 | end-aware e=25 | `.ext` emitted |
+| --- | --- | --- | --- |
+| attestation only | 45.51 | 41.38 (2272 refs) | 515 |
+| + 5' contradiction OFF | 45.40 (-0.11) | **43.29 (+1.91, 2381)** | 212 |
+
+Human gains +1.91 end-aware F1 for -0.11 end-blind (the e=25 gap to stringtie3
+on `full` narrows from -3.16 to -1.25). **SIRV4 pays -0.45 [-0.51, -0.40] over
+156 cells, with `c_trunc5p` at -6.10 (worst -11.15)** and every other family
+within +-0.05 -- because c_trunc5p IS the truncated-5'-annotation corruption
+and SIRV reads are full-length, so the extension is RIGHT there. That is 4g's
+mechanism doing its job.
+
+**The discriminator between the two regimes is measurable per sample, and it is
+the TAIL, not the median** (`annotation_end_precision.py`; SIRV 55 chains vs
+human 1111): 5' |offset| median 14 vs 22 bp -- nearly the same, that is the
+motor/degradation constant -- but p90 **20 vs 253** and **100% vs 56% within
+25 bp**. On SIRV every locus's read-start mode tracks the annotated TSS; on
+human barely half do. Where the starts track the annotation an outlier cluster
+is evidence; where they do not it is noise.
+
+**The gate is now implemented** (`--tss-contradiction-auto-gate`, default off).
+`sample_nuisance.annotated_tss_tracking` computes the statistic from data the
+run has ALREADY loaded (`starts_by_locus` + `_annotated_tss()`), so it costs no
+new BAM pass: the fraction of annotated TSSs whose local read-start MODE lands
+within `--tss-contradiction-track-bp` (25). Below `--tss-contradiction-track-frac`
+the 5' contradiction is disabled for that run and the measurement is logged; the
+3' contradiction is never gated; an unscorable sample leaves it ENABLED (unknown
+is not evidence).
+
+**The threshold is the midpoint of an empty band, not a tuned value.** Measured
+on 10 libraries across 4 datasets: human dRNA 0.491 / 0.496 / 0.498 / 0.500 /
+0.514, SIRV4 0.797 / 0.800 / 0.814, Sequin 0.917 / 0.950 -- nothing between
+0.52 and 0.79. Default 0.65.
+
+**The first version of the gate was falsified by its own test, and the failure
+is the interesting part.** It measured only whether read starts LAND on
+annotated TSSs -- which conflates two opposite causes of not landing: the reads
+are imprecise (human, 0.50) or the ANNOTATION is wrong (`c_trunc5p50`, 0.553),
+and the second is exactly what the repair exists for. The gate therefore switched
+the repair off precisely where it was needed: **-4.88 F1 on the c_trunc5p family
+(worst -11.15)** while every other family moved 0.00.
+
+**The corrected statistic adds one clause and is immune to it**: a locus counts
+as RESOLVED when its modal read start lands on the annotated TSS **or** holds a
+majority of the local starts -- a tight cluster away from the annotation is
+evidence against the ANNOTATION, not against the reads. Measured, SIRV4 goes
+0.957 (intact annotation) -> 0.959 (5'-truncated) where the tracking-only
+version collapsed 0.797 -> 0.438; human sits at 0.784-0.834. Default threshold
+0.89, between them.
+
+**Verified (`_snap/autogate2`, arms `gcag2` / `ag2`):**
+
+| grid | corrected gate vs attestation-only | gate decision |
+| --- | --- | --- |
+| SIRV4 156 cells / 6 libs | **0.00, 156/156 identical** | enabled (0.968) |
+| Sequin 104 / 4 | **0.00, 104/104 identical** | enabled |
+| human `full` | **byte-identical to the manual 5'-off arm** | disabled (0.834) |
+
+Human `full` under the gate: end-blind F1 45.40 (attestation-only 45.51,
+production 42.75) and **end-aware e=25 F1 43.29 (attestation-only 41.38,
+production 38.61; stringtie3 44.54)**. One setting, measured per sample,
+produces the right behaviour in both domains. HEYA8 and the other 13 human
+conditions are still running; the flag stays default-OFF until they land.
+
+## 4s. The M2 signal tie-break: its value IS the signal, and it survives real human data (2026-09-10/11, LANDED d4e63fc + docs)
+
+Record: `docs/PRODUCTION_M2_GUIDED_PATH_2026-09-10.md`.
+
+**What production actually runs** (from the manifests, not the profile
+sentinel): `real-drna` PINS `m2_metric="summed_llr"` (route `fixed`), so the
+tie-break scores the TIGHT differing-junction window (`m2_summed_llr_flank=8`)
+with a REAL abstention threshold (`m2_summed_llr_margin=1.0`). The wide-window
+`auto -> mean` belongs to the `sirv` profile. `m2_tiebreak_margin=1e-9` is the
+`argmax` mode's threshold and is not on this path.
+
+**Three-arm decomposition.** `--m2-metric off` removes the signal AND restores
+M1's 1/K split, so it cannot separate "signal is right" from "concentrating a
+tie onto any structure helps". The new `--m2-scramble-seed` (default 0 = off,
+never a production setting) keeps the concentration and removes only the
+signal: same tie population, same abstentions, same thresholded margin, only
+the winning STRUCTURE replaced by a blake2b hash.
+
+| contrast | SIRV4 dF1 [CI] | HEYA8 dF1 [CI] | human dF1 |
+|---|---|---|---|
+| off - base (signal + concentration) | -0.93 [-1.46,-0.49] | -0.76 [-0.96,-0.56] | -0.27 |
+| scram - base (signal only) | -0.75 [-1.05,-0.45] | -0.59 [-0.90,-0.32] | -0.14 |
+| scram - off (concentration only) | +0.18 [-0.27,+0.60] | +0.17 [-0.23,+0.50] | +0.13 |
+
+Concentration alone buys nothing measurable (CI straddles zero on both
+spike-ins). Recall is untouched everywhere; the whole effect is precision, and
+the signal carries 81% / 78% / 67% of it. On human the mechanism holds but the
+magnitude is ~4x smaller than on spike-ins (spike-in density of wobble-shadow
+contests). Per corruption family, the signal is worth most on the truncation
+families (-0.96 vs -0.68 elsewhere; grids agree, r=+0.63), i.e. where reads
+are most ambiguous -- the direction the NanoCount/degradation literature
+predicts. Per-candidate-base normalisation (`sqrt_count_mean_llr`) is a NULL:
+SIRV4 +0.08 looked directional, HEYA8 -0.02 killed it.
+
+Building the control was wrong twice, both caught by Codex: permute
+STRUCTURES not candidates (the gate reduces to per-structure minima; `.ext`
+siblings are one hypothesis), and anchor reconstruction on the assigned
+minimum (`old + (new-old)` cost a 1-ulp margin and flipped the bare `>=`
+threshold). Three CLI guards refuse a partial control. Literature bound: no
+published method does isoform assignment in squiggle space at all.
+
+**Scoring trap (cost a full pass):** `sirv4_grid_runner.py --dataset
+gencode_sub` scores against GENOME-WIDE gencode v44 while assemblies cover
+chr1/19/21 -> Sn diluted ~30x, every F1 delta reads +-0.00. Rescore with
+`experiments/prod_validation/rescore_human_expression_contract.sh` against
+`_gencodegrid/expression_contract/_truth/<sample>.gtf`; the check is `full`
+landing at 42.75.
+
+## 4t. The attestation exemption is now the real-drna DEFAULT at K=3 (2026-09-11, LANDED 17fec28; decision record fc14e15)
+
+Pre-registered rule and outcome: `docs/PRODUCTION_ATTESTATION_DEFAULT_DECISION.md`.
+
+**The reframing that unblocked it (Codex).** Adding n predictions that recover
+t unmatched truths improves F1 whenever `t/n > F1_old/2` -- at human `full`
+that is **21.4%** marginal precision, not the current 67.9%. The gate-dropped
+suffix>=3 tier (1367 annotated candidates, 77.5% truth) was far above the bar.
+
+**Decision run** (one snapshot `_snap/att_dec` = 735cbf8, one lever, default
+re-run on the same snapshot, K=3 + `novel` veto frozen before the arms):
+
+| grid | dSn | dPr | dF1 |
+|---|---|---|---|
+| human GENCODE (7 conds) | +1.47 | +0.36 | **+1.45** |
+| SIRV4 (156 / 6 libs) | +0.18 | -0.15 | +0.12 [-0.05,+0.32] |
+| HEYA8 (130 / 5) | +0.04 | -0.03 | +0.04 [+0.01,+0.09] |
+
+`full` 31.2/67.9/42.75 -> **34.0/68.8/45.51**; cells beating stringtie3
+**2/7 -> 6/7**; `p00` exactly inert. Precision ROSE: 194 distinct newly
+matched truths from 232 new models (84%). The pre-registered failure mode
+(one shared 3' suffix credits every compatible annotated extension) is an
+ASSOCIATION, not a demonstrated cost: shared-suffix buckets yield 8-15 pp less
+(alone 90 / pairs 75 / groups>=3 82) and still clear break-even by 3.5-4x.
+My first audit said the opposite and was wrong three ways (query-side `=`
+labels, a containment predicate that missed `[A,C]`/`[B,C]` sharing `[C]`, and
+non-merging grouping); `attest_sharing_audit.py` is the corrected version.
+
+**Silent configuration trap, fixed and guarded:** a profile key nobody reads
+back out of `resolved` in `fin/cli.py` is a NO-OP -- the profile computed 3,
+click's default 0 ran, nothing raised, and the only symptom was a run coming
+out byte-identical to the arm it should have differed from. Guard is now
+behavioural (`tests/unit/test_profiles.py`, through the real click command,
+incl. one test iterating every profile key). `real-drna-precision` inherits
+K=3 by design, unvalidated in combination; dataclass default stays 0; `sirv`
+untouched.
+
+**The K operating curve (2026-09-13, human arms scored today):**
+
+| K | human mean Sn/Pr/F1 | vs K=3 | beats stringtie3 |
+|---|---|---|---|
+| 0 | 25.17/60.46/35.38 | -1.45 | 2/7 |
+| 3 (landed) | 26.64/60.81/36.83 | -- | 6/7 |
+| 2 | 27.14/61.04/37.34 | +0.50 (5 up / 1 down) | 6/7 |
+| 1 | 27.63/61.16/**37.80** | **+0.97** (5 up / 1 down) | 6/7 |
+
+Monotone in both Sn AND Pr; `full` 34.0/68.8 -> 35.7/69.4 at K=1; the K=3->1
+step is 85% marginal precision on `full`. The one cell down is
+`c_jitter50_10bp` at -0.05. On SIRV4, K=3/2/1 produce BYTE-IDENTICAL
+assemblies (the depth threshold never binds on a high-depth spike-in; only the
+veto does), so lowering K carries zero SIRV4 risk. HEYA8 at K=1 is the last
+grid the frozen rule requires: SLURM 211963 -> `_heya8grid/attK1.tsv`,
+compare vs `_heya8grid/adef.tsv` with `arm_compare.py`. If it is >= 0 in the
+mean with no family <= -1.0, K=1 is promotable by the same rule.
+
+## 4u. All-dimension audit, and where the remaining loss lives (2026-09-11, 945fdae)
+
+`docs/PRODUCTION_ALL_DIMENSION_AUDIT_2026-09-11.md`. Every axis, vs the best
+alternative: structure recall/precision on annotated human ahead or level
+(+1.4 / +5.8); robustness to corrupt (+10.5 jitter) and sparse (+3.6 p50)
+annotation far ahead; **de novo `p00` is the one open structural dimension
+(-0.30)**, and it is exactly where an annotation-conditioned exemption is
+inert; transcript ends: matched models place both ends exactly (median 0,
+100% within 25 bp; `gffcompare --strict-match` returns ZERO on real dRNA at
+any `-e` -- wrong instrument, not a 0% score); quantification: downstream of
+detection (4q); signal: genuinely discriminative (4s).
+
+**Remaining recall loss under the new default** (`remaining_loss_attribution.py`
+on the `--selection-audit` run `_gencodegrid/_audit_after_attest`): of 4823
+missed expressed multi-exon truths, `m2_support_gate` still owns **81.8%**,
+`cluster_recheck` 7.2%, survived-then-lost 9.1%, generation **1.1%**. So on
+annotated human data generation is NOT the bottleneck and the next question
+is the gate's operating point (4t), not a new mechanism.
+
+**A literature premise tested and mostly not confirmed:** minimap2's default
+`--splice-flank=yes` prior (base after GT is A/G) holds on human (93.9%) and is
+violated on SIRV4 (62.3%) / HEYA8 (50.9%). But the per-junction placement
+penalty is ~3 pp everywhere and SMALLEST on HEYA8 (+0.3), so grids that break
+the prior do not pay for it per junction -- only the violating fraction
+differs. ~0.2 pp of wobble on human, ~1.1 on SIRV4. Not worth realigning;
+use `--splice-flank=no` on any future SIRV alignment. No grid uses
+`--junc-bed` (no annotation leak through the aligner).
+`experiments/prod_validation/splice_flank_artifact.py`.
+
+**Broad literature review (2026-09-11, agent-run, in the audit doc's sources):**
+top implementable ideas, none yet tested -- (1) IsoQuant's LOCUS-RELATIVE floor
+(`>=N FSM reads AND >=2% of max locus coverage`) plus its non-polyA
+terminal-attachment rule, aimed squarely at `p00`; (2) StringTie3's verbatim
+poly(A/T) terminal rules; (3) a degradation-ramp-vs-sharp-peak statistic on
+read 5' starts as a SELECTION feature (scATS alpha/beta; Telos
+`5'_degradation_score`); (4) publish operating curves and a spike-in-derived
+noise floor rather than single points; (5) TUSCO as a fourth, endogenous grid.
+Also: dRNA chimeras are adapter-bridged, so an internal-adapter scan
+(DeepChopper) is the mechanistically right replacement for the `sc250`
+soft-clip heuristic.
+
+## 4v. Fusion: isolated analysis (2d1644e), fused-transcript models (25e5448), and the real-data repair (9a200b7)
+
+A separate line from the assembly campaign above; the only contact is the
+pre-existing quant-axis leak noted in 4f. Contracts and records:
+`docs/FUSION_IMPLEMENTATION_CONTRACT_2026-09-12.md`,
+`docs/FUSION_VALIDATION_2026-09-12.md`, `docs/FUSION_SIGNAL_VALIDATION.md`,
+`docs/FUSION_TRANSCRIPT_MODELS_2026-09-15.md`,
+`docs/FUSION_REAL_DATA_2026-09-15.md`. READ THOSE before touching fusion.
+
+**The owner's independent analysis (2d1644e).** `--fusion` runs ordinary
+assembly unchanged, then a separate `fin/fusion/` pipeline with its own
+BAM scan, N-arm read paths, chain support, junction correction, optional
+krill signal, and its own atomically-published output namespace. Assembly
+byte-identity is asserted by test.
+
+**Fused-transcript models (25e5448 + 992d8be).** The chain layer says which
+ordered gene path and breakpoints molecules support; it does not say WHICH
+isoform of each gene, cannot extend a 5'-degraded dRNA read to a transcript
+start, and emits opaque templates. The transcript layer adds, per model:
+per-arm isoform resolution on observed introns (all compatible transcripts
+reported; class is display-only), the conventional exon-rank junction name
+(`BCR:e14>ABL1:e2`), endpoint completeness kept SEPARATE from splice class,
+two FASTAs that never share an id (`fusion_models.fa` evidence-constrained,
+`fusion_models.annotated.fa` annotated completion with
+`extension_observed=false`), a multi-chromosome exon table with per-exon
+provenance, and molecule assignment (unique / compatible / partial / nearby).
+Three Codex rounds; the two rejected versions are recorded in the doc
+(permuting candidates instead of structures; reconstructing a group minimum
+through a shift instead of anchoring on it).
+
+**The real-data repair (9a200b7) -- the important part.** Validated on
+synthetic error-free reads, the analysis found NOTHING on the canonical
+positive control (BCR-ABL1 in K562 dRNA): 0 chains at defaults; at relaxed
+coverage, one wrong chain with the ABL1 arm unlabelled. Four real defects:
+an SA CIGAR is a SUMMARY (minimap2 writes one M plus one I/D; the spliced
+BCR arm appears as `175M723D` and that fiction beat the truth) -> SA entries
+are locators, superseded by any detailed alignment of the same placement; a
+12/12 deletion-free anchor rejects nanopore reads with a 2-bp deletion near
+a real junction -> windowed anchors with an identity floor proportional to
+what aligned; a template carrying 700 bp of intron VALIDATED because the
+read never aligned that part -> every template block must be represented by
+the same forward alignment; and dRNA's ~80 bp non-genomic tail fails a 0.9
+full-read coverage gate -> a per-molecule coverage domain excluding only
+terminal bases no detailed alignment could place. Nomination clip 100 -> 250
+(at 100 it nominates 8.6% of a real library and trips the cap).
+
+The transcript layer had to follow: the chain layer keys on exact topology,
+so five molecules of one fusion that lost different numbers of 5' exons are
+five chains of support 1. Models are now aggregate ENVELOPES with
+`envelope_status` (`single_molecule_spanned` only when ONE observation
+reaches both ends), EXACT membership (a molecule that decisively settled
+2 bp away is `nearby`, reported and NOT counted), and merging only when a
+molecule is an exact member of both models AND the group's diameter is
+bounded pairwise.
+
+Result, frozen as `tests/data/fusion_k562_bcr_abl1/` (95 real records incl.
+the `175M723D` SA, 1.3 MB, seconds): ONE model `BCR:e14>ABL1:e2` (K562's
+canonical b3a2), `arm_fsm`/`arm_fsm`, 7172 bp, the right BCR and ABL1
+transcript ids, 4 molecules of unique support. Five Codex rounds; every
+finding has a regression that fails on the previous code. 2417 tests pass.
+
+**Throughput:** mappy holds the GIL in `map()` (`n_threads` only builds the
+index), so a full-library run sat at 17k molecules for 7 h.
+`FusionGenomeAligner.map_many` forks a pool sharing one index; serial and
+multi-worker results are asserted equal per read. Limits are in its
+docstring (not reentrant, fork/Linux only, no crash watchdog).
+
+**Open:** whole-library validation (`experiments/fusion/k562_fusion.sbatch`,
+job 211970) is the first run of the repaired code at scale; adapter-bearing
+negative controls are owed; the two-locus fixture proves the regression, not
+genome-wide mapping uniqueness.
+
 ## 5. Validation protocol for ANY future change (frozen invariants)
 
 1. Opt-in flag, default off, no profile enables it; explicit misuse fails
@@ -1226,108 +1919,72 @@ is a cheap base-space experiment with a clear falsifier.
    Sn nor Pr degrades (paired bootstrap 95% CI lower bound > -0.5) and complete
    Spearman does not drop.
 
-## 6. Git state (IMPORTANT)
+## 6. Git state (IMPORTANT; refreshed 2026-09-13)
 
-Branch `dev`; origin/dev = f628f58. On 2026-09-02 the batch was split by
-a Codex review (gpt-5.6-sol; full output in
-`.omc/codex_review_sirv4_batch_2026-09-02.txt`):
+Branch `dev` == `origin/dev` == `2d1644e` (owner's fusion commit on top of the
+2026-09-10/11 campaign). Everything in 4s-4u is COMMITTED and Codex-reviewed
+(gpt-6-astra) before each commit: d4e63fc (scramble control), a15fdb4 /
+b8fe84c / e389faf / 735cbf8 (signal decomposition records), 90ca80a
+(attestation pre-registration), 17fec28 (attestation default), fc14e15
+(decision record), 945fdae (all-dimension audit). Test suite on that tree:
+2203 passed, 4 skipped (`--ignore=tests/unit/test_junction_dtw_variants.py`,
+which needs g++). Run tests inside the SIF with `--nv`.
 
-- **Committed as `ca82319`** (Codex-clean, 1214 tests + M3 regression
-  passed on exactly that tree): P0 strict-positive GTF gate, complete-chain
-  rescue, catalog completion, and their config/CLI/README wiring + tests.
-- **Still uncommitted (Codex found 3 issues, fixes pending)**: the
-  junction-election and containment-evidence levers — tracked modified
-  `README.md`, `fin/cli.py`, `fin/pipeline/config.py`,
-  `fin/pipeline/runner.py`, `fin/pipeline/selection.py`,
-  `fin/analysis/quantification.py`, `fin/candidates/dataclasses.py`,
-  `fin/candidates/discovery.py` (election/containment hunks only) and new
-  `fin/analysis/containment_evidence.py`, `fin/analysis/junction_election.py`,
-  `tests/unit/test_containment_evidence.py`,
-  `tests/unit/test_junction_election.py`. Findings: (P1) election
-  electorate built from `reps[j]` only, omitting reads of other carriers of
-  the same junction (defense burden then drops well-supported junctions on
-  `no_quorum`); (P2) `finalize_containment` merges multi-row verdicts
-  last-row-wins instead of by precedence, losing `supported` exemptions;
-  (P2) `default_signal_scorer` rebuilds a krill aligner per contested
-  interval. Must be fixed and re-reviewed before commit.
-- **Uncommitted 2026-09-03 batch (NOT yet Codex-reviewed; user must run
-  `/codex:review` before any commit)** — three generation/quant changes plus
-  the additive junction correction:
-  1. GTF multi-exon chains are ORDINARY zero-read variant keys in
-     `cluster_families` (default, no flag): `fin/candidates/chain_cluster.py`
-     (`gtf_variants=`, `_attach_gtf_variants` removed; annotated keys are
-     legal containers but NEVER foldees — Codex's "pure-GTF foldee folds
-     unconditionally" was implemented first and measured at -3.03 F1 /
-     Sn -3.8 on the 156-cell plain default, run kept as
-     `_sirv4grid/gv_off_foldgtf`), `fin/candidates/discovery.py`
-     (`gtf_models` built before clustering, every GTF model of a surviving key
-     emitted with annotated geometry, `emitted_gtf`), tests rewritten in
-     `tests/unit/test_cluster_families.py::TestGtfVariantKeys`,
-     `test_collapse.py`, `test_discovery_families.py`. **Guided-condition
-     outputs change by design** — `_sirv4grid/base` is no longer the
-     byte-identity reference for full/p50; p00 unaffected by this item.
-  2. CIGAR-level collapse span_guard: `chain_cluster.read_alignment_from_cigar`
-     + `_cigar_exonically_covers` (W=[d-10,a+10): footprint covers W, no N,
-     D<=3 each / <=6 total, >=8/10 matched per flank, body matched >= len-6);
-     `collapse(read_alignments=)` replaces `read_spans=`; discovery records
-     alignments in its CIGAR walk. **Changes default outputs in every
-     condition** (fold decisions). Figure:
-     `_sirv4grid/fig/span_guard_explainer.png` (`span_guard_figure.py`).
-  3. `--folded-tss-recovery-mode off|audit|require` (default off):
-     `fin/analysis/tss_shadow_recovery.py` (post-EM shadow test via
-     `evaluate_internal_tss`, `tss_shadow_recovery.tsv` shards merged at
-     finalize), `_quant_m2_em` two-pass wiring, and the frozen read-5'
-     positional likelihood `assignment.apply_start_likelihood`
-     (`Assigner.assign(start_likelihood_context=)`, second pass only,
-     exact {parent, recovered} ties; mirrored into `nlls_by_read` for the
-     support gate). `CandidateSet.indels_by_read` added.
-     Tests: `tests/unit/test_tss_shadow_recovery.py` (9). Designs:
-     `.omc/codex_consult_spanguard_gtf_lost_2026-09-03.txt`,
-     `.omc/codex_consult_tss_5p_likelihood_2026-09-03.md`.
-  4. Additive per-read junction correction (`fin/analysis/junction_correction.py`,
-     `junction_support.py`, config/cli `--junction-correction-*`, runner
-     ballots, always-on `junction_support.tsv`; tests
-     `test_junction_correction.py` (20), `test_junction_support_record.py`).
-     Candidate-level probe grid: `_sirv4grid/jc_additive_m{M}_r{R}_k{K}/`
-     (`jc_additive_grid*.sbatch`, `junction_correction_candidate_probe.py`).
-  Additive junction-correction candidate probe (96 cells, done): lost
-  chains 0 everywhere, but new candidates are ~90% FP (m10/K2: 12 TP /
-  116 FP; m20/K2: 0 / 64; read moves own_TP->FP 612 vs own_FP->TP 448)
-  -> the per-read K-way ballot is NOT a viable completion mechanism
-  (`_sirv4grid/jc_additive_probe_summary.txt`).
-  Validation running as SLURM 211628 (`experiments/prod_validation/gv_grid.sbatch`):
-  156-cell `gv_off` (plain defaults, vs `base`),
-  `gv_best` (P0+rescue+defense, vs `je_defense` 91.87), `gv_tss_audit` (must
-  cmp-equal `gv_best`), `gv_tss_req`, determinism rerun on 3 cells, then
-  `sirv4_expression_rescore.py` (modes registered). Full suite: 1319 passed,
-  4 skipped (SLURM 211622, before the never-foldee change; rerun 211629).
-- Also uncommitted, not yet reviewed: `SIRV4_GRID_STUDY.md`,
-  `SIRV4_IMPROVEMENT_PLAN.md`, `HANDOFF.md`, and the
-  `experiments/prod_validation/sirv4_*.py` + probe scripts. Exclude
-  forever: all `_sirv4grid/` outputs, SIF images, FASTA/FASTQ, `_img/`.
-  `.gitignore` has a pre-existing user-owned modification — leave it.
+Tracked-modified: only `HANDOFF.md` (this file; pure additions -- the owner's
+raw-DTW notebook block at the top plus 4b5/4o-4v). Untracked and DELIBERATELY
+NOT STAGED (owner's instruction, do not commit without explicit approval):
+the `docs/PRODUCTION_*DTW*/NEIGHBOR*/HMM*/DISCORDANT*/ALL_READS*/QUESTIONS*/
+SIGNAL_WORKED*/REPO_REVIEW*.md` batch and its scripts, `SIRV4_GRID_STUDY.md`,
+`SIRV4_IMPROVEMENT_PLAN.md`, `CLAUDE.md`/`AGENTS.md` and the other agent
+config files, plus ~600 run artefacts under `experiments/prod_validation/_*`
+(exclude forever: grid outputs, SIF images, FASTA/FASTQ, `_img/`).
 
-## 7. Next work, in priority order
+Source snapshots used by arms (`experiments/prod_validation/_snap/`):
+`m2off`=fecd197, `m2scram`=fecd197+control, `att_dec`=735cbf8,
+`att_land`=17fec28-equivalent (used by the K-curve and `_audit_after_attest`).
+Always verify `run_manifest.json.source_root` and one `source_sha256` per arm.
 
-1. **Trunc/merge recall (the remaining 44 loss cells)** — P2 sidecar:
-   preserve annotation-independent read-derived candidates through joint EM
-   (do not let GTF absorb/outcompete them before evidence), then contrastive
-   reconciliation + read-supported endpoint repair. Evidence: 42-64% of
-   residual trunc/merge FN chains already exist in the same sample's p00
-   output; remaining FNs die at MULTIPLE stages (no single gate ablation
-   recovers them). Gates frozen in the plan: +5 F1 per `c_trunc*50`, no
-   p00-p50 regression, recover >= 50% of p00-recoverable FN chains.
-2. **PolyA wiring (P4)**: polyA-qualified TES evidence into the containment
-   own_tes rung + a mono-exon span route (mono corrupt entries: 0/8 have
-   polyA at claimed TES vs reads reading through; genuine mono TPs often lack
-   polyA too — tri-state only, never absence=rejection). Machinery exists
-   (`fin/scoring/polya.py` krill pass, `evaluate_tes_support(polya_supported=)`).
-3. **Junction election on `p00`/de novo cells**: the mechanism is
-   annotation-free but the grid applied it via `--extra-with-gtf` only;
-   extending to unannotated runs is unexplored upside.
-4. **Real-data re-validation**: defense burden and all screen thresholds on
-   real dRNA (genuine nearby splice sites, lower coverage) — prosecution is
-   the safe default until then. Also rescan external tree for the 24 missing
-   competitor cells and refresh standings.
-5. Optional consolidation: retire superseded probe scripts, promote the
-   election/containment audits into `candidate_evidence.tsv` schema.
+## 7. Next work, in priority order (refreshed 2026-09-13)
+
+0. **OWNER GOAL (2026-09-13), largely delivered -- see 4v.** Fused-transcript
+   level multi-gene output plus a final fusion-transcript FASTA:
+   `fusion_models.tsv` / `.fa` / `.annotated.fa` / `_exons.tsv` /
+   `_evidence.jsonl` / `_collapsed.jsonl`, landed 25e5448 and repaired for
+   real direct RNA in 9a200b7. REMAINING: whole-library validation at scale
+   (job 211970 is the first such run of the repaired code), adapter-bearing
+   negative controls, and a full-reference (not two-locus) acceptance run.
+1. **Attestation operating point: DONE (c0c83a6).** HEYA8 K=1 came in at
+   +0.07 F1 vs default, CI [+0.02,+0.09], worst family -0.01, so `real-drna`
+   moved K=3 -> K=1 under the same frozen rule. Next: re-run
+   `remaining_loss_attribution.py` under K=1 to see what the gate still owns.
+2. **De novo (`p00`), the one open structural dimension (4u):** first
+   candidate is IsoQuant's locus-relative floor (`>=N FSM reads AND >=2% of
+   max locus coverage`) + non-polyA terminal-attachment rule, as an opt-in
+   with the frozen protocol; earlier global-floor attempts gutted recall.
+3. **Cheap literature levers not yet tested (4u):** StringTie3 poly(A/T)
+   terminal rules; degradation-ramp-vs-peak 5' statistic as a selection
+   feature; operating curves + spike-in noise floor in the benchmark report;
+   internal-adapter scan to replace `sc250`.
+4. **Real-data replication of 4s on a second human library** (the `.ext`
+   sibling density makes structure-level grouping matter more on human).
+5. Historical items (sidecar trunc/merge recall, polyA wiring, election on
+   p00) remain in `SIRV4_IMPROVEMENT_PLAN.md`; they were SIRV-profile levers
+   and are superseded by the real-drna default for production purposes.
+
+Cluster-scoped raw-DTW correction, the owner's proposal (2026-09-09):
+`docs/PRODUCTION_CLUSTER_DTW_REPLAY_2026-09-09.md` -- a masked replay of the
+frozen benchmark restricting alternatives to candidate-level junctions from the
+read's interval (offline production discovery + canonical gate), zero new
+eventalign, protocol frozen by Codex before scoring. Kill test: 89.3% of the
+8,988 SIRV4 raw damages land on junctions that ARE candidate-level, so the
+restriction can remove at most 9.5% of the harm. Restricted raw SSE: SIRV4
+73.834% (+651/-8,056), -19.311 pp vs BAM -- the frozen stop rule fires and the
+proposal is falsified in its stated form; no signal arm passes the gate (best,
+dwell5 + 5% abstention, is -3.912 on SIRV4 with all six libraries negative).
+The only positive arm is the BAM-support-only count rule (+3.390 / +1.739 pp,
+zero catalog->off-catalog), and an unrestricted-registry count arm does as
+well or better (96.644%), so candidate restriction contributes nothing there
+either; that rule is production's existing junction_snap applied at read level
+and shows 439 catalog->catalog moves that the metric cannot judge. Codex
+independently recomputed every count. Production unchanged; nothing staged.
+
