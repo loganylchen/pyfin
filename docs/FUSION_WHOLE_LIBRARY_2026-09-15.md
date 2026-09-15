@@ -83,31 +83,44 @@ proximity is not evidence, because a corrector that decisively settled on a
 cross-listing is what makes the grouping recoverable: join rows on
 `nearby_read_ids` to collapse them yourself.
 
-## Runtime, and one thing I could not explain
+## Runtime: 1h50 -> 28 minutes, byte-identical
 
-The run takes about 1h50: ~5 minutes to scan 1,074,197 records and build the
-whole-genome mappy index, ~3 minutes of forked realignment, then ~6,277 s in
-`analyze_fusion_input`, then ~350 s for the transcript layer.
+The whole-library run went from **6,631 s to 1,643 s (4.0x)**, measured
+end to end, with **all 13 published artifacts byte-identical**: same 595
+chains, same 69 models, same 4 multi-gene. Two changes, both measured before
+being made, neither touching the algorithm. `docs/FUSION_DP_AND_CACHE_2026-09-16.md`
+carries the full record.
 
-What is NOT the bottleneck, measured rather than assumed: chain construction.
-Its `O(clusters x eligible)` subpath sweep -- which I suspected first -- runs in
-**1 second** on 1,874 eligible paths and 595 clusters. So the cost is the
-per-molecule adjudication, where the cheap exits are "no eligible path" and
-"one arm" and the expensive path is a stitched-template alignment per candidate.
+The phase that mattered was the per-molecule adjudication, and it took two
+wrong guesses before a profiler settled it. Chain construction -- the
+`O(clusters x eligible)` subpath sweep I suspected first -- runs in **1 second**
+on 1,874 eligible paths and 595 clusters. A per-molecule probe I wrote next
+disagreed with a batch counter in what I believed was the same loop; it was
+not. `analyze_fusion_input` has TWO loops, and I had put the timer's start in
+the cheap one (23,403 molecules, 8 s) and its end in the expensive one
+(`for read_id in sorted(searches)`, about 2,400 molecules). Both probes were
+right about their own loop.
 
-I tried to attribute that cost per molecule and the probe did not survive
-scrutiny: its elapsed values tracked wall-clock rather than per-molecule time,
-and it emitted more records than the loop had iterations left. Two independent
-inconsistencies mean it was measuring something other than what it claimed, so
-its numbers are not reported and it was not kept. A batch counter in the same
-loop reports passing 22,000 of 23,403 in 8 seconds, which cannot be reconciled
-with a 6,277 s loop either. **One of those two probes is wrong and I have not
-determined which**; the phase boundaries above come from the pipeline's own
-per-phase logs, which are independent of both. Profiling this properly is the
-next operational task -- it is not a correctness question.
+What the profiler then found:
 
-Node contention is real and large: the early phases ran 33x faster on an idle
-node than while a full pytest suite and several Codex reviews shared it.
+1. **The genome cache was thrashing.** `LazyGenomeFasta.__getitem__` returns a
+   whole chromosome and its LRU held two -- right for the assembly pipeline's
+   one-locus-at-a-time sweep, wrong for an adjudication that walks molecules in
+   read-id order. 499 misses, **497 evictions**, 66.6 Gb fetched from a 3.1 Gb
+   genome. This is also why the two-locus fixture and chr9+chr22 were fast: with
+   a two-chromosome reference the cache cannot miss.
+2. **The junction DP repeats itself.** 29-38% of `align_junction_window` calls
+   are exact repeats of a previous call, so memoising the pure recurrence is an
+   identity, not an approximation.
+
+Controlled profile of the adjudication phase, same job each time:
+667.2 s -> 369.6 s (cache) -> **213.4 s** (memo).
+
+What is left is the DP itself, 55% of the remaining phase. Going further means
+compiling it -- and mappy is not the answer: it cannot produce a result at all
+for a window with no matching seeds, and, more sharply, two EQUALLY optimal
+alignments can carry different left/right anchor counts and therefore different
+accept/reject verdicts, so score equality is not a sufficient gate.
 
 ## The failure that only a named diagnostic could have found
 
@@ -121,7 +134,7 @@ ctime all unchanged. The automounter had expired the share and remounted it
 during the two-hour run. `st_dev` names the mount, not the file, and is now out
 of `_snapshot`; every remaining field speaks to content. The work directory is
 preserved on publication failure, which is why the 69 models above survived the
-crash that produced them.
+crash that produced them. The 28-minute run published cleanly.
 
 ## Nomination, and why the library is tractable at all
 

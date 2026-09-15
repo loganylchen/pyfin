@@ -1912,6 +1912,28 @@ dropped `st_dev`: two runs died at publication on an autofs REMOUNT (`st_dev
 144->138`, content identical) — the work dir survives publication failure,
 which is the only reason the 69 models above exist.
 
+**PERFORMANCE, 2026-09-16 (`docs/FUSION_DP_AND_CACHE_2026-09-16.md`).** The
+whole-library run is **6,631 s -> 1,643 s (4.0x), all 13 artifacts
+byte-identical**. Two causes, both found by profiler after two wrong structural
+guesses (chain construction is 1 s, measured). (1) `LazyGenomeFasta` returns a
+WHOLE chromosome and its LRU held two -- 499 misses, **497 evictions**, 66.6 Gb
+fetched from a 3.1 Gb genome; now bounded by SIZE, since a count bound cannot be
+chosen without knowing the reference. This is also why the two-locus fixture was
+always fast: a two-chromosome reference cannot miss. (2) 29-38% of
+`align_junction_window` calls are exact repeats, so memoising the pure
+recurrence is an identity. Phase: 667 -> 370 (cache) -> 213 s (memo).
+
+**Do NOT try to replace that DP with mappy.** Codex's kill case: the function
+must return an optimal alignment for EVERY valid window, including one with no
+matching seeds (`"A"*75` vs `"C"*75` scores -154.0, 75 insertions, reason
+large_indel) -- a seed-chain-extend mapper produces no hit at all. And score
+equality is not a sufficient gate for any replacement: two EQUALLY optimal
+intervals carry anchor counts 0/2 and 1/1, so one rejects and one passes. The
+contract is this recurrence plus this canonical traceback, not "affine
+semi-global alignment". Going further needs a compiled DP = numba or parasail =
+a new dependency and an SIF rebuild; that is an owner decision. Amdahl caps the
+prize well below 2x on the phase.
+
 **Open:** adapter-bearing negative controls are now in the suite
 (`tests/unit/test_fusion_adapter_chimera.py`) but are synthetic; the two-locus
 fixture still proves the regression, not genome-wide mapping uniqueness; no
@@ -1956,8 +1978,10 @@ Branch `dev` is AHEAD of `origin/dev`. Since 2d1644e, all Codex-reviewed
 c0c83a6 (attestation K=1), 9a200b7 + 951ee6c (real-data fusion repair),
 d10c9c3 (nomination tightening), 9486814 (Codex's cross-arm transition fix),
 d6adabf (adjudication progress log), a11e55a (adapter-chimera control),
-6da527e (autofs remount / `SNAPSHOT_FIELDS`). Suite on this tree: **2437
-passed, 4 skipped**.
+6da527e (autofs remount / `SNAPSHOT_FIELDS`), 87689bd (genome cache bounded by
+size), 040d8a0 (junction-DP memoisation), 6c95ea6 (clock starts before the GTF
+parse). Suite on this tree: **2460 passed, 4 skipped**, and the suite itself
+dropped from 273 s to 66 s because the memo hits in tests too.
 
 Historical: `2d1644e` was (owner's fusion commit on top of the
 2026-09-10/11 campaign). Everything in 4s-4u is COMMITTED and Codex-reviewed
