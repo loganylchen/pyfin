@@ -1886,10 +1886,40 @@ index), so a full-library run sat at 17k molecules for 7 h.
 multi-worker results are asserted equal per read. Limits are in its
 docstring (not reentrant, fork/Linux only, no crash watchdog).
 
-**Open:** whole-library validation (`experiments/fusion/k562_fusion.sbatch`,
-job 211970) is the first run of the repaired code at scale; adapter-bearing
-negative controls are owed; the two-locus fixture proves the regression, not
-genome-wide mapping uniqueness.
+**WHOLE-LIBRARY ACCEPTANCE — DONE.** `docs/FUSION_WHOLE_LIBRARY_2026-09-15.md`.
+The entire K562 direct-RNA library (1,074,197 records) against the whole
+GRCh38 + GENCODE v44, nothing told where to look: 23,403 candidate molecules →
+595 chains → **69 fused-transcript models, 4 of them three-arm (multi-gene)**,
+split 48 readthrough / 19 intrachromosomal / **2 interchromosomal**. The top
+interchromosomal call by support is **`BCR:e14>ABL1:e2`** — K562's e14a2
+driver, `arm_fsm`/`arm_fsm`, 7172 bp, 4 molecules, correct transcript ids, and
+its 24 exons across chr22+chr9 sum to exactly the FASTA record length. All six
+both-arms-annotated models are the driver or known readthrough/paralog loci
+(DHRS4-DHRS4L2, GAGE2A-GAGE1, BAG6-SLC44A4). Run ~1h50 on an idle node.
+
+Two things to tell a downstream user: **chrM is 12 of the 69 and holds the two
+highest-support models** (390, 91) because the mitochondrial genome is circular
+— filter it; and **one event can occupy several rows** (BAG6-SLC44A4 is 3, two
+differing by 6 bp), joinable via the mutual `nearby_read_ids`, because models
+merge only on exact shared membership and never on proximity.
+
+Three commits since: the gene-transition nomination had to be tightened
+(6.09%→0.19% of records) to make the library tractable, then Codex found the
+false negative in the tightening — `{A}->{}->{B}` and `{A}->{A,B}->{B}` cross
+an intermediate arm, so the test is over ALL pairs, not adjacent ones. That fix
+is what produced 3 of the 4 multi-gene models (66/1 → 69/4). And `_snapshot`
+dropped `st_dev`: two runs died at publication on an autofs REMOUNT (`st_dev
+144->138`, content identical) — the work dir survives publication failure,
+which is the only reason the 69 models above exist.
+
+**Open:** adapter-bearing negative controls are now in the suite
+(`tests/unit/test_fusion_adapter_chimera.py`) but are synthetic; the two-locus
+fixture still proves the regression, not genome-wide mapping uniqueness; no
+benchmark against a fusion caller has been run. One loose end: the per-molecule
+adjudication is ~6,277 s of the ~6,600 s run (chain construction is 1 s — it
+was NOT the bottleneck, measured), but two progress probes disagree about where
+inside it the time goes and I did not resolve which is wrong. Profiling that is
+operational, not correctness.
 
 ## 5. Validation protocol for ANY future change (frozen invariants)
 
@@ -1921,7 +1951,15 @@ genome-wide mapping uniqueness.
 
 ## 6. Git state (IMPORTANT; refreshed 2026-09-13)
 
-Branch `dev` == `origin/dev` == `2d1644e` (owner's fusion commit on top of the
+Branch `dev` is AHEAD of `origin/dev`. Since 2d1644e, all Codex-reviewed
+(gpt-6-astra) before each commit: 25e5448 + 992d8be (fused-transcript models),
+c0c83a6 (attestation K=1), 9a200b7 + 951ee6c (real-data fusion repair),
+d10c9c3 (nomination tightening), 9486814 (Codex's cross-arm transition fix),
+d6adabf (adjudication progress log), a11e55a (adapter-chimera control),
+6da527e (autofs remount / `SNAPSHOT_FIELDS`). Suite on this tree: **2437
+passed, 4 skipped**.
+
+Historical: `2d1644e` was (owner's fusion commit on top of the
 2026-09-10/11 campaign). Everything in 4s-4u is COMMITTED and Codex-reviewed
 (gpt-6-astra) before each commit: d4e63fc (scramble control), a15fdb4 /
 b8fe84c / e389faf / 735cbf8 (signal decomposition records), 90ca80a
@@ -1946,13 +1984,17 @@ Always verify `run_manifest.json.source_root` and one `source_sha256` per arm.
 
 ## 7. Next work, in priority order (refreshed 2026-09-13)
 
-0. **OWNER GOAL (2026-09-13), largely delivered -- see 4v.** Fused-transcript
+0. **OWNER GOAL (2026-09-13) -- DELIVERED AND ACCEPTED ON A WHOLE REAL LIBRARY;
+   see 4v and `docs/FUSION_WHOLE_LIBRARY_2026-09-15.md`.** Fused-transcript
    level multi-gene output plus a final fusion-transcript FASTA:
    `fusion_models.tsv` / `.fa` / `.annotated.fa` / `_exons.tsv` /
-   `_evidence.jsonl` / `_collapsed.jsonl`, landed 25e5448 and repaired for
-   real direct RNA in 9a200b7. REMAINING: whole-library validation at scale
-   (job 211970 is the first such run of the repaired code), adapter-bearing
-   negative controls, and a full-reference (not two-locus) acceptance run.
+   `_evidence.jsonl` / `_collapsed.jsonl`, landed 25e5448, repaired for real
+   direct RNA in 9a200b7, and validated on the ENTIRE K562 library against the
+   WHOLE genome: 69 models, 4 multi-gene (three-arm), and `BCR:e14>ABL1:e2` as
+   the top interchromosomal call. Adapter-bearing negative controls are in the
+   suite (a11e55a). REMAINING on this axis: the negative controls are
+   synthetic, and no head-to-head against a fusion caller has been run --
+   neither blocks downstream use of the FASTA.
 1. **Attestation operating point: DONE (c0c83a6).** HEYA8 K=1 came in at
    +0.07 F1 vs default, CI [+0.02,+0.09], worst family -0.01, so `real-drna`
    moved K=3 -> K=1 under the same frozen rule. Next: re-run
