@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import time
+
 from dataclasses import dataclass, replace
 from typing import Optional, Tuple
 
@@ -11,6 +14,8 @@ from fin.fusion.correction import PathCorrection, annotation_junction_registry, 
 from fin.fusion.paths import coverage_domain, find_read_paths
 from fin.fusion.records import reconcile_sa_locators
 from fin.fusion.validation import TranscriptValidation, validate_stitched_path
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -110,7 +115,14 @@ def analyze_fusion_input(evidence, genome, aligner, genes=None, settings=None, *
     realignments = aligner.map_many(ready, workers=realign_workers) if ready else {}
     if len(realignments) != len(ready):
         raise ValueError("fusion realignment did not return every molecule")
-    for molecule in evidence.molecules:
+    # Only the realignment above is forked; this adjudication is serial, and on
+    # a real library it is the longer half. A run with no output here is
+    # indistinguishable from a hung one.
+    started = time.monotonic()
+    for index, molecule in enumerate(evidence.molecules):
+        if index and index % 2000 == 0:
+            LOGGER.info("fusion: adjudicated %d/%d molecules [%.0fs]", index,
+                        len(evidence.molecules), time.monotonic() - started)
         if molecule.status != "ready":
             audits[molecule.read_id] = FusionReadAudit(molecule.read_id, "unresolved", molecule.reason)
             continue
