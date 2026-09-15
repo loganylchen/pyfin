@@ -24,7 +24,7 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
                         sequence_path=None, settings=None, threads=1, publication=None,
                         signal_path=None, signal_settings=None, assembly_gtf_path=None,
                         assembly_support_path=None, assembly_min_clean_reads=3,
-                        realign_workers=1):
+                        realign_workers=1, genome_cache_bases=4_000_000_000):
     """Never instantiate an assembly runner or touch its candidates or caches."""
     from fin.io.io_gtf import GTFReader
     from fin.io.lazy_genome import open_genome
@@ -76,7 +76,16 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
             max_segments=settings.max_segments, min_anchor=settings.min_arm_bases,
             min_identity=settings.min_identity, threads=threads,
         )
-        genome = open_genome(str(reference_path))
+        # The fusion adjudication walks candidate molecules in read-id order,
+        # so the chromosomes it needs arrive in effectively random order --
+        # nothing like the assembly pipeline's one-locus-at-a-time sweep that
+        # the 2-chromosome default was chosen for. Measured on a whole-genome
+        # run under that default: 499 misses, 497 of them evicting the entry
+        # the next miss wanted, 66.6 Gb fetched from a 3.1 Gb genome, 246 s.
+        # Bound by SIZE instead, so the same number is right for a spike-in
+        # reference and for a genome larger than the budget.
+        genome = open_genome(str(reference_path), cache_chroms=None,
+                             cache_bases=genome_cache_bases)
         logger.info("fusion: index ready; adjudicating %d molecules on %d worker(s) [%s]",
                     sum(1 for m in evidence.molecules if m.status == "ready"), realign_workers, elapsed())
         try:
