@@ -48,6 +48,14 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
             assembly_junctions = load_assembly_junctions(
                 assembly_gtf_path, assembly_support_path, min_clean_reads=assembly_min_clean_reads,
             )
+        # a real library is ~1e6 records and a genome index is minutes: a run
+        # with no progress is indistinguishable from a hung one. The clock
+        # starts HERE, before the annotation is read, because it used to start
+        # after -- which reported "annotation indexed [0s]" for a GENCODE parse
+        # that is tens of seconds of real work, and left every later phase
+        # quoting an elapsed time the wall clock disagreed with.
+        started = time.monotonic()
+        elapsed = lambda: f"{time.monotonic() - started:.0f}s"
         genes = GeneIndex()
         transcripts = ()
         if gtf_path is not None:
@@ -55,11 +63,6 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
                 reader.parse()
                 transcripts = tuple(reader.transcripts.values())
                 genes = GeneIndex.from_transcripts(transcripts)
-        # a real library is ~1e6 records and a genome index is minutes: a run
-        # with no progress is indistinguishable from a hung one
-        started = time.monotonic()
-        elapsed = lambda: f"{time.monotonic() - started:.0f}s"
-        if gtf_path is not None:
             logger.info("fusion: annotation indexed, %d genes [%s]", len(genes.genes), elapsed())
         logger.info("fusion: scanning %s (min clip %d bp) [%s]", bam_path, settings.min_clip_bases, elapsed())
         evidence = scan_fusion_bam(bam_path, genes, min_soft_clip=settings.min_clip_bases,
