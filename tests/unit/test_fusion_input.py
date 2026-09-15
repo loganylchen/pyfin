@@ -259,3 +259,44 @@ def test_nomination_routes_are_counted_separately(tmp_path):
     assert counts["nominated_by_supplementary_or_sa"] == 1
     assert counts["nominated_by_soft_clip"] == 1
     assert counts["nominated_molecules"] == 2
+
+
+def test_a_remounted_share_is_not_a_changed_input(tmp_path, monkeypatch):
+    """`st_dev` names the mount, not the file. A two-hour whole-library run
+    failed at publication with `st_dev 144->138` on an /autofs fastq that had
+    not been touched -- the automounter had expired the share and remounted
+    it. Everything identifying the content was unchanged."""
+    import os
+    import pathlib
+
+    from fin.fusion.input import _snapshot
+
+    target = tmp_path / "pass.fq.gz"
+    target.write_bytes(b"@r\nACGT\n+\n!!!!\n")
+    before = _snapshot(target)
+    real = pathlib.Path.stat
+
+    def remounted(self, *args, **kwargs):
+        original = real(self, *args, **kwargs)
+        fields = list(original)
+        fields[2] += 6  # st_dev: the same file, reached through a new mount
+        return os.stat_result(fields, {"st_atime_ns": original.st_atime_ns,
+                                       "st_mtime_ns": original.st_mtime_ns,
+                                       "st_ctime_ns": original.st_ctime_ns})
+
+    monkeypatch.setattr(pathlib.Path, "stat", remounted)
+    moved = pathlib.Path(target).stat()
+    assert moved.st_dev != real(pathlib.Path(target)).st_dev
+    assert (moved.st_ino, moved.st_size, moved.st_mtime_ns) == (
+        before[0], before[1], before[2])
+    assert _snapshot(target) == before
+
+
+def test_a_rewritten_input_is_still_a_changed_input(tmp_path):
+    from fin.fusion.input import _snapshot
+
+    target = tmp_path / "pass.fq.gz"
+    target.write_bytes(b"@r\nACGT\n+\n!!!!\n")
+    before = _snapshot(target)
+    target.write_bytes(b"@r\nACGTACGT\n+\n!!!!!!!!\n")
+    assert _snapshot(target) != before

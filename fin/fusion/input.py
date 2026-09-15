@@ -32,9 +32,28 @@ class FusionInput:
     complete: bool
 
 
+#: The fields `_snapshot` returns, in order. Exported so the diagnostic that
+#: names a drifted field cannot fall out of step with the tuple it describes --
+#: dropping `st_dev` from the tuple alone would have made an inode change
+#: report itself as a device change, which is the very message this identity
+#: exists to stop producing.
+SNAPSHOT_FIELDS = ("st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+
+
 def _snapshot(path):
+    """Identity of an input file, for detecting that it changed under a run.
+
+    Deliberately WITHOUT ``st_dev``. That field names the mount, not the file,
+    and on an automounted network share it is not stable across a long run: a
+    two-hour whole-library run failed at publication with ``st_dev 144->138``
+    on an ``/autofs`` fastq whose inode, size, mtime and ctime were all
+    unchanged. The automounter had expired the share and remounted it. Every
+    remaining field speaks to the content, and the path itself is fixed by the
+    caller, so an inode number reused on some genuinely different export would
+    still have to match size, mtime and ctime to the nanosecond.
+    """
     stat = Path(path).stat()
-    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+    return tuple(getattr(stat, field) for field in SNAPSHOT_FIELDS)
 
 
 def _is_nomination(record, genes, min_soft_clip):

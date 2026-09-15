@@ -369,3 +369,71 @@ def test_annotation_free_file_pipeline_reports_loci_without_inventing_gene_names
     assert tuple(arm.chrom for arm in result.chains[0].representative.arms) == ("A", "B", "C")
     manifest = json.loads((tmp_path / "result" / "fusion" / "fusion_manifest.json").read_text())
     assert manifest["annotation_status"] == "unavailable_loci_only"
+
+
+def test_a_remount_is_not_a_changed_input_but_a_rewrite_is_named(tmp_path):
+    """The publication check killed two whole-library runs after every artifact
+    was computed. The first said only "fusion input changed before publication"
+    and was undiagnosable; the second, once the message named the input and the
+    differing fields, reported `st_dev 144->138` on an /autofs fastq whose
+    inode, size, mtime and ctime were unchanged -- the automounter had expired
+    the share and remounted it mid-run.
+
+    So: a device number must not fail the run, a real rewrite still must, and
+    the message must name the field that actually differs. That last clause is
+    why `SNAPSHOT_FIELDS` is shared rather than spelled twice -- labelling the
+    tuple positionally from a stale list would have reported an inode change as
+    a device change, resurrecting the exact message this fix removes.
+    """
+    import os
+    import pathlib
+
+    from fin.fusion.input import SNAPSHOT_FIELDS
+
+    bam, reference, fastq, gtf = _inputs(tmp_path)
+    assert "st_dev" not in SNAPSHOT_FIELDS
+
+    real = pathlib.Path.stat
+    remounted_paths = {str(fastq)}
+
+    def remounted(self, *args, **kwargs):
+        original = real(self, *args, **kwargs)
+        if str(self) not in remounted_paths:
+            return original
+        fields = list(original)
+        fields[2] += 6  # st_dev
+        return os.stat_result(fields, {"st_atime_ns": original.st_atime_ns,
+                                       "st_mtime_ns": original.st_mtime_ns,
+                                       "st_ctime_ns": original.st_ctime_ns})
+
+    original_stat = pathlib.Path.stat
+    pathlib.Path.stat = remounted
+    try:
+        result = run_fusion_analysis(bam, reference, tmp_path / "remounted",
+                                     gtf_path=gtf, sequence_path=fastq)
+    finally:
+        pathlib.Path.stat = original_stat
+    assert result.chains
+
+    # A genuine rewrite of the same path is still rejected, and named. Rewrite
+    # it from inside the run, after the inputs were snapshotted -- which is
+    # exactly when the real automount drift was observed.
+    import fin.fusion.pipeline as pipeline_module
+
+    original_writer = pipeline_module.write_fusion_outputs
+
+    def rewrite_then_write(analysis, genome, work_dir):
+        fastq.write_text(fastq.read_text() + "@extra\nACGT\n+\nIIII\n")
+        return original_writer(analysis, genome, work_dir)
+
+    pipeline_module.write_fusion_outputs = rewrite_then_write
+    try:
+        with pytest.raises(Exception) as failure:
+            run_fusion_analysis(bam, reference, tmp_path / "rewritten",
+                                gtf_path=gtf, sequence_path=fastq)
+    finally:
+        pipeline_module.write_fusion_outputs = original_writer
+    message = str(failure.value)
+    assert "fusion input changed before publication" in message
+    assert "sequence" in message and "st_size" in message
+    assert "st_dev" not in message

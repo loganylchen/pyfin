@@ -12,7 +12,8 @@ from pathlib import Path
 
 from fin.fusion.analysis import FusionSettings, analyze_fusion_input
 from fin.fusion.annotation import GeneIndex
-from fin.fusion.input import FusionInputError, _snapshot, scan_fusion_bam, supply_fusion_sequences
+from fin.fusion.input import (FusionInputError, SNAPSHOT_FIELDS, _snapshot, scan_fusion_bam,
+                              supply_fusion_sequences)
 from fin.fusion.output import FusionPublication, write_fusion_outputs
 from fin.fusion.realignment import FusionGenomeAligner
 
@@ -106,7 +107,7 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
             drifted = {name: (snapshot, _snapshot(inputs[name])) for name, snapshot in snapshots.items()
                        if _snapshot(inputs[name]) != snapshot}
             if drifted:
-                fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+                fields = SNAPSHOT_FIELDS
                 detail = "; ".join(
                     f"{name} [{inputs[name]}] " + ", ".join(
                         f"{field} {was}->{now}" for field, was, now in zip(fields, before, after) if was != now)
