@@ -62,9 +62,17 @@ def _is_nomination(record, genes, min_soft_clip):
         # can only find adjacent-gene readthrough; a genuine distant fusion
         # arrives with a supplementary alignment or a large clip. Tightening
         # it takes 6.09% -> 0.19% on that measurement.
+        #
+        # Over ALL pairs of arms, not adjacent ones. A read crossing an
+        # intermediate arm -- {A} -> {} -> {B} through unannotated sequence, or
+        # {A} -> {A,B} -> {B} through the overlap of two genes -- connects two
+        # genes without any single adjacent pair saying so ({A} -> {A,B} is a
+        # subset step, {A,B} -> {B} a superset step). The arm count is small,
+        # and a path that merely enters or leaves one gene's territory still
+        # yields no qualifying pair.
         sets = [set(arm.gene_ids) for arm in path.arms]
-        if any(left and right and not (left <= right or right <= left)
-               for left, right in zip(sets, sets[1:])):
+        if any(left and right and (left - right) and (right - left)
+               for index, left in enumerate(sets) for right in sets[index + 1:]):
             return "gene_transition"
     return ""
 

@@ -204,6 +204,43 @@ def test_a_real_gene_transition_is_still_nominated(tmp_path):
     assert scan_fusion_bam(bam, genes).record_counts["nominated_by_gene_transition"] == 1
 
 
+def test_a_transition_across_an_unannotated_middle_arm_is_nominated(tmp_path):
+    """{A} -> {} -> {B}: no ADJACENT pair is a gene transition (each touches
+    the unannotated arm), but the read connects two genes. Found by Codex."""
+    bam = tmp_path / "middle_novel.bam"
+    _write_bam(bam, [{"cigar": "100M800N100M900N100M"}])
+    genes = GeneIndex([
+        GeneModel("geneA", "chr1", "+", ((100, 200),)),
+        GeneModel("geneB", "chr1", "+", ((2000, 2100),)),
+    ])
+    assert scan_fusion_bam(bam, genes).record_counts["nominated_by_gene_transition"] == 1
+
+
+def test_a_transition_through_a_shared_overlap_arm_is_nominated(tmp_path):
+    """{A} -> {A,B} -> {B}: adjacent pairs are a subset step then a superset
+    step, so neither qualifies, yet the read starts in A-only territory and
+    ends in B-only. Found by Codex."""
+    bam = tmp_path / "middle_overlap.bam"
+    _write_bam(bam, [{"cigar": "100M800N100M900N100M"}])
+    genes = GeneIndex([
+        GeneModel("geneA", "chr1", "+", ((100, 200), (1000, 1100))),
+        GeneModel("geneB", "chr1", "+", ((1000, 1100), (2000, 2100))),
+    ])
+    assert scan_fusion_bam(bam, genes).record_counts["nominated_by_gene_transition"] == 1
+
+
+def test_a_three_arm_path_inside_one_gene_territory_is_not_nominated(tmp_path):
+    # {A} -> {A,B} -> {A}: the all-pairs check must not turn the overlap
+    # excursion that motivated the tightening into a nomination
+    bam = tmp_path / "excursion.bam"
+    _write_bam(bam, [{"cigar": "100M800N100M900N100M"}])
+    genes = GeneIndex([
+        GeneModel("geneA", "chr1", "+", ((100, 200), (1000, 1100), (2000, 2100))),
+        GeneModel("geneB", "chr1", "+", ((1000, 1100),)),
+    ])
+    assert scan_fusion_bam(bam, genes).molecules == ()
+
+
 def test_leaving_annotated_territory_is_not_a_gene_transition(tmp_path):
     # {A} -> {} is novel structure; a genuine distant fusion would arrive
     # with a supplementary alignment or a large clip, not on one collinear
