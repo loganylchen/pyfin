@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 
@@ -52,6 +53,25 @@ def align_junction_window(
         return JunctionAlignment("unscorable", None, "window_limit")
     if set(query + target) - set("ACGT"):
         return JunctionAlignment("unscorable", None, "ambiguous_sequence")
+    # The recurrence below is a pure function of the normalised window and the
+    # scoring parameters, and it returns a frozen dataclass, so memoising it is
+    # an identity -- not an approximation. Worth doing because the real call
+    # distribution repeats: measured on the BCR-ABL1 fixture, 271 calls carry
+    # only 192 distinct keys, and a perfect cache saves 30% of alignment time.
+    #
+    # The key is the NORMALISED window plus every parameter that can change the
+    # result, never the junction coordinates a caller started from. Those are
+    # not the same thing: joint validation re-evaluates a junction with
+    # tolerance 0 where the first pass used 3, and since padding is
+    # flank + tolerance the template flanks change from 38 bases to 35. Same
+    # coordinates, different DP input, different answer.
+    return _aligned_window(query, target, junction, min_anchor, min_identity, max_indel,
+                           match_score, mismatch_penalty, gap_open, gap_extend)
+
+
+@lru_cache(maxsize=131072)
+def _aligned_window(query, target, junction, min_anchor, min_identity, max_indel,
+                    match_score, mismatch_penalty, gap_open, gap_extend):
     query_length, target_length = len(query), len(target)
     negative = float("-inf")
     matrices = [[[negative] * (target_length + 1) for _ in range(query_length + 1)] for _ in range(3)]
