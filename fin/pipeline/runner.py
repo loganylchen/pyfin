@@ -208,11 +208,15 @@ class PipelineRunner:
                     f"could not clear the stale selection audit at {_shard_dir}; "
                     "refusing to append this run's records to another run's"
                 )
+        # Lend the annotation parsed in setup() instead of parsing it again.
+        # This is AFTER _reset_input_snapshot(), so the reader lent here is the
+        # one whose fingerprint describes the bytes this run is using.
         result = generate_isolated_intervals(
             self.config.bam_path,
             gtf_path=self.config.gtf_path,
             max_gap=self.config.max_gap,
             max_reads=self.config.max_reads,
+            gtf_reader=self._gtf_reader,
         )
         intervals = result["intervals"]
         logger.info("Generated %d intervals", len(intervals))

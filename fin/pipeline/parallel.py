@@ -65,11 +65,15 @@ def _worker_init(config: PipelineConfig, counter, gpu_workers: int, log_level: s
     # runner's signal/BAM handles (and any GPU context) at process teardown.
     atexit.register(_WORKER_RUNNER.cleanup)
 
+    # Workers SPAWN, so each one parses the annotation in setup() above; without
+    # lending that reader here it parsed the same file a second time. A cell with
+    # --threads 2 therefore parsed a 1.5 GB GENCODE six times.
     result = generate_isolated_intervals(
         cfg.bam_path,
         gtf_path=cfg.gtf_path,
         max_gap=cfg.max_gap,
         max_reads=cfg.max_reads,
+        gtf_reader=_WORKER_RUNNER._gtf_reader,
     )
     _WORKER_INTERVALS = result["intervals"]
     logger.info("worker %d ready (gpu=%s)", _WORKER_ID, role_gpu)

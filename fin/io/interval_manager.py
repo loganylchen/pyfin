@@ -367,34 +367,61 @@ def cluster_intervals(read_alignments: List[Dict], max_gap: int = 0) -> List[Gen
     return clustered
 
 
-def generate_intervals_from_gtf(gtf_path: str) -> List[GenomicInterval]:
+def generate_intervals_from_gtf(gtf_path: str, *, reader=None) -> List[GenomicInterval]:
     """
     Generate intervals from GTF annotation (for merging with read intervals)
 
     Args:
         gtf_path: Path to GTF file
+        reader: an ALREADY-PARSED :class:`GTFReader` for that same path, to be
+            borrowed rather than reparsed. The caller keeps ownership: this
+            function will not open, parse or close it.
 
     Returns:
         List of genomic intervals from transcripts
-    """
-    logger.info("Generating intervals from GTF annotation...")
 
+    The runner parses the annotation in ``setup()`` and then called this, which
+    parsed it again -- twice per process, and workers spawn rather than fork, so
+    a cell with ``--threads 2`` parsed a 1.5 GB GENCODE six times. Measured on a
+    paired probe where annotation size was the only variable, parsing was 235 s
+    of a 359 s excess.
+
+    Borrowing must never reparse: :meth:`GTFReader.parse` rewinds the file but
+    does NOT clear its dictionaries, so a second call appends duplicate features.
+    """
+    if reader is not None:
+        if Path(reader.file_path) != Path(gtf_path):
+            raise ValueError(
+                f"reader was parsed from {reader.file_path}, not {gtf_path}; "
+                "refusing to build intervals from a different annotation")
+        if not reader._parsed:
+            raise ValueError("reader must already be parsed before it is borrowed")
+        logger.info("Generating intervals from the already-parsed GTF annotation...")
+        return _intervals_from_reader(reader)
+
+    logger.info("Generating intervals from GTF annotation...")
     with GTFReader(gtf_path) as gtf_reader:
         gtf_reader.open()
         gtf_reader.parse()
+        return _intervals_from_reader(gtf_reader)
 
-        intervals = []
-        for transcript in gtf_reader.iterate_transcripts():
-            interval = GenomicInterval(
-                chrom=transcript.chrom,
-                start=transcript.start,
-                end=transcript.end,
-                strand=transcript.strand,
-                interval_id=f"gtf_{transcript.transcript_id}",
-                attrs = [f"gtf_{transcript.transcript_id}"],
-                three_prime_pos=[int(transcript.end)] if transcript.strand == '+' else [int(transcript.start)]
-            )
-            intervals.append(interval)
+
+def _intervals_from_reader(gtf_reader) -> List[GenomicInterval]:
+    """The interval construction, verbatim, so borrowing a reader and parsing
+    one cannot drift apart. Iteration order is load-bearing: workers index into
+    this list by integer."""
+    intervals = []
+    for transcript in gtf_reader.iterate_transcripts():
+        interval = GenomicInterval(
+            chrom=transcript.chrom,
+            start=transcript.start,
+            end=transcript.end,
+            strand=transcript.strand,
+            interval_id=f"gtf_{transcript.transcript_id}",
+            attrs = [f"gtf_{transcript.transcript_id}"],
+            three_prime_pos=[int(transcript.end)] if transcript.strand == '+' else [int(transcript.start)]
+        )
+        intervals.append(interval)
 
     logger.info(f"Generated {len(intervals)} intervals from GTF")
     return intervals
@@ -476,7 +503,8 @@ def merge_gtf_and_read_intervals(gtf_intervals: List[GenomicInterval],
 def generate_isolated_intervals(bam_path: str,
                                 gtf_path: Optional[str] = None,
                                 max_gap: int =0,
-                                max_reads: Optional[int] = None, tmp_dir: Optional[str] = None) -> Dict[str, Any]:
+                                max_reads: Optional[int] = None, tmp_dir: Optional[str] = None,
+                                *, gtf_reader=None) -> Dict[str, Any]:
     """
     Generate isolated, non-overlapping genomic intervals with strand separation
 
@@ -497,6 +525,11 @@ def generate_isolated_intervals(bam_path: str,
         - 'fusion_reads': List of full read dicts for fusion reads
         - 'num_reads_processed': Number of reads processed
     """
+    # Argument validation before any I/O: a reader with no annotation path is a
+    # caller mistake, and discovering it after the BAM scan wastes the scan.
+    if gtf_reader is not None and not gtf_path:
+        raise ValueError("a gtf_reader was supplied without a gtf_path")
+
     logger.info("=" * 60)
     logger.info("Starting interval generation")
     logger.info(f"BAM: {bam_path}")
@@ -518,7 +551,7 @@ def generate_isolated_intervals(bam_path: str,
     # Generate intervals from GTF if provided
     gtf_intervals = []
     if gtf_path:
-        gtf_intervals = generate_intervals_from_gtf(gtf_path)
+        gtf_intervals = generate_intervals_from_gtf(gtf_path, reader=gtf_reader)
     if tmp_dir:
         tmp_gtf_intervals = Path(tmp_dir) / "gtf_intervals.bed"
         # tmp_gtf_intervals.mkdir(exist_ok=True)
