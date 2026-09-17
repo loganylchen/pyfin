@@ -206,18 +206,42 @@ def fit_endpoint_model(distances: Sequence[int], *, max_iter: int = 200,
     b_n = max(float(med), 0.5)
     b_b = max(float(absd[int(0.95 * (n - 1))]), 10.0 * b_n, 20.0)
     eta = 0.05
+    # |x| does not change between iterations, and inside one iteration the two
+    # scales are fixed -- yet `_laplace` recomputed math.exp(-1/b) and
+    # (1-q)/(1+q) for EVERY observation, so a fit over the library called exp
+    # 2N times per iteration instead of twice. On a real library this loop is
+    # ~127,646 observations and the whole fit runs once PER INTERVAL, which is
+    # where a genome-wide cell spent essentially all of its 14.6 hours.
+    #
+    # Hoisting is exact, not approximate: q is a deterministic function of b, so
+    # computing it once yields the identical float, and q ** a memoised on the
+    # same (q, a) is the identical float again. The GROUPING is preserved
+    # deliberately -- `(1 - eta) * (c * v)` reproduces
+    # `(1 - eta) * _laplace(x, b)` bit for bit, whereas the algebraically equal
+    # `((1 - eta) * c) * v` would not, because float multiplication does not
+    # associate.
+    a_list = [abs(x) for x in d]
     for _ in range(max_iter):
+        qn = math.exp(-1.0 / max(b_n, 1e-6)); cn = (1.0 - qn) / (1.0 + qn)
+        qb = math.exp(-1.0 / max(b_b, 1e-6)); cb = (1.0 - qb) / (1.0 + qb)
+        pow_n: dict = {}; pow_b: dict = {}
         w_sum = 0.0; s_n = 0.0; s_b = 0.0; n_n = 0.0; n_b = 0.0
-        for x in d:
-            gn = (1 - eta) * EndpointModel._laplace(x, b_n)
-            gb = eta * EndpointModel._laplace(x, b_b)
+        for a in a_list:
+            vn = pow_n.get(a)
+            if vn is None:
+                vn = pow_n[a] = qn ** a
+            vb = pow_b.get(a)
+            if vb is None:
+                vb = pow_b[a] = qb ** a
+            gn = (1 - eta) * (cn * vn)
+            gb = eta * (cb * vb)
             z = gn + gb
             if z <= 0:
                 continue
             r = gb / z
             w_sum += r
-            s_n += (1 - r) * abs(x); n_n += (1 - r)
-            s_b += r * abs(x); n_b += r
+            s_n += (1 - r) * a; n_n += (1 - r)
+            s_b += r * a; n_b += r
         new_eta = min(max(w_sum / n, 1e-4), eta_max)
         new_bn = max(s_n / max(n_n, 1e-9), 0.5)
         # The broad component describes read-through / chimeric / truncation
