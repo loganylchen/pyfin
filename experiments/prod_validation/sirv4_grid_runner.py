@@ -94,10 +94,25 @@ DATASETS = {
         genome_src=_ROOT / "refs" / "host" / "GRCh38.primary_assembly.genome.fa",
         truth_name="gencode.v44.gtf", genome_name="GRCh38.primary_assembly.genome.fa",
         concentration=None,
-        stage_root=Path("/SSD/logan/dev/pyfin/experiments/prod_validation/gencode"),
-        # 3 of the 15 samples have a genome alignment; H9 rep2 run2 additionally
-        # has its reads+signal staged locally. `stage` lists what can be RUN.
-        stage={"SGNex_H9_directRNA_replicate2_run2": "_p00val/stage"},
+        stage_root=Path("/SSD/logan/dev/pyfin/experiments/prod_validation"),
+        # ALL 15 samples are runnable genome-wide. The grid ships no
+        # `<sample>/subset/mapped.fq.gz`, so the fallback in sample_inputs finds
+        # nothing for any of them; `_gwstage/<sample>/` is a directory of
+        # SYMLINKS (no data copied) that gives each sample the three inputs
+        # under the names this runner expects. The genome alignment comes from
+        # the grid, the reads and signal from data/<sample-without-underscores>/
+        # -- the two trees use different naming conventions for the same sample.
+        stage={s: f"_gwstage/{s}" for s in (
+            "SGNex_H9_directRNA_replicate2_run1", "SGNex_H9_directRNA_replicate2_run2",
+            "SGNex_H9_directRNA_replicate3_run1", "SGNex_H9_directRNA_replicate3_run2",
+            "SGNex_H9_directRNA_replicate4_run1", "SGNex_H9_directRNA_replicate4_run2",
+            "SGNex_Hct116_directRNA_replicate3_run1",
+            "SGNex_HEYA8_directRNA_replicate1_run1", "SGNex_HEYA8_directRNA_replicate1_run2",
+            "SGNex_HEYA8_directRNA_replicate2_run1", "SGNex_HEYA8_directRNA_replicate2_run2",
+            "SGNex_HEYA8_directRNA_replicate3_run1",
+            "SGNex_K562_directRNA_replicate4_run1", "SGNex_K562_directRNA_replicate5_run1",
+            "SGNex_MCF7_directRNA_replicate4_run1",
+        )},
     ),
 }
 DATASET = os.environ.get("PYFIN_GRID_DATASET", "sirv4")
