@@ -9,6 +9,13 @@
 # GENOME-WIDE benchmark campaign. One array task per frozen (sample, condition)
 # cell -- the 65 distinct cells where espresso or isoquant has an assembly.
 #
+# manifest.tsv is ordered ROUND-ROBIN across samples, not grouped by sample.
+# The per-sample evidence prepass is a one-time cost cached to the work dir, but
+# grouping put five cells of the SAME sample in the concurrency window, so each
+# recomputed that sample's prepass while competing with its own siblings for the
+# node. Round-robin gives the window five different samples: each prepass runs
+# once, and every later cell of that sample hits the warm cache.
+#
 # Why genome-wide: every competitor on this grid assembled from the full BAM,
 # and only PyFIN ran on a chr1/19/21 subset. Scoring their genome-wide GTFs
 # against a three-chromosome truth could not remove that asymmetry, only hide
