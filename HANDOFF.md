@@ -1980,8 +1980,17 @@ d10c9c3 (nomination tightening), 9486814 (Codex's cross-arm transition fix),
 d6adabf (adjudication progress log), a11e55a (adapter-chimera control),
 6da527e (autofs remount / `SNAPSHOT_FIELDS`), 87689bd (genome cache bounded by
 size), 040d8a0 (junction-DP memoisation), 6c95ea6 (clock starts before the GTF
-parse). Suite on this tree: **2460 passed, 4 skipped**, and the suite itself
-dropped from 273 s to 66 s because the memo hits in tests too.
+parse), 29f0b2b (scoring cache keyed on identity), 07e1776 (parsed annotation
+lent to interval generation), 12fdf4d (endpoint-EM loop invariants hoisted),
+ca512cd/c223f40/bb6474f (genome-wide campaign). Suite: **2486 passed, 4 skipped**.
+
+**PRODUCTION AUDIT 2026-09-17 (Codex, cumulative diff since c0c83a6):** no
+output-changing regression on the default real-drna assembly path. Only two
+assembly-path commits since K=1 landed -- 07e1776 and 12fdf4d -- and the
+current tree reproduces the 2026-09-11 attK1 production output BYTE FOR BYTE
+on a real chr1/19/21 cell, `full` and `p00` (`_gencodegrid/prodgate/`, job
+212038, source eedd9b2d5e2ed9e8). Codex additionally compared the c0c83a6 EM
+against the current one in memory over 42 cases, all identical.
 
 Historical: `2d1644e` was (owner's fusion commit on top of the
 2026-09-10/11 campaign). Everything in 4s-4u is COMMITTED and Codex-reviewed
@@ -2005,6 +2014,34 @@ Source snapshots used by arms (`experiments/prod_validation/_snap/`):
 `m2off`=fecd197, `m2scram`=fecd197+control, `att_dec`=735cbf8,
 `att_land`=17fec28-equivalent (used by the K-curve and `_audit_after_attest`).
 Always verify `run_manifest.json.source_root` and one `source_sha256` per arm.
+
+## 6b. GENOME-WIDE HUMAN CAMPAIGN (running, started 2026-09-17)
+
+`docs/FUSION_DP_AND_CACHE_2026-09-16.md` for the perf work that made it
+feasible; `experiments/prod_validation/gw_campaign.sbatch` for the run. Every
+competitor on the GENCODE grid assembled genome-wide and only PyFIN ran on a
+chr1/19/21 subset; this runs PyFIN on the same inputs. 65 frozen cells (the
+distinct sample/condition pairs where espresso or isoquant exists; only 5
+carry both), 15 samples, all staged as symlinks under `_gwstage/`, frozen
+source snapshot `_snap/gw_campaign` (read-only, digest eedd9b2d5e2ed9e8),
+manifest md5 pinned, completion markers in `_gwcampaign/_done/`.
+
+What was found on the way, each measured: the 2-chromosome genome LRU
+thrashed (497 evictions / 499 misses, fixed by a size bound); the annotation
+was parsed six times per cell (now three); and `_endpoint_context` refit the
+endpoint mixtures over the WHOLE library on every interval -- 7.0 s per
+interval flat against the interval's own read count -- which was essentially
+the entire cost of a genome-wide cell. Hoisting the loop invariants is 2.9x,
+bit-identical. Per-interval rate scales with LIBRARY size: 35 iv/min at
+489 MB, 16 at 920 MB; expect ~29 h for the 1970 MB library, ~8.6 days total.
+
+Rules while it runs: do NOT edit `fin/` (cells import the snapshot, but the
+harness is live); do NOT touch `manifest.tsv`; never resubmit a cell whose
+earlier attempt is still alive (markers are not locks). Scoring in the
+campaign TSV is against FULL GENCODE truth -- the tool comparison must use the
+per-sample expression-contract rescore (`expression_rescore.py`, now keyed on
+query+truth identity). Aggregate per Codex: paired per-library differences,
+libraries equally weighted, Sn/Pr/F1 separately, library-block bootstrap.
 
 ## 7. Next work, in priority order (refreshed 2026-09-13)
 
