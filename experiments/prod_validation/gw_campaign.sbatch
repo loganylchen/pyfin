@@ -2,8 +2,8 @@
 #SBATCH -J gwcamp
 #SBATCH -p mne4
 #SBATCH -c 10
-#SBATCH --mem=150G
-#SBATCH -t 16:00:00
+#SBATCH --mem=64G
+#SBATCH -t 48:00:00
 #SBATCH -o /SSD/logan/dev/pyfin/logs/slurm/gwcamp_%A_%a.out
 #SBATCH --array=1-65%5
 # GENOME-WIDE benchmark campaign. One array task per frozen (sample, condition)
@@ -21,9 +21,12 @@
 # against a three-chromosome truth could not remove that asymmetry, only hide
 # it -- their thresholds were computed over the whole genome either way.
 #
-# -t 16:00:00 deliberately: a cell measured 14.6 h BEFORE the endpoint-EM hoist
-# (12fdf4d) and should now be ~5 h. An earlier probe of mine died at 55% because
-# I set the limit from an estimate I had not measured.
+# -t 48:00:00. The first campaign batch showed per-interval rate scales with
+# LIBRARY size (35 iv/min on a 489 MB BAM, 16 iv/min on 920 MB, same node,
+# same code), and the two samples the ~5 h estimate was calibrated on are the
+# two SMALLEST of the fifteen. Extrapolated, the largest (1970 MB) is ~29 h per
+# cell and seven samples exceed 16 h. Two probes of mine have already died to
+# a wall limit set from an estimate; this one is set from the largest library.
 set -uo pipefail
 cd /SSD/logan/dev/pyfin
 R=/SSD/logan/dev/pyfin/experiments/prod_validation/_gwcampaign
@@ -35,6 +38,17 @@ mkdir -p $DONE
 # would launch the whole grid and its cell cleanup would delete other tasks'
 # output. Refuse the row instead.
 [ -r "$R/manifest.tsv" ] || { echo "FATAL manifest unreadable"; exit 2; }
+# Completion markers are keyed by ARRAY INDEX, so the manifest must never
+# change once a marker exists -- a reordered row would let a marker skip the
+# wrong cell. Its checksum is pinned here; the file is also chmod a-w.
+MANIFEST_MD5=f58a072bc4bb97223194f4fc1de788c3
+[ "$(md5sum $R/manifest.tsv | cut -c1-32)" = "$MANIFEST_MD5" ] || { echo "FATAL manifest.tsv changed (md5 != $MANIFEST_MD5)"; exit 2; }
+# Every cell executes the FROZEN source snapshot, not the live tree: queued
+# tasks import whatever is on disk when they start, so an edit to fin/ during
+# the campaign would otherwise split it across two versions of the code.
+# The snapshot's _source_sha256 equals the one tasks 1-4 recorded
+# (eedd9b2d5e2ed9e8) and the directory is read-only.
+export PYFIN_REPO=/SSD/logan/dev/pyfin/experiments/prod_validation/_snap/gw_campaign
 CELL=$(sed -n "${SLURM_ARRAY_TASK_ID}p" $R/manifest.tsv)
 SAMPLE=$(printf '%s' "$CELL" | cut -f1)
 COND=$(printf '%s' "$CELL" | cut -f2)

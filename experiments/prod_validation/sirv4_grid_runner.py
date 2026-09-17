@@ -190,10 +190,24 @@ def sample_inputs(sample: str):
         full = Path("/SSD/logan/dev/pyfin/experiments/prod_validation/gencode/_p00val/stage")
         fq = st / "reads.fq.gz"
         sig = st / "signal.blow5"
-        if not fq.exists():
-            fq = full / "reads.fq.gz"
-        if not sig.exists():
-            sig = full / "signal.blow5"
+        # The `full` fallback exists for ONE case: the chr1/19/21 slice of H9
+        # rep2 run2, whose staging dir holds only the subset BAM and reuses
+        # that sample's own reads. For any other sample a missing fastq or
+        # signal must FAIL, not fall through -- otherwise one autofs hiccup
+        # would run MCF7's BAM against H9's reads and produce a cell that
+        # scores plausibly and is wrong. (Codex, production audit 2026-09-17.)
+        owner_of_full = "SGNex_H9_directRNA_replicate2_run2"
+        for name, path in (("reads", fq), ("signal", sig)):
+            if not path.exists():
+                if sample != owner_of_full:
+                    raise FileNotFoundError(
+                        f"{name} missing for {sample} at {path}; refusing to fall back to "
+                        f"another sample's {name}")
+                fq = full / "reads.fq.gz" if name == "reads" else fq
+                sig = full / "signal.blow5" if name == "signal" else sig
+        for name, path in (("bam", bam), ("reads", fq), ("signal", sig)):
+            if not path.exists():
+                raise FileNotFoundError(f"{name} missing for {sample} at {path}")
         return bam, fq, sig
     return (BENCH / sample / "align" / f"{sample}.sorted.bam",
             BENCH / sample / "subset" / "mapped.fq.gz",
@@ -262,6 +276,12 @@ def run_cell(args) -> dict:
            "--profile", profile, "--no-gpu", "--threads", "2"]
     # p00 ships a zero-transcript annotation: that is the de novo cell, so no
     # --gtf is passed at all rather than an empty one.
+    # A missing annotation file is NOT an empty annotation. Only p00 ships a
+    # zero-transcript file on purpose; for any other condition an absent file
+    # would silently turn an annotated cell into a de novo run that is then
+    # labelled and scored as the annotated one. (Codex, production audit.)
+    if not anno.exists() and cond != "p00":
+        raise FileNotFoundError(f"annotation missing for {sample}/{cond} at {anno}")
     n_anno = n_annotation_tx(anno)
     row["n_anno"] = n_anno
     if n_anno > 0:
