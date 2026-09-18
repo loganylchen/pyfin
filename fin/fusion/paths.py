@@ -125,6 +125,7 @@ def find_read_paths(
     max_segments: int = 64,
     max_paths: int = 64,
     domain=(0, 0),
+    max_expansions: int = 20000,
 ) -> PathSearchResult:
     """Keep every coverage-qualified path or abstain when search cannot be completed.
 
@@ -136,11 +137,31 @@ def find_read_paths(
     that follows, and a slightly longer wrong geometry must not erase the right
     hypothesis. ``coverage_tolerance_bases`` is retained for signature
     compatibility and no longer prunes.
+
+    EVERY directed path through the eligible segments is a hypothesis, not only
+    the maximal ones. The search used to start at graph roots and emit only
+    leaves, so an alignment that could be extended never appeared on its own:
+    chr1 950M50S alone returned the chr1 path (coverage 0.95), but with a chr2
+    950S50M tail available only chr1->chr2 came back, and the still-qualifying
+    normal explanation was gone before the adjudication that exists to weigh
+    it. A walk now starts at every node and every prefix is a candidate; each
+    index-path has one first node and one extension sequence, so nothing is
+    produced twice. Whether the shorter explanation is COMPETITIVE is decided
+    downstream by the stitched-template score, which already charges for every
+    unaligned query base -- enumeration stays neutral.
+
+    Two budgets, kept distinct because a small frontier is not a small search:
+    ``max_paths`` bounds the QUALIFYING paths retained (the number adjudication
+    must weigh), and ``max_expansions`` bounds the walk itself, which a graph of
+    many mutually-exclusive placements can make exponential while every path
+    fails coverage. Either exhausted means abstain with nothing, never a
+    truncated set presented as complete.
     """
     if not 0 <= min_mapping_quality <= 254 or min_anchor_bases <= 0:
         raise ValueError("invalid mapping quality or anchor threshold")
     if (min(max_query_gap, max_query_overlap, coverage_tolerance_bases) < 0
-            or min(max_segments, max_paths) <= 0 or not 0 < min_read_coverage <= 1):
+            or min(max_segments, max_paths, max_expansions) <= 0
+            or not 0 < min_read_coverage <= 1):
         raise ValueError("invalid path search bounds")
     if min(domain) < 0:
         raise ValueError("invalid coverage domain")
@@ -163,7 +184,6 @@ def find_read_paths(
     if not eligible:
         return PathSearchResult(read_id, "unresolved", "no_eligible_alignment", (), len(unique))
     successors = [[] for _ in eligible]
-    has_predecessor = set()
     for previous_index, previous in enumerate(eligible):
         for following_index in range(previous_index + 1, len(eligible)):
             following = eligible[following_index]
@@ -172,19 +192,24 @@ def find_read_paths(
                     and following.query_end > previous.query_end
                     and -max_query_overlap <= gap <= max_query_gap):
                 successors[previous_index].append(following_index)
-                has_predecessor.add(following_index)
-    pending = [(index,) for index in reversed(range(len(eligible))) if index not in has_predecessor]
-    completed = []
-    while pending:
-        indices = pending.pop()
-        following = successors[indices[-1]]
-        if following:
-            pending.extend(indices + (index,) for index in reversed(following))
-        else:
-            completed.append(ReadPath(read_id, tuple(eligible[index] for index in indices)))
-        if len(pending) + len(completed) > max_paths:
-            return PathSearchResult(read_id, "unresolved", "path_limit", (), len(unique))
-    covered = [path for path in completed if path.effective_coverage(domain) >= min_read_coverage]
+    covered = []
+    expansions = 0
+    # Starts are taken one at a time, not queued together: a chain of N
+    # segments has N starts, and counting them as pending work would abstain
+    # on a molecule whose only qualifying path is the full chain.
+    for start in range(len(eligible)):
+        stack = [(start,)]
+        while stack:
+            indices = stack.pop()
+            expansions += 1
+            if expansions > max_expansions:
+                return PathSearchResult(read_id, "unresolved", "search_budget", (), len(unique))
+            path = ReadPath(read_id, tuple(eligible[index] for index in indices))
+            if path.effective_coverage(domain) >= min_read_coverage:
+                covered.append(path)
+                if len(covered) > max_paths:
+                    return PathSearchResult(read_id, "unresolved", "path_limit", (), len(unique))
+            stack.extend(indices + (index,) for index in reversed(successors[indices[-1]]))
     if not covered:
         return PathSearchResult(read_id, "unresolved", "insufficient_query_coverage", (), len(unique))
     competitive = tuple(sorted(covered, key=lambda path: path.geometry_key))
