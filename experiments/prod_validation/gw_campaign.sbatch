@@ -2,10 +2,10 @@
 #SBATCH -J gwcamp
 #SBATCH -p mne4
 #SBATCH -c 10
-#SBATCH --mem=96G
+#SBATCH --mem=144G
 #SBATCH -t 48:00:00
 #SBATCH -o /SSD/logan/dev/pyfin/logs/slurm/gwcamp_%A_%a.out
-#SBATCH --array=1-65%5
+#SBATCH --array=1-65%4
 # GENOME-WIDE benchmark campaign. One array task per frozen (sample, condition)
 # cell -- the 65 distinct cells where espresso or isoquant has an assembly.
 #
@@ -16,7 +16,13 @@
 # each verified: aggregation is canonicalised because
 # post_selection_refit_effective is true in every campaign manifest; --no-gpu
 # forces gpu_workers=0 so every worker is CPU; and RAM is ~11 GB parent + ~9 GB
-# per worker, hence --mem=96G. Cells finished at 2 workers and cells run at 8
+# per worker, hence --mem=96G -- which was WRONG and OOM-killed cell 10 (a
+# 1460 MB library) after 7h48m. That 9 GB came from a ~1 GB library at 2
+# workers; measured on cells actually running, a process is ~9.4 GB at 1016 MB
+# and ~10.8 GB at 1631 MB, so 8 workers on 1016 MB is already 84.6 GB of the 96,
+# and the largest library (1970 MB) extrapolates to ~120 GB. 144G with a
+# four-cell cap: 4 x 144 = 576 GB inside the ~700 GB this node leaves me.
+# Cells finished at 2 workers and cells run at 8
 # have identical outputs and may be pooled; RUNTIMES must be stratified.
 #
 # manifest.tsv is ordered ROUND-ROBIN across samples, not grouped by sample.
@@ -87,6 +93,12 @@ tail -3 $R/gw_${SLURM_ARRAY_TASK_ID}.log
 # gffcompare_rc..., so the row's own status is the completion test.
 STATUS=$(awk -F'\t' 'NR==1{for(i=1;i<=NF;i++) if($i=="status") c=i; next} {print $c}' "$TSV" 2>/dev/null | head -1)
 echo "CELL $SLURM_ARRAY_TASK_ID rc=$RC status=${STATUS:-none} $(date +%T)"
+# rc -9 is SIGKILL. It does not by itself prove the cause, but on this campaign
+# it has meant the cgroup OOM handler, and a generic FAILED sent me looking in
+# the wrong place for a while.
+case "${STATUS:-}" in
+  pyfin_rc-9) echo "CELL $SLURM_ARRAY_TASK_ID HINT: SIGKILL -- likely OOM; check 'Detected oom-kill' in this log and raise --mem" ;;
+esac
 if [ "$RC" -ne 0 ] || [ -z "${STATUS:-}" ] || [ "${STATUS#ok}" = "$STATUS" ]; then
   echo "CELL $SLURM_ARRAY_TASK_ID FAILED"; exit 1
 fi
