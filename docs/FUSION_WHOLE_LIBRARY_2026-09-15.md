@@ -62,9 +62,17 @@ Every one is either the known driver or a known readthrough/paralog locus:
 | 2 | intrachromosomal | `BAG6:e2>SLC44A4:e15` |
 | 1 | readthrough | `DHRS4:e5>DHRS4L2:e4/5/7` |
 
-DHRS4/DHRS4L2 and GAGE2A/GAGE1 are tandem paralog clusters that produce
-chimeric transcripts; BAG6-SLC44A4 is an MHC-region readthrough. No junk
-reaches this tier.
+DHRS4/DHRS4L2 and GAGE2A/GAGE1 are tandem paralog clusters known to produce
+chimeric transcripts. BAG6-SLC44A4 I had first described here as "an
+MHC-region readthrough"; that was an inference from gene adjacency, not a
+verified event, and Codex's review showed it is wrong on the geometry: both
+arms are on the minus strand and the junction jumps UPWARD in genomic
+coordinates (chr6:31651655 -> 31865784), i.e. reverse order, which is why the
+pipeline itself classifies it intrachromosomal rather than readthrough. It is
+an unadjudicated candidate at a plausible locus, nothing more. "No junk
+reaches this tier" is likewise too strong: a known locus does not authenticate
+this particular junction, and this tier is a selected, annotation-rich subset,
+not a precision estimate.
 
 ## Two things a downstream user must know
 
