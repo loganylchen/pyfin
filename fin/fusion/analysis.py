@@ -39,6 +39,12 @@ class FusionSettings:
     max_windows: int = 64
     max_junction_candidates: int = 128
     min_clip_bases: int = 250  # dRNA adapter/polyA carry-through sits at ~80 bp; 100 nominates ~9% of a real library
+    # Contigs whose reference is a circle: a read across the linearisation seam
+    # is continuity, not a rearrangement. Names, matched against the BAM header;
+    # lengths come from the header at run time. 50 bp: the six real seams on
+    # K562 lie within 7 bp of the ends, the internal chrM jumps >= 4,400 bp away.
+    circular_contigs: tuple = ("chrM", "MT", "chrMT")
+    circular_origin_tolerance_bp: int = 50
 
     def validate(self):
         import math
@@ -111,6 +117,8 @@ def analyze_fusion_input(evidence, genome, aligner, genes=None, settings=None, *
     molecules = {molecule.read_id: molecule for molecule in evidence.molecules}
     if len(molecules) != len(evidence.molecules):
         raise ValueError("duplicate molecule IDs in fusion input")
+    circular = {name: length for name, length in getattr(evidence, "contig_lengths", {}).items()
+                if name in set(settings.circular_contigs)}
     ready = [(m.read_id, m.sequence, m.segments) for m in evidence.molecules if m.status == "ready"]
     realignments = aligner.map_many(ready, workers=realign_workers) if ready else {}
     if len(realignments) != len(ready):
@@ -150,7 +158,9 @@ def analyze_fusion_input(evidence, genome, aligner, genes=None, settings=None, *
             continue
         annotated = {}
         for path in paths.paths:
-            candidate = annotate_read_path(path, genes)
+            candidate = annotate_read_path(
+                path, genes, circular_contigs=circular,
+                circular_origin_tolerance=settings.circular_origin_tolerance_bp)
             quality = min(segment.effective_mapping_quality for segment in path.segments)
             key = _geometry(candidate)
             if key not in annotated or quality < annotated[key][1]:

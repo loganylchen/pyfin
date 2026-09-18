@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -30,6 +30,7 @@ class FusionInput:
     molecules: Tuple[MoleculeEvidence, ...]
     record_counts: dict
     complete: bool
+    contig_lengths: dict = field(default_factory=dict)   # from the BAM header
 
 
 #: The fields `_snapshot` returns, in order. Exported so the diagnostic that
@@ -121,9 +122,11 @@ def scan_fusion_bam(
     counts = Counter()
     nominated = set()
     invalid = {}
+    contig_lengths = {}
     try:
         identity = _snapshot(bam_path)
         with pysam.AlignmentFile(str(bam_path), "rb") as reader:
+            contig_lengths = dict(zip(reader.references, reader.lengths))
             for record in reader.fetch(until_eof=True):
                 counts["alignment_records"] += 1
                 if counts["alignment_records"] % 200000 == 0:
@@ -219,7 +222,7 @@ def scan_fusion_bam(
                 "complete_alignment_scan" if sequence else "full_sequence_unavailable",
             ))
             counts["ready_molecules" if sequence else "molecules_missing_sequence"] += 1
-    return FusionInput(tuple(molecules), dict(sorted(counts.items())), True)
+    return FusionInput(tuple(molecules), dict(sorted(counts.items())), True, contig_lengths)
 
 
 def supply_fusion_sequences(evidence: FusionInput, sequence_path) -> FusionInput:
@@ -274,4 +277,4 @@ def supply_fusion_sequences(evidence: FusionInput, sequence_path) -> FusionInput
     counts["ready_molecules"] = sum(molecule.status == "ready" for molecule in molecules)
     counts["invalid_molecules"] = sum(molecule.status == "unresolved" for molecule in molecules)
     counts["molecules_missing_sequence"] = sum(molecule.status == "needs_sequence" for molecule in molecules)
-    return FusionInput(tuple(molecules), dict(sorted(counts.items())), True)
+    return FusionInput(tuple(molecules), dict(sorted(counts.items())), True, dict(evidence.contig_lengths))

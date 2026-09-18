@@ -138,10 +138,45 @@ def _collinear(previous, following):
     return previous.exit_position >= following.entry_position
 
 
-def annotate_read_path(path: ReadPath, genes: GeneIndex, *, readthrough_distance=100000):
-    """Split a spliced alignment at annotated gene transitions; retain ambiguity."""
+def _origin_spanning(previous, following, circular_contigs, tolerance):
+    """The reference is a circle and this junction is its seam.
+
+    Both arms on one contig declared circular, same strand, and the transcript
+    leaves the linearised reference at one end and re-enters at the other in
+    its own direction: on ``+`` from the end (exit within ``tolerance`` of the
+    length) to the start (entry within ``tolerance`` of 0); on ``-`` the
+    mirror. The opposite direction is reverse order, not continuity. On the
+    whole K562 library the six genuine seams sit within 7 bp of the ends and
+    the six internal mitochondrial jumps no closer than 4,400 bp.
+    """
+    if previous.chrom != following.chrom or previous.strand != following.strand:
+        return False
+    length = circular_contigs.get(previous.chrom)
+    if length is None:
+        return False
+    if previous.strand == "+":
+        return (length - previous.exit_position <= tolerance
+                and following.entry_position <= tolerance)
+    return (previous.exit_position <= tolerance
+            and length - following.entry_position <= tolerance)
+
+
+def annotate_read_path(path: ReadPath, genes: GeneIndex, *, readthrough_distance=100000,
+                       circular_contigs=None, circular_origin_tolerance=50):
+    """Split a spliced alignment at annotated gene transitions; retain ambiguity.
+
+    ``circular_contigs`` maps contig name to length for references declared
+    circular (the mitochondrial genome). A path whose only discontinuity is
+    that contig's seam is ``circular_reference_origin_spanning``: the topology
+    of the reference explains it, which says nothing about the RNA being
+    circular or artefactual, and nothing about a junction elsewhere on the
+    same contig -- an internal deletion on chrM keeps its own class.
+    """
     if readthrough_distance < 0:
         raise ValueError("readthrough distance must be nonnegative")
+    if circular_origin_tolerance < 0:
+        raise ValueError("circular origin tolerance must be nonnegative")
+    circular_contigs = dict(circular_contigs or {})
     arms = []
     for segment in path.segments:
         block_labels = [genes.labels(segment.chrom, segment.strand, (block,), min_overlap_bases=1)
@@ -162,16 +197,26 @@ def annotate_read_path(path: ReadPath, genes: GeneIndex, *, readthrough_distance
     identity_status = ("ambiguous" if any(len(labels) > 1 for labels in identities)
                        else "unannotated" if any(not labels for labels in identities)
                        else "resolved")
+    pairs = list(zip(arms, arms[1:]))
     if len(arms) == 1:
         event_class = "ordinary_alignment"
     elif identity_status == "ambiguous":
         event_class = "ambiguous_gene_path"
-    elif any(previous.chrom != following.chrom for previous, following in zip(arms, arms[1:])):
+    elif any(previous.chrom != following.chrom for previous, following in pairs):
         event_class = "interchromosomal_candidate"
     elif all(_collinear(previous, following)
              and abs(previous.exit_position - following.entry_position) <= readthrough_distance
-             for previous, following in zip(arms, arms[1:])):
+             for previous, following in pairs):
         event_class = "readthrough_or_splicing_candidate"
+    elif (any(_origin_spanning(previous, following, circular_contigs, circular_origin_tolerance)
+              for previous, following in pairs)
+          and all(_origin_spanning(previous, following, circular_contigs, circular_origin_tolerance)
+                  or (_collinear(previous, following)
+                      and abs(previous.exit_position - following.entry_position) <= readthrough_distance)
+                  for previous, following in pairs)):
+        # every discontinuity is either the seam or an ordinary collinear
+        # junction; a seam plus a genuine jump is NOT excused
+        event_class = "circular_reference_origin_spanning"
     elif identity_status == "resolved" and len({labels[0] for labels in identities}) == 1:
         event_class = "intragenic_rearrangement_candidate"
     else:

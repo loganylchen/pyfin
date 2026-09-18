@@ -123,6 +123,9 @@ def build_fusion_chains(
                     edge_support[edge_index].add(partial.read_id)
         status = ("insufficient_full_chain_support" if len(full_support) < min_full_support
                   else "readthrough_or_splicing" if representative.event_class == "readthrough_or_splicing_candidate"
+                  # a circular reference's seam is continuity, never a fusion,
+                  # however many molecules cross it; the support is kept
+                  else "circular_reference_origin" if representative.event_class == "circular_reference_origin_spanning"
                   else "supported_candidate")
         coordinate_status = "exact_observed" if len(modes) == 1 else "unresolved_nearby_modes"
         payload = json.dumps((topology_key(representative), sorted(modes)), separators=(",", ":"))
