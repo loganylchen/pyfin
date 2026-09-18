@@ -2,12 +2,22 @@
 #SBATCH -J gwcamp
 #SBATCH -p mne4
 #SBATCH -c 10
-#SBATCH --mem=64G
+#SBATCH --mem=96G
 #SBATCH -t 48:00:00
 #SBATCH -o /SSD/logan/dev/pyfin/logs/slurm/gwcamp_%A_%a.out
 #SBATCH --array=1-65%5
 # GENOME-WIDE benchmark campaign. One array task per frozen (sample, condition)
 # cell -- the 65 distinct cells where espresso or isoquant has an assembly.
+#
+# --threads 8 (the runner's own default is 2). The interval loop is ~85% of a
+# genome-wide cell and scales with workers; on a real chr1/19/21 cell 8 workers
+# reproduced the 2-worker production output byte for byte (twice, so completion
+# order is proven not to matter) and ran 2.4x faster. Preconditions Codex named,
+# each verified: aggregation is canonicalised because
+# post_selection_refit_effective is true in every campaign manifest; --no-gpu
+# forces gpu_workers=0 so every worker is CPU; and RAM is ~11 GB parent + ~9 GB
+# per worker, hence --mem=96G. Cells finished at 2 workers and cells run at 8
+# have identical outputs and may be pooled; RUNTIMES must be stratified.
 #
 # manifest.tsv is ordered ROUND-ROBIN across samples, not grouped by sample.
 # The per-sample evidence prepass is a one-time cost cached to the work dir, but
@@ -67,7 +77,7 @@ if [ -f "$MARK" ]; then echo "SKIP already scored: $(cat $MARK 2>/dev/null)"; ex
 
 TSV=$R/gw_${SLURM_ARRAY_TASK_ID}.tsv
 python3 experiments/prod_validation/sirv4_grid_runner.py --dataset gencode --workers 1 \
-  --profile real-drna --extra="--m2-support-gate-attest-reads 1" \
+  --profile real-drna --extra="--m2-support-gate-attest-reads 1 --threads 8" \
   --samples "$SAMPLE" --conds "$COND" \
   --tag _gw --out $R/gw --tsv $TSV > $R/gw_${SLURM_ARRAY_TASK_ID}.log 2>&1
 RC=$?
