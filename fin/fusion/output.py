@@ -98,7 +98,16 @@ def write_fusion_outputs(analysis, genome, output_dir):
     reads = {read.read_id: read for read in analysis.reads}
     fields = ("chain_id", "status", "event_class", "gene_path", "arm_count", "full_read_support",
               "full_read_ids", "partial_read_ids", "edge_support", "coordinate_status", "coordinate_alternatives",
-              "signal_status")
+              "signal_status",
+              # appended: the support gate on its own, for EVERY event class.
+              # `status` is a legacy composite -- it reports the gate for
+              # chains that fail it and geometry or coordinate resolution for
+              # chains that pass. The gate is still recoverable from it, but
+              # only by knowing which other values it can take; this column is
+              # the stable thing to filter on. Note bedpe's `score` is CAPPED
+              # EDGE support and counts partial evidence, so it is not a
+              # substitute for full-chain support -- join on chain_id instead.
+              "chain_support_status")
     with (output_dir / "fusions.tsv").open("w") as table, (output_dir / "fusions.bedpe").open("w") as bedpe, \
             (output_dir / "fusion_transcripts.fa").open("w") as fasta, \
             (output_dir / "fusion_arms.jsonl").open("w") as arms_output:
@@ -128,7 +137,8 @@ def write_fusion_outputs(analysis, genome, output_dir):
                              len(chain.full_support_read_ids), _json(chain.full_support_read_ids),
                              _json(chain.partial_support_read_ids),
                              _json([len(read_ids) for read_ids in chain.edge_support_read_ids]),
-                             chain.coordinate_status, _json(coordinate_alternatives), signal_status))
+                             chain.coordinate_status, _json(coordinate_alternatives), signal_status,
+                             chain.support_status))
             for index, (left, right) in enumerate(zip(path.arms, path.arms[1:])):
                 left_base = left.exit_position - 1 if left.strand == "+" else left.exit_position
                 right_base = right.entry_position if right.strand == "+" else right.entry_position - 1

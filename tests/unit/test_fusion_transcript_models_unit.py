@@ -49,12 +49,14 @@ def _analysis(molecules, supported_ids, *, min_support=2):
     if supported_ids:
         chains.append(FusionChain("fusion_chain_supported", molecules[supported_ids[0]][0], tuple(supported_ids), (),
                                   tuple(tuple(supported_ids) for _ in range(len(molecules[supported_ids[0]][0].arms) - 1)),
-                                  (), "supported_rna_fusion", "sequence_resolved"))
+                                  (), "supported_rna_fusion", "sequence_resolved",
+                                  "sufficient_full_chain_support"))
     for rid in molecules:
         if rid not in supported_ids:
             chains.append(FusionChain(f"fusion_chain_{rid}", molecules[rid][0], (rid,), (),
                                       tuple((rid,) for _ in range(len(molecules[rid][0].arms) - 1)),
-                                      (), "insufficient_full_chain_support", "sequence_resolved"))
+                                      (), "insufficient_full_chain_support", "sequence_resolved",
+                                      "insufficient_full_chain_support"))
     return FusionAnalysis(tuple(chains), reads, {}, FusionSettings(min_support=min_support), "provided")
 
 

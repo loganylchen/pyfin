@@ -1,4 +1,31 @@
-"""Deterministic whole-chain support and bounded-diameter event grouping."""
+"""Deterministic whole-chain support and bounded-diameter event grouping.
+
+`status` is a legacy composite whose meaning depends on which branch fired:
+for a chain below the support threshold it reports EVIDENCE, and for a chain
+above it reports GEOMETRY (readthrough, circular origin) or COORDINATE
+RESOLUTION (supported_rna_fusion, supported_chain_unresolved_coordinates).
+Geometry is terminal there, so on the whole K562 library the single largest
+chain -- 537 molecules -- is a readthrough and can never carry a "supported"
+value, while only 3 chains in 595 carry `supported_rna_fusion`.
+
+(`supported_candidate` is this builder's intermediate value; analysis.
+finalize_chains replaces it with `supported_rna_fusion` or
+`supported_chain_unresolved_coordinates`, so it never reaches the output.)
+
+`support_status` is the gate alone, asked of every event class. It is not new
+information -- `status != "insufficient_full_chain_support"` is the same
+predicate for every chain produced here -- but recovering it that way requires
+knowing the full value set and the branch ordering, which is exactly the
+coupling to a legacy composite that this field removes. The other two axes
+were already separate columns and are unchanged: `event_class` carries
+geometry and `coordinate_status` carries coordinate resolution.
+
+No mechanism field is published. Mapping geometry into causal words would add
+no evidence the geometry does not already carry, could not say which other
+explanations remain compatible, and this pipeline cannot separate trans-
+splicing from a genomic rearrangement. Geometry plus documentation is the
+honest product.
+"""
 
 from __future__ import annotations
 
@@ -43,6 +70,17 @@ class FusionChain:
     raw_coordinate_modes: Tuple[Tuple[Tuple[int, ...], int], ...]
     status: str
     coordinate_status: str
+    # The support gate ALONE: whether this chain's distinct full-support
+    # molecules reached the configured threshold, for every event class.
+    # It IS recoverable from `status` today -- `status !=
+    # "insufficient_full_chain_support"` is the same predicate for every chain
+    # this builder and finalize_chains produce, and an earlier version of this
+    # comment wrongly claimed otherwise. The point is that recovering it means
+    # knowing which of the other values `status` can take and why, which
+    # couples a consumer to a composite whose branch ordering is free to
+    # change. Required, not defaulted: a wrong default would read as a quiet
+    # finding about the evidence.
+    support_status: str
 
 
 def _is_subpath(partial, complete, tolerance):
@@ -121,6 +159,11 @@ def build_fusion_chains(
                 partial_support.add(partial.read_id)
                 for edge_index in range(offset, offset + len(partial.arms) - 1):
                     edge_support[edge_index].add(partial.read_id)
+        # one comparison, one meaning: distinct FULL-support molecules against
+        # the configured threshold. Partial and edge evidence cannot satisfy
+        # it, and clearing it says nothing about coordinates or mechanism.
+        support_status = ("sufficient_full_chain_support" if len(full_support) >= min_full_support
+                          else "insufficient_full_chain_support")
         status = ("insufficient_full_chain_support" if len(full_support) < min_full_support
                   else "readthrough_or_splicing" if representative.event_class == "readthrough_or_splicing_candidate"
                   # a circular reference's seam is continuity, never a fusion,
@@ -133,6 +176,6 @@ def build_fusion_chains(
         output.append(FusionChain(
             chain_id, representative, full_support, tuple(sorted(partial_support)),
             tuple(tuple(sorted(read_ids)) for read_ids in edge_support),
-            tuple(sorted(modes.items())), status, coordinate_status,
+            tuple(sorted(modes.items())), status, coordinate_status, support_status,
         ))
     return tuple(sorted(output, key=lambda chain: chain.chain_id))

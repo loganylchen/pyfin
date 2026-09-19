@@ -67,9 +67,13 @@ molecules actually reach the model's outer extents.
 ## How molecules are assigned
 
 * **Structures** = splice keys (everything observed except the outer 5'/3'
-  ends), collected from every chain's full-support molecules. Only structures
-  seen in a *supported* chain may become models; a molecule in an
-  insufficient-support chain can still be compatible evidence.
+  ends), collected from every chain's full-support molecules. No filter on
+  chain status is applied -- readthrough, circular-origin and
+  unresolved-coordinate chains all enter model construction, and several
+  individually insufficient chains can jointly clear the model's own
+  distinct-molecule threshold. (This paragraph previously claimed only
+  *supported* chains may become models. That never described the code;
+  `build_fused_transcript_models` reads every chain.)
 * **Envelope**: a model's outer exons are the maximal observed extent among
   molecules of that exact structure (min start / max end) -- an aggregate
   observed envelope, deterministic, and every base of it was observed by some
