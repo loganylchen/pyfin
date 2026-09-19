@@ -41,14 +41,66 @@ def _base_slice(genome, chrom, start, end):
     return sequence[start:end].upper()
 
 
+# reverse_complement maps A/C/G/T/N and passes anything else through
+# UNCHANGED, so an IUPAC ambiguity code on a minus-strand arm came back
+# uncomplemented -- R (A or G) stayed R where the transcript reads Y (C or T).
+# The membership test that used to be the only consumer rejected either
+# spelling, so the defect was invisible until the bases were published.
+# Scoped here rather than fixed in reverse_complement, whose other callers
+# build sequences this change has no business altering.
+_IUPAC_COMPLEMENT = str.maketrans("ACGTUNRYSWKMBDHVacgtunryswkmbdhv",
+                                  "TGCAANYRSWMKVHDBtgcaanyrswmkvhdb")
+
+
+def _reverse_complement_iupac(sequence):
+    return sequence.translate(_IUPAC_COMPLEMENT)[::-1]
+
+
+def junction_dinucleotides(genome, left_chrom, donor, left_strand,
+                           right_chrom, acceptor, right_strand):
+    """The reference bases flanking one junction, in transcript orientation.
+
+    Donor = the two bases immediately AFTER the upstream exon ends; acceptor =
+    the two immediately BEFORE the downstream exon begins; each read on its own
+    arm's strand, so a minus-strand arm is reverse-complemented.
+
+    A side whose sequence is unavailable -- absent contig, or a window running
+    off either end -- is `None`, never a guessed or empty dinucleotide. On the
+    whole K562 library every null side was a chrM origin-spanning junction,
+    where the two-base window falls off the end of the LINEARISED
+    mitochondrial reference. A circular-aware read could wrap and return
+    bases, but they are not what the reference holds at that coordinate, and
+    this field annotates coordinates; the null says so rather than inventing
+    them.
+    Ambiguous reference bases are kept, and COMPLEMENTED CORRECTLY on a minus
+    arm -- R becomes Y, not R. `N` is what the reference says, and collapsing
+    it into "missing" would lose that.
+
+    This is an ANNOTATION OF COORDINATES. It is not evidence that a junction
+    was spliced: a genomic rearrangement can place GT-AG at a breakpoint by
+    coincidence, and reading a motif at a position this pipeline chose does not
+    corroborate the position. See nominate_junctions below for why the motif
+    distribution in any output built on it is biased.
+    """
+    left_bases = (_base_slice(genome, left_chrom, donor, donor + 2) if left_strand == "+"
+                  else _reverse_complement_iupac(_base_slice(genome, left_chrom, donor - 2, donor)))
+    right_bases = (_base_slice(genome, right_chrom, acceptor - 2, acceptor) if right_strand == "+"
+                   else _reverse_complement_iupac(_base_slice(genome, right_chrom, acceptor, acceptor + 2)))
+    return (left_bases or None), (right_bases or None)
+
+
 def fusion_motif(genome, left: FusionArm, right: FusionArm, positions):
-    """Read donor/acceptor dinucleotides in each arm's transcript orientation."""
+    """Read donor/acceptor dinucleotides in each arm's transcript orientation.
+
+    Returns "" rather than None for an unavailable side, because its only
+    caller is a membership test against MOTIFS_EXTENDED and ("", "") is not a
+    member. `junction_dinucleotides` is the same extraction, and is what the
+    published annotation uses.
+    """
     donor, acceptor = positions
-    left_bases = (_base_slice(genome, left.chrom, donor, donor + 2) if left.strand == "+"
-                  else reverse_complement(_base_slice(genome, left.chrom, donor - 2, donor)))
-    right_bases = (_base_slice(genome, right.chrom, acceptor - 2, acceptor) if right.strand == "+"
-                   else reverse_complement(_base_slice(genome, right.chrom, acceptor, acceptor + 2)))
-    return left_bases, right_bases
+    left_bases, right_bases = junction_dinucleotides(
+        genome, left.chrom, donor, left.strand, right.chrom, acceptor, right.strand)
+    return (left_bases or ""), (right_bases or "")
 
 
 def move_junction(left: FusionArm, right: FusionArm, positions):
@@ -88,7 +140,23 @@ def nominate_junctions(
     left, right, genome, *, tolerance=3, supported_positions=(),
     annotation_positions=(), assembly_positions=(), internal_intron=False, max_candidates=128,
 ):
-    """Keep the observed baseline and nominate sequence/evidence alternatives."""
+    """Keep the observed baseline and nominate sequence/evidence alternatives.
+
+    THE SOURCE OF THE MOTIF ASCERTAINMENT BIAS. For a fusion edge this scans
+    every (donor, acceptor) within +/-tolerance and nominates a hypothesis
+    wherever the bases land in MOTIFS_EXTENDED. Canonical placements are
+    therefore GENERATED preferentially. Anything published downstream that
+    reads those bases is subject to that motif-selection bias and is not
+    independent corroboration of the placement -- preferential generation is
+    certain; how far it enriches the placements that finally win is not
+    established here.
+
+    Note what the "canonical" origin does and does not mean: the scan also
+    covers the observed position and positions nominated by read support or
+    annotation, so they too pick up the label when their bases match. It marks
+    an applicable rule, NOT that the rule was needed to generate the candidate,
+    and certainly not that the result would differ without it.
+    """
     if tolerance < 0 or max_candidates <= 0:
         raise ValueError("invalid junction nomination limits")
     observed = left.exit_position, right.entry_position

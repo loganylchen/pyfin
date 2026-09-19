@@ -390,8 +390,12 @@ def test_the_writer_appends_the_event_family_columns_without_moving_any_other(tm
     rows = list(csv.DictReader((tmp_path / "fusion_models.tsv").open(), delimiter="\t"))
     header = (tmp_path / "fusion_models.tsv").open().readline().rstrip("\n").split("\t")
 
-    assert header[-3:] == ["event_family_id", "event_family_model_count", "event_family_support"]
-    assert header.index("model_id") == 0 and header.index("completion_transcript_ids") == len(header) - 4
+    # the appended block, in the order the columns were added, still sitting
+    # immediately after the last pre-existing column
+    assert header[header.index("completion_transcript_ids") + 1:] == [
+        "event_family_id", "event_family_model_count", "event_family_support",
+        "junction_dinucleotides"]
+    assert header.index("model_id") == 0
     assert len(rows) == 1
     assert rows[0]["event_family_id"].startswith("EFAM_")
     assert rows[0]["event_family_model_count"] == "1"

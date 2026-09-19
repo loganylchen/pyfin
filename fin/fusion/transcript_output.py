@@ -17,9 +17,30 @@ from pathlib import Path
 from dataclasses import asdict
 
 from fin.fusion.event_families import assign_event_families, families_by_model
+from fin.fusion.junctions import junction_dinucleotides
 from fin.fusion.transcript_models import (
     FusedTranscriptModel, completion_exons, model_sequence,
 )
+
+
+def _model_dinucleotides(model, genome):
+    """Reference bases flanking each of the model's OWN reported junctions.
+
+    Exactly `arm_count - 1` entries, ordered along the transcript path, one per
+    INTER-ARM fusion edge -- internal splice junctions are not junctions
+    between arms and are not listed. Read from `model.breakpoints`, which is
+    the placement this row displays, so the annotation cannot drift from the
+    coordinates beside it: a model's placement is not simply its primary
+    chain's, because envelopes aggregate across chains and merged placements
+    can be chosen on annotation agreement.
+
+    An unavailable side is null, not an empty or guessed dinucleotide, and an
+    ambiguous reference base is reported as the reference spells it.
+    """
+    return [list(junction_dinucleotides(genome, left_chrom, donor, left_strand,
+                                        right_chrom, acceptor, right_strand))
+            for left_chrom, donor, left_strand, right_chrom, acceptor, right_strand
+            in model.breakpoints]
 
 
 def _json(value):
@@ -121,7 +142,21 @@ def write_transcript_outputs(models, collapsed, genome, output_dir, *, breakpoin
               "observed_length", "annotated_completion_id", "annotated_completion_length",
               "extension_bases_5p", "extension_bases_3p", "completion_transcript_ids",
               # appended, so every column above keeps its position and value
-              "event_family_id", "event_family_model_count", "event_family_support")
+              "event_family_id", "event_family_model_count", "event_family_support",
+              # Reference bases at THIS ROW's reported junctions, donor then
+              # acceptor, one pair per inter-arm edge. An annotation of the
+              # coordinates, NOT evidence that the junction was spliced and
+              # NOT a mechanism call: a rearrangement can put GT-AG at a
+              # breakpoint by coincidence. It describes the displayed
+              # placement only -- see coordinate_status and
+              # coordinate_alternatives, whose other placements may spell
+              # something else, and which this column does not adjudicate.
+              # Subject to motif-selection bias, and not independent
+              # evidence: the junction nominator searches +/-tolerance for
+              # canonical motifs and nominates what it finds. Preferential
+              # GENERATION is certain; enrichment among the placements that
+              # finally win is plausible but not established here.
+              "junction_dinucleotides")
     exon_fields = ("model_id", "sequence_id", "record_kind", "arm_index", "exon_index_in_arm",
                    "exon_index_in_model", "chrom", "strand", "start0", "end0", "tx_start0", "tx_end0",
                    "gene_ids", "compatible_transcript_ids", "arm_match_class", "provenance")
@@ -217,6 +252,7 @@ def write_transcript_outputs(models, collapsed, genome, output_dir, *, breakpoin
                 families[model.model_id].family_id,
                 families[model.model_id].model_count,
                 families[model.model_id].support,
+                _json(_model_dinucleotides(model, genome)),
             ))
             evidence.write(_json({
                 "model_id": model.model_id, "alternative_group_id": model.alternative_group_id,
@@ -225,6 +261,7 @@ def write_transcript_outputs(models, collapsed, genome, output_dir, *, breakpoin
                 # the union over the family's emitted models, NOT a sum: a
                 # compatible molecule may support several of them
                 "event_family_support_read_ids": list(families[model.model_id].support_read_ids),
+                "junction_dinucleotides": _model_dinucleotides(model, genome),
                 "primary_chain_id": model.primary_chain_id, "source_chain_ids": list(model.source_chain_ids),
                 "unique_read_ids": list(model.unique_read_ids),
                 "compatible_read_ids": list(model.compatible_read_ids),
