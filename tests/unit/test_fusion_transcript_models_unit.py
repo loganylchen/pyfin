@@ -369,3 +369,35 @@ def test_a_regenerated_envelope_is_not_called_same_sequence_on_its_members():
     model = models[0]
     assert len(model_sequence(model.arms, genome)[0]) == 297
     assert model.coordinate_status == "unresolved_nearby_placements"
+
+
+def test_the_writer_appends_the_event_family_columns_without_moving_any_other(tmp_path):
+    """Junction-geometry family columns are APPENDED: every pre-existing column
+    keeps its position and its value, so a consumer reading by index is unharmed
+    and one reading by name sees three new fields.
+    """
+    import csv
+
+    from fin.fusion.transcript_output import write_transcript_outputs
+
+    paths = [_path(f"r{i}", [("A", "+", [(150, 200), (300, 400)], "A"), ("B", "+", [(500, 600)], "B")])
+             for i in range(2)]
+    analysis = _analysis({p.read_id: [p] for p in paths}, [p.read_id for p in paths])
+    models, collapsed = build_fused_transcript_models(analysis, INDEX, GENOME)
+    write_transcript_outputs(models, collapsed, GENOME, tmp_path)
+    rows = list(csv.DictReader((tmp_path / "fusion_models.tsv").open(), delimiter="\t"))
+    header = (tmp_path / "fusion_models.tsv").open().readline().rstrip("\n").split("\t")
+
+    assert header[-3:] == ["event_family_id", "event_family_model_count", "event_family_support"]
+    assert header.index("model_id") == 0 and header.index("completion_transcript_ids") == len(header) - 4
+    assert len(rows) == 1
+    assert rows[0]["event_family_id"].startswith("EFAM_")
+    assert rows[0]["event_family_model_count"] == "1"
+    # the family's support is this model's two molecules, unique + compatible
+    assert rows[0]["event_family_support"] == "2"
+    assert rows[0]["support_unique"] == "2"
+
+    evidence = [json.loads(line) for line in (tmp_path / "fusion_model_evidence.jsonl").open()]
+    assert evidence[0]["event_family_id"] == rows[0]["event_family_id"]
+    assert evidence[0]["event_family_model_ids"] == [rows[0]["model_id"]]
+    assert evidence[0]["event_family_support_read_ids"] == ["r0", "r1"]

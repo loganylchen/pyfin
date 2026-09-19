@@ -113,7 +113,8 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
 
             transcript_index = TranscriptIndex.from_transcripts(transcripts)
             models, collapsed = build_fused_transcript_models(analysis, transcript_index, genome)
-            write_transcript_outputs(models, collapsed, genome, publication.work_dir)
+            write_transcript_outputs(models, collapsed, genome, publication.work_dir,
+                                     breakpoint_tolerance=analysis.settings.breakpoint_tolerance)
             logger.info("fusion: %d fused-transcript models (%d multi-gene), %d collapsed [%s]",
                         len(models), sum(1 for m in models if len(m.arms) > 2), len(collapsed), elapsed())
             drifted = {name: (snapshot, _snapshot(inputs[name])) for name, snapshot in snapshots.items()

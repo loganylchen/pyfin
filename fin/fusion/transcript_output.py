@@ -16,6 +16,7 @@ from pathlib import Path
 
 from dataclasses import asdict
 
+from fin.fusion.event_families import assign_event_families, families_by_model
 from fin.fusion.transcript_models import (
     FusedTranscriptModel, completion_exons, model_sequence,
 )
@@ -90,14 +91,26 @@ def _header(record_id, model, *, kind, length, extension=None):
     return f">{record_id} " + " ".join(fields)
 
 
-def write_transcript_outputs(models, collapsed, genome, output_dir):
+def write_transcript_outputs(models, collapsed, genome, output_dir, *, breakpoint_tolerance=6):
     """Write fusion_models.tsv / .fa / .annotated.fa / _exons.tsv / _evidence.jsonl / _collapsed.jsonl.
 
     Any sequence that cannot be projected from the reference -- observed OR
     annotated completion -- raises, so the publication is marked failed rather
     than quietly missing a record.
+
+    Junction-geometry families are computed here rather than handed in: the
+    universe that matters is exactly the model list being written, and deriving
+    it at the point of use removes any chance of reporting a family set built
+    from a different list. `breakpoint_tolerance` must be the one the models
+    were built under -- the default matches `FusionSettings`.
     """
     output_dir = Path(output_dir)
+    # materialised BEFORE the families are derived: assign_event_families
+    # consumes its argument, so a generator would be exhausted by the time the
+    # write loop reached it and the run would publish a header and no rows
+    # without raising. The writer used to consume `models` exactly once.
+    models = list(models)
+    families = families_by_model(assign_event_families(models, breakpoint_tolerance=breakpoint_tolerance))
     fields = ("model_id", "sequence_id", "primary_chain_id", "source_chain_ids", "alternative_group_id",
               "arm_count", "gene_path", "gene_names", "junction_names", "breakpoints",
               "compatible_transcript_ids", "arm_match_classes",
@@ -106,7 +119,9 @@ def write_transcript_outputs(models, collapsed, genome, output_dir):
               "envelope_status", "five_prime_observed_reads", "three_prime_observed_reads",
               "coordinate_status", "coordinate_alternatives", "event_class", "five_prime_status", "three_prime_status",
               "observed_length", "annotated_completion_id", "annotated_completion_length",
-              "extension_bases_5p", "extension_bases_3p", "completion_transcript_ids")
+              "extension_bases_5p", "extension_bases_3p", "completion_transcript_ids",
+              # appended, so every column above keeps its position and value
+              "event_family_id", "event_family_model_count", "event_family_support")
     exon_fields = ("model_id", "sequence_id", "record_kind", "arm_index", "exon_index_in_arm",
                    "exon_index_in_model", "chrom", "strand", "start0", "end0", "tx_start0", "tx_end0",
                    "gene_ids", "compatible_transcript_ids", "arm_match_class", "provenance")
@@ -199,9 +214,17 @@ def write_transcript_outputs(models, collapsed, genome, output_dir):
                 _json([json.loads(alt) for alt in model.coordinate_alternatives]),
                 model.event_class, model.five_prime_status, model.three_prime_status,
                 len(sequence), completion_id, completion_length, ext5, ext3, completion_tx,
+                families[model.model_id].family_id,
+                families[model.model_id].model_count,
+                families[model.model_id].support,
             ))
             evidence.write(_json({
                 "model_id": model.model_id, "alternative_group_id": model.alternative_group_id,
+                "event_family_id": families[model.model_id].family_id,
+                "event_family_model_ids": list(families[model.model_id].model_ids),
+                # the union over the family's emitted models, NOT a sum: a
+                # compatible molecule may support several of them
+                "event_family_support_read_ids": list(families[model.model_id].support_read_ids),
                 "primary_chain_id": model.primary_chain_id, "source_chain_ids": list(model.source_chain_ids),
                 "unique_read_ids": list(model.unique_read_ids),
                 "compatible_read_ids": list(model.compatible_read_ids),
