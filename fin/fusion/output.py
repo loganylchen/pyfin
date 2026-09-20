@@ -17,6 +17,18 @@ def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def correction_id(observed):
+    """Identify a correction record by the observed path it was derived from.
+
+    The single expression, called from both places that publish an id here and
+    from the junction-evidence exporter, so the two artifacts cannot drift into
+    disagreeing about what an id is. The callers still pass their own observed
+    path -- the corrections loop its correction's, the evaluated loop the
+    item's -- because those are genuinely different arguments.
+    """
+    return hashlib.sha256(_json(asdict(observed)).encode()).hexdigest()[:20]
+
+
 def _write_json(path, value):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(_json(value) + "\n")
@@ -174,21 +186,21 @@ def write_fusion_outputs(analysis, genome, output_dir):
             evaluated = []
             seen_corrections = set()
             for correction in read.corrections:
-                correction_id = hashlib.sha256(_json(asdict(correction.observed)).encode()).hexdigest()[:20]
-                if correction_id not in seen_corrections:
-                    correction_output.write(_json({"read_id": read.read_id, "correction_id": correction_id,
+                identifier = correction_id(correction.observed)
+                if identifier not in seen_corrections:
+                    correction_output.write(_json({"read_id": read.read_id, "correction_id": identifier,
                                                    **asdict(correction)}) + "\n")
-                    seen_corrections.add(correction_id)
+                    seen_corrections.add(identifier)
             for item in read.evaluated:
-                correction_id = None
+                identifier = None
                 if item.correction is not None:
-                    correction_id = hashlib.sha256(_json(asdict(item.observed)).encode()).hexdigest()[:20]
-                    if correction_id not in seen_corrections:
-                        correction_output.write(_json({"read_id": read.read_id, "correction_id": correction_id,
+                    identifier = correction_id(item.observed)
+                    if identifier not in seen_corrections:
+                        correction_output.write(_json({"read_id": read.read_id, "correction_id": identifier,
                                                        **asdict(item.correction)}) + "\n")
-                        seen_corrections.add(correction_id)
+                        seen_corrections.add(identifier)
                 evaluated.append({"observed": asdict(item.observed), "proposed": asdict(item.proposed),
-                                  "correction_id": correction_id, "validation": asdict(item.validation),
+                                  "correction_id": identifier, "validation": asdict(item.validation),
                                   "min_mapping_quality": item.min_mapping_quality})
             read_output.write(_json({"read_id": read.read_id, "status": read.status, "reason": read.reason,
                                      "path_count": read.path_count, "search_windows": read.search_windows,

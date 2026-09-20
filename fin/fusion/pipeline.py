@@ -115,6 +115,12 @@ def run_fusion_analysis(bam_path, reference_path, output_dir, *, gtf_path=None,
             models, collapsed = build_fused_transcript_models(analysis, transcript_index, genome)
             write_transcript_outputs(models, collapsed, genome, publication.work_dir,
                                      breakpoint_tolerance=analysis.settings.breakpoint_tolerance)
+            # derived sidecar: which molecule, on which retained path, put each
+            # reported junction exactly where the model says. Adds no score and
+            # no filter, and reads nothing back -- it joins the live objects.
+            from fin.fusion.junction_evidence import write_junction_evidence
+            write_junction_evidence(analysis, models, publication.work_dir,
+                                    breakpoint_tolerance=analysis.settings.breakpoint_tolerance)
             logger.info("fusion: %d fused-transcript models (%d multi-gene), %d collapsed [%s]",
                         len(models), sum(1 for m in models if len(m.arms) > 2), len(collapsed), elapsed())
             drifted = {name: (snapshot, _snapshot(inputs[name])) for name, snapshot in snapshots.items()
