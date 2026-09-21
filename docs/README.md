@@ -12,7 +12,7 @@ Four destinations:
 |---|---|
 | Install, including the signal backend | root `README.md`, Installation |
 | Run it, and what the profiles mean | root `README.md`, Quick Start |
-| What the outputs contain, field by field | [`PIPELINE_WALKTHROUGH.md`](PIPELINE_WALKTHROUGH.md), "Outputs" |
+| Prepare inputs, diagnose a run, read the outputs | [`USAGE.md`](USAGE.md) |
 | Every CLI flag | `pyfin --help`, and the parameter table in root `README.md` |
 
 Two things the parameter table does not yet do: it does not separate raw
@@ -23,11 +23,11 @@ disagree.
 
 ## 2. What the algorithm currently does
 
-[`PIPELINE_WALKTHROUGH.md`](PIPELINE_WALKTHROUGH.md) is the closest thing to a
-current description, and it names the commit it was written against.
+[`CURRENT_ALGORITHM.md`](CURRENT_ALGORITHM.md) -- the shipped `real-drna` path
+stage by stage, plus the fusion acceptance rules and what is off by default.
+It contains no benchmark results by design.
 
-For decisions that changed the shipped default since, read the production
-notes, which are dated and scoped:
+For the reasoning behind particular defaults, the dated production notes:
 
 - [`PRODUCTION_ATTESTATION_DEFAULT_DECISION.md`](PRODUCTION_ATTESTATION_DEFAULT_DECISION.md) -- why the support gate exempts attested annotated candidates by default
 - [`PRODUCTION_QUANT_ACCURACY_2026-09-10.md`](PRODUCTION_QUANT_ACCURACY_2026-09-10.md) -- the quantification axis and the TPM reporting convention
@@ -56,6 +56,7 @@ Do not quote a threshold from them as current behaviour.
 |---|---|
 | `../ALGORITHM.md` | full algorithm description, snapshot 2026-08-26 |
 | `../PIPELINE_AS_IMPLEMENTED.md` | step-by-step walkthrough, 2026-09-03, **SIRV** profile as its "default" |
+| `PIPELINE_WALKTHROUGH.md` | production walkthrough, 2026-09-08, Chinese; superseded by `CURRENT_ALGORITHM.md` but its worked examples remain useful |
 | `../REPO_MAP.md` | repository layout, snapshot at `97029eae`; some entries are stale |
 | `../ALGORITHM_REVIEW.md`, `../CANDIDATE_EXISTENCE_DESIGN.md`, `../TSS_CONTAINMENT_STUDY.md`, `../PROFILE_OPTIMIZATION.md` | design and study notes from particular investigations |
 | `../HANDOFF.md` | a working session handoff, not a user document |
@@ -79,3 +80,6 @@ Recorded rather than implied, so a reader is not misled by their absence:
   directory holds the generation prompts, not the PNGs it lists.
 - **No effective-configuration reference** separating raw defaults, profile
   overrides, inert mode-specific options and experimental switches.
+  `CURRENT_ALGORITHM.md` §0 and §8 cover the production profile and the
+  disabled options, which is most of what such a reference would say, but it
+  is not exhaustive over every flag.

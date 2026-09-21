@@ -12,7 +12,8 @@ signal-aware abundance / TPM per candidate.
 |---|---|
 | Install it (**including the signal backend -- it is easy to miss**) | [Installation](#installation) below |
 | Run it | [Quick Start](#quick-start) below |
-| Know what the outputs contain, field by field | [`docs/PIPELINE_WALKTHROUGH.md`](docs/PIPELINE_WALKTHROUGH.md) |
+| Prepare inputs, diagnose a run, interpret the outputs | [`docs/USAGE.md`](docs/USAGE.md) |
+| Know what the algorithm actually does | [`docs/CURRENT_ALGORITHM.md`](docs/CURRENT_ALGORITHM.md) |
 | Find any other document | [`docs/README.md`](docs/README.md) -- the index, including which documents are historical and what is known to be missing |
 
 Several documents in this repository read as authoritative because each was,
@@ -105,9 +106,11 @@ extension PyFIN used to ship; neither is needed or used any more.
 pip install -e ".[gpu]"      # CuPy, for the assignment/EM step
 ```
 
-This is independent of krill: CuPy accelerates the read-to-transcript EM,
-krill does the signal. Either can be present without the other. `--no-gpu`
-forces the CPU path regardless.
+CuPy accelerates the read-to-transcript EM; krill does the signal. They are
+separate installs and either can be present without the other -- but they are
+**not** independent of `--no-gpu`: that flag is passed to both. A CUDA-built
+krill uses the GPU when one is visible and falls back to CPU on init failure
+(`fin/scoring/krill_aligner.py:66`), and `--no-gpu` asks it for CPU directly.
 
 ### Verify the installation
 
@@ -125,8 +128,9 @@ python -c "from fin.analysis.assignments import CUPY_AVAILABLE; print(f'CuPy: {C
 
 Check 2 reports whether **krill is importable**, which is what signal scoring
 needs. It is not a CUDA probe: a CPU-only krill build reports `True`, and that
-is correct -- krill runs on CPU. Use `nvidia-smi` and check 3 if you want to
-know about the GPU. Note that an import check is not a signal-health check;
+is correct -- it is installed and usable. Whether krill will actually use a
+GPU depends on the build (`krill.built_with_cuda`), on a visible device, and
+on `--gpu/--no-gpu`. Note that an import check is not a signal-health check;
 there is no end-to-end smoke test that proves signal scoring actually ran
 (see `docs/README.md`, known gaps).
 
