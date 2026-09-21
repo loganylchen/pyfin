@@ -6,6 +6,20 @@ known and novel isoforms; independent multi-gene fusion analysis; and bounded kr
 that refines exact M1 ties before read-to-transcript assignment, yielding
 signal-aware abundance / TPM per candidate.
 
+## Where to read what
+
+| You want to | Go to |
+|---|---|
+| Install it (**including the signal backend -- it is easy to miss**) | [Installation](#installation) below |
+| Run it | [Quick Start](#quick-start) below |
+| Know what the outputs contain, field by field | [`docs/PIPELINE_WALKTHROUGH.md`](docs/PIPELINE_WALKTHROUGH.md) |
+| Find any other document | [`docs/README.md`](docs/README.md) -- the index, including which documents are historical and what is known to be missing |
+
+Several documents in this repository read as authoritative because each was,
+on the day it was written. `docs/README.md` says which one is current for
+which question; `ALGORITHM.md` and `PIPELINE_AS_IMPLEMENTED.md` in particular
+are dated snapshots and carry banners saying so.
+
 ## Pipeline Overview
 
 ```
@@ -42,12 +56,12 @@ BAM + GTF + POD5/SLOW5/BLOW5 + FASTQ + genome FASTA
 2. **Signal Scoring** - M1 supplies a mappy structural mask; krill M2 junction NLL refines exact ties inside shared genomic disagreement windows
 3. **Assignment** - Probabilistic read-to-transcript responsibilities with production read-by-read coherence disabled (`beta=0`)
 4. **Existence selection** - Structural/support gates fix the final transcript set; real profiles then apply read-supported junction consensus
-5. **Quantification** - Named profiles renormalize each assignable read over the final survivors, report orphaned mass, and write coherent abundance/TPM to GTF/TSV
+5. **Quantification** - Named profiles renormalize each assignable read over the final survivors, report orphaned mass, and write coherent abundance to the GTF and both abundance and TPM to the TSV
 6. **Independent Fusion Analysis** *(optional, `--fusion`)* - Scans BAM/SA evidence and realigns full molecules and clipped arms; validates complete gene chains and junction corrections without inserting candidates into assembly or changing its read assignments.
 
 ## Installation
 
-### Basic (CPU only)
+### 1. PyFIN itself
 
 ```bash
 git clone https://github.com/loganylchen/pyfin.git
@@ -55,47 +69,66 @@ cd pyfin
 pip install -e .
 ```
 
-### With GPU acceleration
+That gives you the assembly pipeline. `mappy` (the minimap2 Python binding)
+and `pysam` come in as dependencies -- PyFIN calls them in-process and never
+shells out to the `minimap2` or `samtools` CLIs.
 
-Requires CUDA Toolkit (nvcc on PATH):
+### 2. krill -- required for signal scoring
+
+**The shipped profile requires krill and fails without it.** `real-drna`
+resolves `m2_metric = "summed_llr"`, and on that path the assignment layer's
+`tie_nll` does an unguarded `import krill` (`fin/pipeline/assignment.py:369`)
+*before* it checks whether any read actually needs tie refinement. A run
+without krill therefore raises `ModuleNotFoundError` as soon as an interval
+reaches assignment with reads still retained after candidate remapping --
+serial or parallel alike (`fin/pipeline/parallel.py:128` propagates worker
+failures). It does not silently degrade to a sequence-only result. Install
+krill before you start.
+
+Two exceptions, for completeness: an explicit `--m2-metric off` bypasses the
+import, and an interval with no candidates, no read sequences, or no candidate
+alignment clearing the AS filter returns before reaching it
+(`fin/pipeline/assignment.py:964`, `:1009`). Neither is the default.
 
 ```bash
-# Install with CUDA DTW extension
-pip install -e .
-
-# Install CuPy for GPU-accelerated EM algorithm
-pip install -e ".[gpu]"
+pip install krill --no-deps \
+    --index-url https://loganylchen.github.io/krill-dist/simple/
 ```
 
-The build system auto-detects your GPU's compute capability via `nvidia-smi`. If no GPU is detected, it falls back to PTX compute_70 for forward compatibility.
+krill is a faithful port of the f5c engine and supplies BOTH the in-memory
+eventalign and the DTW. It replaces the external `f5c` CLI and the CUDA DTW
+extension PyFIN used to ship; neither is needed or used any more.
 
-### External tool dependencies
+### 3. Optional: GPU acceleration for the EM
 
 ```bash
-# Required for the scoring pipeline
-conda install -c bioconda minimap2 f5c samtools
-
-# Or install individually
-# minimap2: https://github.com/lh3/minimap2
-# f5c: https://github.com/hasindu2008/f5c
-# samtools: https://github.com/samtools/samtools
+pip install -e ".[gpu]"      # CuPy, for the assignment/EM step
 ```
 
-### Verify installation
+This is independent of krill: CuPy accelerates the read-to-transcript EM,
+krill does the signal. Either can be present without the other. `--no-gpu`
+forces the CPU path regardless.
+
+### Verify the installation
 
 ```bash
-# Check Python package
+# 1. the package imports
 python -c "import fin; print(f'PyFIN v{fin.__version__}')"
 
-# Check CUDA DTW availability
-python -c "from fin._dtw import is_available; print(f'CUDA DTW: {is_available()}')"
+# 2. the SIGNAL BACKEND is importable. The default profile needs it and will
+#    raise ModuleNotFoundError during assignment if it is absent
+python -c "from fin._dtw import is_available; print(f'krill backend: {is_available()}')"
 
-# Check CuPy availability
+# 3. optional GPU EM
 python -c "from fin.analysis.assignments import CUPY_AVAILABLE; print(f'CuPy: {CUPY_AVAILABLE}')"
-
-# Check external tools
-which minimap2 f5c samtools
 ```
+
+Check 2 reports whether **krill is importable**, which is what signal scoring
+needs. It is not a CUDA probe: a CPU-only krill build reports `True`, and that
+is correct -- krill runs on CPU. Use `nvidia-smi` and check 3 if you want to
+know about the GPU. Note that an import check is not a signal-health check;
+there is no end-to-end smoke test that proves signal scoring actually ran
+(see `docs/README.md`, known gaps).
 
 ## Quick Start
 
@@ -175,7 +208,7 @@ validation before promotion):
 | `--candidate-evidence` | write the observable-feature table (read-only) |
 | `--ranking-mode filter` | drop novel candidates below the frozen evidence-ranker operating point before snapping/refit |
 | `--endpoint-refine` | split novel multi-exon models into supported TSS/TES states, with mandatory post-split requantification |
-| `--catalog-mode complete\|adaptive` | catalog-structure benchmark adapter only: full-GTF gffcompare rewards zero-abundance entries, but expression-conditioned rescoring shows large precision loss; never enabled by a profile and not an expression-performance mode ([study](SIRV4_GRID_STUDY.md)) |
+| `--catalog-mode complete\|adaptive` | catalog-structure benchmark adapter only: full-GTF gffcompare rewards zero-abundance entries, but expression-conditioned rescoring shows large precision loss; never enabled by a profile and not an expression-performance mode (the supporting study is an internal note, not part of this repository) |
 | `--m2-metric sqrt_count_mean_llr` | event-count-rescaled tight-window M2 contrast |
 | `--m2-contrast-stats-jsonl` | machine-readable M2 contrast records |
 | `--no-lazy-genome` | restore the eager whole-genome dict (higher worker RSS) |
@@ -511,22 +544,36 @@ ruff check fin/
 
 ## Benchmarking
 
-A benchmark harness is provided in `benchmarks/` to compare pyfin against
-established long-read isoform tools (Bambu, IsoQuant) and fusion callers
-(JAFFAL, LongGF). Missing tools skip gracefully.
+The published comparison is produced by the runners under
+`experiments/prod_validation/`, not by a generic harness:
 
-```bash
-bash benchmarks/run_benchmark.sh \
-    --dataset /path/to/data.bam \
-    --tools pyfin,bambu,isoquant,jaffal,longgf \
-    --output-dir out/
-```
+| Step | Script |
+|---|---|
+| Run one (sample, annotation-condition) cell of the grid | `experiments/prod_validation/sirv4_grid_runner.py` |
+| Score assemblies against the expression truth | `experiments/prod_validation/expression_rescore.py` |
+| Build the per-cell tool-vs-tool table | `experiments/prod_validation/gw_headtohead.py` |
 
-See `benchmarks/README.md` for the harness and `benchmarks/TODO.md` for the
-recommended datasets (SG-NEx, SIRV/Sequin, fusion-positive cell lines), the
-metric set (sensitivity/precision/F1, abundance correlation, fusion recall +
-breakpoint accuracy), and acceptance criteria.
+The truth contract is the **expression** contract: a transcript counts as
+truth for a sample when it is in the reference annotation AND NanoCount
+reports TPM > 0 for that same sample. Structural agreement is gffcompare
+transcript level `=` (exact intron chain). Sensitivity and precision are
+always reported together.
+
+`benchmarks/` holds analysis and plotting utilities used while developing
+those runs. It is not a one-command reproduction of the paper.
+
+> **Reproduction recipe: not yet written.** These runners read dataset trees
+> configured for the authors' machine (`sirv4_grid_runner.py`), so a reader
+> cannot currently re-run the evaluation from a clean checkout. A release-time
+> recipe -- input manifest with checksums, annotation-condition generation,
+> competitor commands and versions, and the table-generation step -- is
+> outstanding. This is stated rather than implied: previously this section
+> advertised a `run_benchmark.sh` that wrote `"status": "ran"` markers without
+> ever invoking the tools. That script has been removed.
 
 ## License
 
-MIT License
+MIT. Full text in [LICENSE](LICENSE); Copyright (c) 2026 Yuelong Chen.
+
+Third-party components keep their own terms. In particular the signal backend
+`krill` is installed separately from its own index and is not vendored here.

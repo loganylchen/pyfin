@@ -1,5 +1,9 @@
 # PyFIN Repository Map
 
+> **Historical snapshot.** Kept for its layout reasoning; some entries no
+> longer describe the tree (for instance `benchmarks/run_benchmark.sh` was
+> removed on 2026-09-21). See `docs/README.md` for the current index.
+
 Snapshot: branch `dev`, clean baseline commit `97029eae` (`feat(pipeline): add
 validated profiles and family-aware selection`), plus the v9 abundance-refit
 working tree with source SHA-256 `42e1210d...7954`, updated through 2026-08-27.

@@ -50,7 +50,7 @@ Goal (per `.omc/plans/ralplan-pyfin-sig-assembly.md` AC-26/AC-27, R8 opt B3):
 | **LongGF** | ≥0.1.2 | Compiled C++ binary |
 | **Genion** (optional) | latest | If runtime budget allows |
 
-All four are already enumerated in `benchmarks/run_benchmark.sh`; missing binaries skip gracefully.
+(A `run_benchmark.sh` once enumerated these, but it never invoked them -- it wrote "status": "ran" markers. It was removed on 2026-09-21.)
 
 ---
 

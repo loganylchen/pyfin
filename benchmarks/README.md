@@ -1,6 +1,13 @@
-# Benchmark Harness
+# Benchmark utilities
 
-Compare **pyfin** against established long-read isoform quantification tools:
+> **This directory is analysis and plotting utilities, not a reproduction
+> harness.** The `run_benchmark.sh` skeleton that used to be advertised here
+> wrote `"status": "ran"` markers without invoking any tool; it was removed on
+> 2026-09-21. The runs that produce the published comparison live in
+> `experiments/prod_validation/` -- see the Benchmarking section of the root
+> README.
+
+Intended comparison targets for **pyfin**, long-read isoform quantification tools:
 [Bambu](https://github.com/GoekeLab/bambu), [IsoQuant](https://github.com/ablab/IsoQuant),
 [JAFFAL](https://github.com/Oshlack/JAFFA), and [LongGF](https://github.com/WGLab/LongGF).
 
@@ -16,57 +23,20 @@ Compare **pyfin** against established long-read isoform quantification tools:
 | jaffal    | `bpipe`         | Requires Bpipe pipeline runner             |
 | longgf    | `LongGF`        | Compiled binary must be on PATH            |
 
-Missing tools are **skipped** with a `[SKIP]` message — they do not cause the harness to fail.
+## The utilities that remain
 
----
+| Script | What it does |
+|---|---|
+| `compare_results.py` | counts transcript features in per-tool GTFs and writes a comparison TSV |
+| `evaluate_ablation.py`, `ablation_5rows.py` | ablation-table helpers |
+| `viz_*.py`, `replot_class_partitioned.py` | plotting used during development |
+| `map_drna.sh` | direct-RNA mapping helper |
 
-## Quick Start
-
-```bash
-# Make executable once
-chmod +x benchmarks/run_benchmark.sh
-
-# Run pyfin only (no external tools needed)
-bash benchmarks/run_benchmark.sh \
-    --dataset /path/to/data.bam \
-    --tools pyfin \
-    --output-dir out/
-
-# Run pyfin + bambu (bambu skipped if Rscript absent)
-bash benchmarks/run_benchmark.sh \
-    --dataset /path/to/data.bam \
-    --tools pyfin,bambu \
-    --output-dir out/
-
-# Run the full suite
-bash benchmarks/run_benchmark.sh \
-    --dataset /path/to/data.bam \
-    --tools pyfin,bambu,isoquant,jaffal,longgf \
-    --output-dir out/
-
-# Show help
-bash benchmarks/run_benchmark.sh --help
-```
-
----
-
-## Output Layout
-
-```
-out/
-├── pyfin/
-│   └── result.json          # status marker written by harness
-├── bambu/
-│   └── result.json
-├── isoquant/
-│   └── result.json
-└── comparison.tsv           # aggregated metrics (auto-generated)
-```
-
-Per-tool directories may also contain `*.gtf` outputs; `compare_results.py`
-will count transcript features automatically.
-
----
+These take explicit paths; none of them orchestrates a comparison run. The
+runs that produced the published comparison are in
+`experiments/prod_validation/` -- see the Benchmarking section of the root
+README for which script does what, and for the reproduction gap that is still
+open.
 
 ## Comparison TSV Schema
 
@@ -133,4 +103,4 @@ Download a pre-built binary from the
 python -m pytest tests/integration/test_benchmark_smoke.py -v
 ```
 
-All tests pass even when external tools are absent — missing tools trigger `pytest.skip`.
+These tests exercise `compare_results.py` only and do not depend on any external tool being installed; they skip if that script itself is missing.

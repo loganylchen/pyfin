@@ -1,9 +1,12 @@
 # PyFIN Algorithm
 
-Snapshot: `dev` at `a2c4be4e` plus the verified profile-integration worktree,
-source SHA-256
-`42e1210dea81860686e76aaf9fa058fc8a65808e0a31367570d8526f4da17954`,
-2026-08-26. This document describes what the current source actually executes.
+> **Historical snapshot, 2026-08-26.** This describes `dev` at `a2c4be4e`
+> **plus the verified profile-integration worktree** -- not that commit alone --
+> with source SHA-256
+> `42e1210dea81860686e76aaf9fa058fc8a65808e0a31367570d8526f4da17954`.
+> It is kept for the reasoning, not as the current contract: the production default has since moved to the `real-drna`
+> profile, and the two deltas found on 2026-09-21 are marked inline below.
+> For what ships today, read the README and `docs/PIPELINE_WALKTHROUGH.md`.
 Older README, production-state, and experiment notes are evidence but do not
 override the live source and run manifests.
 
@@ -24,7 +27,10 @@ Inputs:
 
 Outputs:
 
-- Assembled known, novel, and optional fusion transcripts in GTF.
+- Assembled known and novel transcripts in GTF. (2026-09-21: fusion
+  transcripts are NOT in the assembly GTF. `fin/cli.py:593` passes
+  `fusion_enabled=False` to the assembly, and `--fusion` runs an independent
+  analysis afterwards with its own tables and FASTAs.)
 - Soft abundance, hard read count, confidence, TPM, and diagnostic scores in TSV.
 - Optional fusion breakpoints in BEDPE.
 
@@ -600,6 +606,14 @@ candidate list.
 4. `m2_support_gate` (default on): a multi-exon GTF/novel candidate survives only
    if it is at least one read's sole M1 winner or an M2 minimum. Fusion and mono
    are exempt. With tie acceptance, equal M2 minima can support all tied winners.
+
+   (2026-09-21: "only if" no longer holds for annotated candidates under the
+   shipped profile. `real-drna` sets `m2_support_gate_attest_reads=1`
+   (`fin/pipeline/config.py:137`), so an ANNOTATED candidate is exempted from
+   the drop set once enough compatible reads attest it, subject to a junction
+   veto -- it need win neither contest. See
+   `fin/pipeline/selection.py:362` and
+   `docs/PRODUCTION_ATTESTATION_DEFAULT_DECISION.md`.)
 5. `containment_cluster` (default on): drop a novel chain that is a contiguous
    <=6 bp subchain of a longer candidate when both
    `soft_ab_shadow <= 0.3 * soft_ab_parent` and

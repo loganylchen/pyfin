@@ -219,3 +219,9 @@ fin/_eventalign/tmp
 progress.txt
 # Added by code-review-graph
 .code-review-graph/
+
+# Session working artifacts: Codex review prompts/outputs and the review driver.
+# These are how the work was done, not the product. Untracked 2026-09-21; the
+# files stay on disk and remain in history.
+.codex_*.txt
+.rereview/

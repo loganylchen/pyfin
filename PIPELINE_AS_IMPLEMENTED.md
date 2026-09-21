@@ -1,4 +1,10 @@
-# PyFIN 现行算法：按实际执行顺序的逐步说明（2026-09-03）
+# PyFIN 算法快照：按实际执行顺序的逐步说明（2026-09-03）
+
+> **历史快照,且以 SIRV 为默认。** 本文第 0 节把"默认路径"定义为
+> `--profile sirv`,而生产默认现在是 `real-drna` —— 两者的阈值不同,
+> 不要把这里的 SIRV 阈值当成产品行为。文中标注 2026-09-21 的地方是
+> 事后核对出的、与当前代码不符之处。当前行为请看 README 与
+> `docs/PIPELINE_WALKTHROUGH.md`。
 
 本文只描述**代码里真正在跑的东西**。每一条都有 `file:line` 出处（以 2026-09-03 的 live 工作区为准，HEAD = ca82319 + 未提交改动）。
 由 Codex（gpt-5.6-sol, xhigh）逐行核对、我再抽查关键论断后整理；原始核对稿在 `.omc/codex_walkthrough_raw_2026-09-03.txt`。
@@ -170,7 +176,9 @@ BAM(+GTF) ──> intervals（按 chrom+strand 单链合并；GTF 转录本各�
 
 ### 2.8 runner 收尾的 sidecar
 
-- **[B]** `finalize_containment`（mode 非 off 才跑；当前最佳不跑）：合并 shard、hazard 行做 grouped FDR、require 下执行最终 drop/exempt。**已知 bug**：最后用 `{short_id: verdict}` 字典推导回写，同一 short 多行时排序最后一行获胜，没有用聚合阶段的优先级（`containment_evidence.py:489`）。
+- **[B]** `finalize_containment`（mode 非 off 才跑；当前最佳不跑）：合并 shard、hazard 行做 grouped FDR、require 下执行最终 drop/exempt。~~**已知 bug**：最后用 `{short_id: verdict}` 字典推导回写，同一 short 多行时排序最后一行获胜，没有用聚合阶段的优先级。~~
+  **（2026-09-21 复核：此缺陷已修复。** `containment_evidence.py:476` 明确修正了该行为，
+  `:488` 定义了 verdict 优先级并确定性地裁决。此处保留原文以存档，不再是未决缺陷。）
 - **[B]** `merge_election_shards`（当前最佳跑）：只合并 `junction_election.tsv`，drop 早在 interval 阶段完成。
 - **[B, 未提交]** `merge_correction_shards`：只合并审计表。
 

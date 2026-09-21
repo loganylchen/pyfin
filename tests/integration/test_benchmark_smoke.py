@@ -5,34 +5,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-BENCH_SH = Path(__file__).resolve().parent.parent.parent / "benchmarks" / "run_benchmark.sh"
 COMPARE_PY = Path(__file__).resolve().parent.parent.parent / "benchmarks" / "compare_results.py"
 
 
-def test_run_benchmark_help_exits_zero():
-    """AC-26: --help exits 0."""
-    if not BENCH_SH.exists():
-        pytest.skip("run_benchmark.sh not found")
-    r = subprocess.run(["bash", str(BENCH_SH), "--help"], capture_output=True, text=True)
-    assert r.returncode == 0
-    assert "Usage" in r.stdout or "usage" in r.stdout.lower()
-
-
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
-def test_run_benchmark_skips_missing_tools(tmp_path):
-    """Missing tools should SKIP, not fail."""
-    if not BENCH_SH.exists():
-        pytest.skip("run_benchmark.sh not found")
-    r = subprocess.run(
-        ["bash", str(BENCH_SH), "--tools", "bambu", "--output-dir", str(tmp_path)],
-        capture_output=True,
-        text=True,
-    )
-    # Should exit 0 even if bambu/Rscript is missing
-    assert r.returncode == 0
-    # Output must contain either [SKIP] (tool absent) or [RUN] (tool present)
-    out = r.stdout + r.stderr
-    assert "[SKIP]" in out or "[RUN]" in out
+# The two harness smoke tests that lived here were retired on 2026-09-21 with
+# benchmarks/run_benchmark.sh itself. That script wrote {"status": "ran"}
+# markers without ever invoking a tool, and the tests covered its help output,
+# exit status and [SKIP]/[RUN] messages -- real assertions about the skeleton,
+# but never about whether any external tool ran. Retiring them alongside the
+# script loses no tool-execution coverage. The compare_results.py tests below
+# exercise a utility that does real work and are kept.
 
 
 def test_compare_results_produces_tsv(tmp_path):
