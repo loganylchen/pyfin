@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -88,7 +89,8 @@ def test_default_cli_profile_is_real_drna(monkeypatch, tmp_path):
     assert manifest["config"]["m2_metric"] == "summed_llr"
     assert manifest["config"]["isoform_fraction_locus"] == "family"
     assert manifest["config"]["post_selection_refit_effective"] is True
-    assert manifest["source_root"].endswith("/pyfin")
+    # wherever the checkout lives and whatever its directory is called
+    assert Path(manifest["source_root"]) == Path(__file__).resolve().parents[2]
     assert len(manifest["source_sha256"]) == 64
     assert manifest["git_dirty"] in (True, False, None)
 
