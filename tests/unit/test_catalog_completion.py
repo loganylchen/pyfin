@@ -220,12 +220,13 @@ def test_unknown_mode_rejected():
         complete_from_catalog({}, None, mode="bogus")
 
 
-def test_config_rejects_catalog_mode_without_gtf():
+def test_config_rejects_catalog_mode_without_gtf(tmp_path):
+    # validate() checks that the inputs exist before anything else
+    bam, genome = tmp_path / "input.bam", tmp_path / "genome.fa"
+    bam.touch()
+    genome.touch()
     cfg = PipelineConfig.from_profile(
-        "sirv", bam_path="experiments/prod_validation/gencode/_p00val/"
-                         "stage/input.bam",
-        genome_fasta_path="experiments/prod_validation/gencode/_p00val/"
-                          "stage/genome.fa")
+        "sirv", bam_path=str(bam), genome_fasta_path=str(genome))
     bad = dataclasses.replace(cfg, catalog_mode="complete", gtf_path="")
     with pytest.raises(ValueError, match="catalog_mode requires --gtf"):
         bad.validate()
