@@ -97,7 +97,17 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
     tmp.replace(path)
 
 
+def _print_version(ctx, _param, value):
+    if not value or ctx.resilient_parsing:
+        return
+    from fin.versions import version_text
+
+    click.echo(version_text())
+    ctx.exit()
+
+
 @click.group(invoke_without_command=True)
+@click.option("--version", is_flag=True, callback=_print_version, expose_value=False, is_eager=True, help="Print the versions of PyFIN and of its alignment and signal libraries, then exit.")
 @click.option("--bam", default=None, type=click.Path(exists=True), help="Input BAM file.")
 @click.option("--gtf", default=None, type=click.Path(), help="Reference GTF annotation file (optional).")
 @click.option("--genome", default=None, type=click.Path(exists=True), help="Genome FASTA file.")

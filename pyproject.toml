@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "numpy>=1.21.0"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "py-fin"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A Python package for nanopore Direct RNA-seq data analysis and transcriptome assembly"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "loganylchen", email = "yuelong.chen.btr@gmail.com"},
@@ -17,10 +17,8 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -33,7 +31,9 @@ dependencies = [
     "scipy>=1.7.0",
     # File I/O handling - format parsers
     "ont-fast5-api>=4.0.0",
-    "pyslow5>=0.3.0",
+    # >=1.0.0: older versions do not accept the pA keyword of
+    # Slow5Reader.get_picoamp_signal() and would silently drop every read.
+    "pyslow5>=1.0.0",
     "pod5>=0.2.0",
     "pysam>=0.21.0",
     "mappy>=2.24",
@@ -52,8 +52,8 @@ dependencies = [
 dev = [
     "pytest>=6.0.0",
     "pytest-cov",
-    "black",
-    "flake8",
+    "ruff",
+    "build",
 ]
 gpu = [
     # GPU acceleration dependencies
@@ -70,18 +70,22 @@ Repository = "https://github.com/loganylchen/pyfin.git"
 Issues = "https://github.com/loganylchen/pyfin/issues"
 
 [project.scripts]
+pyfin = "fin.cli:main"
 fin = "fin.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "fin.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["fin*", "fin.*"]
 
 [tool.setuptools.package-data]
-fin = ["*.py", "*.cu", "*.c", "*.h", "*.cuh", "*.yaml", "*.yml"]
+fin = ["*.yaml", "*.yml"]
 
 [tool.black]
 line-length = 100
-target-version = ['py38']
+target-version = ['py310']
 include = '\.pyi?$'
 extend-exclude = '''
 /(

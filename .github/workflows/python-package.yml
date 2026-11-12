@@ -2,78 +2,89 @@ name: Python CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, dev]
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, dev]
+
+# The signal backend (krill) ships manylinux x86_64 wheels for CPython 3.10-3.12
+# only, so that is the supported matrix.
+env:
+  KRILL_INDEX: https://loganylchen.github.io/krill-dist/simple/
+  KRILL_VERSION: "0.1.5"
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ["3.8", "3.9", "3.10", "3.11"]
-
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
 
-    - name: Get full Python version
-      id: full-python-version
-      run: echo "version=$(python -c 'import sys; print(".".join(map(str, sys.version_info)))'" >> $GITHUB_OUTPUT
+      - name: Install
+        run: |
+          # mappy is built from source: it needs a C compiler and zlib headers
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential zlib1g-dev
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install "krill==${KRILL_VERSION}" --no-deps --index-url "${KRILL_INDEX}"
 
-    - name: Cache dependencies
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+      - name: The signal backend must be present, or the signal tests would skip
+        run: python -c "import krill; a = krill.Aligner(pore='rna002', use_gpu=False); print('krill ok')"
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip setuptools wheel
-        pip install -r requirements.txt
-        pip install -e .
-
-    - name: Test with pytest
-      run: |
-        pytest tests/ -v --cov=fin --cov-report=xml
-
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage.xml
-        flags: unittests
-        name: codecov-umbrella
-        fail_ci_if_error: false
+      - name: Test
+        run: pytest
 
   lint:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Syntax errors and undefined names
+        run: |
+          pip install ruff
+          ruff check --select E9,F63,F7,F82 fin tests/unit tests/integration
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.10"
-
-    - name: Install linting dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install black flake8
-
-    - name: Lint with flake8
-      run: |
-        flake8 fin/ --count --select=E9,F63,F7,F82 --show-source --statistics
-        flake8 fin/ --count --exit-zero --max-complexity=10 --max-line-length=88 --statistics
-
-    - name: Check code formatting with black
-      run: |
-        black --check fin/
-
+  package:
+    # What a user installs: the wheel, in a clean environment, outside the checkout.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          ls -l dist
+      - name: Install the wheel and run both commands
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential zlib1g-dev
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install dist/*.whl
+          /tmp/venv/bin/pip install "krill==${KRILL_VERSION}" --no-deps --index-url "${KRILL_INDEX}"
+          cd /tmp
+          /tmp/venv/bin/pyfin --version
+          /tmp/venv/bin/fin --version
+          /tmp/venv/bin/python - <<'PY'
+          import fin, pathlib
+          from importlib import metadata
+          assert "site-packages" in fin.__file__, fin.__file__
+          assert metadata.version("py-fin") == fin.__version__
+          names = {ep.name for ep in metadata.entry_points(group="console_scripts") if ep.value == "fin.cli:main"}
+          assert names == {"pyfin", "fin"}, names
+          root = pathlib.Path(fin.__file__).parent
+          for package in ("analysis", "candidates", "fusion", "io", "pipeline", "scoring", "utils"):
+              assert (root / package / "__init__.py").exists(), package
+          print("wheel ok:", fin.__version__)
+          PY

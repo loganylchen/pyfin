@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir pyslow5 pyfastx \
     && pip install --no-cache-dir "krill==0.1.5" --no-deps \
         --index-url https://loganylchen.github.io/krill-dist/simple/
 
-# Install pyfin (CPU only — no nvcc, so setup.py skips CUDA extension)
+# Install pyfin. The package is pure Python; eventalign and DTW come from krill.
 WORKDIR /app
 COPY . .
 RUN pip install --no-cache-dir .
@@ -32,5 +32,6 @@ RUN apt-get update \
 
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin/fin /usr/local/bin/fin
+COPY --from=builder /usr/local/bin/pyfin /usr/local/bin/pyfin
 
 WORKDIR /data
