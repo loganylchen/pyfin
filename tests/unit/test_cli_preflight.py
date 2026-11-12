@@ -119,6 +119,53 @@ def test_placeholder_inputs_are_caught_by_the_real_checks(invoke):
     assert _Runner.configs == []
 
 
+def test_the_summary_is_written_after_the_fusion_analysis_and_not_if_it_fails(invoke, monkeypatch, tmp_path):
+    import json
+
+    import fin.fusion.pipeline as fusion_pipeline
+
+    order = []
+    monkeypatch.setattr(fusion_pipeline, "run_fusion_analysis",
+                        lambda *_a, **_k: order.append((tmp_path / "out" / "run_summary.json").exists()))
+    result = invoke("--no-preflight", "--fusion")
+    assert result.exit_code == 0, result.output
+    assert order == [False]            # not yet written while the fusion analysis ran
+    summary = json.loads((tmp_path / "out" / "run_summary.json").read_text())
+    assert summary["fusion_analysis"] is True
+
+    # the same directory again, and this time the run fails: the summary of the
+    # earlier, successful run must not be left standing
+    _Runner.configs.clear()
+
+    def failing(*_a, **_k):
+        raise RuntimeError("fusion analysis failed")
+
+    monkeypatch.setattr(fusion_pipeline, "run_fusion_analysis", failing)
+    result = invoke("--no-preflight", "--fusion")
+    assert result.exit_code != 0
+    assert (tmp_path / "out" / "run_manifest.json").exists()
+    assert not (tmp_path / "out" / "run_summary.json").exists()
+
+
+def test_a_failed_assembly_in_a_reused_directory_leaves_no_summary(invoke, monkeypatch, tmp_path):
+    assert invoke("--no-preflight").exit_code == 0
+    assert (tmp_path / "out" / "run_summary.json").exists()
+
+    def failing_run(_self):
+        raise RuntimeError("assembly failed")
+
+    monkeypatch.setattr(_Runner, "run", failing_run)
+    assert invoke("--no-preflight").exit_code != 0
+    assert not (tmp_path / "out" / "run_summary.json").exists()
+
+
+def test_a_run_without_fusion_says_so_in_its_summary(invoke, tmp_path):
+    import json
+
+    assert invoke("--no-preflight").exit_code == 0
+    assert json.loads((tmp_path / "out" / "run_summary.json").read_text())["fusion_analysis"] is False
+
+
 def test_an_unknown_pore_is_rejected_by_the_option(invoke):
     result = invoke("--no-preflight", "--pore", "rna003")
     assert result.exit_code == 2 and "rna003" in result.output

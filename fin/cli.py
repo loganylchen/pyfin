@@ -70,8 +70,14 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
     except (OSError, subprocess.CalledProcessError):
         commit = _read_git_head(source_root)
         dirty = None
+    from fin import __version__
+    from fin.versions import library_versions
+
     payload = {
         "schema_version": 1,
+        "pyfin_version": __version__,
+        # the libraries that decide a result: alignment, signal access, signal scoring
+        "libraries": library_versions(),
         "profile": cfg.profile,
         "profile_overrides": list(cfg.profile_overrides),
         "git_commit": commit,
@@ -468,6 +474,10 @@ def main(
     if ctx.invoked_subcommand is not None:
         return
 
+    import time
+
+    started = time.monotonic()
+
     missing = []
     if not bam:
         missing.append("--bam")
@@ -769,6 +779,7 @@ def main(
 
     import logging
 
+    preflight_warnings = []
     if preflight_enabled:
         # after validate(), which resolves m2_metric=auto: the backend check
         # needs to know whether signal scoring will actually run
@@ -782,12 +793,13 @@ def main(
             click.echo(f"Error: {exc}", err=True)
             sys.exit(2)
         cfg.krill_pore = report.pore
+        preflight_warnings = list(report.warnings)
     elif pore == "auto":
-        logging.getLogger(__name__).warning(
+        logging.getLogger("fin.cli").warning(
             "--no-preflight: the pore model was not read from the signal file; assuming rna002"
         )
 
-    logging.getLogger(__name__).info(
+    logging.getLogger("fin.cli").info(
         "Resolved profile=%s overrides=%s m2_metric=%s(%s) abundance=%s%s/%s refit=%s full=%s polyA=%s",
         cfg.profile,
         ",".join(cfg.profile_overrides) or "none",
@@ -802,6 +814,10 @@ def main(
     )
     # nothing is written, not even the directory, until the inputs passed their checks
     os.makedirs(output_dir, exist_ok=True)
+    # a summary describes a finished run: one left by an earlier run in this
+    # directory must not outlive the start of this one, or a failure here would
+    # leave the old summary beside the new manifest
+    (Path(output_dir) / "run_summary.json").unlink(missing_ok=True)
     _write_run_manifest(cfg, output_dir)
 
     from contextlib import nullcontext
@@ -823,7 +839,7 @@ def main(
         runner = PipelineRunner(cfg)
         try:
             runner.setup()
-            runner.run()
+            final_models = runner.run()
         finally:
             runner.cleanup()
         if fusion_enabled:
@@ -841,6 +857,33 @@ def main(
                                 assembly_gtf_path=cfg.output_gtf if has_assembly_support else None,
                                 assembly_support_path=assembly_support if has_assembly_support else None)
             click.echo(f"Independent fusion output written to {output_dir}/fusion/")
+
+    # written last, after the optional fusion analysis: the elapsed time and the
+    # peak memory are those of the whole run, and a run that failed leaves no summary
+    from fin.pipeline.run_summary import model_counts, write_run_summary
+
+    summary = write_run_summary(
+        output_dir,
+        intervals_total=getattr(runner, "intervals_total", 0),
+        models=model_counts(model.source for model in (final_models or {}).values()),
+        elapsed_seconds=time.monotonic() - started,
+        pore=cfg.krill_pore,
+        signal_scoring=cfg.m2_metric,
+        quant_mode=cfg.quant_mode,
+        fusion_analysis=fusion_enabled,
+        warnings=preflight_warnings,
+    )
+    _signal = summary["signal"]
+    logging.getLogger("fin.cli").info(
+        "Run summary: %d models (%d annotated, %d novel) from %d of %d intervals; %s reads in "
+        "an alignment-score tie, %s signal contrasts scored (%s, %s); peak RSS of one process "
+        "%.1f GiB; %.0f s",
+        summary["models"]["total"], summary["models"]["annotated"], summary["models"]["novel"],
+        summary["intervals"]["assigned"], summary["intervals"]["total"],
+        "n/a" if _signal["tied_reads"] is None else _signal["tied_reads"],
+        "n/a" if _signal["scored_contrasts"] is None else _signal["scored_contrasts"],
+        _signal["scoring"], _signal["pore"], summary["peak_rss_gib"], summary["elapsed_seconds"],
+    )
 
     click.echo(f"Assembly output written to {output_dir}/")
 

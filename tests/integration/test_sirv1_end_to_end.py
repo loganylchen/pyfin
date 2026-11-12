@@ -79,11 +79,41 @@ def test_the_default_command_assembles_the_locus(default_run):
 
 
 def test_the_signal_was_actually_scored(default_run):
-    _out, log = default_run
+    out, log = default_run
     counters = [(int(t), int(r)) for t, r in re.findall(r"\(ties=(\d+) refined=(\d+)\)", log)]
     assert len(counters) == 2  # two intervals
     assert sum(t for t, _ in counters) >= 10
     assert sum(r for _, r in counters) >= 3  # contrasts that the signal scored
+    # and the same is on record without reading a log
+    signal = json.loads((out / "run_summary.json").read_text())["signal"]
+    assert signal == {"scoring": "summed_llr", "pore": "rna002",
+                      "tied_reads": sum(t for t, _ in counters),
+                      "scored_contrasts": sum(r for _, r in counters)}
+
+
+def test_the_summary_describes_the_run(default_run):
+    out, _log = default_run
+    summary = json.loads((out / "run_summary.json").read_text())
+    models = _transcripts(out / "assembly.gtf")
+    assert summary["models"] == {
+        "total": len(models),
+        "annotated": sum(m["transcript_source"] == "gtf" for m in models),
+        "novel": sum(m["transcript_source"] != "gtf" for m in models),
+    }
+    assert summary["intervals"] == {"total": 2, "assigned": 2}
+    assert 0 < summary["reads"]["assigned"] <= summary["reads"]["in_assigned_intervals"] == 91
+    assert summary["quant_mode"] == "m2_em"
+    assert summary["warnings"] == [] and summary["peak_rss_gib"] > 0 and summary["elapsed_seconds"] > 0
+    manifest = json.loads((out / "run_manifest.json").read_text())
+    assert manifest["libraries"] == summary["libraries"] and manifest["libraries"]["krill"]
+    assert manifest["pyfin_version"] == summary["pyfin_version"]
+
+
+def test_the_output_directory_holds_only_results(default_run):
+    out, _log = default_run
+    assert sorted(p.name for p in out.iterdir() if p.is_dir()) == []
+    assert {"assembly.gtf", "scores.tsv", "run_manifest.json", "run_summary.json"} <= {
+        p.name for p in out.iterdir()}
 
 
 def test_the_format_and_pore_are_read_from_the_inputs(default_run):
@@ -102,6 +132,21 @@ def test_resource_settings_do_not_move_the_assembly(default_run, tmp_path, extra
     assert struct_compare.records(str(out / "assembly.gtf")) == struct_compare.records(
         str(tmp_path / "out" / "assembly.gtf")
     )
+    # workers write their interval counters as shards; the totals must not depend on who ran what
+    summaries = [json.loads((d / "run_summary.json").read_text()) for d in (out, tmp_path / "out")]
+    for key in ("intervals", "reads", "signal", "models"):
+        assert summaries[0][key] == summaries[1][key]
+
+
+def test_an_engine_that_does_not_score_ties_reports_its_signal_counters_as_unknown(tmp_path):
+    result = _pyfin(tmp_path / "out", "--quant-mode", "argmax")
+    assert result.returncode == 0, result.stderr[-3000:]
+    summary = json.loads((tmp_path / "out" / "run_summary.json").read_text())
+    assert summary["quant_mode"] == "argmax"
+    assert summary["intervals"] == {"total": 2, "assigned": 2}
+    assert summary["reads"] == {"in_assigned_intervals": 91, "assigned": None}
+    assert summary["signal"]["tied_reads"] is None and summary["signal"]["scored_contrasts"] is None
+    assert summary["models"]["total"] == len(_transcripts(tmp_path / "out" / "assembly.gtf")) > 0
 
 
 def test_it_runs_without_an_annotation(tmp_path):

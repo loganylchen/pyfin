@@ -160,6 +160,10 @@ class PipelineRunner:
         self._fusion_aligner_built = False
         # m2_em assignment layer (mappy AS -> tie_nll -> d_tx -> EM -> quantify).
         self._assigner = Assigner(config)
+        # set by run(); how many intervals the run was divided into
+        self.intervals_total = 0
+        # per-interval counters only the current quantification engine knows
+        self._interval_engine_counters: Dict[str, int] = {}
 
     def setup(self):
         """Open file handles and load references.
@@ -220,6 +224,11 @@ class PipelineRunner:
         )
         intervals = result["intervals"]
         logger.info("Generated %d intervals", len(intervals))
+        self.intervals_total = len(intervals)
+        # counters left by an earlier run in the same directory are not this run's
+        from fin.pipeline.run_summary import clear_interval_shards
+
+        clear_interval_shards(self.config.work_dir)
 
         # Sample-level evidence prepass for the existence audit: one krill polyA
         # pass over the sample and the strand-aware 3' ends, cached to the work
@@ -721,9 +730,6 @@ class PipelineRunner:
             populated only when post-selection refit is effectively enabled.
             Returns ``None`` when the interval has no candidates or no reads.
         """
-        work_dir = Path(self.config.work_dir) / interval.region_string.replace(":", "_").replace("-", "_")
-        work_dir.mkdir(parents=True, exist_ok=True)
-
         # Get genome sequence for this chromosome
         chrom_seq = ""
         if self._genome_fasta and interval.chrom in self._genome_fasta:
@@ -847,6 +853,7 @@ class PipelineRunner:
         quant_mode = getattr(self.config, "quant_mode", "m2_em")
         ledger: Optional[ResponsibilityLedger] = None
         self._audit_interval_rows = [] if audit else None
+        self._interval_engine_counters = {}
         if quant_mode == "argmax":
             results = self._quant_argmax_keep(candidate_set, read_ids, interval)
         elif quant_mode == "m1_em":
@@ -859,6 +866,14 @@ class PipelineRunner:
             results = self._quant_cluster(candidate_set, read_ids, interval)
         else:
             raise ValueError(f"unknown quant_mode: {quant_mode!r}")
+        from fin.pipeline.run_summary import record_interval
+
+        record_interval(
+            self.config.work_dir,
+            f"{interval.chrom}:{interval.start}-{interval.end}:{interval.strand or 'u'}",
+            reads=len(read_ids), candidates=len(candidate_ids),
+            **self._interval_engine_counters,
+        )
         if audit:
             audit_rows += self._audit_interval_rows or []
             self._audit_interval_rows = None
@@ -2656,6 +2671,11 @@ class PipelineRunner:
             "(ties=%d refined=%d)",
             interval.region_string, len(read_ids), len(qo.cand_list),
             qo.n_ties, qo.n_refined,
+        )
+        # what only this engine knows; process_interval records it with the rest
+        self._interval_engine_counters = dict(
+            assigned_reads=len(qo.kept_read_ids), tied_reads=qo.n_ties,
+            scored_contrasts=qo.n_refined,
         )
         if logger.isEnabledFor(logging.DEBUG):
             import resource
