@@ -1,19 +1,24 @@
-# PyFIN - Signal-Based Reference-Based Transcriptome Assembly
+# PyFIN - signal-aware isoform assembly for nanopore direct RNA
 
-A Python package for nanopore Direct RNA-seq **transcriptome assembly with fusion
-detection and per-transcript signal-based scoring**. Reference-based discovery of
-known and novel isoforms; independent multi-gene fusion analysis; and bounded krill eventalign
-that refines exact M1 ties before read-to-transcript assignment, yielding
-signal-aware abundance / TPM per candidate.
+PyFIN assembles full-length transcript models from nanopore **direct RNA**
+reads aligned to a genome. It discovers known and novel isoforms from the
+reads' own intron chains, uses the **raw current signal** to assign reads that
+sequence alignment alone cannot place, treats a reference annotation as
+evidence to be confirmed rather than as truth, and reports an abundance for
+every model it keeps. An optional, independent analysis reports multi-gene
+fusion transcripts.
 
 ## Where to read what
 
 | You want to | Go to |
 |---|---|
-| Install it (**including the signal backend -- it is easy to miss**) | [Installation](#installation) below |
-| Run it | [Quick Start](#quick-start) below |
+| Install it | [Installation](#installation) below |
+| Check the installation and see a run | [Quick start](#quick-start-the-bundled-example) below |
+| Run your own data | [Running your own data](#running-your-own-data) below |
 | Prepare inputs, diagnose a run, interpret the outputs | [`docs/USAGE.md`](docs/USAGE.md) |
 | Know what the algorithm actually does | [`docs/CURRENT_ALGORITHM.md`](docs/CURRENT_ALGORITHM.md) |
+| Know what changed, and what is known not to work well | [`CHANGELOG.md`](CHANGELOG.md) |
+| Use RNA004 data | [`docs/RNA004_STATUS.md`](docs/RNA004_STATUS.md) |
 | Find any other document | [`docs/README.md`](docs/README.md) -- the index, including which documents are historical and what is known to be missing |
 
 Several documents in this repository read as authoritative because each was,
@@ -21,10 +26,12 @@ on the day it was written. `docs/README.md` says which one is current for
 which question; `ALGORITHM.md` and `PIPELINE_AS_IMPLEMENTED.md` in particular
 are dated snapshots and carry banners saying so.
 
-## Pipeline Overview
+## Pipeline overview
 
 ```
-BAM + GTF + POD5/SLOW5/BLOW5 + FASTQ + genome FASTA
+genome BAM + genome FASTA + raw signal (SLOW5/BLOW5)   [+ GTF, optional]
+                |
+        Input checks (before the output directory is created)
                 |
         Phase 1: Candidate Discovery
                   - GTF + novel isoforms
@@ -42,7 +49,7 @@ BAM + GTF + POD5/SLOW5/BLOW5 + FASTQ + genome FASTA
         Phase 5: Survivor-set abundance refit + outputs
                   - assembly.gtf       (with abundance attributes)
                   - scores.tsv         (per-candidate metrics + TPM)
-                  - abundance_refit.json (mass/TPM diagnostics)
+                  - run_summary.json   (what the run did)
                 |
                 v
         Optional independent fusion analysis (--fusion)
@@ -62,91 +69,153 @@ BAM + GTF + POD5/SLOW5/BLOW5 + FASTQ + genome FASTA
 
 ## Installation
 
-### 1. PyFIN itself
+**Requirements.** Linux on x86-64, Python 3.10 to 3.12, and a C compiler with
+the zlib headers (`mappy`, the minimap2 binding, is built from source; on
+Debian or Ubuntu: `apt-get install build-essential zlib1g-dev`). The supported
+platform is set by the signal backend, which ships wheels for exactly that.
+
+### 1. PyFIN
 
 ```bash
 git clone https://github.com/loganylchen/pyfin.git
 cd pyfin
-pip install -e .
+pip install .
 ```
 
-That gives you the assembly pipeline. `mappy` (the minimap2 Python binding)
-and `pysam` come in as dependencies -- PyFIN calls them in-process and never
-shells out to the `minimap2` or `samtools` CLIs.
+This installs the `pyfin` command (`fin` is the same command). `mappy` and
+`pysam` come in as dependencies -- PyFIN calls them in-process and never
+shells out to the `minimap2` or `samtools` programs.
 
-### 2. krill -- required for signal scoring
-
-**The shipped profile requires krill and fails without it.** `real-drna`
-resolves `m2_metric = "summed_llr"`, and on that path the assignment layer's
-`tie_nll` does an unguarded `import krill` (`fin/pipeline/assignment.py:369`)
-*before* it checks whether any read actually needs tie refinement. A run
-without krill therefore raises `ModuleNotFoundError` as soon as an interval
-reaches assignment with reads still retained after candidate remapping --
-serial or parallel alike (`fin/pipeline/parallel.py:128` propagates worker
-failures). It does not silently degrade to a sequence-only result. Install
-krill before you start.
-
-Two exceptions, for completeness: an explicit `--m2-metric off` bypasses the
-import, and an interval with no candidates, no read sequences, or no candidate
-alignment clearing the AS filter returns before reaching it
-(`fin/pipeline/assignment.py:964`, `:1009`). Neither is the default.
+### 2. krill, the signal backend
 
 ```bash
-pip install krill --no-deps \
+pip install "krill==0.1.5" --no-deps \
     --index-url https://loganylchen.github.io/krill-dist/simple/
 ```
 
-krill is a faithful port of the f5c engine and supplies BOTH the in-memory
-eventalign and the DTW. It replaces the external `f5c` CLI and the CUDA DTW
-extension PyFIN used to ship; neither is needed or used any more.
+**Use that index.** An unrelated package called `krill` exists on PyPI;
+`pip install krill` without the index installs the wrong thing. For the same
+reason krill is not, and cannot be, a declared dependency of PyFIN.
 
-### 3. Optional: GPU acceleration for the EM
+krill 0.1.5 is the version every published benchmark number was produced with.
+It supplies the eventalign that scores the raw signal. The shipped profile
+needs it: without it PyFIN stops at start-up and prints this install command.
+`--m2-metric off` turns the junction signal scoring off and lets a run start
+without krill; an installed krill is then still used for poly(A) evidence.
 
-```bash
-pip install -e ".[gpu]"      # CuPy, for the assignment/EM step
-```
-
-CuPy accelerates the read-to-transcript EM; krill does the signal. They are
-separate installs and either can be present without the other -- but they are
-**not** independent of `--no-gpu`: that flag is passed to both. A CUDA-built
-krill uses the GPU when one is visible and falls back to CPU on init failure
-(`fin/scoring/krill_aligner.py:66`), and `--no-gpu` asks it for CPU directly.
-
-### Verify the installation
+### 3. Optional: GPU for the assignment step
 
 ```bash
-# 1. the package imports
-python -c "import fin; print(f'PyFIN v{fin.__version__}')"
-
-# 2. the SIGNAL BACKEND is importable. The default profile needs it and will
-#    raise ModuleNotFoundError during assignment if it is absent
-python -c "from fin._dtw import is_available; print(f'krill backend: {is_available()}')"
-
-# 3. optional GPU EM
-python -c "from fin.analysis.assignments import CUPY_AVAILABLE; print(f'CuPy: {CUPY_AVAILABLE}')"
+pip install ".[gpu]"      # CuPy
 ```
 
-Check 2 reports whether **krill is importable**, which is what signal scoring
-needs. It is not a CUDA probe: a CPU-only krill build reports `True`, and that
-is correct -- it is installed and usable. Whether krill will actually use a
-GPU depends on the build (`krill.built_with_cuda`), on a visible device, and
-on `--gpu/--no-gpu`. Note that an import check is not a signal-health check;
-there is no end-to-end smoke test that proves signal scoring actually ran
-(see `docs/README.md`, known gaps).
+CuPy accelerates the read-to-transcript assignment matrices. It is separate
+from krill, and both obey `--gpu/--no-gpu`. The Docker images use the CPU
+build of krill on purpose: its eventalign calls are many and small, and
+across several worker processes the CPU build is faster.
 
-## Quick Start
+### Docker
+
+```bash
+docker build -f Dockerfile.cpu -t pyfin:cpu .      # or Dockerfile.gpu
+docker run --rm -v "$PWD":/data pyfin:cpu pyfin --version
+```
+
+### Check the installation
+
+```bash
+pyfin --version            # PyFIN and the libraries that decide a result
+scripts/smoke_test.sh      # runs the bundled example; a few seconds
+```
+
+## Quick start: the bundled example
+
+`tests/data/sirv1_mini` is one locus of a real direct-RNA run: 91 reads, their
+raw signal, the reference sequence and eight annotated transcripts.
+
+```bash
+pyfin \
+    --bam    tests/data/sirv1_mini/reads.bam \
+    --genome tests/data/sirv1_mini/reference.fa \
+    --signal tests/data/sirv1_mini/reads.blow5 \
+    --gtf    tests/data/sirv1_mini/annotation.gtf \
+    --output-dir sirv1_out --no-gpu
+```
+
+It ends with a line like this one, which is also what `run_summary.json` holds:
+
+```
+Run summary: 10 models (8 annotated, 2 novel) from 2 of 2 intervals; 17 reads in an
+alignment-score tie, 5 signal contrasts scored (summed_llr, rna002); ...
+```
+
+"17 reads in an alignment-score tie" are reads that two or more candidate
+transcripts explain equally well by sequence; "5 signal contrasts scored" are
+the ties in which the raw signal could be compared against the candidates. A
+run in which that number is zero scored no splice junction with the signal.
+(The exact counts depend on the krill version; these are from 0.1.5.)
+
+## Running your own data
+
+| Input | Option | Notes |
+|---|---|---|
+| Alignments | `--bam` | reads aligned to the **genome** with a splice-aware preset, coordinate-sorted and indexed |
+| Genome | `--genome` | the FASTA the reads were aligned to |
+| Raw signal | `--signal` | SLOW5 or BLOW5 of the same reads |
+| Annotation | `--gtf` | optional; same assembly and contig names as the BAM |
+| Reads | `--fastq` | optional; only `--fusion` uses it |
+
+```bash
+# align (direct RNA: forward strand, splice-aware)
+minimap2 -ax splice -uf -k14 -t 8 genome.fa reads.fq.gz \
+  | samtools sort -@ 4 -o sample.bam - && samtools index sample.bam
+
+# POD5 must be converted once; PyFIN's signal backend reads SLOW5/BLOW5
+blue-crab p2s pod5_dir/ -o sample.blow5        # pip install blue-crab
+
+pyfin --bam sample.bam --genome genome.fa --signal sample.blow5 \
+      --gtf annotation.gtf --output-dir pyfin_out/ --threads 8
+```
+
+**Before it starts, PyFIN checks that the inputs agree with each other**: the
+BAM index, contig names and lengths against the genome, a contig name shared
+with the annotation, that the signal file holds reads of the BAM, and that the
+signal backend is installed. A mismatch it can prove stops the run at once and
+says how to fix it; a partial one (some contigs missing from the genome, some
+reads without signal) is a warning. The output directory is not created until
+the checks pass. What they cannot establish is listed in
+[`docs/USAGE.md`](docs/USAGE.md) section 1.5 -- in particular, an annotation
+of another assembly build whose contig names happen to match is not detected.
+`--no-preflight` skips the checks.
+
+**Pore model.** `--pore auto` (the default) reads the sequencing kit from the
+signal file: RNA002 and RNA004 are recognised. RNA004 runs and is not yet
+benchmarked -- see [`docs/RNA004_STATUS.md`](docs/RNA004_STATUS.md).
+
+**Workers and memory.** `--threads N` runs N worker processes, one genomic
+interval each. Memory grows with N: a deep human library needs on the order of
+100-150 GB with eight workers. `run_summary.json` reports the peak memory of
+one process.
+
+**Options.** `pyfin --help` lists the options an ordinary run needs.
+`pyfin --help-all` lists every option. The additional ones are of two kinds:
+settings the profile owns (several are on in the shipped profile;
+[`docs/CURRENT_ALGORITHM.md`](docs/CURRENT_ALGORITHM.md) section 0 lists
+them), and experimental switches and diagnostics that no profile enables. An
+ordinary run needs none of them.
 
 ### Operating profiles
 
 The CLI resolves a named scientific operating point before constructing
 `PipelineConfig`. The product default is balanced `--profile real-drna`; use
-`--profile real-drna-precision` for a higher-F1 support floor,
+`--profile real-drna-precision` for a higher read-support floor on novel models
+(it has not been benchmarked in combination with the current defaults),
 `--profile sirv` for synthetic SIRV benchmarking, and `--profile custom` for raw
 option defaults. Any explicitly supplied CLI option overrides its profile value.
 
 | Profile | Intended data | Key resolved behavior |
 | --- | --- | --- |
-| `real-drna` | Biological nanopore dRNA, balanced | Tight summed LLR; strict >1 abundance; novel mono >=5 hard reads; read-supported junction consensus; final survivor-set abundance refit |
+| `real-drna` | Biological nanopore dRNA, balanced | Tight summed LLR; abundance floors novel > 1, annotated >= 1; novel mono >=5 hard reads; read-supported junction consensus; final survivor-set abundance refit |
 | `real-drna-precision` | Biological nanopore dRNA, precision-prioritized | Balanced real settings plus generation support >=2 and final survivor-set abundance refit |
 | `sirv` | SIRV synthetic benchmark | M2 auto-routes to summed LLR (1,4) without a usable GTF and mean with a guide; inclusive >=3 abundance; final survivor-set abundance refit |
 | `custom` | Manual/legacy experiments | No profile overlay or refit; pass `--isoform-fraction-locus overlap` to reproduce pre-family selection |
@@ -171,38 +240,27 @@ pyfin --profile sirv ...
 pyfin --profile sirv --m2-metric mean ...
 ```
 
-### CLI — assembly only
+### Outputs
 
-```bash
-pyfin \
-    --bam reads.bam \
-    --gtf annotations.gtf \
-    --genome genome.fa \
-    --fastq reads.fq \
-    --signal signal.blow5 \
-    --signal-format slow5 \
-    --output-dir pyfin_out/
-```
+- `assembly.gtf` -- the assembled transcripts, each with its abundance,
+  confidence, hard-read count and source (`gtf` or `novel`)
+- `scores.tsv` -- one row per model: abundance, read count and `tpm`
+  (by default the direct-RNA convention, a share of abundance per million;
+  see [`docs/USAGE.md`](docs/USAGE.md) section 3.2)
+- `run_summary.json` -- what the run did: models, reads in a tie, signal
+  contrasts scored, elapsed time, peak memory of one process, warnings
+- `run_manifest.json` -- what the run was asked to do: resolved profile and
+  configuration, PyFIN and library versions, source hash
+- `junction_support.tsv` -- read support of every junction observed
+- `abundance_refit.json` -- mass conservation of the final abundance re-fit
+- `tss_shadow_recovery.tsv` -- the folded 5'-truncated chains that were tested
+  for a start of their own (written only when there were any)
+- with `--fusion`: `fusion/` (see [Fusion detection](#fusion-detection))
 
-Outputs:
-- `pyfin_out/assembly.gtf` — assembled transcripts with abundance, confidence, hard-read count, source, and diagnostic score attributes
-- `pyfin_out/scores.tsv` — per-candidate metrics and TPM table
-- `pyfin_out/candidate_evidence.tsv` — optional (`--candidate-evidence`):
-  per-survivor inference-time observable features (junction support, family
-  share, end support, canonicality, containment geometry); read-only
-  diagnostic feeding the experimental evidence ranker (`--ranking-mode
-  filter`, off by default)
-- `pyfin_out/abundance_refit.json` — survivor-refit mass conservation and abundance/TPM shift diagnostics (named profiles)
-- `pyfin_out/endpoint_refine.json` — optional (`--endpoint-refine`): endpoint
-  modes, pair support, poly(A) support, and read routes per split model
-- `pyfin_out/catalog_completion.json` — optional (`--catalog-mode complete`
-  or `adaptive`): catalog additions, adaptive decision, exact mass-transfer
-  map, and strict before/after conservation audit. In adaptive mode, source
-  filtering alone does not reconstruct pre-transfer abundance.
-- `pyfin_out/m2_contrasts/*.jsonl` — optional
-  (`--m2-contrast-stats-jsonl`): per-attempt M2 contrast records (event
-  counts, mean/sum NLL, margin, coverage, abstention reason)
-- `pyfin_out/run_manifest.json` — resolved profile, overrides, configuration, source hash/commit, and result-changing environment
+Optional diagnostics (`--candidate-evidence`, `--endpoint-refine`,
+`--catalog-mode`, `--m2-contrast-stats-jsonl`, `--selection-audit`,
+`--write-unfiltered-scores`) write further files; each is described by
+`pyfin --help-all`.
 
 Experimental opt-in flags (off in every profile; each requires its own
 validation before promotion):
@@ -217,50 +275,63 @@ validation before promotion):
 | `--m2-contrast-stats-jsonl` | machine-readable M2 contrast records |
 | `--no-lazy-genome` | restore the eager whole-genome dict (higher worker RSS) |
 
-### CLI — assembly + fusion detection
+### Assembly plus fusion detection
 
 ```bash
-fin \
+pyfin \
     --bam reads.bam --gtf annotations.gtf --genome genome.fa \
-    --fastq reads.fq --signal signal.blow5 \
+    --signal signal.blow5 --fastq reads.fq \
     --output-dir pyfin_out/ \
     --fusion --min-support 2 --max-dist 6 --flank-bp 35
 ```
 
 Adds results under `pyfin_out/fusion/`. Ordinary `assembly.gtf`, `scores.tsv`
 and `abundance_refit.json` remain assembly-only. Fusion support counts are not
-assembly EM abundance estimates.
+assembly EM abundance estimates. `--fastq` lets the fusion analysis recover the
+sequence of hard-clipped supplementary alignments.
 
 ### Python API
 
+The command line is the supported interface. The same run through the API:
+
 ```python
 from fin.pipeline import PipelineConfig, PipelineRunner
+from fin.preflight import run_preflight
 
+checks = run_preflight(                      # raises PreflightError on a mismatch
+    bam_path="reads.bam", genome_path="genome.fa", signal_path="signal.blow5",
+    signal_format="auto", m2_metric="summed_llr", gtf_path="annotations.gtf",
+)
 config = PipelineConfig.from_profile(
     "real-drna",
     bam_path="reads.bam",
-    gtf_path="annotations.gtf",
     genome_fasta_path="genome.fa",
-    fastq_path="reads.fq",
     signal_path="signal.blow5",
-    signal_format="slow5",
+    gtf_path="annotations.gtf",
+    signal_format=checks.signal_format,
+    krill_pore=checks.pore,                  # rna002 or rna004, read from the signal
     work_dir="./pyfin_output",
     output_gtf="./pyfin_output/assembly.gtf",
     output_tsv="./pyfin_output/scores.tsv",
-    fusion_enabled=False,
-    use_gpu=True,
-    em_sigma=1.0,
+    use_gpu=False,
 )
 config.validate()  # resolves profile routes and effective compatibility state
 
 runner = PipelineRunner(config)
 runner.setup()
-results = runner.run()
-runner.cleanup()
+try:
+    models = runner.run()
+finally:
+    runner.cleanup()
 
-for cid, qr in sorted(results.items(), key=lambda x: -x[1].abundance):
-    print(f"{qr.candidate_id}\t{qr.abundance:.2f}\t{qr.num_assigned_reads}\t{qr.source}")
+for model in sorted(models.values(), key=lambda m: -m.abundance):
+    print(f"{model.candidate_id}\t{model.abundance:.2f}\t{model.num_assigned_reads}\t{model.source}")
+```
 
+Importing `fin` configures no logging and writes no file; call
+`fin.setup_logger("fin", level="INFO")` to see the run's messages.
+
+```python
 from fin.fusion.pipeline import run_fusion_analysis
 
 fusion_results = run_fusion_analysis(
@@ -366,185 +437,25 @@ fusion analysis is intended; candidate/search caps abstain or fail rather than
 silently sample a prefix. Implementation acceptance and the synthetic/real-signal
 assembly byte comparisons are recorded in `docs/FUSION_VALIDATION_2026-09-12.md`.
 
-### Using individual modules
-
-```python
-# Candidate discovery only
-from fin.candidates import discover_candidates
-from fin.io.interval_manager import GenomicInterval
-from fin.io.io_gtf import GTFReader
-
-interval = GenomicInterval(chrom="chr1", start=1000, end=50000, strand="+")
-with GTFReader("annotations.gtf") as gtf:
-    gtf.parse()
-    genome_seq = open("genome.fa").read()  # simplified
-    candidates = discover_candidates(interval, "reads.bam", gtf, genome_seq)
-
-# Eventalign parsing only
-from fin.scoring import parse_eventalign_tsv, build_distance_matrix
-scores = parse_eventalign_tsv("eventalign.tsv", candidate_lengths={"tx1": 1000})
-dist = build_distance_matrix(scores, read_ids=["r1", "r2"], candidate_ids=["tx1", "tx2"])
-
-# EM assignment only
-from fin.analysis.assignments import em_with_coherence
-R, assignments, lls = em_with_coherence(
-    dist_read_to_tx, dist_read_to_read,
-    sigma=1.0, beta=0.5, use_gpu=True
-)
-```
-
-## GPU Acceleration
-
-PyFIN uses GPU acceleration in three areas:
-
-| Component | Technology | Fallback |
-|-----------|-----------|----------|
-| DTW pairwise distances | CUDA C++ extension (`fin._dtw`) | scipy/numpy CPU |
-| EM algorithm (matrix ops) | CuPy (`cupy.matmul`, `cupy.exp`) | numpy CPU |
-| DTW variable-length pairs | CUDA `dtw_distance()` per pair | numpy row-vectorized |
-
-### GPU memory safety
-
-The DTW pairwise batch function checks available GPU memory before allocation. For large datasets (>10,000 reads), it will raise a `MemoryError` with a descriptive message rather than crashing with a CUDA OOM error.
-
-### Disabling GPU
-
-```python
-# Pipeline level
-config = PipelineConfig(..., use_gpu=False)
-
-# EM algorithm level
-R, assignments, lls = em_with_coherence(
-    dist_read_to_tx, dist_read_to_read,
-    use_gpu=False  # Force numpy CPU
-)
-```
-
-## Module Structure
-
-```
-fin/
-  candidates/               # Transcript candidate discovery
-    dataclasses.py          # IntronChain, TranscriptCandidate, CandidateSet
-    intron_chains.py        # CIGAR -> intron chain, 3' clustering
-    discovery.py            # Full candidate discovery per interval
-  scoring/                   # External tool scoring
-    external_tools.py       # minimap2/f5c subprocess wrappers
-    eventalign_parser.py    # f5c TSV -> distance matrix
-    signal_dtw.py           # Signal extraction + pairwise DTW
-  pipeline/                  # Orchestration
-    config.py               # PipelineConfig dataclass
-    runner.py               # PipelineRunner (Phase 1-5)
-  analysis/                  # Statistical methods
-    assignments.py          # EM with coherence (CuPy GPU)
-    quantification.py       # Probability-weighted abundance
-    clustering.py           # 3' end position clustering
-  io/                        # I/O for bioinformatics formats
-    io_bam.py               # BAM reader (pysam)
-    io_gtf.py               # GTF reader
-    io_pod5.py              # POD5 signal reader
-    io_slow5.py             # SLOW5/BLOW5 signal reader
-    io_fasta.py             # FASTA reader
-    io_fastq.py             # FASTQ reader
-    interval_manager.py     # Genomic interval management
-  _dtw/                      # CUDA DTW extension
-    __init__.py             # Python API (dtw_distance, dtw_pairwise)
-    dtw_api.cpp             # C++/CUDA bindings
-    dtw.hpp                 # CUDA DTW kernel
-  utils/                     # Utilities
-    log_config.py           # Logging configuration
-    sequences.py            # Sequence utilities
-```
-
-## Configuration Reference
-
-### PipelineConfig parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `bam_path` | str | required | Path to BAM file |
-| `gtf_path` | str | None | Path to GTF annotation file |
-| `genome_fasta_path` | str | required | Path to genome FASTA |
-| `fastq_path` | str | required | Path to reads FASTQ |
-| `signal_path` | str | required | Path to signal file (SLOW5/BLOW5/POD5) |
-| `signal_format` | str | "slow5" | Signal format: "slow5" or "pod5" |
-| `work_dir` | str | "./pyfin_work" | Working directory for intermediate files |
-| `output_gtf` | str | None | Output assembly GTF path |
-| `output_tsv` | str | None | Output per-candidate scoring TSV path |
-| `output_bedpe` | str | None | Legacy coupled-fusion output; not used by public `--fusion` |
-| `three_prime_threshold` | int | 24 | 3' end clustering distance (bp) |
-| `isoform_fraction_locus` | str | "family" | Use persistent splice families for minor-isoform denominators; "overlap" restores legacy behavior |
-| `post_selection_refit` | bool | False | Renormalize beta=0 M2 responsibilities over final survivors; named profiles enable it |
-| `complete_chain_rescue_reads` | int | 0 | P2 evidence rescue (`--complete-chain-rescue-reads`): a multi-exon candidate whose weakest junction is cleanly attested by enough exact complete-chain reads (gtf >= N; novel multi-junction >= N+1; novel single-junction >= 10) is exempt from the m2 support gate and soft-mass filter. SIRV4 expressed-truth evidence at N=2 on top of the strict-positive gate: F1 89.02 -> 89.29, `c_trunc3p50` +1.96, 3/156 cells regress <= 0.42. Opt-in; 0 disables |
-| `junction_election_mode` | str | "off" | K-way signal-ballot junction election (`--junction-election-mode off\|audit\|require`): nearby junction variants with a cigar-level support imbalance are put to a per-read raw-signal vote (krill eventalign NLL over the contested windows; quorum 5, supermajority 0.75, window purity, event/margin safeguards). `audit` writes junction_election.tsv and is byte-inert. Decided elections pick the correct junction 97.6% of the time on SIRV truth. Requires m2_em + `--signal` + families discovery. Opt-in |
-| `junction_election_burden` | str | "prosecution" | Burden of proof for `require`: `prosecution` retains unless the vote convicts (conservative; SIRV F1 89.29 -> 90.38, 0 cells down); `defense` drops nominated junctions unless the vote exonerates (aggressive; SIRV F1 89.29 -> **91.87**, top 87 -> **112/156**, worst cell -0.06, 73 junctions exonerated). Defense is SIRV-fit; re-validate on real dRNA before use |
-| `junction_election_ballot` | str | "signal" | Development ablation: `signal`/`m1`/`screen`/`shuffle` ballots (only `signal` is a production setting) |
-| `assignment_channels` | str | "none" (profiles `real-drna*`: "ends") | Endpoint evidence in the m2_em assignment posterior (`--assignment-channels none\|tes\|ends`). `tes`: the sample's fitted 3'/polyA kernel scores every polyA-PASS read against each tied model's claimed TES; `ends` adds the one-sided 5' start term (a read cannot begin upstream of the model it came from). An annotated model whose ends the reads contradict (a polyA read past its TES, or -- under `ends` -- a read starting upstream of its TSS, in neither case explained by another annotated model on the same or a wobble chain) gets a read-extent sibling `<id>.ext` with the same intron chain; selection keeps one of the pair by posterior mass. `tes` applies this to single-exon annotation matched by overlap, `ends` also to multi-exon annotated keys. Kernels must be calibrated (>= 50 ends, narrow scale <= 25 bp) or the channel abstains; without `--signal` the 3'/polyA term abstains (no calls = no evidence) and only the 5' term applies, and that term needs a `--gtf` (it scores read starts against the annotated TSS), so an unguided run without signal has no endpoint evidence at all. Requires m2_em. Chosen by cross-dataset maximin: +1.54 / +0.64 / +1.59 F1 (SIRV4 / Sequin / HEYA8, expression contract) with Sn and Pr both up on every grid |
-| `folded_tss_recovery_mode` | str | "off" (profiles `real-drna*`: "require") | Post-EM recovery of generation-folded 5'-truncation shadows: each folded shadow's TSS is tested against the parent's read-5'-end hazard profile; `audit` writes tss_shadow_recovery.tsv only, `require` re-emits a supported shadow as its own candidate and reruns the interval's assignment once. Maximin: +0.05 / 0 / +0.03 F1, never negative |
-| `containment_evidence_mode` | str | "off" | Containment decision layer (`--containment-evidence-mode off\|audit\|require`): contained short-in-long candidate pairs are routed through degradation-aware TES-cluster / termination-hazard tests (tri-state verdicts; abstention always retains). `audit` writes containment_evidence.tsv and is byte-inert; `require` drops contradicted shorts (needs an independently supported parent) and exempts supported ones from the competition gates. Requires m2_em. Opt-in |
-| `require_gtf_positive_mass` | bool | False | Strict-positive GTF evidence gate (`--require-gtf-positive-mass`): a GTF-annotated transcript must end selection with EM soft-mass > 0 or it is dropped as unexpressed, even when every abundance floor is 0 (enforced both at the pre-refit A4 floor and again after the survivor refit). Never adds catalog entries; novel/fusion semantics unchanged. Requires `gtf_path`. Opt-in; no profile enables it. SIRV4 expressed-truth evidence (with `--min-gtf-abundance 0 --no-floor-gtf-abundance`): F1 85.58 -> 89.02, zero regressing cells |
-| `em_sigma` | float | 1.0 | EM temperature (lower = harder assignments) |
-| `em_max_iter` | int | 1000 | Maximum EM iterations |
-| `em_tol` | float | 1e-4 | EM convergence tolerance |
-| `use_gpu` | bool | True | Enable GPU acceleration (DTW + EM) |
-| `max_reads_per_interval_for_dtw` | int | 2000 | DTW subsampling cap per interval |
-| `fusion_enabled` | bool | False | Legacy interval-coupled API; keep False and use `run_fusion_analysis` for isolation |
-| `fusion_min_support` | int | 2 | Legacy coupled-fusion support; independent API uses `FusionSettings.min_support` |
-| `fusion_max_dist` | int | 500 | Legacy value; independent API defaults to a 6-bp bounded cluster diameter |
-| `fusion_flank_bp` | int | 500 | Legacy value; independent API defaults to 35-bp read-window flanks |
-| `f5c_path` | str | "f5c" | Path to f5c binary |
-| `max_reads` | int | None | Limit total reads processed |
-
-## Testing
-
-### Run all unit tests
+## Testing and development
 
 ```bash
-# With the correct Python environment (needs pysam, numpy, scipy)
-pytest tests/unit/ -v
+pip install -e ".[dev]"        # pytest, ruff, build
+pip install "krill==0.1.5" --no-deps \
+    --index-url https://loganylchen.github.io/krill-dist/simple/
 
-# Run specific test modules
-pytest tests/unit/test_intron_chains.py -v      # Intron chain extraction
-pytest tests/unit/test_eventalign_parser.py -v   # Eventalign TSV parsing
-pytest tests/unit/test_quantification.py -v      # Quantification
-pytest tests/unit/test_assignments.py -v         # EM algorithm
-pytest tests/unit/test_dtw.py -v                 # DTW (CUDA tests skipped without GPU)
+pytest                         # tests/unit and tests/integration
+ruff check --select E9,F63,F7,F82 fin tests/unit tests/integration
 ```
 
-### Test with GPU
+The suite includes end-to-end tests that run the whole command on the bundled
+signal fixture (`tests/integration/test_sirv1_end_to_end.py`); they are skipped
+when krill is not installed, and CI refuses to run without it.
 
-```bash
-# DTW tests require CUDA GPU
-pytest tests/unit/test_dtw.py -v  # CUDA tests auto-skip if no GPU
-
-# Verify GPU is being used
-python -c "
-from fin._dtw import is_available
-from fin.analysis.assignments import CUPY_AVAILABLE
-print(f'CUDA DTW: {is_available()}')
-print(f'CuPy EM:  {CUPY_AVAILABLE}')
-"
-```
-
-### Test data
-
-Test data is located in `tests/testdata/`:
-- `RNA004.test.pod5` - POD5 signal file
-- `test.fa` - Reference FASTA
-- `RNA004.test.bam` - Aligned reads
-
-## Development
-
-```bash
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Run tests with coverage
-pytest tests/unit/ --cov=fin --cov-report=term-missing
-
-# Lint
-ruff check fin/
-```
+Continuous integration (`.github/workflows/`) runs the suite on Python 3.10 to
+3.12, builds the wheel and runs the smoke test from a clean environment, and,
+for releases, builds the images and runs the smoke test inside them before
+publishing.
 
 ## Benchmarking
 
@@ -574,6 +485,12 @@ those runs. It is not a one-command reproduction of the paper.
 > outstanding. This is stated rather than implied: previously this section
 > advertised a `run_benchmark.sh` that wrote `"status": "ran"` markers without
 > ever invoking the tools. That script has been removed.
+
+## Known limitations
+
+They are listed in [`CHANGELOG.md`](CHANGELOG.md#known-limitations): assembly
+without any annotation, very deep libraries, RNA004, speed, and memory with
+many workers.
 
 ## License
 

@@ -49,6 +49,13 @@ common mistake.
 
 ## 1. Input and sample-level preparation
 
+**Before the pipeline.** The command line checks that the inputs agree with
+each other and resolves two settings from them: the signal format from the
+file name, and the pore model from the signal file's read-group headers
+(`fin/preflight.py`; the checks are listed in [`USAGE.md`](USAGE.md) section
+1.5). It decides whether a run starts and with which pore model. It computes
+nothing the pipeline uses otherwise.
+
 **Intervals.** Reads are grouped into working intervals by overlap, separated
 by chromosome and strand (`fin/io/interval_manager.py:449`). Reads carrying a
 fusion signature are held out of the interval read pool entirely
@@ -67,8 +74,8 @@ fallback otherwise (`fin/analysis/sample_nuisance.py:608`).
 
 Discovery uses the pooled fit. **Assignment refits it leave-one-interval-out**
 -- excluding the interval's own reads -- so an interval cannot set the
-yardstick it is then measured by (`fin/pipeline/runner.py:2127`,
-`fin/pipeline/runner.py:1994`).
+yardstick it is then measured by (`fin/pipeline/runner.py:2150`,
+`fin/pipeline/runner.py:2152`).
 
 Sample-level evidence is cached and shared across runs of the same sample.
 What is cached is the common evidence, never a verdict about a candidate.
@@ -102,7 +109,7 @@ What is cached is the common evidence, never a verdict about a candidate.
    `source="gtf"` does not make its new endpoints annotated.
 
 **Compatibility is computed here**, because the profile asks for it
-(`fin/pipeline/runner.py:754`, `fin/candidates/discovery.py:591`). §5.2 uses it.
+(`fin/pipeline/runner.py:768`, `fin/candidates/discovery.py:591`). §5.2 uses it.
 
 ---
 
@@ -118,8 +125,8 @@ interval selection (§5.2).
   (`fin/pipeline/selection.py:1055`). A candidate removed here cannot be
   repaired by the later junction snap -- it no longer exists.
 - **Junction dominance** is an additional conditional branch
-  (`fin/pipeline/runner.py:815`) and is **off** by default
-  (`fin/pipeline/config.py:990`).
+  (`fin/pipeline/runner.py:829`) and is **off** by default
+  (`fin/pipeline/config.py:1003`).
 
 **The junction registry records evidence; it is not a third gate.** No gate
 re-reads the serialised `junction_support.tsv`. But the in-memory
@@ -136,8 +143,8 @@ Every read is re-mapped to every candidate cDNA **in the interval**, producing
 a read x candidate alignment-score matrix. Families govern *discovery*; they
 are not the boundary of assignment competition -- the runner hands the whole
 interval candidate set to `Assigner.assign` and the matrix is built over all
-of it (`fin/pipeline/runner.py:2531`, `fin/pipeline/assignment.py:959`,
-`:986`). Exact AS ties are what the signal
+of it (`fin/pipeline/runner.py:2554`, `fin/pipeline/assignment.py:1012`,
+`:1038`). Exact AS ties are what the signal
 layer exists to break; a read with a single best candidate is already decided.
 
 ### 4.2 Junction scoring (M2)
@@ -148,11 +155,20 @@ Two windows, easily confused:
 - the **coverage-span flank is 2** (`_M2_EM_FLANK`,
   `fin/pipeline/assignment.py:40`).
 
+The tied pairs of an interval are eventaligned in chunks of whole reads; a
+chunk closes once it holds `m2_batch_pairs` (2000) read-candidate pairs, so it
+can exceed that by less than one read's tie (`fin/pipeline/assignment.py:55`,
+`:562`). Each chunk is reduced to its scores before the next, which bounds
+memory on an extreme-depth interval. With eventalign on the CPU a read's
+score depends only on that read, so when every call succeeds the chunking
+does not enter the result; a chunk whose call fails takes the per-read path
+alone, which leaves its reads without coverage evidence.
+
 *Coverage* means every disagreement span is straddled on at least one
 candidate alignment. A sufficient structure-level score margin can select a
 structure **without** verified coverage; verified coverage is additionally
 required for a candidate to contribute a `covered_vote`
-(`fin/pipeline/assignment.py:458`, `:577`, `:1122`).
+(`fin/pipeline/assignment.py:480`, `:630`, `:1175`).
 
 ### 4.3 Endpoint channels
 
@@ -166,7 +182,7 @@ A softmax over the combined costs gives each read a distribution over
 candidates. **This is not an abundance EM** -- abundance comes later.
 
 The no-vote fallback has a specific shape worth stating, because it is easy to
-get backwards (`fin/pipeline/assignment.py:1150`):
+get backwards (`fin/pipeline/assignment.py:1203`):
 
 - **With covered votes:** normalise over *structures*, then divide each
   structure's share among its tied candidates.
@@ -180,13 +196,13 @@ These are different and the distinction matters when reading a run:
 
 | Situation | Behaviour |
 |---|---|
-| krill not installed | **raises** at the unguarded import (`fin/pipeline/assignment.py:365`) |
-| krill imports, backend yields no aligner | AS ties preserved, no junction scores (`:396`) |
-| invalid sequence payload, missing result, too few scored hypotheses | abstain (`:487`, `:529`, `:597`) |
-| batch failure | per-read fallback |
+| krill not installed | the command line **stops at start-up** (`fin/preflight.py:93`); through the Python API, or with `--no-preflight`, the unguarded import **raises** at the first interval that reaches assignment (`fin/pipeline/assignment.py:387`) |
+| krill imports, backend yields no aligner | AS ties preserved, no junction scores (`fin/pipeline/assignment.py:414`) |
+| invalid sequence payload, missing result, too few scored hypotheses | abstain (`fin/pipeline/assignment.py:517`, `:593`, `:650`) |
+| a batch call fails | per-read fallback for the reads of that call only |
 | poly(A) unavailable | its own path (`fin/scoring/polya.py:44`) |
 
-The CLI requiring `--signal` (`fin/cli.py:456`) does not mean every read has
+The CLI requiring `--signal` (`fin/cli.py:505`) does not mean every read has
 usable signal evidence, and a signal failure does not generally abort the run.
 
 ---
@@ -265,7 +281,7 @@ selection subtracts qualifying annotated candidates from the drop set
 7. **It changes this gate only.** It does not resurrect candidates dropped by
    earlier gates (they stay masked, `fin/pipeline/selection.py:367`), does not
    add candidates, does not move read mass, and does not bypass the global
-   abundance cascade (`fin/pipeline/runner.py:352`).
+   abundance cascade (`fin/pipeline/runner.py:369`).
 
 > **The distinction to carry away:** under the shipped profile an annotated
 > model may survive the support gate **without winning any individual M1 or
@@ -305,8 +321,9 @@ the refit diagnostics only.
 
 `assembly.gtf` (abundance as an attribute, no TPM), `scores.tsv` (per
 candidate, including TPM), `junction_support.tsv`, `abundance_refit.json`,
-`run_manifest.json`, and a folded-TSS recovery report where applicable
-(`fin/pipeline/runner.py:327`, `:338`, `:517`, `fin/cli.py:756`). Artifacts
+`run_manifest.json`, `run_summary.json` (written last, by the command line),
+and a folded-TSS recovery report where applicable
+(`fin/pipeline/runner.py:344`, `:355`, `:534`, `fin/cli.py:840`). Artifacts
 are conditional -- an empty or failed run does not produce all of them. Field
 definitions are in [`USAGE.md`](USAGE.md).
 
@@ -315,7 +332,7 @@ definitions are in [`USAGE.md`](USAGE.md).
 ## 7. Independent fusion analysis (`--fusion`, opt-in)
 
 Fusion runs **after an unchanged assembly** and writes to its own directory.
-`fin/cli.py:593` passes `fusion_enabled=False` to the assembly config, so the
+`fin/cli.py:650` passes `fusion_enabled=False` to the assembly config, so the
 old coupled path is unreachable from the CLI and the assembly GTF never
 contains a fusion transcript.
 
@@ -359,12 +376,12 @@ misdescribe this pipeline. Under `real-drna` the following are **not** active:
 | Option | Default |
 |---|---|
 | `max_soft_mass_ratio`, `min_fulllen_fraction`, `min_polya5p_reads` | disabled by the profile |
-| `junction_dominance_filter` | off (`fin/pipeline/config.py:990`) |
+| `junction_dominance_filter` | off (`fin/pipeline/config.py:1003`) |
 | `m2_support_gate_gtf_exempt` | `False` -- a *different* mechanism from §5.2 attestation |
-| `read_extent_mode_tol_bp` | 0 -- ends use the outward extreme, not a mode (`:564`) |
-| `tss_contradiction_min_share`, `tss_contradiction_auto_gate`, both distance floors | 0 / off (`:565`) |
+| `read_extent_mode_tol_bp` | 0 -- ends use the outward extreme, not a mode (`:566`) |
+| `tss_contradiction_min_share`, `tss_contradiction_auto_gate`, both distance floors | 0 / off (`:567`, `:582`) |
 | `m2_scramble_seed` | 0 -- no signal-score permutation |
-| `selection_audit` | off -- candidate-fate tracing is opt-in (`:1065`) |
+| `selection_audit` | off -- candidate-fate tracing is opt-in (`:1078`) |
 | `denovo_graph` | off, **and unreachable under production discovery** (`fin/candidates/discovery.py:1041` returns first) |
 | `--fusion` | off |
 

@@ -8,6 +8,10 @@ This document covers the three things installation does not: preparing inputs
 that actually match each other, diagnosing a run that finished without doing
 what you expected, and reading the numbers that come out.
 
+PyFIN checks most of what section 1 describes by itself, before it starts
+(section 1.5). The section still matters: the checks tell you *that* two
+inputs disagree, and this is where to read *why* they must agree.
+
 For what the pipeline does internally, see
 [`CURRENT_ALGORITHM.md`](CURRENT_ALGORITHM.md).
 
@@ -15,16 +19,17 @@ For what the pipeline does internally, see
 
 ## 1. Preparing inputs
 
-PyFIN takes five inputs. The README names them; this section is about getting
-them to agree with each other, which is where most first runs fail.
+PyFIN takes three inputs and two optional ones. The README names them; this
+section is about getting them to agree with each other, which is where most
+first runs fail.
 
 | Input | Flag | Notes |
 |---|---|---|
-| Alignments | `--bam` | coordinate-sorted, indexed, **spliced** |
+| Alignments | `--bam` | coordinate-sorted, indexed, **spliced**; primary records must carry the read sequence |
 | Genome | `--genome` | FASTA, same build and contig names as the BAM |
+| Raw signal | `--signal` | SLOW5/BLOW5, the same reads again |
 | Annotation | `--gtf` | optional; same build and contig names again |
-| Reads | `--fastq` | the same reads the BAM contains |
-| Raw signal | `--signal` | SLOW5/BLOW5 or POD5, same reads again |
+| Reads | `--fastq` | optional; the assembly takes read sequences from the BAM. Only `--fusion` reads it |
 
 ### 1.1 The BAM must be spliced, sorted and indexed
 
@@ -50,8 +55,9 @@ result that looks like a biology problem and is not.
 ### 1.2 The genome, the BAM and the GTF must be the same build
 
 Not just the same assembly version -- the same **contig naming**. A BAM on
-`chr1` with a GTF on `1` will run and silently annotate nothing, because no
-interval will ever match a gene.
+`chr1` with a GTF on `1` can never match a gene. PyFIN refuses to start when
+the two share no contig name at all; with `--no-preflight`, or through the
+Python API, such a run goes ahead and silently annotates nothing.
 
 ```bash
 # a naming SPOT-CHECK -- not proof the assemblies agree
@@ -68,54 +74,86 @@ If they disagree, fix the annotation or the reference -- do not rename
 contigs in the BAM header alone, because the genome FASTA is read by contig
 name too.
 
-### 1.3 Reads and signal must be the same molecules
+### 1.3 The alignment and the signal must be the same molecules
 
-Three identifiers have to line up:
+Two identifiers have to line up: the BAM's `query_name` and the read id inside
+the raw-signal file. (With `--fusion --fastq`, the FASTQ header is a third:
+PyFIN takes **the first whitespace-separated token** after `@`, so
+`@abc-123 runid=... ch=42` is read id `abc-123`.)
 
-- the BAM's `query_name`,
-- the FASTQ header -- PyFIN takes **the first whitespace-separated token**
-  after `@`, so `@abc-123 runid=... ch=42` is read id `abc-123`,
-- the read id inside the raw-signal file.
+PyFIN checks this before it starts: it looks up the first 200 reads of the BAM
+in the signal file. If none is there it searches the whole BAM for one that
+is, and refuses to start only when the two files share no read at all -- the
+usual causes being a signal file from another run, or read ids that were
+rewritten (a prefix, a suffix).
 
-A quick overlap check before a long run:
+A signal file that holds only part of the BAM's reads is accepted: reads
+without signal are assembled from sequence alone. PyFIN warns when some of the
+200 sampled reads have no signal. It does not measure coverage beyond that
+sample -- if the first reads all have signal and later ones do not, nothing
+is reported at start-up; `run_summary.json` shows afterwards how many ties
+the signal scored.
 
-```bash
-samtools view sample.sorted.bam | cut -f1 | sort -u > /tmp/bam.ids
-zcat reads.fq.gz | awk 'NR%4==1{print substr($1,2)}' | sort -u > /tmp/fq.ids
-comm -12 /tmp/bam.ids /tmp/fq.ids | wc -l     # compare against UNIQUE bam ids:
-wc -l < /tmp/bam.ids
-```
-
-Compare against the number of **unique query names**, not the alignment-record
-count -- a read with supplementary alignments contributes several records.
-
-The signal file needs the same check and the command depends on your format
-(`slow5tools skim`, or a POD5 reader). Doing it is worth the minutes: a
-signal file from a different run is the most common cause of a run that
-completes with signal contributing nothing.
-
-If any overlap is near zero you probably basecalled and aligned different
-files, or the headers carry a prefix.
-
-### 1.4 Signal format and pore model are not auto-detected
+### 1.4 Signal format and pore model
 
 ```bash
---signal reads.blow5                 # default: --signal-format slow5
---signal reads.pod5 --signal-format pod5
+--signal reads.blow5                 # the format is taken from the file name
+--signal reads.dat --signal-format slow5
 ```
 
-`--signal-format` defaults to `slow5`. Passing a POD5 without the flag is a
-common first-run failure.
+**POD5 is not read.** PyFIN's signal backend opens the signal file itself and
+reads SLOW5/BLOW5 only. Convert a POD5 run once, losslessly:
 
-The pore model defaults to `rna002` (`fin/pipeline/config.py:749`) and is
-**not** detected from the file. A mismatched model degrades signal scoring
-rather than refusing to run.
+```bash
+blue-crab p2s pod5_dir/ -o reads.blow5       # pip install blue-crab
+```
 
-**There is currently no CLI flag for it.** The CLI does not populate
-`krill_pore` when it builds `PipelineConfig`, so changing it means using the
-Python API and setting the field on the config object directly. If your data
-is RNA004 chemistry, this is a real limitation to plan around rather than a
-flag to pass.
+Given a POD5, PyFIN stops with that command rather than start.
+
+**The pore model** is chosen by `--pore {auto,rna002,rna004}`. `auto`, the
+default, reads every read group's header in the signal file: the sequencing
+kit, or failing that the sampling rate (3012 Hz for RNA002, 4000 Hz for
+RNA004). What it does when the header is not clear-cut:
+
+| The signal file says | `--pore auto` |
+|---|---|
+| one chemistry | uses it |
+| nothing (no kit, no known sampling rate) | uses rna002, with a warning |
+| a chemistry in some read groups, nothing in others | uses that chemistry, with a warning |
+| different chemistries in different read groups | refuses: pass `--pore` yourself |
+| a DNA experiment in every read group | refuses |
+
+A wrong pore model does not fail. It scores the signal against the wrong
+current levels and quietly degrades the result, which is why PyFIN never
+guesses between two. RNA004 is selectable and not yet benchmarked; see
+[`RNA004_STATUS.md`](RNA004_STATUS.md).
+
+### 1.5 What is checked before a run starts
+
+Unless `--no-preflight` is given, PyFIN verifies the following before it
+creates the output directory. An error stops the run; a warning does not.
+"Sampled" means the first 200 mapped primary records of the BAM. The checks
+write nothing, with one exception: a genome FASTA without a `.fai` index gets
+one, next to the FASTA.
+
+| Check | Outcome when it fails |
+|---|---|
+| the signal backend imports (unless `--m2-metric off`) | error, with the install command |
+| the signal file is SLOW5/BLOW5 | error, with the conversion command (also under `--no-preflight`) |
+| the BAM opens and has an index | error: `samtools index` |
+| the sampled primary records carry a read sequence | error if none of them does |
+| some sampled read is spliced | warning if none is, among at least 50 sampled (section 1.1); says so if the reference names look like transcripts |
+| contigs with mapped reads exist in the genome | error if none does (naming); warning if some do not |
+| those contigs have the same length in the BAM header and the genome | error: different builds |
+| the annotation shares a contig name with the BAM | error (section 1.2) |
+| the annotation has `exon` records | warning |
+| the signal file holds reads of the BAM | error if it holds none of them; warning if some of the sampled reads are missing (section 1.3) |
+| the pore model is unambiguous | see section 1.4 |
+
+What it cannot check: that a GTF whose contig names match is the *same
+assembly build* as the alignment (section 2.3); how much of the BAM beyond the
+sample has a sequence, a spliced alignment or signal; or that your reads are
+what you think they are.
 
 ---
 
@@ -123,9 +161,30 @@ flag to pass.
 
 ### 2.1 "It finished, but did signal do anything?"
 
-The import check in the README tells you krill is *installed*. It does not
-tell you signal scoring *contributed*. These are different, and a run can
-complete with signal abstaining on every read.
+Look at `run_summary.json`:
+
+```json
+"signal": {
+  "scoring": "summed_llr",
+  "pore": "rna002",
+  "tied_reads": 17,
+  "scored_contrasts": 5
+}
+```
+
+- `tied_reads` -- reads whose best alignment score is shared by two or more
+  candidates. These are the only reads the signal is asked about; a read with
+  a single best candidate is already decided.
+- `scored_contrasts` -- ties in which **at least two candidates received a
+  valid signal score**. It is counted (`fin/pipeline/assignment.py:644`,
+  `:684`) before the decision margin is applied (`:1181`), so it means "a
+  junction contrast was scored", not "the assignment changed".
+
+These two counters are about the **junction** scoring only. The poly(A)
+evidence that the endpoint channels use is also read from the raw signal, and
+is not counted here.
+
+The same two counters are in the log, per interval, as `ties` and `refined`.
 
 Signal can legitimately abstain, per read, when:
 
@@ -137,25 +196,25 @@ Signal can legitimately abstain, per read, when:
 
 What is **not** abstention: a structure selected on a sufficient score margin
 *without* a verified covered span. Coverage controls whether that structure
-also contributes to the prior (`fin/pipeline/assignment.py:1127`); its absence
+also contributes to the prior (`fin/pipeline/assignment.py:1180`); its absence
 is not a failure to score.
 
 None of these stop the run, and none of them mean your inputs are wrong. What
-*is* worth investigating is abstention on essentially everything, which
-usually means the signal file and the BAM are not the same reads (see §1.3).
+*is* worth investigating is many `tied_reads` with `scored_contrasts` at zero.
+It does **not** by itself identify mismatched ids -- the start-up check
+(section 1.5) has already established that the signal file holds reads of the
+BAM. Valid, matching inputs can also produce no disagreement window, invalid
+candidate payloads, too few scored hypotheses, or a backend failure. Neither
+counter is a quality metric.
 
-The closest direct evidence is in the interval log: the per-interval `ties`
-and `refined` counters (`fin/pipeline/runner.py:2654`). `ties` is how many
-exact alignment-score ties were found; `refined` counts ties where **at least
-two hypotheses received valid scores** -- note that this increments *before*
-the structure-selection margin is applied
-(`fin/pipeline/assignment.py:597`, `:1127`), so it means "a junction contrast
-was scored", not "the assignment changed".
-
-Large `ties` with `refined` at zero everywhere is worth investigating, but it
-does **not** by itself identify mismatched ids. Valid, matching inputs can
-also produce no disagreement window, invalid candidate payloads, too few
-scored hypotheses, or a backend failure. Neither counter is a quality metric.
+`run_summary.json` also records the models written, the elapsed time, the
+peak memory of one process and any warning the start-up checks raised. It is
+written last, and a summary already in the directory is removed when a run
+starts writing -- so a run that failed part-way leaves no summary. (A run that
+the start-up checks refused never started: whatever an earlier run left in the
+directory, its summary included, is untouched.) With a quantification engine
+other than the default (`--quant-mode`), the two signal counters are `null`,
+which means "not recorded", not zero.
 
 The manifest tells you the configuration, not whether signal contributed:
 
@@ -164,16 +223,22 @@ The manifest tells you the configuration, not whether signal contributed:
 python -m json.tool pyfin_out/run_manifest.json | head -40
 ```
 
-`run_manifest.json` records the **resolved** profile and every override. When
-a document and a run disagree about a setting, the manifest is right.
+`run_manifest.json` records the **resolved** profile and every override, and
+the versions of PyFIN, krill, mappy, pysam, pyslow5, pod5, numpy and scipy.
+When a document and a run disagree about a setting, the manifest is right.
 
-### 2.2 "It failed with ModuleNotFoundError: krill"
+### 2.2 "It stopped: the krill backend cannot be imported"
 
-Expected, and it means exactly what it says: the shipped profile resolves
-`m2_metric = "summed_llr"`, and the assignment layer imports krill on that
-path before checking whether any read needs refinement. Install krill (root
-README) or run with `--m2-metric off` if you deliberately want a
-sequence-only result.
+It means exactly what it says: the shipped profile resolves
+`m2_metric = "summed_llr"`, which scores the raw signal with krill. PyFIN
+checks for it at start-up and prints the install command (root README). Note
+that the package of the same name on PyPI is a different project.
+`--m2-metric off` turns the junction scoring off, which lets a run start
+without krill. That run is sequence-only; with krill installed, `--m2-metric
+off` still leaves the poly(A) evidence, which is read from the signal too.
+
+Through the Python API, or with `--no-preflight`, the same condition surfaces
+later, as `ModuleNotFoundError` when the first interval reaches assignment.
 
 ### 2.3 "Nothing was annotated"
 
@@ -193,7 +258,7 @@ not establish that your inputs agree.
 `--no-gpu` forces the CPU path for the EM **and is passed to krill as well**.
 A CUDA-built krill requests the GPU when `krill.built_with_cuda` is true and a
 device is visible, and falls back to CPU if initialisation fails
-(`fin/pipeline/assignment.py:390`, `fin/scoring/krill_aligner.py:66`). So the
+(`fin/pipeline/assignment.py:410`, `fin/scoring/krill_aligner.py:66`). So the
 two accelerations are separate installs but not separate switches.
 
 The CuPy check in the README is only about the assignment/EM step.
@@ -208,9 +273,11 @@ Default assembly outputs land in `--output-dir`:
 |---|---|
 | `assembly.gtf` | the final transcript set, with `abundance` as an attribute |
 | `scores.tsv` | one row per reported candidate: abundance, read counts, TPM, diagnostics |
+| `run_summary.json` | what the run did: models, reads in a tie, signal contrasts scored, time, peak memory, warnings (section 2.1) |
+| `run_manifest.json` | what the run was asked to do: the resolved configuration, PyFIN and library versions, source hash, environment |
 | `abundance_refit.json` | mass accounting for the refit -- orphaned mass, conservation |
-| `run_manifest.json` | the resolved configuration, source hash, environment |
 | `junction_support.tsv` | observed junction evidence per interval |
+| `tss_shadow_recovery.tsv` | the folded 5'-truncated chains tested for a start of their own; written only when there were any |
 
 `--fusion` adds a `fusion/` directory with its own tables and FASTAs; see
 [`README.md`](../README.md) and the fusion documents in

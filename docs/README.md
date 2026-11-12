@@ -11,15 +11,19 @@ Four destinations:
 | Question | Read |
 |---|---|
 | Install, including the signal backend | root `README.md`, Installation |
-| Run it, and what the profiles mean | root `README.md`, Quick Start |
+| Check the installation; run the bundled example | root `README.md`, Quick start; `scripts/smoke_test.sh` |
+| Run it on your data, and what the profiles mean | root `README.md`, Running your own data |
 | Prepare inputs, diagnose a run, read the outputs | [`USAGE.md`](USAGE.md) |
-| Every CLI flag | `pyfin --help`, and the parameter table in root `README.md` |
+| RNA004 data | [`RNA004_STATUS.md`](RNA004_STATUS.md) |
+| What changed between versions; known limitations | root `CHANGELOG.md` |
+| The options a run needs | `pyfin --help` |
+| Every option, experimental switches included | `pyfin --help-all` |
 
-Two things the parameter table does not yet do: it does not separate raw
-defaults from profile overrides, and it omits some settings the shipped
-`real-drna` profile turns on. `pyfin_out/run_manifest.json` records the
-**resolved** configuration for a given run and is the authority when the two
-disagree.
+`--help-all` gives each option's raw default, which is not always what a
+profile resolves it to. `pyfin_out/run_manifest.json` records the **resolved**
+configuration of a given run and is the authority when the two disagree;
+[`CURRENT_ALGORITHM.md`](CURRENT_ALGORITHM.md) section 0 lists what the shipped
+profile sets.
 
 ## 2. What the algorithm currently does
 
@@ -72,10 +76,12 @@ Recorded rather than implied, so a reader is not misled by their absence:
   manifest with checksums, the annotation-condition generation step,
   competitor commands and versions, and the table-generation step. None of
   that is written yet.
-- **No end-to-end example that exercises signal.** `tests/testdata/` is
-  referenced by the root README and `tests/README.md` but no files under it
-  are tracked. The tracked K562 fusion fixture
-  (`tests/data/fusion_k562_bcr_abl1/`) is sequence-only.
+- **The end-to-end example is one small RNA002 locus.**
+  `tests/data/sirv1_mini/` (91 reads of one SIRV gene, with raw signal) is
+  what the smoke test and the end-to-end tests run. It shows that an
+  installation works and that the signal is scored; it is not a benchmark.
+  There is no RNA004 fixture. The other tracked fixture, the K562 fusion one
+  (`tests/data/fusion_k562_bcr_abl1/`), is sequence-only.
 - **The figures in `diagrams/README.md` are not in the tree** -- that
   directory holds the generation prompts, not the PNGs it lists.
 - **No effective-configuration reference** separating raw defaults, profile
