@@ -118,12 +118,18 @@ def write_run_summary(
     quant_mode: str,
     fusion_analysis: bool = False,
     warnings: Optional[Iterable[str]] = None,
+    counters: Optional[Dict[str, Optional[int]]] = None,
 ) -> Dict[str, object]:
-    """Merge the interval shards and write ``run_summary.json``; return what was written."""
+    """Write ``run_summary.json``; return what was written.
+
+    ``counters`` are the merged interval counters, as the runner keeps them
+    after a run. Without them the shards are merged here.
+    """
     from fin import __version__
     from fin.versions import library_versions
 
-    counters = merge_interval_shards(work_dir)
+    if counters is None:
+        counters = merge_interval_shards(work_dir)
     summary: Dict[str, object] = {
         "schema_version": 1,
         "pyfin_version": __version__,

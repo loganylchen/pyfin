@@ -195,6 +195,31 @@ def test_an_engine_that_does_not_score_ties_reports_its_signal_counters_as_unkno
     assert summary["models"]["total"] == len(_transcripts(tmp_path / "out" / "assembly.gtf")) > 0
 
 
+def test_the_python_api_leaves_only_results_and_keeps_the_counters(tmp_path):
+    from fin.pipeline import PipelineConfig, PipelineRunner
+
+    out = tmp_path / "out"
+    config = PipelineConfig.from_profile(
+        "real-drna",
+        bam_path=str(DATA / "reads.bam"), genome_fasta_path=str(DATA / "reference.fa"),
+        signal_path=str(DATA / "reads.blow5"), gtf_path=str(DATA / "annotation.gtf"),
+        work_dir=str(out), output_gtf=str(out / "assembly.gtf"), output_tsv=str(out / "scores.tsv"),
+        use_gpu=False,
+    )
+    config.validate()
+    runner = PipelineRunner(config)
+    runner.setup()
+    try:
+        models = runner.run()
+    finally:
+        runner.cleanup()
+
+    assert len(models) == len(_transcripts(out / "assembly.gtf")) > 0
+    assert runner.interval_counters["intervals_assigned"] == runner.intervals_total == 2
+    assert runner.interval_counters["scored_contrasts"] >= 3
+    assert sorted(p.name for p in out.iterdir() if p.is_dir()) == []     # no shard directory left
+
+
 def test_it_runs_without_an_annotation(tmp_path):
     result = _pyfin(tmp_path / "out", gtf=False)
     assert result.returncode == 0, result.stderr[-3000:]

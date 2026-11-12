@@ -104,3 +104,10 @@ def test_an_engine_without_signal_counters_is_summarised_as_unknown(tmp_path):
     assert on_disk["quant_mode"] == "argmax"
     assert on_disk["reads"] == {"in_assigned_intervals": 10, "assigned": None}
     assert on_disk["signal"]["tied_reads"] is None and on_disk["signal"]["scored_contrasts"] is None
+
+
+def test_counters_handed_over_by_the_runner_are_used_as_they_are(tmp_path):
+    run_summary.record_interval(tmp_path, "chr1:0-100:+", reads=10, candidates=3, **ENGINE)
+    counters = run_summary.merge_interval_shards(tmp_path)      # what PipelineRunner.run() keeps
+    on_disk = _write(tmp_path, counters=counters)
+    assert on_disk["intervals"]["assigned"] == 1 and on_disk["signal"]["tied_reads"] == 4

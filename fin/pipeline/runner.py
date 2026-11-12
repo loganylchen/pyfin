@@ -164,6 +164,8 @@ class PipelineRunner:
         self.intervals_total = 0
         # per-interval counters only the current quantification engine knows
         self._interval_engine_counters: Dict[str, int] = {}
+        # set by run(): the interval counters of the finished run, summed
+        self.interval_counters: Optional[Dict[str, Optional[int]]] = None
 
     def setup(self):
         """Open file handles and load references.
@@ -285,13 +287,19 @@ class PipelineRunner:
         # Aggregate across intervals. Responsibility ledgers remain separate so
         # the historical aggregation/selection evidence is not changed by refit.
         aggregated = aggregate_across_intervals(all_quant_results)
-        return self._finalize_and_write(
+        final = self._finalize_and_write(
             aggregated,
             output_gtf=self.config.output_gtf,
             output_tsv=self.config.output_tsv,
             responsibility_ledgers=responsibility_ledgers,
             extent_redirects=extent_redirects,
         )
+        # The run owns its counter shards: they are summed and removed here, so
+        # a caller that never writes a summary is not left with the directory.
+        from fin.pipeline.run_summary import merge_interval_shards
+
+        self.interval_counters = merge_interval_shards(self.config.work_dir)
+        return final
 
     def _finalize_and_write(
         self,

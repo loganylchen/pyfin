@@ -891,6 +891,7 @@ def main(
         quant_mode=cfg.quant_mode,
         fusion_analysis=fusion_enabled,
         warnings=preflight_warnings,
+        counters=getattr(runner, "interval_counters", None),
     )
     _signal = summary["signal"]
     logging.getLogger("fin.cli").info(
