@@ -103,6 +103,9 @@ needs it: without it PyFIN stops at start-up and prints this install command.
 `--m2-metric off` turns the junction signal scoring off and lets a run start
 without krill; an installed krill is then still used for poly(A) evidence.
 
+For RNA004 data install krill 0.1.6 or later instead: 0.1.5 has no RNA004
+poly(A) model ([`docs/RNA004_STATUS.md`](docs/RNA004_STATUS.md)).
+
 ### 3. Optional: GPU for the assignment step
 
 ```bash

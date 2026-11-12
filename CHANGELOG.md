@@ -53,6 +53,8 @@ checked is under "Verification" below; what it does not cover is said there.
   command line before. `auto` (the default) reads the sequencing kit, or
   failing that the sampling rate, from the signal file. RNA004 support is
   **experimental**: see [`docs/RNA004_STATUS.md`](docs/RNA004_STATUS.md).
+  krill 0.1.5 has no RNA004 poly(A) model; the start-up checks warn when the
+  installed backend cannot estimate poly(A) tails for the chosen pore.
 - **`--signal-format auto`** (the default) takes the format from the file name.
 - **`run_summary.json`**: how many reads reached assignment, how many were in
   an alignment-score tie, how many of those ties the signal scored, how many

@@ -149,6 +149,7 @@ one, next to the FASTA.
 | the annotation has `exon` records | warning |
 | the signal file holds reads of the BAM | error if it holds none of them; warning if some of the sampled reads are missing (section 1.3) |
 | the pore model is unambiguous | see section 1.4 |
+| the signal backend can estimate poly(A) tails for that pore | warning: the run completes without poly(A) calls (krill before 0.1.6, on RNA004). Every read abstains on the 3' endpoint evidence; where enabled, endpoint refinement uses end sharpness alone and the polyA+5' filter (off in the default profile) is skipped |
 
 What it cannot check: that a GTF whose contig names match is the *same
 assembly build* as the alignment (section 2.3); how much of the BAM beyond the
@@ -261,7 +262,7 @@ device is visible, and falls back to CPU if initialisation fails
 (`fin/pipeline/assignment.py:410`, `fin/scoring/krill_aligner.py:66`). So the
 two accelerations are separate installs but not separate switches.
 
-The CuPy check in the README is only about the assignment/EM step.
+CuPy concerns the assignment/EM step only; krill needs no CuPy.
 
 ---
 

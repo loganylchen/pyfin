@@ -57,6 +57,15 @@ RNA004 = {"sequencing_kit": "sqk-rna004", "sample_rate": 4000, "experiment_type"
 DNA = {"sequencing_kit": "sqk-lsk114", "sample_rate": 5000, "experiment_type": "genomic_dna"}
 
 
+_POLYA_REFUSAL = preflight._polya_refusal   # the real probe, for the tests about it
+
+
+@pytest.fixture(autouse=True)
+def _backend_has_every_polya_model(monkeypatch):
+    """What the installed krill supports is not what these tests are about."""
+    monkeypatch.setattr(preflight, "_polya_refusal", lambda pore: None)
+
+
 class _FakeSignal:
     """Stands in for an opened signal file: its read ids and one header per read group."""
 
@@ -144,6 +153,70 @@ def test_missing_krill_is_reported_with_the_install_command(monkeypatch):
 def test_sequence_only_runs_do_not_need_krill(monkeypatch):
     monkeypatch.setitem(sys.modules, "krill", None)
     preflight.check_backend("off")
+
+
+class _Krill015:
+    """A backend with a poly(A) model for RNA002 only, as krill 0.1.5 is."""
+
+    calls: list = []
+
+    @classmethod
+    def Aligner(cls, **kwargs):
+        cls.calls.append(kwargs)
+        if kwargs.get("polya") and kwargs["pore"] != "rna002":
+            raise ValueError("polya=True requires pore='rna002'")
+        return object()
+
+
+def test_the_backend_is_asked_for_the_aligner_the_run_builds(monkeypatch):
+    monkeypatch.setitem(sys.modules, "krill", _Krill015)
+    monkeypatch.setattr(_Krill015, "calls", [])
+    assert _POLYA_REFUSAL("rna002") is None
+    assert _POLYA_REFUSAL("rna004") == "polya=True requires pore='rna002'"
+    assert _Krill015.calls == [
+        dict(pore=pore, use_gpu=False, hmm_confidence=True, polya=True)
+        for pore in ("rna002", "rna004")
+    ]
+
+
+def test_no_backend_is_not_a_polya_question(monkeypatch):
+    monkeypatch.setitem(sys.modules, "krill", None)
+    assert _POLYA_REFUSAL("rna004") is None
+
+
+def test_a_backend_that_fails_to_import_is_a_warning_not_a_crash(tmp_path, monkeypatch):
+    # installed but broken: with --m2-metric off nothing has imported it yet, and
+    # the run itself would carry on without poly(A) calls
+    class _Broken:
+        def find_spec(self, name, path=None, target=None):
+            if name == "krill":
+                raise ValueError("libkrill.so: undefined symbol")
+            return None
+
+    monkeypatch.delitem(sys.modules, "krill", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_Broken(), *sys.meta_path])
+    assert _POLYA_REFUSAL("rna002") == "libkrill.so: undefined symbol"
+    monkeypatch.setattr(preflight, "_polya_refusal", _POLYA_REFUSAL)
+    report = _run(tmp_path, monkeypatch)            # m2_metric="off"
+    assert len(report.warnings) == 1 and "undefined symbol" in report.warnings[0]
+
+
+def test_a_backend_without_a_polya_model_for_the_pore_is_a_warning(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "krill", _Krill015)
+    monkeypatch.setattr(preflight, "_polya_refusal", _POLYA_REFUSAL)
+    report = _run(tmp_path, monkeypatch,
+                  signal_path=_signal(tmp_path, monkeypatch, _all_ids(), RNA004))
+    assert report.pore == "rna004"
+    assert len(report.warnings) == 1
+    warning = report.warnings[0]
+    assert "poly(A)" in warning and "'rna004'" in warning and "3' endpoint" in warning
+    assert "end sharpness" in warning
+    assert "polyA+5' filter (off in the default profile) is skipped" in warning
+    assert preflight.KRILL_UPGRADE in warning and "--upgrade" in preflight.KRILL_UPGRADE
+    # the same backend on the pore it does model: nothing to say
+    report = _run(tmp_path, monkeypatch,
+                  signal_path=_signal(tmp_path, monkeypatch, _all_ids(), RNA002))
+    assert (report.pore, report.warnings) == ("rna002", [])
 
 
 # ---------------------------------------------------------------- the whole run

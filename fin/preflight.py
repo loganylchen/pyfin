@@ -24,6 +24,7 @@ KRILL_INSTALL = (
     "pip install krill --no-deps "
     "--index-url https://loganylchen.github.io/krill-dist/simple/"
 )
+KRILL_UPGRADE = KRILL_INSTALL.replace("pip install krill", "pip install --upgrade krill")
 _SIGNAL_SUFFIXES = {".blow5": "slow5", ".slow5": "slow5", ".pod5": "pod5"}
 # How many leading primary alignments are inspected. Enough to tell "these are
 # the same molecules" from "these are different files"; small enough to be free.
@@ -105,6 +106,52 @@ def check_backend(m2_metric: str) -> None:
             "  To run without it, pass --m2-metric off: splice junctions are then decided by\n"
             "  sequence alone, and without krill there is no poly(A) evidence from the signal."
         ) from exc
+
+
+def _polya_refusal(pore: str) -> Optional[str]:
+    """Why the backend will not estimate poly(A) tails for ``pore``, or None.
+
+    Builds the aligner the run itself builds (``fin.scoring.polya``), so the
+    answer comes from the backend and not from comparing version strings.
+    """
+    try:
+        import krill
+
+        krill.Aligner(pore=pore, use_gpu=False, hmm_confidence=True, polya=True)
+    except ImportError:
+        return None  # not installed: check_backend has decided whether that is fatal
+    except Exception as exc:  # noqa: BLE001 - krill raises broad errors
+        # A backend that is installed and fails -- importing or building the
+        # aligner -- gives the run no poly(A) calls either way. The run treats
+        # both as "no calls", so neither may stop it here.
+        return str(exc) or type(exc).__name__
+    return None
+
+
+def check_polya_backend(pore: str, report: PreflightReport) -> None:
+    """Warn when the installed backend has no poly(A) model for this pore.
+
+    krill before 0.1.6 has none for RNA004 and refuses to build the aligner.
+    PyFIN treats that as "no poly(A) calls" (``fin.scoring.polya``): the run
+    completes, every read abstains on the 3' endpoint channel, endpoint
+    refinement falls back to end sharpness, and the polyA+5' filter no-ops.
+    That is worth saying before the run.
+    """
+    refusal = _polya_refusal(pore)
+    if refusal is None:
+        return
+    from fin.versions import library_versions
+
+    report.warn(
+        f"the installed krill ({library_versions().get('krill')}) cannot estimate "
+        f"poly(A) tails for pore '{pore}' ({refusal}). The run will complete, but "
+        "without poly(A) calls: every read abstains on the 3' endpoint evidence, and "
+        "where they are enabled, endpoint refinement judges 3' ends by end sharpness "
+        "alone and the polyA+5' filter (off in the default profile) is skipped. "
+        "krill 0.1.6 and later carry an "
+        "RNA004 poly(A) model.\n"
+        f"  Upgrade:   {KRILL_UPGRADE}"
+    )
 
 
 def _primary_records(bam):
@@ -499,6 +546,7 @@ def run_preflight(
     check_annotation(gtf_path, lengths, report)
     infos = check_signal(signal_path, report.signal_format, ids, report, bam_path=bam_path)
     report.pore = resolve_pore(pore, infos, report)
+    check_polya_backend(report.pore, report)
     logger.info(
         "preflight ok: signal=%s, pore=%s (%s), %d reads sampled (%d spliced, %s with signal), "
         "%d warning(s)",

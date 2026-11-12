@@ -196,7 +196,7 @@ These are different and the distinction matters when reading a run:
 
 | Situation | Behaviour |
 |---|---|
-| krill not installed | the command line **stops at start-up** (`fin/preflight.py:93`); through the Python API, or with `--no-preflight`, the unguarded import **raises** at the first interval that reaches assignment (`fin/pipeline/assignment.py:387`) |
+| krill not installed | the command line **stops at start-up** (`fin/preflight.py:94`); through the Python API, or with `--no-preflight`, the unguarded import **raises** at the first interval that reaches assignment (`fin/pipeline/assignment.py:387`) |
 | krill imports, backend yields no aligner | AS ties preserved, no junction scores (`fin/pipeline/assignment.py:414`) |
 | invalid sequence payload, missing result, too few scored hypotheses | abstain (`fin/pipeline/assignment.py:517`, `:593`, `:650`) |
 | a batch call fails | per-read fallback for the reads of that call only |
@@ -323,7 +323,8 @@ the refit diagnostics only.
 candidate, including TPM), `junction_support.tsv`, `abundance_refit.json`,
 `run_manifest.json`, `run_summary.json` (written last, by the command line),
 and a folded-TSS recovery report where applicable
-(`fin/pipeline/runner.py:344`, `:355`, `:534`, `fin/cli.py:840`). Artifacts
+(`fin/pipeline/runner.py:344`, `:355`, `:534`; the manifest at
+`fin/cli.py:840`, the summary at `fin/cli.py:884`). Artifacts
 are conditional -- an empty or failed run does not produce all of them. Field
 definitions are in [`USAGE.md`](USAGE.md).
 
