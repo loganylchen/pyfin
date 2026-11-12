@@ -10,7 +10,6 @@ This module provides centralized logging configuration with:
 
 import logging
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 
@@ -79,30 +78,32 @@ def setup_logger(
 
 def get_package_logger(name: str, **kwargs) -> logging.Logger:
     """
-    Get a logger instance configured for the py-fin package
+    Get the logger of a PyFIN module.
 
-    This is a convenient wrapper around setup_logger with sensible defaults
-    for the py-fin package.
+    Called with the name alone -- how the package's own modules use it -- this
+    returns the plain module logger. It carries no handler of its own and
+    propagates to the ``fin`` logger, which the command line configures. It
+    writes no file: a library must not create ``./logs`` in whatever directory
+    it happens to be imported from.
+
+    Called with options (``level``, ``log_file``, ...) it configures that
+    logger explicitly through :func:`setup_logger`. A log file is written only
+    when ``log_file`` is given.
 
     Args:
         name: Logger name (use __name__)
         **kwargs: Additional arguments passed to setup_logger
 
     Returns:
-        Configured logger instance
+        Logger instance
 
     Example:
         >>> from fin.utils.log_config import get_package_logger
         >>> logger = get_package_logger(__name__)
         >>> logger.info("Starting analysis")
     """
-    # Set default log file if not specified
-    if 'log_file' not in kwargs:
-        # Create logs directory in current working directory
-        log_dir = Path.cwd() / 'logs'
-        log_dir.mkdir(exist_ok=True)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        kwargs['log_file'] = str(log_dir / f'fin_{timestamp}.log')
+    if not kwargs:
+        return logging.getLogger(name)
 
     logger = setup_logger(name, **kwargs)
 

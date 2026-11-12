@@ -31,19 +31,11 @@ try:
 except ImportError:
     _CUPY_AVAILABLE = False
 
-# Initialize package logger
-package_logger = get_package_logger(__name__, level="INFO")
+# Importing the package configures nothing and writes nothing: the command line
+# sets up logging (fin.cli), and a program embedding PyFIN sets up its own.
+import logging as _logging
 
-# Log package initialization
-package_logger.info(f"Package initialized - version {__version__}")
-
-if not _DTW_AVAILABLE:
-    package_logger.info(
-        f"_dtw CUDA extension not available (optional). Error: {_DTW_IMPORT_ERROR}"
-    )
-
-if _CUPY_AVAILABLE:
-    package_logger.info("CuPy GPU acceleration available for EM algorithm")
+_logging.getLogger(__name__).addHandler(_logging.NullHandler())
 
 __all__ = [
     "io",

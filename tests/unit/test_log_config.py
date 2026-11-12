@@ -213,15 +213,22 @@ class TestGetPackageLogger:
         logger = get_package_logger("test_pkg_logger")
         assert isinstance(logger, logging.Logger)
 
-    def test_get_package_logger_creates_log_file(self):
-        """Test that get_package_logger creates a log file."""
-        # This test may create files in the current directory
-        logger = get_package_logger("test_pkg_creates_file")
-        
-        # Check that a file handler was added
-        file_handlers = [h for h in logger.handlers 
-                        if isinstance(h, logging.FileHandler)]
-        assert len(file_handlers) >= 1
+    def test_get_package_logger_writes_no_file_unless_asked(self, tmp_path, monkeypatch):
+        """With the name alone it is the plain module logger: no handler, no ./logs."""
+        monkeypatch.chdir(tmp_path)
+        logger = get_package_logger("fin.test_pkg_no_file")
+
+        assert logger is logging.getLogger("fin.test_pkg_no_file")
+        assert logger.handlers == [] and logger.propagate
+        logger.info("goes to whatever the application configured")
+        assert list(tmp_path.iterdir()) == []
+
+    def test_configuring_a_level_alone_writes_no_file_either(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        logger = get_package_logger("test_pkg_level_only", level="INFO")
+
+        assert not [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
+        assert list(tmp_path.iterdir()) == []
 
     def test_get_package_logger_accepts_custom_level(self):
         """Test that get_package_logger accepts custom log level."""
