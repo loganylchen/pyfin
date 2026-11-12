@@ -102,7 +102,8 @@ def check_backend(m2_metric: str) -> None:
             f"cannot be imported ({exc}).\n"
             f"  Install it:   {KRILL_INSTALL}\n"
             "  krill is NOT the package of the same name on PyPI; use the index above.\n"
-            "  For a sequence-only assembly instead, pass --m2-metric off."
+            "  To run without it, pass --m2-metric off: splice junctions are then decided by\n"
+            "  sequence alone, and without krill there is no poly(A) evidence from the signal."
         ) from exc
 
 

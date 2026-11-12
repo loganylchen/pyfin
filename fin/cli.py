@@ -141,7 +141,7 @@ def _print_all_options(ctx, _param, value):
     type=click.Choice(["real-drna", "real-drna-precision", "sirv", "custom"]),
     default="real-drna",
     show_default=True,
-    help="Resolved scientific operating point. Explicit CLI options override profile values. Use 'sirv' for synthetic benchmarking, balanced 'real-drna' for biological samples, 'real-drna-precision' for the validated higher-F1/lower-recall support floor, or 'custom' for raw option defaults.",
+    help="Resolved scientific operating point. Explicit CLI options override profile values. Use 'sirv' for synthetic benchmarking, balanced 'real-drna' for biological samples, 'real-drna-precision' for a higher read-support floor on novel models (precision-oriented; not benchmarked in combination with the current defaults), or 'custom' for raw option defaults.",
 )
 @click.option("--gpu/--no-gpu", "use_gpu", default=True, show_default=True, help="Enable/disable GPU acceleration.")
 @click.option(
