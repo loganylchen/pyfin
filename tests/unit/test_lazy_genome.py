@@ -84,7 +84,7 @@ def test_cli_exposes_genome_flags():
     from click.testing import CliRunner
     from fin.cli import main
 
-    out = CliRunner().invoke(main, ["--help"]).output
+    out = CliRunner().invoke(main, ["--help-all"]).output
     assert "--lazy-genome" in out and "--no-lazy-genome" in out
     assert "--genome-cache-chroms" in out
 

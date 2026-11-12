@@ -112,7 +112,23 @@ def _print_version(ctx, _param, value):
     ctx.exit()
 
 
+def _print_all_options(ctx, _param, value):
+    if not value or ctx.resilient_parsing:
+        return
+    import copy
+
+    # render from copies: the command object is shared by every invocation in
+    # the process, and its options must stay hidden for the others
+    full = copy.copy(ctx.command)
+    full.params = [copy.copy(param) for param in ctx.command.params]
+    for param in full.params:
+        param.hidden = False
+    click.echo(full.get_help(ctx))
+    ctx.exit()
+
+
 @click.group(invoke_without_command=True)
+@click.option("--help-all", is_flag=True, callback=_print_all_options, expose_value=False, is_eager=True, help="Show every option, including the experimental switches and diagnostics that --help leaves out, then exit.")
 @click.option("--version", is_flag=True, callback=_print_version, expose_value=False, is_eager=True, help="Print the versions of PyFIN and of its alignment and signal libraries, then exit.")
 @click.option("--bam", default=None, type=click.Path(exists=True), help="Input BAM file.")
 @click.option("--gtf", default=None, type=click.Path(), help="Reference GTF annotation file (optional).")
@@ -470,6 +486,9 @@ def main(
     Performs reference-based transcriptome assembly with EM-based abundance/TPM
     quantification baked into the output. Pass --fusion to additionally detect
     gene fusions.
+
+    Required: --bam, --genome, --signal, --output-dir. --help lists the options
+    an ordinary run needs; --help-all lists every option.
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -886,6 +905,27 @@ def main(
     )
 
     click.echo(f"Assembly output written to {output_dir}/")
+
+
+# What --help lists: the inputs, the profile, and the settings a user is meant to
+# choose. Every other option is an experimental switch, a diagnostic, or a value
+# the profile owns; it parses and behaves exactly as before, and --help-all
+# lists it.
+_COMMON_OPTIONS = frozenset({
+    "help_all", "version",
+    "bam", "genome", "signal", "gtf", "fastq", "output_dir",
+    "profile", "pore", "signal_format", "preflight_enabled",
+    "threads", "use_gpu", "gpu_workers",
+    "min_abundance", "min_gtf_abundance", "min_novel_reads", "min_isoform_fraction",
+    "min_mono_exon_reads", "m2_metric", "tpm_length_normalize",
+    "fusion_enabled", "min_support", "max_dist", "flank_bp",
+    "fusion_junction_tolerance", "fusion_max_internal_gap_bp",
+    "verbose",
+})
+for _param in main.params:
+    if isinstance(_param, click.Option) and _param.name not in _COMMON_OPTIONS:
+        _param.hidden = True
+assert _COMMON_OPTIONS <= {p.name for p in main.params}, "an option named in _COMMON_OPTIONS does not exist"
 
 
 if __name__ == "__main__":

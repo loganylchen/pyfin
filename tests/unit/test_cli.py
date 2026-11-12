@@ -16,12 +16,13 @@ def run_cli(*args):
 
 
 # ---------------------------------------------------------------------------
-# Default command (assembly) — fin --help exposes assembly + fusion flags
+# Default command (assembly). --help lists the options an ordinary run needs;
+# --help-all lists every option, including the experimental switches.
 # ---------------------------------------------------------------------------
 
 
-def test_default_help_shows_assembly_flags():
-    r = run_cli("--help")
+def test_help_all_shows_assembly_flags():
+    r = run_cli("--help-all")
     assert r.returncode == 0, f"Expected exit 0, got {r.returncode}\n{r.stderr}"
     for flag in [
         "--bam",
@@ -55,8 +56,8 @@ def test_default_help_shows_fusion_flags():
         assert flag in r.stdout, f"Missing fusion flag in fin --help: {flag}"
 
 
-def test_default_help_shows_containment_flags():
-    r = run_cli("--help")
+def test_help_all_shows_containment_flags():
+    r = run_cli("--help-all")
     assert r.returncode == 0
     for flag in [
         "--containment-collapse",
@@ -66,8 +67,8 @@ def test_default_help_shows_containment_flags():
         assert flag in r.stdout, f"Missing containment flag in fin --help: {flag}"
 
 
-def test_default_help_shows_mono_exon_flags():
-    r = run_cli("--help")
+def test_help_all_shows_mono_exon_flags():
+    r = run_cli("--help-all")
     assert r.returncode == 0
     for flag in [
         "--drop-mono-exon-novel",
@@ -77,8 +78,8 @@ def test_default_help_shows_mono_exon_flags():
         assert flag in r.stdout, f"Missing mono-exon flag in fin --help: {flag}"
 
 
-def test_default_help_shows_junction_snap_flags():
-    r = run_cli("--help")
+def test_help_all_shows_junction_snap_flags():
+    r = run_cli("--help-all")
     assert r.returncode == 0
     for flag in [
         "--junction-snap",
@@ -89,15 +90,15 @@ def test_default_help_shows_junction_snap_flags():
         assert flag in r.stdout, f"Missing junction-snap flag in fin --help: {flag}"
 
 
-def test_default_help_shows_junction_support_flags():
-    r = run_cli("--help")
+def test_help_all_shows_junction_support_flags():
+    r = run_cli("--help-all")
     assert r.returncode == 0
     for flag in ["--novel-junction-min-reads", "--novel-junction-reads-tol"]:
         assert flag in r.stdout, f"Missing junction-support flag in fin --help: {flag}"
 
 
-def test_default_help_shows_junction_dominance_flags():
-    r = run_cli("--help")
+def test_help_all_shows_junction_dominance_flags():
+    r = run_cli("--help-all")
     assert r.returncode == 0
     for flag in [
         "--junction-dominance-filter",
@@ -206,3 +207,48 @@ def test_gpu_workers_exceeds_threads_rejected(tmp_path):
     )
     assert r.returncode != 0
     assert "gpu-workers" in (r.stdout + r.stderr).lower()
+
+
+# ---------------------------------------------------------------------------
+# --help is short on purpose; nothing it leaves out stops working
+# ---------------------------------------------------------------------------
+
+def _options(text):
+    import re
+
+    return set(re.findall(r"^  (?:-\w, )?(--[a-z0-9-]+)", text, re.M))
+
+
+def test_help_lists_what_an_ordinary_run_needs_and_little_else():
+    shown = _options(run_cli("--help").stdout)
+    for flag in ("--bam", "--genome", "--signal", "--gtf", "--output-dir", "--profile", "--pore",
+                 "--threads", "--gpu", "--fusion", "--preflight", "--tpm-length-normalize",
+                 "--m2-metric", "--version", "--help-all", "--help"):
+        assert flag in shown, flag
+    for flag in ("--m2-summed-llr-margin", "--junction-election-mode", "--m2-batch-pairs",
+                 "--selection-audit", "--denovo-graph", "--m2-scramble-seed"):
+        assert flag not in shown, flag
+    assert len(shown) <= 35
+
+
+def test_help_all_lists_everything_help_lists_and_much_more():
+    short, full = _options(run_cli("--help").stdout), _options(run_cli("--help-all").stdout)
+    assert short < full and len(full) > 140
+    assert "--m2-batch-pairs" in full and "--junction-election-mode" in full
+
+
+def test_help_all_does_not_change_what_help_shows_afterwards():
+    from click.testing import CliRunner
+
+    from fin.cli import main
+
+    before = CliRunner().invoke(main, ["--help"]).output
+    assert CliRunner().invoke(main, ["--help-all"]).exit_code == 0
+    assert CliRunner().invoke(main, ["--help"]).output == before
+
+
+def test_an_option_left_out_of_help_still_parses_and_validates():
+    r = run_cli("--junction-election-mode", "bogus")
+    assert r.returncode == 2 and "Invalid value" in r.stderr
+    r = run_cli("--m2-batch-pairs", "0")
+    assert r.returncode == 2 and "m2-batch-pairs" in r.stderr

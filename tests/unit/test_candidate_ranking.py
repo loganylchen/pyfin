@@ -218,7 +218,7 @@ def test_cli_rejects_invalid_ranking_options():
     assert "Invalid value" in bad.output and "ranking-mode" in bad.output
     bad_thr = CliRunner().invoke(main, ["--ranking-threshold", "notafloat"])
     assert bad_thr.exit_code != 0
-    help_out = CliRunner().invoke(main, ["--help"])
+    help_out = CliRunner().invoke(main, ["--help-all"])
     assert "--ranking-mode" in help_out.output
     assert "--endpoint-refine" in help_out.output
     assert "--m2-contrast-stats-jsonl" in help_out.output

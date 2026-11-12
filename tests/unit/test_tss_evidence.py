@@ -223,7 +223,7 @@ def test_config_validates_tss_mode_and_requires_endpoint_refine(tmp_path):
 def test_cli_exposes_tss_evidence_mode():
     from click.testing import CliRunner
     from fin.cli import main
-    out = CliRunner().invoke(main, ["--help"]).output
+    out = CliRunner().invoke(main, ["--help-all"]).output
     assert "--tss-evidence-mode" in out
     bad = CliRunner().invoke(main, ["--tss-evidence-mode", "bogus"])
     assert bad.exit_code != 0
