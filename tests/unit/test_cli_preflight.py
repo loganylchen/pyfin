@@ -119,6 +119,14 @@ def test_placeholder_inputs_are_caught_by_the_real_checks(invoke):
     assert _Runner.configs == []
 
 
+def test_tpm_is_the_direct_rna_convention_unless_asked(invoke):
+    assert invoke("--no-preflight").exit_code == 0
+    assert _config().tpm_length_normalize is False
+    _Runner.configs.clear()
+    assert invoke("--no-preflight", "--tpm-length-normalize").exit_code == 0
+    assert _config().tpm_length_normalize is True
+
+
 def test_the_summary_is_written_after_the_fusion_analysis_and_not_if_it_fails(invoke, monkeypatch, tmp_path):
     import json
 

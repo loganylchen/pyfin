@@ -199,7 +199,10 @@ def test_real_cli_assembly_bytes_match_prechange_baseline_with_fusion_off_and_on
     command = [sys.executable, "-m", "fin.cli", "--bam", str(bam), "--genome", str(reference),
                "--gtf", str(gtf), "--fastq", str(fastq), "--signal", str(signal),
                "--signal-format", "slow5", "--no-gpu", "--m2-metric", "off",
-               "--assignment-channels", "none", "--folded-tss-recovery-mode", "off"]
+               "--assignment-channels", "none", "--folded-tss-recovery-mode", "off",
+               # the baseline was measured when length-normalised TPM was the default;
+               # the flag keeps scores.tsv and the refit diagnostics comparable with it
+               "--tpm-length-normalize"]
     for mode in ("off", "on"):
         output = tmp_path / mode
         execution = subprocess.run(command + ["--output-dir", str(output)] + (["--fusion"] if mode == "on" else []),
@@ -220,6 +223,24 @@ def test_real_cli_assembly_bytes_match_prechange_baseline_with_fusion_off_and_on
     assert len(rows) == 1
     assert rows[0]["arm_count"] == "3"
     assert rows[0]["full_read_support"] == "2"
+
+    # The default TPM convention (direct RNA) moves the tpm column and nothing else:
+    # the assembly is byte-identical to the same baseline.
+    default = tmp_path / "default"
+    execution = subprocess.run([a for a in command if a != "--tpm-length-normalize"]
+                               + ["--output-dir", str(default)],
+                               cwd=source_root, capture_output=True, text=True, timeout=90)
+    assert execution.returncode == 0, execution.stdout + execution.stderr
+    assert hashlib.sha256((default / "assembly.gtf").read_bytes()).hexdigest() == baseline["assembly.gtf"]
+
+    def table(path):
+        with path.open() as handle:
+            return list(csv.DictReader(handle, delimiter="\t"))
+
+    old, new = table(tmp_path / "off" / "scores.tsv"), table(default / "scores.tsv")
+    assert [{k: v for k, v in r.items() if k != "tpm"} for r in old] == [
+        {k: v for k, v in r.items() if k != "tpm"} for r in new]
+    assert [r["tpm"] for r in old] != [r["tpm"] for r in new]
     assert not (tmp_path / "off" / "fusion").exists()
 
 

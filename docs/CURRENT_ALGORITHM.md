@@ -291,14 +291,12 @@ selection subtracts qualifying annotated candidates from the drop set
 ### 6.1 Quantification and TPM
 
 Abundance is the fractional EM mass. `num_reads` is the hard argmax count.
-TPM by default **divides abundance by transcript length**
-(`tpm_length_normalize=True`, `fin/pipeline/config.py:509`), which is the
-short-read convention. `--no-tpm-length-normalize` **still normalises to one
-million**, it simply stops dividing by length:
-`TPM = 1e6 * abundance / sum(abundances)` (`fin/analysis/quantification.py:554`).
-That is the direct-RNA convention. Disabling length normalisation does not
-disable million-sum normalisation, so the TPM column is not generally the raw
-abundance.
+TPM by default is the direct-RNA convention, a million-sum share of abundance:
+`TPM = 1e6 * abundance / sum(abundances)` (`tpm_length_normalize=False`,
+`fin/pipeline/config.py:511`; `fin/analysis/quantification.py:554`). It is not
+generally the raw abundance. `--tpm-length-normalize` **divides abundance by
+transcript length** before the million-sum, which is the short-read
+convention and was the default before v1.0.
 
 **No structural decision reads TPM.** The flag changes the reported column and
 the refit diagnostics only.

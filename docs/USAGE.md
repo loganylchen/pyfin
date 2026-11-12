@@ -235,21 +235,24 @@ Default assembly outputs land in `--output-dir`:
 
 ### 3.2 TPM carries a convention you should choose deliberately
 
-By default TPM **divides abundance by transcript length**. That is the
-short-read convention, and it exists because fragmentation makes a longer
-transcript yield proportionally more reads.
+By default the `tpm` column is the **direct-RNA convention**:
+`tpm = 1e6 * abundance / sum(abundances)`. Direct RNA is not fragmented: one
+molecule yields at most one read regardless of its length, so the read count
+already is the per-molecule quantity. This is what NanoCount and
+`salmon --ont` report. Note that it is a million-sum share, not the raw
+abundance -- the two coincide only when the abundances happen to sum to a
+million.
 
-Direct RNA is not fragmented that way: one molecule yields at most one read
-regardless of length. `--no-tpm-length-normalize` stops dividing by length --
-but it **still normalises to one million**:
-`TPM = 1e6 * abundance / sum(abundances)`. Disabling length normalisation does
-not disable million-sum normalisation, so the TPM column is not generally the
-raw abundance -- it coincides only in the degenerate cases where the
-abundances already sum to a million, or are zero. This is the convention
-NanoCount and `salmon --ont` use.
+`--tpm-length-normalize` divides abundance by transcript length first. That is
+the short-read convention, which exists because fragmentation makes a longer
+transcript yield proportionally more reads. It was PyFIN's default before
+v1.0; pass the flag to reproduce older tables.
 
-Neither is an unbiased estimate of molarity. Pick the one that matches what
-you are comparing against, and say which you used.
+Neither is an unbiased estimate of molarity. Against the known input
+concentrations of the Sequin spike-in the default agrees better overall, and
+the length-normalised value agrees better on transcripts of 2 kb and longer.
+Pick the one that matches what you are comparing against, and say which you
+used.
 
 **This flag changes reporting only.** No structural selection decision reads
 the TPM column; the transcript set is identical either way.

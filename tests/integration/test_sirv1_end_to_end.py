@@ -138,6 +138,52 @@ def test_resource_settings_do_not_move_the_assembly(default_run, tmp_path, extra
         assert summaries[0][key] == summaries[1][key]
 
 
+def _scores(path: Path):
+    lines = path.read_text().splitlines()
+    header = lines[0].split("\t")
+    return [dict(zip(header, line.split("\t"))) for line in lines[1:]]
+
+
+def _spliced_lengths(gtf: Path):
+    lengths = {}
+    for line in gtf.read_text().splitlines():
+        fields = line.split("\t")
+        if len(fields) > 8 and fields[2] == "exon":
+            tid = re.search(r'transcript_id "([^"]*)"', fields[8]).group(1)
+            lengths[tid] = lengths.get(tid, 0) + int(fields[4]) - int(fields[3]) + 1
+    return lengths
+
+
+def _all_but_tpm(rows):
+    """Every column except tpm, with the spelling of minted novel ids masked."""
+    return sorted(
+        tuple((k, struct_compare._mask(v)) for k, v in row.items() if k != "tpm") for row in rows
+    )
+
+
+def test_tpm_is_a_share_of_abundance_and_length_normalising_changes_only_that_column(default_run, tmp_path):
+    out, _log = default_run
+    rows = _scores(out / "scores.tsv")
+    total = sum(float(r["abundance"]) for r in rows)
+    for row in rows:
+        assert float(row["tpm"]) == pytest.approx(1e6 * float(row["abundance"]) / total, rel=1e-4)
+
+    other = tmp_path / "out"
+    result = _pyfin(other, "--tpm-length-normalize")
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert struct_compare.records(str(out / "assembly.gtf")) == struct_compare.records(
+        str(other / "assembly.gtf"))
+    by_length = _scores(other / "scores.tsv")
+    assert _all_but_tpm(rows) == _all_but_tpm(by_length)        # nothing but tpm moved
+
+    lengths = _spliced_lengths(other / "assembly.gtf")
+    density = {r["candidate_id"]: float(r["abundance"]) / lengths[r["candidate_id"]] for r in by_length}
+    for row in by_length:
+        expected = 1e6 * density[row["candidate_id"]] / sum(density.values())
+        assert float(row["tpm"]) == pytest.approx(expected, rel=1e-3)
+    assert sorted(float(r["tpm"]) for r in rows) != sorted(float(r["tpm"]) for r in by_length)
+
+
 def test_an_engine_that_does_not_score_ties_reports_its_signal_counters_as_unknown(tmp_path):
     result = _pyfin(tmp_path / "out", "--quant-mode", "argmax")
     assert result.returncode == 0, result.stderr[-3000:]

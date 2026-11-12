@@ -497,16 +497,18 @@ class PipelineConfig:
     # first, |offset| median 8 bp with 57% within 10 -- so its floor is
     # separate and defaults to the same 0 (no floor) until measured per sample.
     # 0 disables (byte-identical). Opt-in.
-    # TPM convention. True (default) = the short-read one, abundance/length_kb.
-    # False = the direct-RNA one used by NanoCount and `salmon --ont`: a whole
-    # molecule yields at most one read regardless of length, so the count does
-    # not carry the length factor that short-read normalisation removes, and
-    # dividing by length gives an inverse-length-weighted quantity. Measured
+    # TPM convention. False (default) = the direct-RNA one used by NanoCount and
+    # `salmon --ont`: a whole molecule yields at most one read regardless of
+    # length, so the count does not carry the length factor that short-read
+    # normalisation removes, and tpm = 1e6 * abundance / sum(abundance).
+    # True = the short-read one, abundance/length_kb before the million-sum;
+    # on direct RNA that is an inverse-length-weighted quantity. Measured
     # against the Sequin spike-in's known input molarity, the un-normalised
     # count agrees better in aggregate but is WORSE on transcripts >= 2 kb (see
-    # analysis.quantification.compute_tpm). No structural selection decision
-    # consumes tpm -- it affects TSV reporting and refit diagnostics only.
-    tpm_length_normalize: bool = True
+    # analysis.quantification.compute_tpm). The default was True until v1.0.
+    # No structural selection decision consumes tpm -- it affects TSV reporting
+    # and refit diagnostics only.
+    tpm_length_normalize: bool = False
     # Per-sample gate on the 5' read-extent contradiction. The mechanism repairs
     # a truncated annotated TSS where reads are full-length and is mostly noise
     # where they are 5'-degraded, so the question is not "on or off" but "does
