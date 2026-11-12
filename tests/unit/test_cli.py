@@ -174,6 +174,8 @@ def _required_args(tmp_path):
         path.touch()
         paths.extend((flag, str(path)))
     paths.extend(("--output-dir", str(tmp_path / "out")))
+    # empty placeholder files: there is nothing for the input checks to inspect
+    paths.append("--no-preflight")
     return paths
 
 

@@ -254,7 +254,7 @@ def test_cli_valid_ranking_values_reach_config(monkeypatch, tmp_path, mode, thre
     gen = tmp_path / "g.fa"; gen.touch()
     args = ["--bam", str(bam), "--genome", str(gen), "--fastq", str(fq),
             "--signal", str(sig), "--output-dir", str(tmp_path / "out"),
-            "--ranking-mode", mode]
+            "--no-preflight", "--ranking-mode", mode]
     if threshold is not None:
         args += ["--ranking-threshold", threshold]
     res = CliRunner().invoke(cli_mod.main, args)

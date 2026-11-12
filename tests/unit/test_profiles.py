@@ -40,6 +40,8 @@ def _required_args(tmp_path):
         "--signal", paths["signal.blow5"],
         "--output-dir", str(output),
         "--no-gpu",
+        # empty placeholder files: there is nothing for the input checks to inspect
+        "--no-preflight",
     ], output
 
 

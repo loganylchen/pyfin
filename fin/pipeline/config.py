@@ -1484,6 +1484,10 @@ class PipelineConfig:
             raise ValueError("m2_summed_llr_flank must be >= 1")
         if self.m2_batch_pairs < 1:
             raise ValueError("m2_batch_pairs must be >= 1")
+        if self.krill_pore not in ("rna002", "rna004"):
+            raise ValueError(f"krill_pore must be 'rna002' or 'rna004', got {self.krill_pore!r}")
+        if self.signal_format not in ("slow5", "pod5"):
+            raise ValueError(f"signal_format must be 'slow5' or 'pod5', got {self.signal_format!r}")
         if self.junction_snap_tolerance < 1:
             raise ValueError("junction_snap_tolerance must be >= 1")
         if self.junction_snap_min_support < 1:

@@ -111,8 +111,8 @@ def _print_version(ctx, _param, value):
 @click.option("--bam", default=None, type=click.Path(exists=True), help="Input BAM file.")
 @click.option("--gtf", default=None, type=click.Path(), help="Reference GTF annotation file (optional).")
 @click.option("--genome", default=None, type=click.Path(exists=True), help="Genome FASTA file.")
-@click.option("--fastq", default=None, type=click.Path(exists=True), help="FASTQ reads file.")
-@click.option("--signal", default=None, type=click.Path(exists=True), help="SLOW5/BLOW5/POD5 signal file.")
+@click.option("--fastq", default=None, type=click.Path(exists=True), help="Reads in FASTQ. Optional: the assembly takes read sequences from the BAM. With --fusion it is used to recover the sequence of hard-clipped supplementary alignments.")
+@click.option("--signal", default=None, type=click.Path(exists=True), help="Raw signal of the same reads, SLOW5 or BLOW5. A POD5 run must be converted first (blue-crab p2s).")
 @click.option("--output-dir", default=None, help="Output directory.")
 @click.option(
     "--profile",
@@ -124,11 +124,19 @@ def _print_version(ctx, _param, value):
 @click.option("--gpu/--no-gpu", "use_gpu", default=True, show_default=True, help="Enable/disable GPU acceleration.")
 @click.option(
     "--signal-format",
-    default="slow5",
-    type=click.Choice(["slow5", "pod5"]),
+    default="auto",
+    type=click.Choice(["auto", "slow5", "pod5"]),
     show_default=True,
-    help="Signal file format.",
+    help="Signal file format. 'auto' decides from the file name (.blow5/.slow5).",
 )
+@click.option(
+    "--pore",
+    default="auto",
+    type=click.Choice(["auto", "rna002", "rna004"]),
+    show_default=True,
+    help="Pore model used to score the raw signal. 'auto' reads the sequencing kit (or, failing that, the sampling rate) from the signal file header and falls back to rna002 with a warning when the header says neither.",
+)
+@click.option("--preflight/--no-preflight", "preflight_enabled", default=True, show_default=True, help="Check that the inputs agree with each other before starting: BAM index, contig names and lengths against the genome and the annotation, the signal backend, and that the signal file holds the reads of the BAM. --no-preflight skips the checks; --pore auto then assumes rna002.")
 @click.option("--fusion", "fusion_enabled", is_flag=True, default=False, help="Run independent multi-gene fusion analysis after unchanged assembly; outputs in OUTPUT_DIR/fusion/.")
 @click.option("--min-support", default=2, show_default=True, type=click.IntRange(min=1), help="Minimum distinct reads spanning the complete fusion chain (only with --fusion).")
 @click.option("--max-dist", default=6, show_default=True, type=click.IntRange(min=0), help="Maximum cluster diameter in breakpoint coordinates, not transitive linkage (only with --fusion).")
@@ -303,6 +311,8 @@ def main(
     profile,
     use_gpu,
     signal_format,
+    pore,
+    preflight_enabled,
     fusion_enabled,
     min_support,
     max_dist,
@@ -463,8 +473,6 @@ def main(
         missing.append("--bam")
     if not genome:
         missing.append("--genome")
-    if not fastq:
-        missing.append("--fastq")
     if not signal:
         missing.append("--signal")
     if not output_dir:
@@ -473,6 +481,14 @@ def main(
         click.echo(f"Error: missing required option(s): {', '.join(missing)}", err=True)
         click.echo(ctx.get_help(), err=True)
         sys.exit(2)
+
+    from fin.preflight import PreflightError, refuse_pod5, resolve_signal_format, run_preflight
+
+    try:
+        signal_format = resolve_signal_format(signal, signal_format)
+        refuse_pod5(signal, signal_format)  # even under --no-preflight
+    except PreflightError as exc:
+        raise click.UsageError(str(exc)) from exc
 
     if threads < 1:
         raise click.BadParameter("must be >= 1", param_hint="--threads")
@@ -586,8 +602,6 @@ def main(
     snap_merge_chain = resolved["snap_merge_chain"]
     m2_support_gate_attest_reads = resolved["m2_support_gate_attest_reads"]
 
-    os.makedirs(output_dir, exist_ok=True)
-
     cfg = PipelineConfig(
         bam_path=bam,
         profile=profile,
@@ -602,6 +616,8 @@ def main(
         output_bedpe=None,
         use_gpu=use_gpu,
         signal_format=signal_format,
+        # 'auto' is resolved from the signal header by the preflight below
+        krill_pore="rna002" if pore == "auto" else pore,
         fusion_enabled=False,
         max_reads_per_interval_for_dtw=max_reads_for_dtw,
         min_novel_reads=min_novel_reads,
@@ -753,6 +769,24 @@ def main(
 
     import logging
 
+    if preflight_enabled:
+        # after validate(), which resolves m2_metric=auto: the backend check
+        # needs to know whether signal scoring will actually run
+        try:
+            report = run_preflight(
+                bam_path=bam, genome_path=genome, signal_path=signal,
+                signal_format=signal_format, m2_metric=cfg.m2_metric, pore=pore,
+                gtf_path=gtf, fusion=fusion_enabled, fastq_path=fastq,
+            )
+        except PreflightError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(2)
+        cfg.krill_pore = report.pore
+    elif pore == "auto":
+        logging.getLogger(__name__).warning(
+            "--no-preflight: the pore model was not read from the signal file; assuming rna002"
+        )
+
     logging.getLogger(__name__).info(
         "Resolved profile=%s overrides=%s m2_metric=%s(%s) abundance=%s%s/%s refit=%s full=%s polyA=%s",
         cfg.profile,
@@ -766,6 +800,8 @@ def main(
         cfg.min_fulllen_fraction,
         cfg.min_polya5p_reads,
     )
+    # nothing is written, not even the directory, until the inputs passed their checks
+    os.makedirs(output_dir, exist_ok=True)
     _write_run_manifest(cfg, output_dir)
 
     from contextlib import nullcontext
