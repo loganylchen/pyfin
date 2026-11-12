@@ -109,15 +109,14 @@ What is cached is the common evidence, never a verdict about a candidate.
 ## 3. Pre-assignment gates
 
 These run before any read is assigned, and they remove *candidates* without
-removing those candidates' reads from the competition pool.
+removing those candidates' reads from the competition pool. The novel-junction
+read-support requirement is **not** one of them: it runs after assignment, in
+interval selection (§5.2).
 
 - **Canonical gate** (on): a novel multi-exon candidate with any non-canonical
   junction is dropped. GTF, fusion and mono candidates are exempt
   (`fin/pipeline/selection.py:1055`). A candidate removed here cannot be
   repaired by the later junction snap -- it no longer exists.
-- **Novel junction support** (2 reads): a novel multi-exon candidate is dropped
-  if any of its junctions is observed by fewer than two same-strand primary
-  CIGAR introns within tolerance.
 - **Junction dominance** is an additional conditional branch
   (`fin/pipeline/runner.py:815`) and is **off** by default
   (`fin/pipeline/config.py:990`).
@@ -202,7 +201,15 @@ container.
 
 ### 5.2 Interval selection, and the support gate
 
-Extent is resolved first, then support, then containment, then mono.
+Extent is resolved first, then the wobble-shadow recheck, then novel junction
+support, then the support gate, then containment, then mono
+(`fin/pipeline/selection.py:257`, `:276`, `:416`, `:448`, `:529`).
+
+**Novel junction support** (2 reads): a novel multi-exon candidate is dropped
+if any of its junctions is observed by fewer than two same-strand primary
+CIGAR introns within 2 bp on both boundaries (`fin/pipeline/selection.py:266`,
+`fin/scoring/m2_junction_nll.py:1096`). GTF, fusion and mono candidates are
+exempt. It is evaluated here, after assignment, not with the §3 gates.
 
 **The ordinary support rule.** A multi-exon candidate (GTF or novel) survives
 the support gate if it is some read's **sole** M1 best, or some read's **M2
