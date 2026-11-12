@@ -2657,6 +2657,16 @@ class PipelineRunner:
             interval.region_string, len(read_ids), len(qo.cand_list),
             qo.n_ties, qo.n_refined,
         )
+        if logger.isEnabledFor(logging.DEBUG):
+            import resource
+
+            # ru_maxrss is this PROCESS's high-water mark (kB on Linux), so it
+            # only ever rises: the interval that moved it is the one to look at.
+            logger.debug(
+                "m2_em interval %s: process peak RSS %.2f GB after this interval",
+                interval.region_string,
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576.0,
+            )
         return quant_results, ledger
 
     def _junction_correction_context(self):

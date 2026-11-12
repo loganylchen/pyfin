@@ -162,6 +162,7 @@ def _write_run_manifest(cfg, output_dir: str) -> None:
 @click.option("--folded-tss-recovery-mode", type=click.Choice(["off", "audit", "require"]), default="off", show_default=True, help="EXPERIMENTAL (m2_em): after the first assignment/EM pass, test every generation-folded 5'-truncation shadow's proposed TSS against its parent's read-5'-end degradation hazard (local background, selection-corrected over the parent's searchable bins). 'audit' writes tss_shadow_recovery.tsv and leaves output byte-identical; 'require' re-emits each 'supported' shadow as its own candidate (in-bin shadow reads as support, parent 3' end) and reruns assignment/EM once so the second pass decides ownership and abundance. Recovered candidates get no gate exemption. The real-drna profiles resolve 'require'.")
 @click.option("--m2-contrast-stats-jsonl/--no-m2-contrast-stats-jsonl", default=False, show_default=True, help="EXPERIMENTAL observability: write per-attempt machine-readable M2 contrast records (per-comparison event counts, mean+sum NLL, margins, coverage, and abstention reasons, plus one aggregate line) as JSONL under <work_dir>/m2_contrasts/.")
 @click.option("--lazy-genome/--no-lazy-genome", default=True, show_default=True, help="Open the genome FASTA as an indexed lazy mapping holding at most --genome-cache-chroms chromosomes per process instead of an eager whole-genome dict. Measured on the tuning sample: whole-job peak RSS 67.1 GB -> 40.9 GB with byte-identical outputs, because each spawn worker no longer duplicates the full genome. --no-lazy-genome restores the historical eager load.")
+@click.option("--m2-batch-pairs", type=click.IntRange(min=1), default=2000, show_default=True, hidden=True, help="Resource limit, not a scientific setting: maximum (read, candidate) pairs per batched krill eventalign call within an interval. Bounds peak memory on extreme-depth intervals. With CPU eventalign any value gives the same assembly; a CUDA-built krill chooses its kernel per batch, so there grouping can move a score, as it could before this bound existed.")
 @click.option("--genome-cache-chroms", type=int, default=2, show_default=True, help="(--lazy-genome) Chromosomes retained per process in the lazy genome LRU.")
 @click.option("--min-fulllen-fraction", default=0.1, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose fraction of full-length assigned reads (read genomic 5' AND 3' both within --fulllen-window-bp of the candidate's ends) is below this (FLAIR/TALON-style full-length read support; signal-free). Orthogonal to --min-isoform-fraction. GTF/fusion/mono and unreachable candidates exempt; 0.0 disables. The SIRV profile resolves 0.1; real-dRNA resolves 0 because genuine 5'-truncated isoforms would otherwise lose recall.")
 @click.option("--max-soft-mass-ratio", default=2.0, show_default=True, type=float, help="Drop NOVEL multi-exon transcripts whose EM soft abundance / hard argmax read count is >= this (0 hard reads always dropped). Real isoforms deposit ~1 soft mass per hard read (ratio ~1); wobble shadows borrow fractional soft crumbs from a high-abundance structural near-copy and show an inflated ratio — catches the high-relative-abundance shadows the fraction/cluster-recheck levers miss. Pure EM evidence (no GTF). GTF/fusion/mono exempt; 0.0 disables. SIRV-tuned default 2.0 (24-cell F1@3 up-or-equal, recall held); re-tune on real dRNA.")
@@ -335,6 +336,7 @@ def main(
     catalog_mode,
     m2_contrast_stats_jsonl,
     lazy_genome,
+    m2_batch_pairs,
     genome_cache_chroms,
     max_soft_mass_ratio,
     min_fulllen_fraction,
@@ -629,6 +631,7 @@ def main(
         m2_contrast_stats_jsonl=m2_contrast_stats_jsonl,
         m2_scramble_seed=m2_scramble_seed,
         lazy_genome=lazy_genome,
+        m2_batch_pairs=m2_batch_pairs,
         genome_cache_chroms=genome_cache_chroms,
         max_soft_mass_ratio=max_soft_mass_ratio,
         min_fulllen_fraction=min_fulllen_fraction,

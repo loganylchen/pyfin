@@ -52,6 +52,24 @@ def _eventalignable_variants(variants: Dict[str, str]) -> bool:
     )
 
 
+def _pair_bounded_chunks(cidj_by_read: Dict[str, Dict[str, int]], max_pairs: int):
+    """Yield read-id lists in insertion order, each closing once it holds >= max_pairs pairs.
+
+    A read is never split: a chunk carries whole reads, so it can exceed ``max_pairs`` by at
+    most one read's tie size minus one.
+    """
+    chunk: List[str] = []
+    n_pairs = 0
+    for rid, per_cidj in cidj_by_read.items():
+        chunk.append(rid)
+        n_pairs += len(per_cidj)
+        if n_pairs >= max_pairs:
+            yield chunk
+            chunk, n_pairs = [], 0
+    if chunk:
+        yield chunk
+
+
 def _raw_tie_sets(raw: np.ndarray, n_c: int) -> Tuple[Dict[int, List[int]], int]:
     """Return exact best-AS tie sets without invoking the signal backend."""
     ties: Dict[int, List[int]] = {}
@@ -426,11 +444,15 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
     # the singular read_cand_mean_nll would have eventaligned, so the batched
     # eventalign below is byte-identical to the per-call path -- only the
     # Python/GIL/per-call overhead is removed.
+    # Only the slice BOUNDS are kept here. The slices themselves are cut per
+    # chunk in pass 2: holding one sequence copy per tied pair for a whole
+    # interval is what an extreme-depth interval (the mitochondrion) cannot
+    # afford.
     gset_by_read: Dict[int, set] = {}
     windows_by_read: Dict[int, List[Tuple[int, int]]] = {}
     spans_by_read: Dict[int, List[Tuple[int, int]]] = {}  # diff-cover gate spans
-    reads_variants: Dict[str, Dict[str, str]] = {}  # rid -> {cand_id: seq}
     starts: Dict[str, Dict[str, int]] = {}          # rid -> {cand_id: r_st}
+    ends: Dict[str, Dict[str, int]] = {}            # rid -> {cand_id: r_en}
     cidj_by_read: Dict[str, Dict[str, int]] = {}     # rid -> {cand_id: col j}
     n_ties = 0
     n_invalid_payloads = 0
@@ -462,6 +484,7 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
         seq = read_seqs[rid]
         per_seqs: Dict[str, str] = {}
         per_starts: Dict[str, int] = {}
+        per_ends: Dict[str, int] = {}
         per_cidj: Dict[str, int] = {}
         for j in tie:
             aln = aligners[j]
@@ -480,6 +503,7 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
             cand = cand_list[j]
             per_seqs[cand.candidate_id] = cand.sequence[best_hit.r_st:best_hit.r_en]
             per_starts[cand.candidate_id] = best_hit.r_st
+            per_ends[cand.candidate_id] = best_hit.r_en
             per_cidj[cand.candidate_id] = j
         if not per_seqs:
             _record_abstention(stats, rid, tie, cand_list, "no_alignment")
@@ -496,8 +520,8 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
             gset_by_read[i] = gset
         if windows:
             windows_by_read[i] = windows
-        reads_variants[rid] = per_seqs
         starts[rid] = per_starts
+        ends[rid] = per_ends
         cidj_by_read[rid] = per_cidj
 
     if n_invalid_payloads:
@@ -506,103 +530,132 @@ def tie_nll(config, kept_read_ids, read_seqs, cand_list, aligners, raw):
             "eventalign sequences; remaining reads stay batched",
             n_invalid_payloads,
         )
-    if not reads_variants:
+    if not cidj_by_read:
         # Every tied read abstained in pass 1; still emit the record set so a
         # fully-abstaining locus is visible in the calibration data.
         _log_contrast_stats(metric, stats, config)
         return nlls_by_read, ties_by_read, n_ties, 0, cover_by_read
 
-    # --- Pass 2: ONE batched eventalign over every tied pair (per-pair start
-    # via the {label: offset} form); per-read singular fallback on absence or
-    # batch failure. Both branches use the configured mean/summed reducer.
+    # --- Pass 2: batched eventalign over the tied pairs (per-pair start via
+    # the {label: offset} form), in chunks of whole reads bounded by
+    # m2_batch_pairs. Each chunk's eventalign output is reduced to its NLLs
+    # and released before the next chunk is aligned, so peak memory tracks
+    # the chunk, not the interval.
+    # With eventalign on the CPU -- every shipped image and every benchmark
+    # run -- a read's result depends only on that read and its own variants,
+    # so the chunk boundaries do not enter the result. A CUDA-built krill is
+    # different, and was before this bound existed: its load balancer sends a
+    # read to the CPU or the GPU kernel by comparing its length with the mean
+    # length of the native batch it lands in, and the two kernels differ in
+    # floating-point precision. There the grouping -- like the composition of
+    # the interval itself -- can move a score.
+    # A chunk whose batch call fails (or a krill without the batch API) takes
+    # the per-read singular path. Both use the configured mean/summed reducer.
     rid_to_i = {rid: i for i, rid in enumerate(kept_read_ids)}
     n_refined = 0
     use_batch = hasattr(krill, "align_reads_variants")
-    batch_out = None
-    if use_batch:
-        try:
-            batch_out = krill.align_reads_variants(
-                sig_path, reads_variants, pore=pore,
-                use_gpu=eff_gpu, num_thread=num_threads,
-                aligner=krill_aligner, start=starts,
-            )
-        except Exception as exc:  # noqa: BLE001 - krill raises broad errors
-            logger.warning("M2 batch eventalign failed (%s); per-read fallback", exc)
-            use_batch = False
-
-    if use_batch and batch_out is not None:
-        for rid in cidj_by_read:
-            if rid not in batch_out:
-                i_missing = rid_to_i.get(rid)
-                _record_abstention(
-                    stats, rid,
-                    ties_by_read.get(i_missing, []) if i_missing is not None else [],
-                    cand_list, "batch_output_missing",
+    fallback_rids: List[str] = []
+    if not use_batch:
+        fallback_rids = list(cidj_by_read)
+    else:
+        batch_pairs = max(1, int(getattr(config, "m2_batch_pairs", 2000)))
+        for chunk in _pair_bounded_chunks(cidj_by_read, batch_pairs):
+            chunk_variants = {
+                rid: {
+                    cid: cand_list[j].sequence[starts[rid][cid]:ends[rid][cid]]
+                    for cid, j in cidj_by_read[rid].items()
+                }
+                for rid in chunk
+            }
+            batch_out = None
+            try:
+                batch_out = krill.align_reads_variants(
+                    sig_path, chunk_variants, pore=pore,
+                    use_gpu=eff_gpu, num_thread=num_threads,
+                    aligner=krill_aligner,
+                    start={rid: starts[rid] for rid in chunk},
                 )
-        for rid, res_list in batch_out.items():
-            i = rid_to_i.get(rid)
-            if i is None:
-                continue
-            gset = gset_by_read.get(i)
-            windows = windows_by_read.get(i, [])
-            if metric == "mean" and gset is None:
-                continue
-            if metric in ("summed_llr", "sqrt_count_mean_llr") and not windows:
-                _record_abstention(
-                    stats, rid, ties_by_read.get(i, []), cand_list, "no_window",
+            except Exception as exc:  # noqa: BLE001 - krill raises broad errors
+                logger.warning(
+                    "M2 batch eventalign failed on %d reads (%s); per-read fallback",
+                    len(chunk), exc,
                 )
+            del chunk_variants
+            if batch_out is None:
+                fallback_rids.extend(chunk)
                 continue
-            by_label = {x.get("variant_label"): x for x in res_list}
-            nlls: Dict[int, float] = {}
-            evs: Dict[int, int] = {}
-            spans = spans_by_read.get(i) if gate else None
-            span_cov = [False] * len(spans) if spans else None
-            for cid, j in cidj_by_read.get(rid, {}).items():
-                res = by_label.get(cid)
-                if res is None or res.get("status", -1) != 0:
+            for rid in chunk:
+                if rid not in batch_out:
+                    i_missing = rid_to_i.get(rid)
+                    _record_abstention(
+                        stats, rid,
+                        ties_by_read.get(i_missing, []) if i_missing is not None else [],
+                        cand_list, "batch_output_missing",
+                    )
+            for rid, res_list in batch_out.items():
+                i = rid_to_i.get(rid)
+                if i is None:
                     continue
-                if metric == "summed_llr":
-                    nll, n_ev = _mean_nll_in_window(
-                        res, cand_list[j], windows, reduce="sum"
+                gset = gset_by_read.get(i)
+                windows = windows_by_read.get(i, [])
+                if metric == "mean" and gset is None:
+                    continue
+                if metric in ("summed_llr", "sqrt_count_mean_llr") and not windows:
+                    _record_abstention(
+                        stats, rid, ties_by_read.get(i, []), cand_list, "no_window",
                     )
-                elif metric == "sqrt_count_mean_llr":
-                    nll, n_ev = _mean_nll_in_window(
-                        res, cand_list[j], windows, reduce="mean"
+                    continue
+                by_label = {x.get("variant_label"): x for x in res_list}
+                nlls: Dict[int, float] = {}
+                evs: Dict[int, int] = {}
+                spans = spans_by_read.get(i) if gate else None
+                span_cov = [False] * len(spans) if spans else None
+                for cid, j in cidj_by_read.get(rid, {}).items():
+                    res = by_label.get(cid)
+                    if res is None or res.get("status", -1) != 0:
+                        continue
+                    if metric == "summed_llr":
+                        nll, n_ev = _mean_nll_in_window(
+                            res, cand_list[j], windows, reduce="sum"
+                        )
+                    elif metric == "sqrt_count_mean_llr":
+                        nll, n_ev = _mean_nll_in_window(
+                            res, cand_list[j], windows, reduce="mean"
+                        )
+                    else:
+                        nll, n_ev = _mean_nll_in_gset(res, cand_list[j], gset)
+                    if n_ev > 0 and np.isfinite(nll):
+                        nlls[j] = float(nll)
+                        evs[j] = int(n_ev)
+                    if span_cov is not None:
+                        egp = event_genomic_positions(res, cand_list[j])
+                        if egp:
+                            for s_idx, (lo, hi) in enumerate(spans):
+                                if not span_cov[s_idx] and read_straddles(egp, lo, hi):
+                                    span_cov[s_idx] = True
+                if len(nlls) >= 2:
+                    cover_val = (all(span_cov) if span_cov else True) if gate else None
+                    nlls = _finalize_contrast(
+                        metric, nlls, evs, stats, read_id=rid,
+                        cand_ids={j: cand_list[j].candidate_id for j in nlls},
+                        coverage=cover_val,
                     )
-                else:
-                    nll, n_ev = _mean_nll_in_gset(res, cand_list[j], gset)
-                if n_ev > 0 and np.isfinite(nll):
-                    nlls[j] = float(nll)
-                    evs[j] = int(n_ev)
-                if span_cov is not None:
-                    egp = event_genomic_positions(res, cand_list[j])
-                    if egp:
-                        for s_idx, (lo, hi) in enumerate(spans):
-                            if not span_cov[s_idx] and read_straddles(egp, lo, hi):
-                                span_cov[s_idx] = True
-            if len(nlls) >= 2:
-                cover_val = (all(span_cov) if span_cov else True) if gate else None
-                nlls = _finalize_contrast(
-                    metric, nlls, evs, stats, read_id=rid,
-                    cand_ids={j: cand_list[j].candidate_id for j in nlls},
-                    coverage=cover_val,
-                )
-                nlls = _scramble_contrast(nlls, scramble, rid, cand_list)
-                n_refined += 1
-                nlls_by_read[i] = nlls
-                if gate and cover_val is not None:
-                    # covered iff every wobbling diff span is straddled by the
-                    # read on >=1 candidate (empty spans -> vacuously covered).
-                    cover_by_read[i] = cover_val
-            elif evs or cidj_by_read.get(rid):
-                _record_abstention(
-                    stats, rid, ties_by_read.get(i, []), cand_list,
-                    "lt2_scored",
-                )
-        _log_contrast_stats(metric, stats, config)
-        return nlls_by_read, ties_by_read, n_ties, n_refined, cover_by_read
+                    nlls = _scramble_contrast(nlls, scramble, rid, cand_list)
+                    n_refined += 1
+                    nlls_by_read[i] = nlls
+                    if gate and cover_val is not None:
+                        # covered iff every wobbling diff span is straddled by the
+                        # read on >=1 candidate (empty spans -> vacuously covered).
+                        cover_by_read[i] = cover_val
+                elif evs or cidj_by_read.get(rid):
+                    _record_abstention(
+                        stats, rid, ties_by_read.get(i, []), cand_list,
+                        "lt2_scored",
+                    )
+            del batch_out
 
-    for rid, per_cidj in cidj_by_read.items():
+    for rid in fallback_rids:
+        per_cidj = cidj_by_read[rid]
         i = rid_to_i.get(rid)
         if i is None:
             continue

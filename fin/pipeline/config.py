@@ -775,6 +775,17 @@ class PipelineConfig:
     m2_metric_route: str = "fixed"
     m2_summed_llr_margin: float = 2.0
     m2_summed_llr_flank: int = 6
+    # Upper bound on the (read, candidate) pairs handed to ONE batched krill
+    # eventalign call inside an interval. The eventalign output of a call is
+    # held until it is reduced to NLLs, so without a bound an extreme-depth
+    # interval (the whole mitochondrion, ~1e5 tied reads) holds every tied
+    # pair's event table at once. Chunks carry whole reads. With CPU
+    # eventalign (the shipped configuration) a read's result depends only on
+    # that read, so this is a resource limit, not a scientific setting: any
+    # value >= 1 gives the same assembly. A CUDA-built krill picks its CPU or
+    # GPU kernel per read from the batch it is in, so there the result was
+    # already a function of how reads are grouped, and still is.
+    m2_batch_pairs: int = 2000
     # M2-EM diff-region coverage gate (quant_mode="m2_em" only). Default ON. For a
     # read in a >=2 best-AS tie, only let it discriminate wobble siblings when its
     # eventalign signal STRADDLES the wobbling junction(s) (donor->acceptor span;
@@ -1471,6 +1482,8 @@ class PipelineConfig:
             raise ValueError("M2 margins must be >= 0")
         if self.m2_summed_llr_flank < 1:
             raise ValueError("m2_summed_llr_flank must be >= 1")
+        if self.m2_batch_pairs < 1:
+            raise ValueError("m2_batch_pairs must be >= 1")
         if self.junction_snap_tolerance < 1:
             raise ValueError("junction_snap_tolerance must be >= 1")
         if self.junction_snap_min_support < 1:
