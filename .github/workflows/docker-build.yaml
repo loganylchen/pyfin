@@ -1,8 +1,14 @@
-name: Docker Build & Push
+name: Docker images
 
+# Images are published for releases and for main, not for every branch push:
+#   tag  v1.2.3  ->  cpu-1.2.3, gpu-1.2.3
+#   main         ->  cpu-latest, gpu-latest
+# Each image is built, run on the bundled signal fixture, and pushed only if
+# that run succeeds.
 on:
   push:
-    branches: ['*']
+    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -10,132 +16,73 @@ permissions:
   packages: write
 
 jobs:
-  build-gpu:
-    name: GPU Image
+  image:
+    name: ${{ matrix.flavour }} image
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        flavour: [cpu, gpu]
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKER_HUB_USERNAME }}
-        password: ${{ secrets.DOCKER_HUB_TOKEN }}
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-    - name: Log in to GitHub Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Determine tag suffix
-      id: tag
-      run: |
-        BRANCH="${GITHUB_REF##refs/heads/}"
-        if [ "$BRANCH" = "main" ]; then
-          echo "suffix=latest" >> "$GITHUB_OUTPUT"
-        else
-          echo "suffix=$BRANCH" >> "$GITHUB_OUTPUT"
-        fi
+      - name: Image names and tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin
+            ghcr.io/${{ github.repository_owner }}/pyfin
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}},prefix=${{ matrix.flavour }}-
+            type=raw,value=${{ matrix.flavour }}-latest,enable={{is_default_branch}}
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: |
-          ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin
-          ghcr.io/${{ github.repository_owner }}/pyfin
-        tags: |
-          type=sha,prefix=gpu-
-          type=raw,value=gpu-${{ steps.tag.outputs.suffix }}
+      - name: Build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.${{ matrix.flavour }}
+          platforms: linux/amd64
+          load: true
+          tags: pyfin:candidate
+          cache-from: type=gha,scope=${{ matrix.flavour }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.flavour }}
 
-    - name: Build and push GPU image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: Dockerfile.gpu
-        platforms: linux/amd64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha,scope=gpu
-        cache-to: type=gha,mode=max,scope=gpu
+      - name: Run the image on the bundled signal fixture
+        run: |
+          docker run --rm pyfin:candidate fin --version
+          # no GPU on the runner: the smoke test passes --no-gpu, the same code on the CPU
+          docker run --rm \
+            -v "$PWD/tests/data/sirv1_mini:/data:ro" \
+            -v "$PWD/scripts/smoke_test.sh:/smoke_test.sh:ro" \
+            pyfin:candidate sh /smoke_test.sh /data /tmp/out
 
-    - name: Smoke test GPU image
-      run: |
-        IMAGE=${{ secrets.DOCKER_HUB_USERNAME }}/pyfin:gpu-${{ steps.tag.outputs.suffix }}
-        docker run --rm "$IMAGE" \
-          python3 -c "from fin._dtw import is_available; print('CUDA:', is_available())"
-        docker run --rm "$IMAGE" \
-          python3 -c "from fin.ablation.mappy_argmax import mappy_multimap_responsibilities; print('fin.ablation OK')"
-        docker run --rm "$IMAGE" \
-          python3 -c "import krill; print('krill OK')"
-
-  build-cpu:
-    name: CPU Image
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKER_HUB_USERNAME }}
-        password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-    - name: Log in to GitHub Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Determine tag suffix
-      id: tag
-      run: |
-        BRANCH="${GITHUB_REF##refs/heads/}"
-        if [ "$BRANCH" = "main" ]; then
-          echo "suffix=latest" >> "$GITHUB_OUTPUT"
-        else
-          echo "suffix=$BRANCH" >> "$GITHUB_OUTPUT"
-        fi
-
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: |
-          ${{ secrets.DOCKER_HUB_USERNAME }}/pyfin
-          ghcr.io/${{ github.repository_owner }}/pyfin
-        tags: |
-          type=sha,prefix=cpu-
-          type=raw,value=cpu-${{ steps.tag.outputs.suffix }}
-
-    - name: Build and push CPU image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: Dockerfile.cpu
-        platforms: linux/amd64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha,scope=cpu
-        cache-to: type=gha,mode=max,scope=cpu
-
-    - name: Smoke test CPU image
-      run: |
-        IMAGE=${{ secrets.DOCKER_HUB_USERNAME }}/pyfin:cpu-${{ steps.tag.outputs.suffix }}
-        docker run --rm "$IMAGE" \
-          python3 -c "from fin._dtw import is_available; print('CUDA:', is_available())"
-        docker run --rm "$IMAGE" \
-          python3 -c "from fin.ablation.mappy_argmax import mappy_multimap_responsibilities; print('fin.ablation OK')"
-        docker run --rm "$IMAGE" \
-          python3 -c "import krill; print('krill OK')"
+      - name: Push
+        if: steps.meta.outputs.tags != ''
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.${{ matrix.flavour }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.flavour }}

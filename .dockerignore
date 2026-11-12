@@ -20,3 +20,15 @@ env/
 .omc
 docs/_build
 *.log
+
+# not part of the package: benchmark artefacts, run outputs, images, documents
+experiments
+benchmarks
+docs
+tests
+logs
+pyfin_work
+*.sif
+*.bam
+*.blow5
+*.pod5

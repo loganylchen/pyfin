@@ -73,9 +73,10 @@ jobs:
           python -m venv /tmp/venv
           /tmp/venv/bin/pip install dist/*.whl
           /tmp/venv/bin/pip install "krill==${KRILL_VERSION}" --no-deps --index-url "${KRILL_INDEX}"
+          SMOKE="$PWD/scripts/smoke_test.sh"; DATA="$PWD/tests/data/sirv1_mini"
           cd /tmp
-          /tmp/venv/bin/pyfin --version
           /tmp/venv/bin/fin --version
+          PATH="/tmp/venv/bin:$PATH" sh "$SMOKE" "$DATA" /tmp/smoke_out
           /tmp/venv/bin/python - <<'PY'
           import fin, pathlib
           from importlib import metadata
