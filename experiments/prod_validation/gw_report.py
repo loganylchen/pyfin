@@ -219,6 +219,9 @@ def main():
     size = library_sizes({k[0] for k in py})
     unknown = sorted(s for s, v in size.items() if not math.isfinite(v))
     if unknown:
+        # The inputs live on an automounted share that is sometimes away. The
+        # report says so here AND exits non-zero at the end: a report whose
+        # section 6 is quietly empty must not look like a finished one.
         print(f"{len(unknown)} 个文库的 BAM 大小读不到(记为 nan,不进入第 6 节):"
               f"{', '.join(lab(s) for s in unknown)}\n")
     print("| 文库 | BAM MB | 格 | pyfin Sn/Pr/F1 | stringtie3 Sn/Pr/F1 | ΔSn | ΔPr | ΔF1 | 领先 |")
@@ -277,6 +280,12 @@ def main():
               f"{m('bambu','tx_f1')-m('B1','tx_f1'):+.2f} | {sum(ad)/len(ad):.2f} | "
               f"{sum(1 for x in ad if x <= 0.5)}/{len(ad)} |")
 
+    if unknown:
+        print(f"gw_report: INCOMPLETE - BAM size unreadable for {len(unknown)} libraries; "
+              "sections 5 and 6 lack them. Re-run when the inputs are reachable.", file=sys.stderr)
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

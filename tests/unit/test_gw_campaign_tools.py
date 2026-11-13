@@ -294,14 +294,28 @@ def test_the_overall_table_puts_each_tool_in_its_own_columns(tmp_path, monkeypat
     _score_table(tmp_path, rows)
     monkeypatch.setattr(report, "CAMP", tmp_path)
     monkeypatch.setattr(report, "TOOLS", ("pyfin", "stringtie3", "bambu"))
-    report.main()       # library sizes are unknown here: sections 5 and 6 say so and carry on
-    out = capsys.readouterr().out
+    # library sizes are unknown here: the report is written, says which libraries
+    # lack a size, and reports itself incomplete through its exit status
+    assert report.main() == 1
+    captured = capsys.readouterr()
+    out = captured.out
     assert "2 个文库的 BAM 大小读不到" in out and "| A | nan | 3 |" in out
+    assert "INCOMPLETE" in captured.err and "2 libraries" in captured.err
     line = next(ln for ln in out.splitlines() if ln.startswith("| stringtie3 | 4 | "))
     # competitor Sn/Pr/F1, pyfin Sn/Pr/F1, per-cell delta (3*2-6)/4, wins, library mean (2-6)/2
     assert line == "| stringtie3 | 4 | 20.0 | 70.0 | 40.0 | 30.0 | 60.0 | 40.0 | +0.00 | 3/4 | -2.00 |"
     assert "| bambu | 0 | — |" in out                       # no shared cell: a row, not a crash
     assert "合计 4 格:pyfin 领先 3/4,平均 ΔF1 +0.00" in out and "文库等权 ΔF1 -2.00" in out
+
+
+def test_a_report_with_every_library_size_is_complete(tmp_path, monkeypatch, capsys):
+    _score_table(tmp_path, [("A", "c0", "pyfin", "ok", 30.0, 60.0, 42.0),
+                            ("A", "c0", "stringtie3", "ok", 20.0, 70.0, 40.0)])
+    monkeypatch.setattr(report, "CAMP", tmp_path)
+    monkeypatch.setattr(report, "library_sizes", lambda samples: dict.fromkeys(samples, 512.0))
+    assert report.main() == 0
+    captured = capsys.readouterr()
+    assert "| A | 512 | 1 |" in captured.out and "读不到" not in captured.out and captured.err == ""
 
 
 def test_the_bootstrap_interval_keeps_a_library_together():
