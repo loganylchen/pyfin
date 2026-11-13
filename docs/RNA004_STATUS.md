@@ -65,10 +65,34 @@ RNA002.
   estimate for thirty-nine (thirty-six passing its own quality flag), where
   0.1.5 returned none. Whether those lengths are accurate was not checked
   here.
-- **krill 0.1.6 against 0.1.5 on RNA002.** On three loci of a real RNA002
-  run the two versions give the same `assembly.gtf` and `scores.tsv`. The
-  benchmark, the Docker images and the tests use 0.1.5; nothing wider than
-  those three loci has been compared.
+- **krill 0.1.6 against 0.1.5 on RNA002.** The two versions give the same
+  assembly on two whole-genome benchmark runs (one H9 library, with the full
+  annotation and with none) and the same `assembly.gtf` and `scores.tsv` on
+  three loci of another run. The benchmark, the Docker images and the tests
+  use 0.1.5; the other benchmark runs have not been repeated with 0.1.6.
+- **One end-to-end run on real RNA004 data.** 3,939 reads of a HeLa native
+  RNA004 library (4,013 sequenced), aligned to GRCh38, with GENCODE v44 and
+  `--pore auto`. The run completes in about five minutes on four workers
+  with a peak of 3.4 GB, the pore is read from the kit, and a second run
+  reproduces the assembly. With krill 0.1.6 it reports 888 models (882
+  annotated, 6 novel); with 0.1.5, which has no poly(A) calls, 880, a
+  different set. That the two differ is expected. Which is closer to the
+  truth is not known.
+- **The signal reaches the scoring windows on RNA004.** In that run 1,663
+  reads were in an alignment-score tie. For all but 61 of them the signal
+  was not consulted, by design: the tied candidates had different numbers of
+  introns (1,190 attempts) or no junction on which they differ (416
+  attempts); four reads have two attempt records. For those 61, the signal
+  backend aligned 137 of 151 read-candidate pairs, and every event of those
+  137 had a usable score and mapped to a genomic position. Seven pairs had
+  a scoring window overlapping the genomic span of their aligned events, and
+  all seven had events in a window; the other 130 had neither. The same
+  pattern holds on an RNA002 locus (43 pairs with an overlapping window, all
+  with events in one; 8 with neither). Three reads ended with a scored
+  contrast and one of
+  them was decided (margin 4.06, over 25 events per structure); the other
+  two tied exactly. That is far too few to say anything about how well the
+  signal discriminates on RNA004.
 - **The junction-window arithmetic assumes no k-mer size.** The junction
   score is computed from events inside a window of +/- 8 genomic bp around
   each splice boundary on which the candidates differ. krill reports every
@@ -84,6 +108,8 @@ RNA002.
 ## What has not been established
 
 - **Accuracy.** No RNA004 library has been assembled against a truth set.
+  The run above shows that the pipeline works on RNA004 input, not that its
+  output is right.
 - **The junction decision threshold.** The signal is consulted for a read
   whose best alignment score is shared by several candidates with the same
   number of introns, when at least two of their structures have scored events

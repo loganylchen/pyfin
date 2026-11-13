@@ -103,7 +103,8 @@ general rankings.
   and precision about four points lower, in every library.
 - **Deep libraries.** The precision difference to StringTie3 fell as the
   number of reads in a library rose, under every annotation condition tested.
-- **RNA004** runs, and is not yet benchmarked.
+- **RNA004** runs -- one small library was taken end to end -- and is not
+  yet benchmarked.
 - **Speed.** A Python loop calls the aligner (mappy) once for every read and
   every candidate of its interval. A whole-genome library takes hours on eight
   workers.
@@ -121,8 +122,28 @@ general rankings.
 - For the chunked signal scoring: on three loci of a real run, the previous
   code and the new code give the same `assembly.gtf` and `scores.tsv`, at the
   default chunk size and with chunks forced down to 1 and to 7 pairs.
+- **The extreme-depth interval, reproduced.** The mitochondrial reads of the
+  library that failed (135,103 reads, 349 candidates), under a 64 GB limit:
+  the previous code was killed after 2 h 14 min at 63 GB and still growing;
+  the new code finished with a peak of 6.7 GB. The whole library, which had
+  failed in 144, 240 and 480 GB, then completed in 144 GB.
+- **Whole-genome runs.** Six benchmark runs (two libraries, each with the
+  full annotation, with none, and with a corrupted one) give the same
+  `assembly.gtf` as before this series, compared as sets of gene and
+  transcript records: chromosome, strand, span, the exon chain, and every
+  attribute (abundance among them). The random identifiers of novel models
+  and novel genes are normalised first, and the order of the records and the
+  GTF source, score and phase columns are not compared. `scores.tsv` was not
+  compared on these runs. Three of them were run again with chunks forced
+  down to 64 pairs: the same.
+- **A clean installation.** In fresh `python:3.11-slim` and `3.12-slim`
+  containers: the package and its dependencies install, the test suite
+  passes, the wheel builds, and `scripts/smoke_test.sh` passes.
+- **RNA004**: one small library end to end; see
+  [`docs/RNA004_STATUS.md`](docs/RNA004_STATUS.md).
 
-These are observations with one set of library versions (krill 0.1.5) and
-with every call to the signal backend succeeding. They do not cover a run in
-which a backend call fails and reads fall back to one-by-one scoring, nor a
-CUDA build of the backend.
+The comparisons with earlier output were made with one set of library
+versions (krill 0.1.5; two of the whole-genome runs were repeated with krill
+0.1.6 and did not change), and in none of them did a batch call to the signal
+backend fail. They therefore do not cover the path in which a failed batch
+call sends its reads to one-by-one scoring, nor a CUDA build of the backend.
