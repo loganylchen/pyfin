@@ -89,7 +89,7 @@ shells out to the `minimap2` or `samtools` programs.
 ### 2. krill, the signal backend
 
 ```bash
-pip install "krill==0.1.5" --no-deps \
+pip install "krill==0.1.6" --no-deps \
     --index-url https://loganylchen.github.io/krill-dist/simple/
 ```
 
@@ -97,13 +97,15 @@ pip install "krill==0.1.5" --no-deps \
 `pip install krill` without the index installs the wrong thing. For the same
 reason krill is not, and cannot be, a declared dependency of PyFIN.
 
-krill 0.1.5 is the version every published benchmark number was produced with.
-It supplies the eventalign that scores the raw signal. The shipped profile
+krill supplies the eventalign that scores the raw signal. The shipped profile
 needs it: without it PyFIN stops at start-up and prints this install command.
 `--m2-metric off` turns the junction signal scoring off and lets a run start
 without krill; an installed krill is then still used for poly(A) evidence.
 
-For RNA004 data install krill 0.1.6 or later instead: 0.1.5 has no RNA004
+0.1.6 is the version PyFIN is tested and shipped with. The published
+benchmark numbers were produced with 0.1.5; the benchmark runs that were
+repeated with 0.1.6 (two whole-genome runs) gave the same assembly, and the
+rest were not repeated. Do not use 0.1.5 for RNA004 data: it has no RNA004
 poly(A) model ([`docs/RNA004_STATUS.md`](docs/RNA004_STATUS.md)).
 
 ### 3. Optional: GPU for the assignment step
@@ -156,7 +158,7 @@ alignment-score tie, 5 signal contrasts scored (summed_llr, rna002); ...
 transcripts explain equally well by sequence; "5 signal contrasts scored" are
 the ties in which the raw signal could be compared against the candidates. A
 run in which that number is zero scored no splice junction with the signal.
-(The exact counts depend on the krill version; these are from 0.1.5.)
+(The exact counts depend on the krill version; these are from 0.1.6.)
 
 ## Running your own data
 
@@ -444,7 +446,7 @@ assembly byte comparisons are recorded in `docs/FUSION_VALIDATION_2026-09-12.md`
 
 ```bash
 pip install -e ".[dev]"        # pytest, ruff, build
-pip install "krill==0.1.5" --no-deps \
+pip install "krill==0.1.6" --no-deps \
     --index-url https://loganylchen.github.io/krill-dist/simple/
 
 pytest                         # tests/unit and tests/integration

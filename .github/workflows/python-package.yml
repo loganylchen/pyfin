@@ -10,7 +10,7 @@ on:
 # only, so that is the supported matrix.
 env:
   KRILL_INDEX: https://loganylchen.github.io/krill-dist/simple/
-  KRILL_VERSION: "0.1.5"
+  KRILL_VERSION: "0.1.6"
 
 jobs:
   test:

@@ -2,7 +2,7 @@
 
 ```bash
 pip install -e ".[dev]"
-pip install "krill==0.1.5" --no-deps \
+pip install "krill==0.1.6" --no-deps \
     --index-url https://loganylchen.github.io/krill-dist/simple/
 pytest
 ```

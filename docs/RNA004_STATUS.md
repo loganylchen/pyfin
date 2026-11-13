@@ -13,9 +13,9 @@ pyfin --bam sample.bam --genome genome.fa --signal sample.blow5 \
       --gtf annotation.gtf --output-dir pyfin_out/
 ```
 
-Install krill 0.1.6 or later for RNA004 (see "Poly(A) estimation" below);
-the images and the install instructions pin 0.1.5, the version the RNA002
-benchmark was run with:
+RNA004 needs krill 0.1.6 or later (see "Poly(A) estimation" below). That is
+the version the images and the install instructions pin; an older
+installation is upgraded with:
 
 ```bash
 pip install --upgrade krill --no-deps \
@@ -68,8 +68,9 @@ RNA002.
 - **krill 0.1.6 against 0.1.5 on RNA002.** The two versions give the same
   assembly on two whole-genome benchmark runs (one H9 library, with the full
   annotation and with none) and the same `assembly.gtf` and `scores.tsv` on
-  three loci of another run. The benchmark, the Docker images and the tests
-  use 0.1.5; the other benchmark runs have not been repeated with 0.1.6.
+  three loci of another run. The benchmark was run with 0.1.5 and the other
+  benchmark runs have not been repeated; the Docker images, CI and the
+  install instructions use 0.1.6.
 - **One end-to-end run on real RNA004 data.** 3,939 reads of a HeLa native
   RNA004 library (4,013 sequenced), aligned to GRCh38, with GENCODE v44 and
   `--pore auto`. The run completes in about five minutes on four workers

@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # cp311 manylinux wheel to match python:3.11-slim. --no-deps keeps the custom
 # index from resolving numpy/etc (those arrive with the pyfin install below).
 RUN pip install --no-cache-dir pyslow5 pyfastx \
-    && pip install --no-cache-dir "krill==0.1.5" --no-deps \
+    && pip install --no-cache-dir "krill==0.1.6" --no-deps \
         --index-url https://loganylchen.github.io/krill-dist/simple/
 
 # Install pyfin. The package is pure Python; eventalign and DTW come from krill.

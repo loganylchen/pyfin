@@ -87,6 +87,10 @@ checked is under "Verification" below; what it does not cover is said there.
   PyFIN could not start in a directory it could not write to. PyFIN now logs
   to the console only. Redirect it to keep a log
   (`pyfin ... > run.log 2>&1`).
+- **krill 0.1.6** is the signal backend the images, CI and the install
+  instructions pin. The benchmark was produced with 0.1.5. The two
+  whole-genome runs repeated with 0.1.6 gave the same assembly, and the rest
+  were not repeated. 0.1.6 adds the RNA004 poly(A) model.
 - Python 3.10 or newer, on Linux x86-64: the signal backend ships wheels for
   CPython 3.10 to 3.12 only.
 - The package is pure Python. `setup.py` no longer builds a CUDA extension;
@@ -136,9 +140,11 @@ general rankings.
   GTF source, score and phase columns are not compared. `scores.tsv` was not
   compared on these runs. Three of them were run again with chunks forced
   down to 64 pairs: the same.
-- **A clean installation.** In fresh `python:3.11-slim` and `3.12-slim`
-  containers: the package and its dependencies install, the test suite
-  passes, the wheel builds, and `scripts/smoke_test.sh` passes.
+- **A clean installation.** In fresh `python:3.10-slim`, `3.11-slim` and
+  `3.12-slim` containers, with krill 0.1.6: the package and its dependencies
+  install, the test suite passes, the wheel builds, and
+  `scripts/smoke_test.sh` passes. The CPU image builds and passes the same
+  smoke test; the GPU image was not built for this check.
 - **RNA004**: one small library end to end; see
   [`docs/RNA004_STATUS.md`](docs/RNA004_STATUS.md).
 

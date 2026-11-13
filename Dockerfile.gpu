@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # is still GPU-accelerated via cupy below. --no-deps keeps the custom index from
 # resolving numpy/etc (those arrive with pyfin).
 RUN pip3 install --no-cache-dir pyslow5 pyfastx \
-    && pip3 install --no-cache-dir "krill==0.1.5" --no-deps \
+    && pip3 install --no-cache-dir "krill==0.1.6" --no-deps \
         --index-url https://loganylchen.github.io/krill-dist/simple/
 
 # Install pyfin and CUDA-12 prebuilt cupy wheel (avoids 30 min source build).
